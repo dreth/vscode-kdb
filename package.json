@@ -1,0 +1,562 @@
+{
+  "name": "vscode-kdb",
+  "displayName": "KX for VS Code",
+  "description": "First-party-style standalone q IPC connections, q execution, and high-performance KX results for VS Code.",
+  "version": "0.1.0",
+  "publisher": "DanielAlonso",
+  "license": "MIT",
+  "icon": "icons/marketplace.png",
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/dreth/vscode-kdb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/dreth/vscode-kdb/issues"
+  },
+  "homepage": "https://github.com/dreth/vscode-kdb#readme",
+  "categories": [
+    "Programming Languages",
+    "Data Science",
+    "Visualization"
+  ],
+  "keywords": [
+    "kx",
+    "kdb",
+    "kdb+",
+    "q",
+    "q ipc",
+    "time series"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [
+    "onLanguage:q",
+    "onView:vscode-kdb.connections",
+    "onCommand:vscode-kdb.addConnection",
+    "onCommand:vscode-kdb.editConnection",
+    "onCommand:vscode-kdb.removeConnection",
+    "onCommand:vscode-kdb.setActiveConnection",
+    "onCommand:vscode-kdb.connect",
+    "onCommand:vscode-kdb.disconnect",
+    "onCommand:vscode-kdb.testConnection",
+    "onCommand:vscode-kdb.refreshConnections",
+    "onCommand:vscode-kdb.runSelectionOrCurrentLine",
+    "onCommand:vscode-kdb.runScript",
+    "onCommand:vscode-kdb.runSelectionInNewResult",
+    "onCommand:vscode-kdb.copyResultSelection",
+    "onCommand:vscode-kdb.openLocalDataServer",
+    "onCommand:vscode-kdb.stopLocalDataServer",
+    "onCommand:vscode-kdb.copyLocalDataServerUrl"
+  ],
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "test": "npm run compile && node test/run.js",
+    "test:unit": "npm run compile && node test/run.js",
+    "test:live-q": "npm run compile && node test/live/run.js",
+    "package": "npm run compile && vsce package --out vscode-kdb-0.1.0.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.0.vsix"
+  },
+  "dependencies": {
+    "jszip": "^3.10.1",
+    "uplot": "^1.6.32"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.0",
+    "@types/vscode": "^1.96.0",
+    "@vscode/vsce": "^3.6.2",
+    "typescript": "^5.7.2"
+  },
+  "contributes": {
+    "languages": [
+      {
+        "id": "q",
+        "aliases": [
+          "q",
+          "KX q",
+          "kdb+ q"
+        ],
+        "extensions": [
+          ".q"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "q",
+        "scopeName": "source.q",
+        "path": "./syntaxes/q.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "vscode-kdb.addConnection",
+        "title": "KX: Add Connection",
+        "icon": "$(add)"
+      },
+      {
+        "command": "vscode-kdb.editConnection",
+        "title": "KX: Edit Connection",
+        "icon": "$(edit)"
+      },
+      {
+        "command": "vscode-kdb.removeConnection",
+        "title": "KX: Remove Connection",
+        "icon": "$(trash)"
+      },
+      {
+        "command": "vscode-kdb.setActiveConnection",
+        "title": "KX: Set Active Connection",
+        "icon": "$(star-full)"
+      },
+      {
+        "command": "vscode-kdb.connect",
+        "title": "KX: Connect",
+        "icon": "$(debug-start)"
+      },
+      {
+        "command": "vscode-kdb.disconnect",
+        "title": "KX: Disconnect",
+        "icon": "$(debug-disconnect)"
+      },
+      {
+        "command": "vscode-kdb.testConnection",
+        "title": "KX: Test Connection",
+        "icon": "$(beaker)"
+      },
+      {
+        "command": "vscode-kdb.refreshConnections",
+        "title": "KX: Refresh Connections",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-kdb.runSelectionOrCurrentLine",
+        "title": "KX: Run Selection / Current Line",
+        "icon": "$(play)"
+      },
+      {
+        "command": "vscode-kdb.runScript",
+        "title": "KX: Run q Script",
+        "icon": "$(run-all)"
+      },
+      {
+        "command": "vscode-kdb.runSelectionInNewResult",
+        "title": "KX: Run Selection in New Result",
+        "icon": "$(open-preview)"
+      },
+      {
+        "command": "vscode-kdb.copyResultSelection",
+        "title": "KX Results: Copy Selection",
+        "icon": "$(copy)"
+      },
+      {
+        "command": "vscode-kdb.openLocalDataServer",
+        "title": "KX Results: Start Local Data Server",
+        "icon": "$(server-process)"
+      },
+      {
+        "command": "vscode-kdb.stopLocalDataServer",
+        "title": "KX Results: Stop Local Data Server",
+        "icon": "$(debug-stop)"
+      },
+      {
+        "command": "vscode-kdb.copyLocalDataServerUrl",
+        "title": "KX Results: Copy Local Data Server URL",
+        "icon": "$(link)"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "vscode-kdb.runSelectionOrCurrentLine",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "editorTextFocus && (editorLangId == q || resourceExtname == .q)"
+      },
+      {
+        "command": "vscode-kdb.runScript",
+        "key": "ctrl+alt+enter",
+        "mac": "cmd+alt+enter",
+        "when": "editorTextFocus && (editorLangId == q || resourceExtname == .q)"
+      },
+      {
+        "command": "vscode-kdb.runSelectionInNewResult",
+        "key": "ctrl+shift+enter",
+        "mac": "cmd+shift+enter",
+        "when": "editorTextFocus && (editorLangId == q || resourceExtname == .q)"
+      }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vscode-kdb",
+          "title": "KX",
+          "icon": "icons/activity.svg"
+        }
+      ]
+    },
+    "views": {
+      "vscode-kdb": [
+        {
+          "id": "vscode-kdb.connections",
+          "name": "KX Connections",
+          "contextualTitle": "KX Connections"
+        }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        {
+          "command": "vscode-kdb.addConnection",
+          "when": "view == vscode-kdb.connections",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscode-kdb.refreshConnections",
+          "when": "view == vscode-kdb.connections",
+          "group": "navigation@2"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "vscode-kdb.connect",
+          "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\.disconnected\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-kdb.disconnect",
+          "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\.connected\\./",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-kdb.setActiveConnection",
+          "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\.(connected|disconnected)\\.inactive$/",
+          "group": "inline@2"
+        },
+        {
+          "command": "vscode-kdb.testConnection",
+          "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\./",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscode-kdb.editConnection",
+          "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\./",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vscode-kdb.removeConnection",
+          "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\./",
+          "group": "navigation@3"
+        }
+      ],
+      "editor/title": [
+        {
+          "command": "vscode-kdb.runSelectionOrCurrentLine",
+          "when": "editorLangId == q || resourceExtname == .q",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "vscode-kdb.runSelectionOrCurrentLine",
+          "when": "editorLangId == q || resourceExtname == .q",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscode-kdb.runScript",
+          "when": "editorLangId == q || resourceExtname == .q",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vscode-kdb.runSelectionInNewResult",
+          "when": "editorLangId == q || resourceExtname == .q",
+          "group": "navigation@3"
+        }
+      ],
+      "webview/context": [
+        {
+          "command": "vscode-kdb.copyResultSelection",
+          "when": "webviewId == vscodeKdbResults && webviewSection == kxResultsTable",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "KX for VS Code",
+      "properties": {
+        "vscode-kdb.connections": {
+          "type": "array",
+          "scope": "application",
+          "default": [],
+          "description": "Global direct q IPC connections. Authentication secrets are stored separately in VS Code SecretStorage.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "id",
+              "name",
+              "host",
+              "port",
+              "database",
+              "username"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$",
+                "description": "Extension-generated stable connection ID."
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 100,
+                "description": "Unique display name."
+              },
+              "host": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253,
+                "description": "Direct q host name or IP address."
+              },
+              "port": {
+                "type": "integer",
+                "minimum": 1,
+                "maximum": 65535,
+                "default": 5000,
+                "description": "Direct q IPC port."
+              },
+              "database": {
+                "type": "string",
+                "default": ".",
+                "description": "q namespace/database used for editor runs."
+              },
+              "username": {
+                "type": "string",
+                "default": "",
+                "maxLength": 256,
+                "description": "Optional q IPC username."
+              }
+            }
+          }
+        },
+        "vscode-kdb.connectionTimeoutMs": {
+          "type": "integer",
+          "scope": "application",
+          "default": 30000,
+          "minimum": 0,
+          "description": "Direct q IPC connect and query timeout in milliseconds. Use 0 to disable the timeout."
+        },
+        "vscode-kdb.performance.trace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log KX query performance timings to the extension host console."
+        },
+        "vscode-kdb.results.viewer.initialViewColumn": {
+          "type": "string",
+          "default": "active",
+          "enum": [
+            "active",
+            "beside",
+            "one",
+            "two",
+            "three"
+          ],
+          "description": "Editor group used for the first KX result panel."
+        },
+        "vscode-kdb.results.viewer.arrayDisplayFormat": {
+          "type": "string",
+          "default": "commaSpace",
+          "enum": [
+            "commaSpace",
+            "space",
+            "raw"
+          ],
+          "description": "Array/list cell display format in KX results."
+        },
+        "vscode-kdb.results.viewer.functionDisplayStrategy": {
+          "type": "string",
+          "default": "qText",
+          "enum": [
+            "grid",
+            "qText"
+          ],
+          "description": "Display top-level q functions as a grid or q-like text."
+        },
+        "vscode-kdb.results.viewer.dictionaryDisplayStrategy": {
+          "type": "string",
+          "default": "grid",
+          "enum": [
+            "grid",
+            "qText"
+          ],
+          "description": "Display top-level q dictionaries as a grid or q-like text."
+        },
+        "vscode-kdb.results.viewer.listDisplayStrategy": {
+          "type": "string",
+          "default": "grid",
+          "enum": [
+            "grid",
+            "qText"
+          ],
+          "description": "Display top-level q lists as a grid or q-like text."
+        },
+        "vscode-kdb.results.viewer.objectDisplayStrategy": {
+          "type": "string",
+          "default": "grid",
+          "enum": [
+            "grid",
+            "qText"
+          ],
+          "description": "Display composite q values as a grid or q-like text."
+        },
+        "vscode-kdb.results.viewer.chartMaxSourceRows": {
+          "type": "integer",
+          "default": 2000000,
+          "minimum": 1,
+          "description": "Maximum source rows scanned for built-in charting. Higher values can temporarily block the extension host."
+        },
+        "vscode-kdb.results.viewer.chartDecimalPlaces": {
+          "type": "integer",
+          "default": 4,
+          "minimum": 0,
+          "maximum": 12,
+          "description": "Decimal places for numeric chart axes, tooltips, legends, and statistics."
+        },
+        "vscode-kdb.results.viewer.chartZoomMinSampledPoints": {
+          "type": "integer",
+          "default": 3000,
+          "minimum": 1,
+          "description": "Minimum visible sampled points before a settled zoom auto-refines."
+        },
+        "vscode-kdb.results.viewer.chartZoomMaxSampledPoints": {
+          "type": "integer",
+          "default": 7000,
+          "minimum": 1,
+          "description": "Maximum sampled points returned for a refined chart zoom range."
+        },
+        "vscode-kdb.results.density": {
+          "type": "string",
+          "default": "standard",
+          "enum": [
+            "compact",
+            "standard",
+            "comfortable"
+          ],
+          "description": "Visual density preset for KX results."
+        },
+        "vscode-kdb.results.compact.cellWidth": {
+          "type": "number",
+          "default": 140,
+          "minimum": 80,
+          "maximum": 600,
+          "description": "Compact result cell width in pixels."
+        },
+        "vscode-kdb.results.compact.rowHeight": {
+          "type": "number",
+          "default": 24,
+          "minimum": 20,
+          "maximum": 80,
+          "description": "Compact result row height in pixels."
+        },
+        "vscode-kdb.results.compact.fontSize": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 32,
+          "description": "Compact result font size; 0 uses the VS Code default."
+        },
+        "vscode-kdb.results.standard.cellWidth": {
+          "type": "number",
+          "default": 160,
+          "minimum": 80,
+          "maximum": 600,
+          "description": "Standard result cell width in pixels."
+        },
+        "vscode-kdb.results.standard.rowHeight": {
+          "type": "number",
+          "default": 28,
+          "minimum": 20,
+          "maximum": 80,
+          "description": "Standard result row height in pixels."
+        },
+        "vscode-kdb.results.standard.fontSize": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 32,
+          "description": "Standard result font size; 0 uses the VS Code default."
+        },
+        "vscode-kdb.results.comfortable.cellWidth": {
+          "type": "number",
+          "default": 180,
+          "minimum": 80,
+          "maximum": 600,
+          "description": "Comfortable result cell width in pixels."
+        },
+        "vscode-kdb.results.comfortable.rowHeight": {
+          "type": "number",
+          "default": 32,
+          "minimum": 20,
+          "maximum": 80,
+          "description": "Comfortable result row height in pixels."
+        },
+        "vscode-kdb.results.comfortable.fontSize": {
+          "type": "number",
+          "default": 0,
+          "minimum": 0,
+          "maximum": 32,
+          "description": "Comfortable result font size; 0 uses the VS Code default."
+        },
+        "vscode-kdb.results.showRowIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show row numbers in KX results."
+        },
+        "vscode-kdb.results.includeHeaders": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include headers by default when copying or exporting."
+        },
+        "vscode-kdb.results.includeRowIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Include row numbers by default when copying or exporting."
+        },
+        "vscode-kdb.results.hideLargeResultWarnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Hide large-result guardrail messages."
+        },
+        "vscode-kdb.results.hideLargeSortWarnings": {
+          "type": "boolean",
+          "default": false,
+          "description": "Skip large-result sort confirmation warnings."
+        },
+        "vscode-kdb.results.elapsedTimeDisplay": {
+          "type": "string",
+          "default": "auto",
+          "enum": [
+            "auto",
+            "milliseconds"
+          ],
+          "description": "Elapsed-time display format in KX results."
+        },
+        "vscode-kdb.results.copyExportConfirmCellThreshold": {
+          "type": "integer",
+          "default": 1000000,
+          "minimum": 1,
+          "description": "Selected-cell threshold that triggers copy/export confirmation."
+        },
+        "vscode-kdb.results.localDataServerFullExportCellLimit": {
+          "type": "integer",
+          "default": 1000000,
+          "minimum": 1,
+          "description": "Visible-cell limit for full exports from the loopback local data server."
+        }
+      }
+    }
+  }
+}

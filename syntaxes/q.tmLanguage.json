@@ -1,0 +1,167 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "q",
+  "scopeName": "source.q",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#systemCommands" },
+    { "include": "#strings" },
+    { "include": "#symbols" },
+    { "include": "#temporalLiterals" },
+    { "include": "#numericLiterals" },
+    { "include": "#keywords" },
+    { "include": "#builtins" },
+    { "include": "#systemNamespaces" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.block.q",
+          "begin": "^\\s*/\\s*$",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.comment.begin.q" }
+          },
+          "end": "^\\s*\\\\\\s*$",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.comment.end.q" }
+          }
+        },
+        {
+          "name": "comment.line.slash.q",
+          "match": "^\\s*/.*$"
+        }
+      ]
+    },
+    "systemCommands": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.q",
+          "match": "^\\s*\\\\(?:[^\\s/\\\\].*)?$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.q",
+          "begin": "\"",
+          "beginCaptures": {
+            "0": { "name": "punctuation.definition.string.begin.q" }
+          },
+          "end": "\"",
+          "endCaptures": {
+            "0": { "name": "punctuation.definition.string.end.q" }
+          },
+          "patterns": [
+            {
+              "name": "constant.character.escape.q",
+              "match": "\\\\(?:[\\\\\"nrt]|[0-7]{3})"
+            }
+          ]
+        }
+      ]
+    },
+    "symbols": {
+      "patterns": [
+        {
+          "name": "constant.other.symbol.q",
+          "match": "`(?:\\.?[A-Za-z_][A-Za-z0-9_.]*|\"(?:\\\\.|[^\"\\\\])*\")?"
+        }
+      ]
+    },
+    "temporalLiterals": {
+      "patterns": [
+        {
+          "name": "constant.numeric.timestamp.q",
+          "match": "(?<![A-Za-z0-9_.])\\d{4}\\.\\d{2}\\.\\d{2}D\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?"
+        },
+        {
+          "name": "constant.numeric.datetime.q",
+          "match": "(?<![A-Za-z0-9_.])\\d{4}\\.\\d{2}\\.\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?"
+        },
+        {
+          "name": "constant.numeric.timespan.q",
+          "match": "(?<![A-Za-z0-9_.])[-+]?\\d+D\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?"
+        },
+        {
+          "name": "constant.numeric.date.q",
+          "match": "(?<![A-Za-z0-9_.])\\d{4}\\.\\d{2}\\.\\d{2}(?![A-Za-z0-9_.])"
+        },
+        {
+          "name": "constant.numeric.month.q",
+          "match": "(?<![A-Za-z0-9_.])\\d{4}\\.\\d{2}m(?![A-Za-z0-9_.])"
+        },
+        {
+          "name": "constant.numeric.time.q",
+          "match": "(?<![A-Za-z0-9_.])\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?[uvt]?(?![A-Za-z0-9_.])"
+        }
+      ]
+    },
+    "numericLiterals": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.q",
+          "match": "(?<![A-Za-z0-9_.])0x[0-9A-Fa-f]+(?![A-Za-z0-9_.])"
+        },
+        {
+          "name": "constant.language.boolean.q",
+          "match": "(?<![A-Za-z0-9_.])[01]b(?![A-Za-z0-9_.])"
+        },
+        {
+          "name": "constant.numeric.null-infinity.q",
+          "match": "(?<![A-Za-z0-9_.])-?0[NW][ghijefpmdznuvt]?(?![A-Za-z0-9_.])"
+        },
+        {
+          "name": "constant.numeric.q",
+          "match": "(?<![A-Za-z0-9_.])[-+]?(?:\\d+(?:\\.\\d*)?|\\.\\d+)(?:[eE][-+]?\\d+)?[hijef]?(?![A-Za-z0-9_.])"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.q",
+          "match": "\\b(?:do|if|while)\\b"
+        },
+        {
+          "name": "keyword.other.query.q",
+          "match": "\\b(?:by|delete|exec|fby|from|select|update|where)\\b"
+        },
+        {
+          "name": "storage.type.q",
+          "match": "\\b(?:boolean|byte|char|date|datetime|float|int|long|minute|month|real|second|short|string|symbol|time|timespan|timestamp)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "patterns": [
+        {
+          "name": "support.function.q",
+          "match": "\\b(?:abs|acos|aj|aj0|all|and|any|asc|asin|asof|atan|attr|avg|avgs|bin|binr|ceiling|cols|cor|cos|count|cov|cross|csv|cut|deltas|desc|dev|differ|distinct|div|dsave|each|ej|enlist|eval|except|exit|exp|fills|first|fkeys|flip|floor|get|group|gtime|hclose|hcount|hdel|hopen|hsym|iasc|idesc|ij|ijf|in|inter|inv|key|keys|last|like|lj|ljf|load|log|lower|lsq|ltrim|mavg|max|maxs|mcount|md5|mdev|med|meta|min|mins|msum|neg|next|not|null|or|over|parse|peach|pj|prd|prds|prev|prior|rand|rank|ratios|raze|read0|read1|reciprocal|reval|reverse|rload|rotate|rsave|save|scan|set|show|signum|sin|sqrt|ss|ssr|string|sublist|sum|sums|sv|system|tables|tan|til|trim|type|uj|ujf|union|upper|value|var|vs|wavg|within|wsum|xasc|xbar|xcol|xcols|xdesc|xexp|xgroup|xkey|xlog|xprev|xrank)\\b"
+        }
+      ]
+    },
+    "systemNamespaces": {
+      "patterns": [
+        {
+          "name": "support.function.system.q",
+          "match": "(?<![A-Za-z0-9_.])\\.(?:Q|q|z)(?:\\.[A-Za-z_][A-Za-z0-9_]*)+"
+        },
+        {
+          "name": "entity.name.namespace.q",
+          "match": "(?<![A-Za-z0-9_.])\\.[A-Za-z_][A-Za-z0-9_.]*"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.q",
+          "match": "0:|1:|2:|::|[+\\-*%=<>~,^#_?@.!|&:\\\\/]"
+        }
+      ]
+    }
+  }
+}
