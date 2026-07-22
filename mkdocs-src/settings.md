@@ -4,6 +4,21 @@ Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The ma
 
 Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
 
+## Feature Controls
+
+Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.
+
+| Setting | Default | Values / range | Behavior and tradeoff |
+| --- | --- | --- | --- |
+| `vscode-kdb.features.serverExplorer` | `false` | Boolean | Shows the focused Server Explorer for an active direct q IPC profile, including a disconnected/reconnect status. Metadata requires a connection and is manual-refresh/on-expand only; disabling disposes its provider and hides its view and commands. |
+| `vscode-kdb.serverExplorer.previewCellLimit` | `10000` | Integer `1`-`1000000` | Server-side table/variable Preview cap: approximate table cells or outer list/dictionary items. Every preview still confirms because scalars and nested values can be large; functions/projections are metadata-only. |
+| `vscode-kdb.features.queryHistory` | `false` | Boolean | Records actually issued editor query text in local workspace extension storage. Disabling stops writes and hides its view/commands, but retained entries require re-enabling and running **KX: Clear Query History** to erase them. |
+| `vscode-kdb.queryHistory.maxEntries` | `100` | Integer `1`-`1000` | Maximum newest-first local entries; lowering the limit prunes the oldest. No result payload is stored. |
+
+Server Explorer applies the active connection's configured namespace and never auto-refreshes or installs persistent server code. Preview accepts only standard q identifiers and warns before materialization. Local cancellation stops waiting but does not interrupt q work already sent.
+
+Query History uses VS Code workspace `Memento`, not a syncable/global setting. It is not registered for Settings Sync and is not transmitted as telemetry. Stored fields are exact query text, stable connection ID and recorded label, timestamp, editor execution kind, status (`succeeded`, `failed`, or `canceled` after an issued run's local wait is canceled), and duration. Passwords and results are excluded. Query text can be commercially or personally sensitive, so enable the feature only in workspaces where local persistence is acceptable.
+
 ## Connections and diagnostics
 
 | Setting | Default | Use |
@@ -96,6 +111,10 @@ Array display examples:
 
 ```json
 {
+  "vscode-kdb.features.serverExplorer": false,
+  "vscode-kdb.serverExplorer.previewCellLimit": 10000,
+  "vscode-kdb.features.queryHistory": false,
+  "vscode-kdb.queryHistory.maxEntries": 100,
   "vscode-kdb.connectionTimeoutMs": 30000,
   "vscode-kdb.queryTimeoutMs": null,
   "vscode-kdb.performance.trace": false,

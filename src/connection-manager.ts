@@ -6,6 +6,7 @@ import {
   KxConnection,
   qScriptInNamespace,
   queryInNamespace,
+  queryInNamespaceStrict,
   resolveConnectionTimeouts,
   safeTimeoutMs,
 } from './connection';
@@ -145,18 +146,38 @@ export class ConnectionManager implements vscode.Disposable {
     await client!.close();
   }
 
-  public async execute(connection: KxConnection, query: string): Promise<QValue> {
-    return this.executePrepared(connection, queryInNamespace(query, connection.database));
+  public async execute(
+    connection: KxConnection,
+    query: string,
+    onIssued?: () => void
+  ): Promise<QValue> {
+    return this.executePrepared(connection, queryInNamespace(query, connection.database), onIssued);
   }
 
-  public async executeScript(connection: KxConnection, script: string): Promise<QValue> {
-    return this.executePrepared(connection, qScriptInNamespace(script, connection.database));
+  public async executeScript(
+    connection: KxConnection,
+    script: string,
+    onIssued?: () => void
+  ): Promise<QValue> {
+    return this.executePrepared(connection, qScriptInNamespace(script, connection.database), onIssued);
   }
 
-  private async executePrepared(connection: KxConnection, query: string): Promise<QValue> {
+  public async executeInConfiguredNamespace(
+    connection: KxConnection,
+    query: string,
+    onIssued?: () => void
+  ): Promise<QValue> {
+    return this.executePrepared(connection, queryInNamespaceStrict(query, connection.database), onIssued);
+  }
+
+  private async executePrepared(
+    connection: KxConnection,
+    query: string,
+    onIssued?: () => void
+  ): Promise<QValue> {
     const client = await this.connect(connection);
     try {
-      return await client.query(query);
+      return await client.query(query, onIssued);
     } catch (error) {
       if (!(error instanceof KdbQError)) {
         const shouldCancel = this.clients.get(connection.id) === client;

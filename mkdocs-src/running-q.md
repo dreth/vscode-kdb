@@ -24,6 +24,10 @@ Multiline selections and documents are normalized to line-feed endings and group
 
 Whitespace, q indentation, and script termination rules still belong to q. Select the intended text when a partial document should run.
 
+## Syntax scope
+
+The existing first-party TextMate grammar was audited for 0.1.4 and left unchanged because no reliable token-coverage defect was found. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
+
 ## Active connection and namespace
 
 All three editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.
@@ -41,6 +45,16 @@ The wrapper restores the server's previous namespace after success or failure. A
 The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.
 
 **Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files.
+
+## Query History
+
+`vscode-kdb.features.queryHistory` defaults to `false`. When enabled, **KX Query History** records editor line, selection, and script executions only after the exact text is actually issued to q. A run rejected before issue is not stored. Entries are newest first and contain the query text, stable connection ID and recorded label, timestamp, execution kind, status (`succeeded`, `failed`, or `canceled` after an issued run's local wait is canceled), and duration. Result payloads and passwords are never included.
+
+Storage is the current VS Code workspace's local extension `Memento`. History is not placed in user/workspace settings, registered for Settings Sync, or transmitted as telemetry. The entry cap is `vscode-kdb.queryHistory.maxEntries`, default `100`, with a valid range of `1` through `1000`; lowering it removes the oldest excess entries.
+
+Use an entry's context menu to rerun, copy, insert its exact text into the active editor, or delete it. **KX: Clear Query History** confirms before removing all local entries. Disabling the feature stops new writes and hides the view and commands, but retained entries are not silently destroyed; re-enable it and use Clear to remove them.
+
+Rerun goes through the same exact editor pipeline, including normal connection selection, the configured namespace wrapper, query/script transport choice, timeout, cancellation, q-error handling, diagnostics, and normal KX Results panel. After selection resolves the target, KX identifies both labels and confirms every stable-ID mismatch—including when no profile was active or the recorded profile was removed—before sending the text. Renamed and removed profiles remain safely described without storing or displaying passwords.
 
 ## Cancellation boundary
 

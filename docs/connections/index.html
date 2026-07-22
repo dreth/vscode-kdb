@@ -457,6 +457,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#focused-server-explorer" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Focused Server Explorer
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#namespace-behavior" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -855,6 +866,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#focused-server-explorer" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Focused Server Explorer
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#namespace-behavior" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -982,8 +1004,13 @@
 <p>Passwords and authentication secrets are not written into that setting. Each connection's secret is stored under an extension-specific key in VS Code <code>SecretStorage</code>, which delegates at-rest protection to VS Code and the operating system.</p>
 <p>Do not add a password field to <code>settings.json</code>. Do not paste credentials into logs, issue reports, or example queries.</p>
 <h2 id="network-security">Network security</h2>
-<p>Direct q IPC is plaintext in transit, including handshake credentials and query traffic. Phase 1 does not implement TLS, SSH configuration, gateways, brokers, or remote orchestration. Use loopback, a trusted private network, or a separately managed secure tunnel whose lifecycle remains outside the extension.</p>
-<p>The connection sidebar is not an object explorer. Phase 1 does not enumerate server tables, functions, or namespaces.</p>
+<p>Direct q IPC is plaintext in transit, including handshake credentials and query traffic. The standalone release does not implement TLS, SSH configuration, gateways, brokers, or remote orchestration. Use loopback, a trusted private network, or a separately managed secure tunnel whose lifecycle remains outside the extension.</p>
+<h2 id="focused-server-explorer">Focused Server Explorer</h2>
+<p><code>vscode-kdb.features.serverExplorer</code> defaults to <code>false</code>. When enabled, <strong>KX Server Explorer</strong> is a separate tree under the KX activity bar whenever an active direct q IPC profile exists. A disconnected profile leaves a clear reconnect status instead of stale metadata; requests require it to be connected. The connection tree remains responsible only for connection state and lifecycle.</p>
+<p>The explorer never polls. Select <strong>KX: Refresh Server Explorer</strong> to query the active profile's configured namespace. Refresh uses q-native <code>tables[]</code> for table names and obtains names plus safe q type metadata for the <strong>Variables &amp; Functions</strong> category without fetching the remote values. Only safely recognized function type codes are labelled as functions; unknown or other objects are conservatively labelled as variables. Non-standard names that cannot be executed safely are omitted and reported.</p>
+<p>Expand a table to invoke <code>meta</code> explicitly and show column name, q type, foreign-key, and attribute metadata. Table expansion is also on demand. Permission errors, missing/stale objects, timeouts, disconnects, cancellation, and a changed active connection or namespace produce a retryable status instead of retaining misleading tree data. Canceling a metadata wait is local: q work already sent may still finish on the server.</p>
+<p><strong>Preview</strong> is a separate, confirmed action for tables and variables and opens the selected object through the normal KX Results pipeline in the configured namespace. Functions and projections remain metadata-only because captured arguments can exceed any meaningful preview limit. The explorer accepts only standard q identifiers beginning with a letter and continuing with letters, digits, or underscores, up to 255 characters; it never treats an arbitrary tree label as executable q text. <code>vscode-kdb.serverExplorer.previewCellLimit</code> defaults to approximately <code>10000</code> table cells or <code>10000</code> outer list/dictionary items and is configurable from <code>1</code> through <code>1000000</code>. Nested values and scalars may still be large, which is why every preview warns before materializing anything.</p>
+<p>Explorer requests temporarily apply the configured namespace and restore q's previous namespace. They install no server scripts, persist no remote state, and provide no namespace browser, write action, SSH/TLS, gateway, or Insights controls.</p>
 <h2 id="namespace-behavior">Namespace behavior</h2>
 <p>Root namespace <code>.</code> sends a single-line/current-line query as written. A non-root namespace wraps the query so q temporarily switches namespace, evaluates the text, restores the previous namespace, and rethrows genuine q errors.</p>
 <p>Whole-document and multiline selection runs use the corresponding script wrapper while preserving the same configured namespace. See <a href="../running-q/">Running q</a> for script grouping and version requirements.</p>

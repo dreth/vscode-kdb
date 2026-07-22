@@ -82,9 +82,33 @@ Virtualization limits webview cells, but the complete IPC payload is decoded and
 - Use a slice when a full export exceeds its cell limit.
 - Make a panel selection before calling a `selection.*` endpoint.
 
-## Missing explorer, SSH, or SQLTools behavior
+## Server Explorer is missing
 
-These are not hidden settings. Phase 1 has no object explorer, built-in SSH/TLS UI, SQLTools result target, SQLTools connection storage, or `.session.sql` workflow. Review [Parity Roadmap & Architecture](parity-roadmap.md) before filing a compatibility report.
+Confirm `vscode-kdb.features.serverExplorer` is enabled and an active direct q IPC profile exists. The view and its commands are intentionally absent when the feature is off or there is no active profile. A disconnected active profile remains visible with reconnect guidance, but the explorer does not connect automatically merely to display metadata.
+
+The focused explorer is not a namespace browser or remote-administration surface. Built-in SSH/TLS, gateway, Insights, SQLTools, and `.session.sql` controls are intentionally absent. Review [Connections & SecretStorage](connections.md#focused-server-explorer) and [Parity Roadmap & Architecture](parity-roadmap.md) before filing a compatibility report.
+
+## Server Explorer refresh or table expansion failed
+
+- Verify the active connection and configured namespace have not changed, then select **KX: Refresh Server Explorer**.
+- Confirm the q user may run `tables[]`, inspect safe name/type metadata, and invoke `meta` for the selected table. A q permission error remains an error; the extension does not install a helper script or bypass server permissions.
+- A missing object may have been dropped after refresh. Refresh instead of trusting stale tree data.
+- Query timeouts and transport failures use the normal active profile rules and invalidate uncertain or stale data. Inspect **Output > KX** for the safe phase/namespace diagnostic.
+- Cancel is local to the metadata wait. q work already issued may complete, and Refresh is required to retry.
+
+Only standard q table and variable identifiers are shown as previewable objects. Functions/projections remain metadata-only because captured arguments are not honestly bounded by the preview setting. Non-standard names are omitted instead of being interpolated into executable q text.
+
+## Preview may be large
+
+Every Preview asks for confirmation. `vscode-kdb.serverExplorer.previewCellLimit` defaults to approximately `10000` table cells or `10000` outer list/dictionary items and accepts `1` through `1000000`. Nested values and scalars may still be large. Functions/projections are not previewed. Canceling the local wait does not interrupt work already sent to q.
+
+## Query History is missing or incomplete
+
+`vscode-kdb.features.queryHistory` defaults to `false`. Enable it for the current window/workspace to show the view. Only editor line, selection, and script executions actually issued while the feature is enabled are recorded; rejected pre-issue runs and result payloads are not.
+
+Disabling the feature stops future writes and hides history commands, but does not silently erase sensitive retained text. Re-enable it and run **KX: Clear Query History** to confirm deletion. Storage is local workspace extension `Memento`, not Settings or Settings Sync. Lowering `vscode-kdb.queryHistory.maxEntries` prunes oldest entries beyond the new limit.
+
+Rerun deliberately targets the current active connection through the normal configured-namespace pipeline. If its stable connection ID differs from the recorded entry, confirm the mismatch prompt or cancel. A renamed/removed recorded profile is labelled safely and never exposes a password.
 
 ## Live q check
 
@@ -94,7 +118,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic form/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.3 produced no screenshot as substitute evidence.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic form/tree/history/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.4 produced no screenshot as substitute evidence.
 
 ## Generated docs drift
 

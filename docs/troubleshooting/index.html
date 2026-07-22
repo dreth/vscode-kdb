@@ -711,10 +711,43 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#missing-explorer-ssh-or-sqltools-behavior" class="md-nav__link">
+  <a href="#server-explorer-is-missing" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Missing explorer, SSH, or SQLTools behavior
+        Server Explorer is missing
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#server-explorer-refresh-or-table-expansion-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Server Explorer refresh or table expansion failed
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#preview-may-be-large" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Preview may be large
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#query-history-is-missing-or-incomplete" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Query History is missing or incomplete
 
     </span>
   </a>
@@ -953,10 +986,43 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#missing-explorer-ssh-or-sqltools-behavior" class="md-nav__link">
+  <a href="#server-explorer-is-missing" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Missing explorer, SSH, or SQLTools behavior
+        Server Explorer is missing
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#server-explorer-refresh-or-table-expansion-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Server Explorer refresh or table expansion failed
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#preview-may-be-large" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Preview may be large
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#query-history-is-missing-or-incomplete" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Query History is missing or incomplete
 
     </span>
   </a>
@@ -1051,13 +1117,29 @@
 <li>Use a slice when a full export exceeds its cell limit.</li>
 <li>Make a panel selection before calling a <code>selection.*</code> endpoint.</li>
 </ul>
-<h2 id="missing-explorer-ssh-or-sqltools-behavior">Missing explorer, SSH, or SQLTools behavior</h2>
-<p>These are not hidden settings. Phase 1 has no object explorer, built-in SSH/TLS UI, SQLTools result target, SQLTools connection storage, or <code>.session.sql</code> workflow. Review <a href="../parity-roadmap/">Parity Roadmap &amp; Architecture</a> before filing a compatibility report.</p>
+<h2 id="server-explorer-is-missing">Server Explorer is missing</h2>
+<p>Confirm <code>vscode-kdb.features.serverExplorer</code> is enabled and an active direct q IPC profile exists. The view and its commands are intentionally absent when the feature is off or there is no active profile. A disconnected active profile remains visible with reconnect guidance, but the explorer does not connect automatically merely to display metadata.</p>
+<p>The focused explorer is not a namespace browser or remote-administration surface. Built-in SSH/TLS, gateway, Insights, SQLTools, and <code>.session.sql</code> controls are intentionally absent. Review <a href="../connections/#focused-server-explorer">Connections &amp; SecretStorage</a> and <a href="../parity-roadmap/">Parity Roadmap &amp; Architecture</a> before filing a compatibility report.</p>
+<h2 id="server-explorer-refresh-or-table-expansion-failed">Server Explorer refresh or table expansion failed</h2>
+<ul>
+<li>Verify the active connection and configured namespace have not changed, then select <strong>KX: Refresh Server Explorer</strong>.</li>
+<li>Confirm the q user may run <code>tables[]</code>, inspect safe name/type metadata, and invoke <code>meta</code> for the selected table. A q permission error remains an error; the extension does not install a helper script or bypass server permissions.</li>
+<li>A missing object may have been dropped after refresh. Refresh instead of trusting stale tree data.</li>
+<li>Query timeouts and transport failures use the normal active profile rules and invalidate uncertain or stale data. Inspect <strong>Output &gt; KX</strong> for the safe phase/namespace diagnostic.</li>
+<li>Cancel is local to the metadata wait. q work already issued may complete, and Refresh is required to retry.</li>
+</ul>
+<p>Only standard q table and variable identifiers are shown as previewable objects. Functions/projections remain metadata-only because captured arguments are not honestly bounded by the preview setting. Non-standard names are omitted instead of being interpolated into executable q text.</p>
+<h2 id="preview-may-be-large">Preview may be large</h2>
+<p>Every Preview asks for confirmation. <code>vscode-kdb.serverExplorer.previewCellLimit</code> defaults to approximately <code>10000</code> table cells or <code>10000</code> outer list/dictionary items and accepts <code>1</code> through <code>1000000</code>. Nested values and scalars may still be large. Functions/projections are not previewed. Canceling the local wait does not interrupt work already sent to q.</p>
+<h2 id="query-history-is-missing-or-incomplete">Query History is missing or incomplete</h2>
+<p><code>vscode-kdb.features.queryHistory</code> defaults to <code>false</code>. Enable it for the current window/workspace to show the view. Only editor line, selection, and script executions actually issued while the feature is enabled are recorded; rejected pre-issue runs and result payloads are not.</p>
+<p>Disabling the feature stops future writes and hides history commands, but does not silently erase sensitive retained text. Re-enable it and run <strong>KX: Clear Query History</strong> to confirm deletion. Storage is local workspace extension <code>Memento</code>, not Settings or Settings Sync. Lowering <code>vscode-kdb.queryHistory.maxEntries</code> prunes oldest entries beyond the new limit.</p>
+<p>Rerun deliberately targets the current active connection through the normal configured-namespace pipeline. If its stable connection ID differs from the recorded entry, confirm the mismatch prompt or cancel. A renamed/removed recorded profile is labelled safely and never exposes a password.</p>
 <h2 id="live-q-check">Live q check</h2>
 <p>Maintainers can run the direct live smoke path when a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic form/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.3 produced no screenshot as substitute evidence.</p>
+<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic form/tree/history/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.4 produced no screenshot as substitute evidence.</p>
 <h2 id="generated-docs-drift">Generated docs drift</h2>
 <p>Edit files under <code>mkdocs-src/</code>, then run the exact gate in <code>mkdocs-src/README.md</code>. Generated <code>docs/</code> is committed. The workflow builds and uploads an artifact but intentionally does not deploy or alter Pages settings.</p>
 

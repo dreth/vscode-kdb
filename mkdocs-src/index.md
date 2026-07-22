@@ -1,6 +1,6 @@
 # KX for VS Code
 
-KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It owns its q IPC connections, q editor commands, results viewer, charting, local data server, and diagnostics.
+KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It owns its q IPC connections, q editor commands, optional focused Server Explorer and Query History, results viewer, charting, local data server, and diagnostics.
 
 It sends q text to the selected q process. It does not translate ANSI SQL to q:
 
@@ -10,21 +10,23 @@ meta trade
 tables `.analytics
 ```
 
-## Phase 1 status
+## Standalone status
 
-The current `0.1.3` release is in the first standalone phase. It has no SQLTools runtime dependency and does not create or interpret SQLTools session files.
+The current `0.1.4` release remains focused and direct-q-IPC-only. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.
 
 Implemented foundations include:
 
 - direct q IPC connections managed through one responsive **KX Connection** form, with extension-owned safe metadata and VS Code SecretStorage;
 - optional per-profile connect/handshake and query timeout overrides with bounded global defaults;
 - exact current-line, selection, and whole-document q execution;
+- a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand `meta`, confirmed bounded table/variable previews, and metadata-only functions/projections;
+- disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;
 - grid and q-text results, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
 - line, scatter, step, bar, box, and candlestick charts;
 - an opt-in tokenized loopback data server; and
 - a dedicated `KX` Output channel with opt-in performance tracing.
 
-Phase 1 is not a full compatibility claim. The extension has no object explorer, built-in SSH or TLS setup, gateway orchestration, SQLTools result target, SQLTools connection UI, or `.session.sql` behavior. Release 0.1.3 has deterministic form/source guards but no visual Extension Host E2E or screenshot evidence. See [Parity Roadmap & Architecture](parity-roadmap.md) and the source-backed repository parity matrix before treating a capability as equivalent.
+This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, `.session.sql` behavior, or notebooks. Release 0.1.4 has deterministic tree/feature/source guards but no visual Extension Host E2E or screenshot evidence. See [Parity Roadmap & Architecture](parity-roadmap.md) and the source-backed repository parity matrix before treating a capability as equivalent.
 
 ## Requirements
 
@@ -42,6 +44,7 @@ SQLTools is not required.
 4. Open a `.q` file and run the current line, an exact selection, or the whole document.
 5. Inspect, chart, copy, or export the result in **KX Results**.
 6. Open **View > Output** and select **KX** when diagnosing lifecycle or IPC failures.
+7. Optionally enable Server Explorer or Query History in Settings; both default off to avoid surprise metadata queries or query-text persistence.
 
 ## Documentation map
 
