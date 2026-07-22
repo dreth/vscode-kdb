@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Standalone q IPC connections, q execution, and high-performance KX results for VS Code.",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -57,8 +57,8 @@
     "test": "npm run compile && node test/run.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:live-q": "npm run compile && node test/live/run.js",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.1.1.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.1.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.1.2.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.2.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",

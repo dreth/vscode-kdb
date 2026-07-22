@@ -4,7 +4,7 @@ KX for VS Code is being developed as the future first-party KX product. During t
 
 The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim.
 
-The repository manifest remains at `0.1.1` for this foundation pass. The documentation and generated-site artifact do not constitute a development release, VSIX validation, Marketplace publication, or parity sign-off.
+The repository manifest is at `0.1.2` for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
 
 ## Current standalone architecture
 

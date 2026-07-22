@@ -1,10 +1,10 @@
 # Standalone parity and architecture
 
-This document is an evidence ledger, not a parity declaration. `vscode-kdb` is the future first-party KX extension, but the standalone `0.1.1` code has **not** yet completed functional or visual parity verification.
+This document is an evidence ledger, not a parity declaration. `vscode-kdb` is the future first-party KX extension, but the standalone `0.1.2` code has **not** yet completed functional or visual parity verification.
 
 The comparison baseline is:
 
-- `vscode-kdb` `0.1.1` at `de89fa2` plus the diagnostics and documentation foundation on this branch.
+- `vscode-kdb` `0.1.2`, based on the diagnostics and documentation foundation at `1df2f0e`.
 - `kdb-sqltools` `0.3.17` at `af2c7c9`. Its repository was inspected read-only. References below name source and test symbols at that commit; pre-existing uncommitted generated-site changes in that checkout were not used as evidence.
 - The connection reliability comparison also examined `kdb-sqltools` commit `f2aab16` (`fix: harden kdb connection reliability`).
 
@@ -74,7 +74,7 @@ The first extraction step is a file-boundary refactor with unchanged behavior an
 - Track this matrix and the source-of-truth/backport direction.
 - Add strict, reproducible MkDocs sources, committed output, normalization, and build-only Pages verification.
 - Add the `KX` diagnostics channel, safe lifecycle/timing events, redaction tests, and direct q verification.
-- Keep version `0.1.1`; do not package or publish.
+- Package `0.1.2` for direct user testing only; do not publish it to Marketplace.
 
 ### M1 — automated confidence
 
