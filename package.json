@@ -1,8 +1,8 @@
 {
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
-  "description": "Standalone q IPC connections, q execution, and high-performance KX results for VS Code.",
-  "version": "0.1.3",
+  "description": "Standalone direct q IPC, focused q workflows, and high-performance KX results for VS Code.",
+  "version": "0.1.4",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -34,6 +34,8 @@
   "activationEvents": [
     "onLanguage:q",
     "onView:vscode-kdb.connections",
+    "onView:vscode-kdb.serverExplorer",
+    "onView:vscode-kdb.queryHistory",
     "onCommand:vscode-kdb.addConnection",
     "onCommand:vscode-kdb.editConnection",
     "onCommand:vscode-kdb.removeConnection",
@@ -42,6 +44,13 @@
     "onCommand:vscode-kdb.disconnect",
     "onCommand:vscode-kdb.testConnection",
     "onCommand:vscode-kdb.refreshConnections",
+    "onCommand:vscode-kdb.refreshServerExplorer",
+    "onCommand:vscode-kdb.previewServerObject",
+    "onCommand:vscode-kdb.rerunQueryHistoryEntry",
+    "onCommand:vscode-kdb.copyQueryHistoryEntry",
+    "onCommand:vscode-kdb.insertQueryHistoryEntry",
+    "onCommand:vscode-kdb.deleteQueryHistoryEntry",
+    "onCommand:vscode-kdb.clearQueryHistory",
     "onCommand:vscode-kdb.runSelectionOrCurrentLine",
     "onCommand:vscode-kdb.runScript",
     "onCommand:vscode-kdb.runSelectionInNewResult",
@@ -57,8 +66,8 @@
     "test": "npm run compile && node test/run.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:live-q": "npm run compile && node test/live/run.js",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.1.3.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.3.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.1.4.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.4.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -134,6 +143,48 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "vscode-kdb.refreshServerExplorer",
+        "title": "KX: Refresh Server Explorer",
+        "icon": "$(refresh)",
+        "enablement": "config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available"
+      },
+      {
+        "command": "vscode-kdb.previewServerObject",
+        "title": "KX: Preview Server Object",
+        "icon": "$(open-preview)",
+        "enablement": "config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available"
+      },
+      {
+        "command": "vscode-kdb.rerunQueryHistoryEntry",
+        "title": "KX Query History: Rerun Query",
+        "icon": "$(play)",
+        "enablement": "config.vscode-kdb.features.queryHistory"
+      },
+      {
+        "command": "vscode-kdb.copyQueryHistoryEntry",
+        "title": "KX Query History: Copy Query",
+        "icon": "$(copy)",
+        "enablement": "config.vscode-kdb.features.queryHistory"
+      },
+      {
+        "command": "vscode-kdb.insertQueryHistoryEntry",
+        "title": "KX Query History: Insert into Active Editor",
+        "icon": "$(insert)",
+        "enablement": "config.vscode-kdb.features.queryHistory"
+      },
+      {
+        "command": "vscode-kdb.deleteQueryHistoryEntry",
+        "title": "KX Query History: Delete Entry",
+        "icon": "$(trash)",
+        "enablement": "config.vscode-kdb.features.queryHistory"
+      },
+      {
+        "command": "vscode-kdb.clearQueryHistory",
+        "title": "KX: Clear Query History",
+        "icon": "$(clear-all)",
+        "enablement": "config.vscode-kdb.features.queryHistory"
+      },
+      {
         "command": "vscode-kdb.runSelectionOrCurrentLine",
         "title": "KX: Run Selection / Current Line",
         "icon": "$(play)"
@@ -204,6 +255,18 @@
           "id": "vscode-kdb.connections",
           "name": "KX Connections",
           "contextualTitle": "KX Connections"
+        },
+        {
+          "id": "vscode-kdb.serverExplorer",
+          "name": "KX Server Explorer",
+          "contextualTitle": "KX Server Explorer",
+          "when": "config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available"
+        },
+        {
+          "id": "vscode-kdb.queryHistory",
+          "name": "KX Query History",
+          "contextualTitle": "KX Query History",
+          "when": "config.vscode-kdb.features.queryHistory"
         }
       ]
     },
@@ -218,6 +281,16 @@
           "command": "vscode-kdb.refreshConnections",
           "when": "view == vscode-kdb.connections",
           "group": "navigation@2"
+        },
+        {
+          "command": "vscode-kdb.refreshServerExplorer",
+          "when": "view == vscode-kdb.serverExplorer && config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscode-kdb.clearQueryHistory",
+          "when": "view == vscode-kdb.queryHistory && config.vscode-kdb.features.queryHistory",
+          "group": "navigation@1"
         }
       ],
       "view/item/context": [
@@ -250,6 +323,61 @@
           "command": "vscode-kdb.removeConnection",
           "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\./",
           "group": "navigation@3"
+        },
+        {
+          "command": "vscode-kdb.previewServerObject",
+          "when": "view == vscode-kdb.serverExplorer && viewItem =~ /^vscode-kdb\\.serverExplorer\\.object\\.(table|variable)$/ && config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-kdb.rerunQueryHistoryEntry",
+          "when": "view == vscode-kdb.queryHistory && viewItem =~ /^vscode-kdb\\.queryHistory\\.entry\\./ && config.vscode-kdb.features.queryHistory",
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-kdb.copyQueryHistoryEntry",
+          "when": "view == vscode-kdb.queryHistory && viewItem =~ /^vscode-kdb\\.queryHistory\\.entry\\./ && config.vscode-kdb.features.queryHistory",
+          "group": "navigation@1"
+        },
+        {
+          "command": "vscode-kdb.insertQueryHistoryEntry",
+          "when": "view == vscode-kdb.queryHistory && viewItem =~ /^vscode-kdb\\.queryHistory\\.entry\\./ && config.vscode-kdb.features.queryHistory",
+          "group": "navigation@2"
+        },
+        {
+          "command": "vscode-kdb.deleteQueryHistoryEntry",
+          "when": "view == vscode-kdb.queryHistory && viewItem =~ /^vscode-kdb\\.queryHistory\\.entry\\./ && config.vscode-kdb.features.queryHistory",
+          "group": "inline@2"
+        }
+      ],
+      "commandPalette": [
+        {
+          "command": "vscode-kdb.refreshServerExplorer",
+          "when": "config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available"
+        },
+        {
+          "command": "vscode-kdb.previewServerObject",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.rerunQueryHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.copyQueryHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.insertQueryHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.deleteQueryHistoryEntry",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.clearQueryHistory",
+          "when": "config.vscode-kdb.features.queryHistory"
         }
       ],
       "editor/title": [
@@ -287,6 +415,34 @@
     "configuration": {
       "title": "KX for VS Code",
       "properties": {
+        "vscode-kdb.features.serverExplorer": {
+          "type": "boolean",
+          "scope": "window",
+          "default": false,
+          "description": "Enable the first-party KX Server Explorer for the active direct q IPC profile. Disabled by default; disconnected state stays visible, and metadata is loaded only while connected when Refresh or table expansion is explicitly invoked."
+        },
+        "vscode-kdb.features.queryHistory": {
+          "type": "boolean",
+          "scope": "window",
+          "default": false,
+          "description": "Enable privacy-aware Query History. Disabled by default; issued editor query text is stored only in local VS Code workspace extension storage and is not sent as telemetry or placed in Settings Sync."
+        },
+        "vscode-kdb.serverExplorer.previewCellLimit": {
+          "type": "integer",
+          "scope": "window",
+          "default": 10000,
+          "minimum": 1,
+          "maximum": 1000000,
+          "description": "Server-side table/variable preview cap: approximate cells for tables and outer items for lists/dictionaries. Preview always requires explicit confirmation; nested values can still be large, and functions/projections are metadata-only."
+        },
+        "vscode-kdb.queryHistory.maxEntries": {
+          "type": "integer",
+          "scope": "window",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000,
+          "description": "Maximum query-text entries retained in local VS Code workspace extension storage when Query History is enabled. Result payloads are never stored."
+        },
         "vscode-kdb.connections": {
           "type": "array",
           "scope": "application",

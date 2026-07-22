@@ -9,7 +9,16 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '../..');
 const FIXTURE = path.join(__dirname, 'fixture.q');
 const { KdbIpcClient, qValueToColumnarPanel } = requireOut('q-ipc');
-const { qScriptInNamespace, queryInNamespace } = requireOut('connection');
+const { qScriptInNamespace, queryInNamespace, queryInNamespaceStrict } = requireOut('connection');
+const {
+  SERVER_TABLES_QUERY,
+  SERVER_VARIABLES_QUERY,
+  buildServerPreviewQuery,
+  buildServerTableMetaQuery,
+  parseServerColumns,
+  parseServerTableNames,
+  parseServerVariables,
+} = requireOut('server-explorer-model');
 
 (async () => {
   const qPath = resolveQPath();
@@ -50,6 +59,104 @@ async function runAssertions(port) {
       table.result.cellWindow({ start: 0, end: 1 }, { start: 0, end: 1 }).cells,
       [['AAPL', '100'], ['MSFT', '250']]
     );
+
+    assert.deepStrictEqual(
+      parseServerTableNames(await client.query(queryInNamespaceStrict(SERVER_TABLES_QUERY, '.'))),
+      { names: ['trade'], omittedUnsafeNames: 0 }
+    );
+    assert.deepStrictEqual(
+      parseServerTableNames(await client.query(queryInNamespaceStrict(SERVER_TABLES_QUERY, '.analytics'))),
+      { names: ['quote'], omittedUnsafeNames: 0 },
+      'table listing must use only the configured active namespace'
+    );
+
+    const rootVariables = parseServerVariables(
+      await client.query(queryInNamespaceStrict(SERVER_VARIABLES_QUERY, '.'))
+    ).variables;
+    assert.deepStrictEqual(
+      rootVariables.map(item => [item.name, item.kind]),
+      [['rootFunction', 'function'], ['rootVector', 'variable']]
+    );
+    const analyticsVariables = parseServerVariables(
+      await client.query(queryInNamespaceStrict(SERVER_VARIABLES_QUERY, '.analytics'))
+    ).variables;
+    assert.deepStrictEqual(
+      analyticsVariables.map(item => [item.name, item.kind]),
+      [['analyticsFunction', 'function'], ['analyticsVector', 'variable'], ['answer', 'variable']]
+    );
+
+    const quoteColumns = parseServerColumns(await client.query(queryInNamespaceStrict(
+      buildServerTableMetaQuery('quote'),
+      '.analytics'
+    )));
+    assert.deepStrictEqual(quoteColumns.map(column => [column.name, column.qTypeCode]), [
+      ['sym', 's'],
+      ['size', 'j'],
+    ]);
+
+    const quotePreview = qValueToColumnarPanel(await client.query(queryInNamespaceStrict(
+      buildServerPreviewQuery('quote', 'table', 3),
+      '.analytics'
+    )));
+    assert.strictEqual(quotePreview.mode, 'grid');
+    assert.strictEqual(quotePreview.result.rowCount, 1, 'three cells over two columns must cap preview to one row');
+    assert.deepStrictEqual(
+      quotePreview.result.cellWindow({ start: 0, end: 0 }, { start: 0, end: 1 }).cells,
+      [['AAPL', '100']]
+    );
+    assert.deepStrictEqual(
+      await client.query(queryInNamespaceStrict(
+        buildServerPreviewQuery('analyticsVector', 'variable', 3),
+        '.analytics'
+      )),
+      [0, 1, 2],
+      'variable previews must be capped server-side without retrieving the full vector'
+    );
+    assert.throws(
+      () => buildServerPreviewQuery('analyticsFunction', 'function', 3),
+      /limited to tables and variables/,
+      'known functions must never receive a Preview query'
+    );
+    await assert.rejects(
+      () => client.query(queryInNamespaceStrict(
+        buildServerPreviewQuery('analyticsFunction', 'variable', 3),
+        '.analytics'
+      )),
+      error => error && error.name === 'KdbQError' && /Function and projection previews are disabled/.test(error.message),
+      'the runtime q type check must reject a function even when a stale/malformed item claims it is a variable'
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.', 'rejected previews must restore the root namespace');
+    await assert.rejects(
+      () => client.query(queryInNamespaceStrict(buildServerTableMetaQuery('missingTable'), '.analytics')),
+      error => error && error.name === 'KdbQError' && /missingTable/.test(error.message)
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.', 'missing meta must restore the root namespace');
+
+    assert.strictEqual(
+      await client.query(queryInNamespaceStrict('string system "d"', '.')),
+      '.',
+      'strict root execution must explicitly enter the configured root namespace'
+    );
+    assert.strictEqual(
+      await client.query(queryInNamespaceStrict('string system "d"', '.analytics')),
+      '.analytics'
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.');
+    assert.strictEqual(
+      await client.query(queryInNamespaceStrict('system "d .analytics";answer', '.')),
+      42
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.', 'strict root success must restore root');
+    await assert.rejects(
+      () => client.query(queryInNamespaceStrict('system "d .analytics";missingStrictRoot', '.')),
+      error => error && error.name === 'KdbQError' && /missingStrictRoot/.test(error.message)
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.', 'strict root errors must restore root');
+    await assert.rejects(
+      () => client.query(queryInNamespaceStrict('system "d .";missingStrictAnalytics', '.analytics')),
+      error => error && error.name === 'KdbQError' && /missingStrictAnalytics/.test(error.message)
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.', 'strict non-root errors must restore root');
 
     assert.strictEqual(await client.query(queryInNamespace('answer', '.analytics')), 42);
     assert.strictEqual(await client.query(queryInNamespace('1', '.analytics')), 1);

@@ -423,6 +423,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#syntax-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Syntax scope
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#active-connection-and-namespace" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -438,6 +449,17 @@
     <span class="md-ellipsis">
 
         Result placement
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#query-history" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Query History
 
     </span>
   </a>
@@ -755,6 +777,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#syntax-scope" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Syntax scope
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#active-connection-and-namespace" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -770,6 +803,17 @@
     <span class="md-ellipsis">
 
         Result placement
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#query-history" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Query History
 
     </span>
   </a>
@@ -851,6 +895,8 @@
 </ul>
 <p>Multiline selections and documents are normalized to line-feed endings and grouped by q's <code>.Q.ld</code> script-line grouping. Groups execute in order and the final value is returned. This requires q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer. Older q versions receive a clear script-version error; single-line raw execution does not use <code>.Q.ld</code>.</p>
 <p>Whitespace, q indentation, and script termination rules still belong to q. Select the intended text when a partial document should run.</p>
+<h2 id="syntax-scope">Syntax scope</h2>
+<p>The existing first-party TextMate grammar was audited for 0.1.4 and left unchanged because no reliable token-coverage defect was found. The extension continues to associate q with <code>.q</code> files only. It does not claim <code>.k</code>: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.</p>
 <h2 id="active-connection-and-namespace">Active connection and namespace</h2>
 <p>All three editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.</p>
 <p>The connection's <strong>Database / Namespace</strong> value is applied consistently:</p>
@@ -863,6 +909,11 @@
 <h2 id="result-placement">Result placement</h2>
 <p>The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.</p>
 <p><strong>Run Selection in New Result</strong> creates another panel. It does not route through SQLTools and does not create <code>.session.sql</code> files.</p>
+<h2 id="query-history">Query History</h2>
+<p><code>vscode-kdb.features.queryHistory</code> defaults to <code>false</code>. When enabled, <strong>KX Query History</strong> records editor line, selection, and script executions only after the exact text is actually issued to q. A run rejected before issue is not stored. Entries are newest first and contain the query text, stable connection ID and recorded label, timestamp, execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. Result payloads and passwords are never included.</p>
+<p>Storage is the current VS Code workspace's local extension <code>Memento</code>. History is not placed in user/workspace settings, registered for Settings Sync, or transmitted as telemetry. The entry cap is <code>vscode-kdb.queryHistory.maxEntries</code>, default <code>100</code>, with a valid range of <code>1</code> through <code>1000</code>; lowering it removes the oldest excess entries.</p>
+<p>Use an entry's context menu to rerun, copy, insert its exact text into the active editor, or delete it. <strong>KX: Clear Query History</strong> confirms before removing all local entries. Disabling the feature stops new writes and hides the view and commands, but retained entries are not silently destroyed; re-enable it and use Clear to remove them.</p>
+<p>Rerun goes through the same exact editor pipeline, including normal connection selection, the configured namespace wrapper, query/script transport choice, timeout, cancellation, q-error handling, diagnostics, and normal KX Results panel. After selection resolves the target, KX identifies both labels and confirms every stable-ID mismatch—including when no profile was active or the recorded profile was removed—before sending the text. Renamed and removed profiles remain safely described without storing or displaying passwords.</p>
 <h2 id="cancellation-boundary">Cancellation boundary</h2>
 <p>Use the result panel's <strong>Cancel</strong> button or cancel the VS Code progress notification. This stops that panel waiting and protects it from a late result. It is a local wait cancellation: q computation or side effects already sent to the server may continue, and other queued work on the same connection is not canceled.</p>
 <p>Use <strong>KX: Disconnect</strong> when you intentionally need to close the connection and fail its outstanding IPC work. Diagnostics distinguish local result-wait cancellation from transport disconnect/cancel transitions.</p>

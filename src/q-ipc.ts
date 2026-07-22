@@ -133,6 +133,7 @@ export interface KdbConnectionOptions {
 interface PendingQuery {
   queryId: number;
   query: string;
+  onIssued?: () => void;
   queuedAtMs: number;
   startedAtMs?: number;
   diagnosticEnded: boolean;
@@ -495,7 +496,7 @@ export class KdbIpcClient {
     }
   }
 
-  public query(query: string): Promise<QValue> {
+  public query(query: string, onIssued?: () => void): Promise<QValue> {
     const queryId = nextQueryId++;
     if (!this.socket || this.socket.destroyed) {
       const error = this.phaseError('query', new KdbIpcError('connection is not open'));
@@ -512,6 +513,7 @@ export class KdbIpcClient {
       this.queue.push({
         queryId,
         query,
+        onIssued,
         queuedAtMs: Date.now(),
         diagnosticEnded: false,
         resolve,
@@ -628,14 +630,23 @@ export class KdbIpcClient {
       pending.perf.sendSpan = perfSpan('q-ipc.send', details);
     }
 
-    this.socket.write(message, error => {
-      if (pending.perf) {
-        finishSendPerf(pending.perf, { error: !!error });
+    try {
+      this.socket.write(message, error => {
+        if (pending.perf) {
+          finishSendPerf(pending.perf, { error: !!error });
+        }
+        if (error) {
+          this.rejectPending(this.phaseError('query', error));
+        }
+      });
+      try {
+        pending.onIssued?.();
+      } catch {
+        // Local observers must never disrupt a direct q request after socket.write.
       }
-      if (error) {
-        this.rejectPending(this.phaseError('query', error));
-      }
-    });
+    } catch (error) {
+      this.rejectPending(this.phaseError('query', toError(error)));
+    }
   }
 
   private handleData = (chunk: Buffer) => {

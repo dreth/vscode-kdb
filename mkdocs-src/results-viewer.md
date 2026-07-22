@@ -66,4 +66,4 @@ For connection, handshake, query, cancellation, and close lifecycle details, ope
 
 ## Viewer boundaries
 
-The viewer does not provide an object explorer, SQLTools grid target, SSH controls, gateway controls, or placeholder actions for unavailable features.
+The viewer does not embed an object explorer, SQLTools grid target, SSH controls, gateway controls, or placeholder actions. The separately gated **KX Server Explorer** sends confirmed previews into this same normal result viewer.

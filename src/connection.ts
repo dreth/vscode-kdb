@@ -268,6 +268,12 @@ export function queryInNamespace(query: string, namespace?: string): string {
     return query;
   }
 
+  return queryInNamespaceStrict(query, normalized);
+}
+
+export function queryInNamespaceStrict(query: string, namespace?: string): string {
+  const normalized = normalizeNamespace(namespace);
+
   return `{[ns;src]
   src:$[-10h=type src;enlist src;src];
   previous:string system "d";

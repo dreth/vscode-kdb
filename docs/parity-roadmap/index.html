@@ -628,10 +628,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#phase-1-boundary" class="md-nav__link">
+  <a href="#focused-standalone-boundary" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Phase 1 boundary
+        Focused standalone boundary
 
     </span>
   </a>
@@ -643,6 +643,28 @@
     <span class="md-ellipsis">
 
         Planned milestones
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#competitive-capability-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Competitive capability audit
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#later-experimental-notebook-milestone" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Later experimental notebook milestone
 
     </span>
   </a>
@@ -733,10 +755,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#phase-1-boundary" class="md-nav__link">
+  <a href="#focused-standalone-boundary" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Phase 1 boundary
+        Focused standalone boundary
 
     </span>
   </a>
@@ -748,6 +770,28 @@
     <span class="md-ellipsis">
 
         Planned milestones
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#competitive-capability-audit" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Competitive capability audit
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#later-experimental-notebook-milestone" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Later experimental notebook milestone
 
     </span>
   </a>
@@ -788,20 +832,22 @@
 <h1 id="parity-roadmap-architecture">Parity Roadmap &amp; Architecture</h1>
 <p>KX for VS Code is being developed as the future first-party KX product. During the parity phase, useful capabilities are ported from <code>kdb-sqltools</code> into this standalone architecture. Functional parity must be verified by evidence and user testing before the standalone repository becomes the source of truth.</p>
 <p>The detailed, source-backed status is maintained in the repository's <a href="https://github.com/dreth/vscode-kdb/blob/main/PARITY.md"><code>PARITY.md</code></a>. Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim.</p>
-<p>The repository manifest is at <code>0.1.3</code> for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.</p>
+<p>The repository manifest is at <code>0.1.4</code> for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.</p>
 <h2 id="current-standalone-architecture">Current standalone architecture</h2>
-<p>The extension has five deliberate layers:</p>
+<p>The extension has seven deliberate layers:</p>
 <ol>
-<li><strong>VS Code surface:</strong> q language contribution, editor commands, KX activity-bar connection tree, the KX-owned single-screen connection form, notifications, and <code>KX</code> Output channel.</li>
+<li><strong>VS Code surface:</strong> q language contribution, editor commands, KX activity-bar views, the KX-owned single-screen connection form, notifications, and <code>KX</code> Output channel.</li>
 <li><strong>Connection ownership:</strong> application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.</li>
 <li><strong>Direct q IPC:</strong> handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.</li>
+<li><strong>Optional server metadata:</strong> disabled-by-default manual <code>tables[]</code>, conservative name/type categories, on-demand <code>meta</code>, and confirmed bounded previews for one active configured namespace.</li>
+<li><strong>Optional local history:</strong> disabled-by-default workspace <code>Memento</code> records for actually issued editor queries, with no results, sync, settings, telemetry, or passwords.</li>
 <li><strong>Result capabilities:</strong> columnar storage, virtual grid/q-text presentation, search/sort/selection, copy/export, and safe chart transformations.</li>
 <li><strong>Optional local access:</strong> per-panel tokenized HTTP endpoints bound to loopback.</li>
 </ol>
-<p>There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, object-explorer nodes, or session-file hooks in this graph. The <strong>KX Connection</strong> form and its storage lifecycle are owned entirely by this extension.</p>
-<h2 id="phase-1-boundary">Phase 1 boundary</h2>
-<p>Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path verification remains partial as recorded in <code>PARITY.md</code>.</p>
-<p>Known gaps and partial areas remain. In particular, Phase 1 does not provide an object explorer, built-in SSH/TLS or gateway orchestration, every historical editor convenience, complete visual/manual Extension Host coverage, or proof of end-user functional parity. Deterministic source/webview guards are not visual E2E, and release 0.1.3 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.</p>
+<p>There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, or session-file hooks in this graph. The <strong>KX Connection</strong> form, focused Server Explorer, Query History, and their storage/lifecycle behavior are owned entirely by this extension.</p>
+<h2 id="focused-standalone-boundary">Focused standalone boundary</h2>
+<p>Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, opt-in focused server metadata and previews, opt-in privacy-aware local history, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path and visual verification remain partial as recorded in <code>PARITY.md</code>.</p>
+<p>Known gaps and partial areas remain. The Server Explorer is deliberately limited to the active direct profile and configured namespace, and metadata requests require that profile to be connected; it is not broad namespace navigation, Insights/gateway integration, server administration, or a write surface. The extension also lacks built-in SSH/TLS orchestration, every historical editor convenience, notebooks, complete visual/manual Extension Host coverage, and proof of end-user functional parity. Deterministic source/tree guards are not visual E2E, and release 0.1.4 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.</p>
 <p>Some SQLTools behaviors are deliberately omitted rather than missing:</p>
 <ul>
 <li>SQLTools as a runtime dependency;</li>
@@ -818,6 +864,16 @@
 <li><strong>Source-of-truth transition:</strong> after verified functional parity, develop new KX behavior in <code>vscode-kdb</code> first.</li>
 <li><strong>Deliberate backports:</strong> make compatible, reviewed backports to <code>kdb-sqltools</code> only where its SQLTools architecture can support them without making it the design authority again.</li>
 </ol>
+<h2 id="competitive-capability-audit">Competitive capability audit</h2>
+<p>Server Explorer and Query History move useful standalone parity forward without reproducing the breadth of KDB-X or q Professional. The product remains intentionally strongest at direct q execution and table/result visualization, with small opt-in workflow surfaces instead of bundled gateway, administration, notebook, or compatibility subsystems.</p>
+<ul>
+<li><a href="https://github.com/jshinonome/vscode-q/tree/1481ba419edee8e53be6bb4f6f134d1fb04f1ed1">q Professional / <code>jshinonome/vscode-q</code> at <code>1481ba419edee8e53be6bb4f6f134d1fb04f1ed1</code></a> supplied documented feature and interaction inspiration only. That public snapshot is all-rights-reserved; no code or assets were copied.</li>
+<li><a href="https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5">KX's <code>KxSystems/kx-vscode</code> at <code>1c745bf0221dd3cca85dce925c4d432d80bb5ef5</code></a> was inspected under Apache-2.0, but no source code, logic, or assets were adapted for 0.1.4.</li>
+<li>SQLTools remains absent as a runtime or UI dependency. The new views and local storage do not depend on SQLTools connection, result, or session abstractions.</li>
+</ul>
+<p>The native q grammar was also audited and left unchanged because no reliable token-coverage defect was found. <code>.k</code> remains unassociated until a demonstrated, testable need justifies the compatibility risk.</p>
+<h2 id="later-experimental-notebook-milestone">Later experimental notebook milestone</h2>
+<p>q notebooks belong to a later experimental milestone, not a fake parity checkbox. A viable proposal must define a durable document format and serializer, stable cell identities and execution-state restoration, cross-cell stale/error/cancellation semantics, renderer/controller and Extension Host tests, interoperability expectations, and the package-weight cost of VS Code notebook infrastructure. Until those questions have evidence-backed answers, the extension will not contribute a placeholder notebook controller or reinterpret <code>.q</code> files as notebooks.</p>
 <h2 id="future-shared-core-boundary">Future shared-core boundary</h2>
 <p>No monorepo or cross-repository code move is part of the foundation pass. A later extraction should start only after interfaces are stable and both repositories have contract tests.</p>
 <p>Good candidates are pure or host-neutral code:</p>

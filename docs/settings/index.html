@@ -509,6 +509,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#feature-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Feature Controls
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#connections-and-diagnostics" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -744,6 +755,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#feature-controls" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Feature Controls
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#connections-and-diagnostics" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -832,6 +854,46 @@
 <h1 id="settings">Settings</h1>
 <p>Open VS Code Settings and search for <code>vscode-kdb</code>, or edit settings JSON. The manifest is the source of truth for accepted values.</p>
 <p>Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.</p>
+<h2 id="feature-controls">Feature Controls</h2>
+<p>Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.</p>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Values / range</th>
+<th>Behavior and tradeoff</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vscode-kdb.features.serverExplorer</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
+<td>Shows the focused Server Explorer for an active direct q IPC profile, including a disconnected/reconnect status. Metadata requires a connection and is manual-refresh/on-expand only; disabling disposes its provider and hides its view and commands.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.serverExplorer.previewCellLimit</code></td>
+<td><code>10000</code></td>
+<td>Integer <code>1</code>-<code>1000000</code></td>
+<td>Server-side table/variable Preview cap: approximate table cells or outer list/dictionary items. Every preview still confirms because scalars and nested values can be large; functions/projections are metadata-only.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.features.queryHistory</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
+<td>Records actually issued editor query text in local workspace extension storage. Disabling stops writes and hides its view/commands, but retained entries require re-enabling and running <strong>KX: Clear Query History</strong> to erase them.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.queryHistory.maxEntries</code></td>
+<td><code>100</code></td>
+<td>Integer <code>1</code>-<code>1000</code></td>
+<td>Maximum newest-first local entries; lowering the limit prunes the oldest. No result payload is stored.</td>
+</tr>
+</tbody>
+</table>
+<p>Server Explorer applies the active connection's configured namespace and never auto-refreshes or installs persistent server code. Preview accepts only standard q identifiers and warns before materialization. Local cancellation stops waiting but does not interrupt q work already sent.</p>
+<p>Query History uses VS Code workspace <code>Memento</code>, not a syncable/global setting. It is not registered for Settings Sync and is not transmitted as telemetry. Stored fields are exact query text, stable connection ID and recorded label, timestamp, editor execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. Passwords and results are excluded. Query text can be commercially or personally sensitive, so enable the feature only in workspaces where local persistence is acceptable.</p>
 <h2 id="connections-and-diagnostics">Connections and diagnostics</h2>
 <table>
 <thead>
@@ -1144,6 +1206,10 @@
 </table>
 <h2 id="example">Example</h2>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.features.serverExplorer&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.serverExplorer.previewCellLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.features.queryHistory&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.queryHistory.maxEntries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.connectionTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">30000</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.queryTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.performance.trace&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>

@@ -85,9 +85,19 @@ Do not add a password field to `settings.json`. Do not paste credentials into lo
 
 ## Network security
 
-Direct q IPC is plaintext in transit, including handshake credentials and query traffic. Phase 1 does not implement TLS, SSH configuration, gateways, brokers, or remote orchestration. Use loopback, a trusted private network, or a separately managed secure tunnel whose lifecycle remains outside the extension.
+Direct q IPC is plaintext in transit, including handshake credentials and query traffic. The standalone release does not implement TLS, SSH configuration, gateways, brokers, or remote orchestration. Use loopback, a trusted private network, or a separately managed secure tunnel whose lifecycle remains outside the extension.
 
-The connection sidebar is not an object explorer. Phase 1 does not enumerate server tables, functions, or namespaces.
+## Focused Server Explorer
+
+`vscode-kdb.features.serverExplorer` defaults to `false`. When enabled, **KX Server Explorer** is a separate tree under the KX activity bar whenever an active direct q IPC profile exists. A disconnected profile leaves a clear reconnect status instead of stale metadata; requests require it to be connected. The connection tree remains responsible only for connection state and lifecycle.
+
+The explorer never polls. Select **KX: Refresh Server Explorer** to query the active profile's configured namespace. Refresh uses q-native `tables[]` for table names and obtains names plus safe q type metadata for the **Variables & Functions** category without fetching the remote values. Only safely recognized function type codes are labelled as functions; unknown or other objects are conservatively labelled as variables. Non-standard names that cannot be executed safely are omitted and reported.
+
+Expand a table to invoke `meta` explicitly and show column name, q type, foreign-key, and attribute metadata. Table expansion is also on demand. Permission errors, missing/stale objects, timeouts, disconnects, cancellation, and a changed active connection or namespace produce a retryable status instead of retaining misleading tree data. Canceling a metadata wait is local: q work already sent may still finish on the server.
+
+**Preview** is a separate, confirmed action for tables and variables and opens the selected object through the normal KX Results pipeline in the configured namespace. Functions and projections remain metadata-only because captured arguments can exceed any meaningful preview limit. The explorer accepts only standard q identifiers beginning with a letter and continuing with letters, digits, or underscores, up to 255 characters; it never treats an arbitrary tree label as executable q text. `vscode-kdb.serverExplorer.previewCellLimit` defaults to approximately `10000` table cells or `10000` outer list/dictionary items and is configurable from `1` through `1000000`. Nested values and scalars may still be large, which is why every preview warns before materializing anything.
+
+Explorer requests temporarily apply the configured namespace and restore q's previous namespace. They install no server scripts, persist no remote state, and provide no namespace browser, write action, SSH/TLS, gateway, or Insights controls.
 
 ## Namespace behavior
 

@@ -2,7 +2,7 @@
 
 Use the [vscode-kdb GitHub issue tracker](https://github.com/dreth/vscode-kdb/issues) for bugs, capability requests, and documentation corrections.
 
-Before filing, check the source-backed [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). A documented Phase 1 gap is still useful feedback, but it should not be reported as a regression from a feature the standalone extension never claimed.
+Before filing, check the source-backed [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). A documented standalone boundary is still useful feedback, but it should not be reported as a regression from a feature the extension never claimed.
 
 ## Useful report details
 

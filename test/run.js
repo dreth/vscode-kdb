@@ -29,6 +29,7 @@ const {
   qScriptInNamespace,
   qString,
   queryInNamespace,
+  queryInNamespaceStrict,
   resolveConnectionTimeouts,
   safeTimeoutMs,
   safeStoredConnections,
@@ -56,12 +57,46 @@ const {
   createColumnarPanelResult,
   rowsToColumnarPanelResult,
 } = requireOut('kx-results');
+const {
+  DEFAULT_SERVER_PREVIEW_CELL_LIMIT,
+  MAX_SERVER_PREVIEW_CELL_LIMIT,
+  MIN_SERVER_PREVIEW_CELL_LIMIT,
+  SERVER_TABLES_QUERY,
+  SERVER_VARIABLES_QUERY,
+  buildServerPreviewQuery,
+  buildServerTableMetaQuery,
+  parseServerColumns,
+  parseServerTableNames,
+  parseServerVariables,
+  qMetaTypeName,
+  safeServerPreviewCellLimit,
+  serverExplorerSnapshotMatches,
+  serverPreviewWarning,
+  validateServerObjectIdentifier,
+} = requireOut('server-explorer-model');
+const {
+  DEFAULT_QUERY_HISTORY_MAX_ENTRIES,
+  MAX_QUERY_HISTORY_MAX_ENTRIES,
+  MIN_QUERY_HISTORY_MAX_ENTRIES,
+  QUERY_HISTORY_STORAGE_KEY,
+  QueryHistoryStore,
+  historyRerunRequiresConfirmation,
+  historyTransportKind,
+  normalizeQueryHistoryEntries,
+  normalizeQueryHistoryEntry,
+  safeHistoryLimit,
+  sortHistoryNewestFirst,
+} = requireOut('query-history-model');
 
 const tests = [
   ['q IPC codec and receive buffering', testQIpc],
   ['diagnostics and performance trace redaction', testDiagnostics],
   ['exact q selection/current-line text', testQText],
   ['connection validation and namespace wrapping', testConnections],
+  ['server explorer request and metadata model', testServerExplorerModel],
+  ['query history privacy and persistence model', testQueryHistoryModel],
+  ['webview-free server and history tree providers', testTreeProviders],
+  ['feature controls enable and disable lifecycle', testFeatureControlsLifecycle],
   ['connection form payload and password semantics', testConnectionFormModel],
   ['connection webview lifecycle', testConnectionFormPanelLifecycle],
   ['connection SecretStorage transactions', testConnectionStoreTransactions],
@@ -325,6 +360,97 @@ async function testQIpc() {
     querySockets.forEach(socket => socket.destroy());
     await closeServer(timeoutServer);
   }
+
+  const queuedSockets = [];
+  const queuedFrames = [];
+  const frameArrivals = [deferred(), deferred(), deferred()];
+  const queueServer = net.createServer(socket => {
+    queuedSockets.push(socket);
+    let handshakeComplete = false;
+    let buffered = Buffer.alloc(0);
+    socket.on('data', chunk => {
+      if (!handshakeComplete) {
+        handshakeComplete = true;
+        socket.write(Buffer.from([3]));
+        return;
+      }
+
+      buffered = Buffer.concat([buffered, chunk]);
+      while (buffered.length >= 8) {
+        const messageLength = buffered.readInt32LE(4);
+        if (messageLength < 8) {
+          socket.destroy(new Error(`invalid test q IPC frame length ${messageLength}`));
+          return;
+        }
+        if (buffered.length < messageLength) {
+          return;
+        }
+        const frame = buffered.subarray(0, messageLength);
+        buffered = buffered.subarray(messageLength);
+        const index = queuedFrames.push(frame) - 1;
+        frameArrivals[index]?.resolve(socket);
+      }
+    });
+  });
+  await listen(queueServer);
+  const queueAddress = queueServer.address();
+  const queuePort = queueAddress && typeof queueAddress === 'object' ? queueAddress.port : 0;
+  const queueClient = new KdbIpcClient({
+    host: '127.0.0.1',
+    port: queuePort,
+    connectTimeoutMs: 1000,
+    queryTimeoutMs: 1000,
+  });
+  const issued = [];
+  const scalarResponse = hex('010200000d000000fa01000000');
+  try {
+    await queueClient.connect();
+    const firstQuery = queueClient.query('first-boundary', () => issued.push('first'));
+    const secondQuery = queueClient.query('second-boundary', () => issued.push('second'));
+    const queueSocket = await assertCompletesWithin(
+      'first queued q IPC write',
+      () => frameArrivals[0].promise,
+      1000
+    );
+    assert.deepStrictEqual(issued, ['first']);
+    assert.strictEqual(queuedFrames.length, 1, 'only the active request may reach socket.write');
+    assert.deepStrictEqual(queuedFrames[0], serializeTextQuery('first-boundary'));
+
+    queueSocket.write(scalarResponse);
+    assert.strictEqual(await firstQuery, 1);
+    await assertCompletesWithin('second queued q IPC write', () => frameArrivals[1].promise, 1000);
+    assert.deepStrictEqual(
+      issued,
+      ['first', 'second'],
+      'a queued history observer must not fire until that request reaches socket.write'
+    );
+    assert.strictEqual(queuedFrames.length, 2);
+    assert.deepStrictEqual(queuedFrames[1], serializeTextQuery('second-boundary'));
+    queueSocket.write(scalarResponse);
+    assert.strictEqual(await secondQuery, 1);
+
+    const throwingObserverQuery = queueClient.query('observer-cannot-break-write', () => {
+      issued.push('throwing');
+      throw new Error('injected history observer failure');
+    });
+    await assertCompletesWithin('observer q IPC write', () => frameArrivals[2].promise, 1000);
+    assert.deepStrictEqual(issued, ['first', 'second', 'throwing']);
+    assert.deepStrictEqual(queuedFrames[2], serializeTextQuery('observer-cannot-break-write'));
+    queueSocket.write(scalarResponse);
+    assert.strictEqual(await throwingObserverQuery, 1);
+  } finally {
+    await queueClient.close();
+    queuedSockets.forEach(socket => socket.destroy());
+    await closeServer(queueServer);
+  }
+
+  const disconnectedObserverClient = new KdbIpcClient({ host: '127.0.0.1', port: 1, timeoutMs: 1 });
+  let disconnectedIssued = 0;
+  await assert.rejects(
+    () => disconnectedObserverClient.query('never-written', () => disconnectedIssued++),
+    /connection is not open/
+  );
+  assert.strictEqual(disconnectedIssued, 0, 'preflight failures must not be recorded as issued queries');
 }
 
 async function testDiagnostics() {
@@ -584,6 +710,18 @@ function testConnections() {
   assert.ok(wrapped.includes(qString('.analytics.market')));
   assert.ok(wrapped.includes(qString(rawQuery)), 'the raw q text must be passed as one escaped q string');
 
+  const strictRoot = queryInNamespaceStrict(rawQuery, '.');
+  assert.notStrictEqual(strictRoot, rawQuery, 'strict metadata/preview execution must wrap even the root namespace');
+  assert.ok(strictRoot.includes('previous:string system "d"'));
+  assert.ok(strictRoot.includes('system "d ",previous'));
+  assert.ok(strictRoot.includes(qString('.')));
+  assert.ok(strictRoot.includes(qString(rawQuery)));
+  assert.strictEqual(
+    queryInNamespaceStrict(rawQuery, 'analytics.market'),
+    queryInNamespace(rawQuery, '.analytics.market'),
+    'strict and editor wrappers must agree for non-root configured namespaces'
+  );
+
   const singleCharacter = queryInNamespace('1', '.analytics');
   assert.ok(singleCharacter.includes('src:$[-10h=type src;enlist src;src]'));
   const script = 'a:1\r\nb:2\r\na+b';
@@ -593,6 +731,901 @@ function testConnections() {
   assert.ok(scriptWrapper.includes('q 4.0 2023.03.28 or newer'));
   assert.ok(scriptWrapper.includes(qString(script)));
   assert.ok(scriptWrapper.includes(qString('.analytics')));
+}
+
+function testServerExplorerModel() {
+  assert.strictEqual(DEFAULT_SERVER_PREVIEW_CELL_LIMIT, 10_000);
+  assert.strictEqual(MIN_SERVER_PREVIEW_CELL_LIMIT, 1);
+  assert.strictEqual(MAX_SERVER_PREVIEW_CELL_LIMIT, 1_000_000);
+  assert.strictEqual(SERVER_TABLES_QUERY, 'string tables[]');
+  assert.strictEqual(
+    SERVER_VARIABLES_QUERY,
+    [
+      '{[]',
+      '  names:key `$string system "d";',
+      '  names:names where 0<count each string names;',
+      '  names:names except tables[];',
+      '  types:{@[{type value x};x;{0Nh}]} each names;',
+      '  flip `name`type!(string names;types)',
+      '}[]',
+    ].join('\n'),
+    'variables metadata must return names/type atoms without returning remote values'
+  );
+
+  assert.strictEqual(validateServerObjectIdentifier('trade'), 'trade');
+  assert.strictEqual(validateServerObjectIdentifier('Trade_2026'), 'Trade_2026');
+  assert.strictEqual(validateServerObjectIdentifier(`a${'b'.repeat(254)}`).length, 255);
+  for (const hostile of [
+    '',
+    '.analytics.trade',
+    '1trade',
+    '_trade',
+    'trade price',
+    'trade;delete from trade',
+    'trade\nshow 1',
+    'trade"',
+    'trade\\path',
+    `a${'b'.repeat(255)}`,
+  ]) {
+    assert.throws(
+      () => validateServerObjectIdentifier(hostile),
+      /standard q identifiers up to 255 characters/,
+      `unsafe Server Explorer identifier must be rejected: ${JSON.stringify(hostile)}`
+    );
+    assert.throws(() => buildServerTableMetaQuery(hostile), /standard q identifiers/);
+    assert.throws(() => buildServerPreviewQuery(hostile, 'table', 100), /standard q identifiers/);
+  }
+
+  assert.strictEqual(buildServerTableMetaQuery('trade'), '0!meta `trade');
+  assert.strictEqual(
+    buildServerPreviewQuery('trade', 'table', 12),
+    [
+      '{[objectName;limit]',
+      '  objectValue:value objectName;',
+      '  (limit div 1|count cols objectName)#objectValue',
+      '}[`trade;12]',
+    ].join('\n')
+  );
+  const variablePreview = buildServerPreviewQuery('items', 'variable', 25);
+  assert.strictEqual(
+    variablePreview,
+    [
+      '{[objectName;limit]',
+      '  objectValue:value objectName;',
+      '  objectType:type objectValue;',
+      `  if[objectType>=100h;'"Function and projection previews are disabled."];`,
+      '  $[98h=objectType;(limit div 1|count cols objectName)#objectValue;',
+      '    99h=objectType;$[98h=type key objectValue;(limit div 1|count cols objectName)#objectValue;limit#objectValue];',
+      '    objectType<0h;objectValue;',
+      '    objectType<98h;limit#objectValue;',
+      '    objectValue]',
+      '}[`items;25]',
+    ].join('\n')
+  );
+  assert.match(variablePreview, /objectType>=100h/, 'runtime type checks must reject disguised functions/projections');
+  assert.throws(
+    () => buildServerPreviewQuery('calculate', 'function', 25),
+    /limited to tables and variables/
+  );
+  assert.throws(() => serverPreviewWarning('calculate', 'function', '.', 25), /limited to tables and variables/);
+  assert.throws(() => buildServerPreviewQuery('trade', 'view', 10), /limited to tables and variables/);
+
+  assert.strictEqual(safeServerPreviewCellLimit(1), 1);
+  assert.strictEqual(safeServerPreviewCellLimit(1_000_000), 1_000_000);
+  for (const invalid of [0, -1, 1.5, 1_000_001, '100', null, undefined, NaN, Infinity]) {
+    assert.strictEqual(
+      safeServerPreviewCellLimit(invalid),
+      DEFAULT_SERVER_PREVIEW_CELL_LIMIT,
+      'hand-edited preview limits must fail closed to the bounded default'
+    );
+  }
+  assert.ok(buildServerPreviewQuery('trade', 'table', 'untrusted').endsWith('}[`trade;10000]'));
+  const tableWarning = serverPreviewWarning('trade', 'table', '.analytics', 12_345);
+  assert.match(tableWarning, /Preview table "trade" from namespace \.analytics\?/);
+  assert.match(tableWarning, /12,345 cells/);
+  assert.match(tableWarning, /nested values can still be large/i);
+  const variableWarning = serverPreviewWarning('items', 'variable', '.', 25);
+  assert.match(variableWarning, /Lists and dictionaries are capped to 25 outer items/);
+  assert.match(variableWarning, /scalars and nested values may still be large/);
+  assert.match(variableWarning, /Functions and projections are metadata-only/);
+
+  assert.deepStrictEqual(
+    parseServerTableNames(['zeta', 'alpha', 'zeta', 'bad;name', '', 42]),
+    { names: ['alpha', 'zeta'], omittedUnsafeNames: 2 }
+  );
+  assert.deepStrictEqual(
+    parseServerTableNames('trade'),
+    { names: ['trade'], omittedUnsafeNames: 0 }
+  );
+  assert.throws(() => parseServerTableNames(42), /unexpected table-list shape/);
+
+  const variables = parseServerVariables(modelQTable(
+    ['name', 'type'],
+    [
+      { name: 'vector', type: 7 },
+      { name: 'fn', type: 100 },
+      { name: 'projection', type: 104 },
+      { name: 'futureType', type: 113 },
+      { name: 'unknownType', type: null },
+      { name: 'fn', type: 101 },
+      { name: 'bad;name', type: 100 },
+    ]
+  ));
+  assert.deepStrictEqual(variables, {
+    variables: [
+      { name: 'fn', kind: 'function', qType: 100 },
+      { name: 'futureType', kind: 'variable', qType: 113 },
+      { name: 'projection', kind: 'function', qType: 104 },
+      { name: 'unknownType', kind: 'variable' },
+      { name: 'vector', kind: 'variable', qType: 7 },
+    ],
+    omittedUnsafeNames: 1,
+  });
+  assert.throws(
+    () => parseServerVariables(modelQTable(['object', 'type'], [])),
+    /unexpected variables metadata shape/
+  );
+
+  assert.deepStrictEqual(
+    parseServerColumns(modelQTable(
+      ['c', 't', 'f', 'a'],
+      [
+        { c: 'sym', t: 's', f: '', a: 'p' },
+        { c: 'size\u0000', t: 'j', f: 'ref', a: '' },
+        { c: 'mystery', t: '?', f: null, a: null },
+      ]
+    )),
+    [
+      { name: 'sym', qTypeCode: 's', qTypeName: 'symbol', foreignKey: '', attribute: 'p' },
+      { name: 'size', qTypeCode: 'j', qTypeName: 'long', foreignKey: 'ref', attribute: '' },
+      { name: 'mystery', qTypeCode: '?', qTypeName: 'q type ?', foreignKey: '', attribute: '' },
+    ]
+  );
+  assert.strictEqual(qMetaTypeName('p'), 'timestamp');
+  assert.strictEqual(qMetaTypeName(''), 'unknown');
+  assert.throws(
+    () => parseServerColumns(modelQTable(['name', 'type'], [])),
+    /unexpected meta shape/
+  );
+
+  const snapshot = { connectionId: 'kx-active', namespace: '.analytics' };
+  assert.strictEqual(serverExplorerSnapshotMatches(snapshot, 'kx-active', '.analytics', true), true);
+  assert.strictEqual(serverExplorerSnapshotMatches(snapshot, 'kx-other', '.analytics', true), false);
+  assert.strictEqual(serverExplorerSnapshotMatches(snapshot, 'kx-active', '.other', true), false);
+  assert.strictEqual(serverExplorerSnapshotMatches(snapshot, 'kx-active', '.analytics', false), false);
+  assert.strictEqual(serverExplorerSnapshotMatches(snapshot, undefined, undefined, true), false);
+}
+
+async function testQueryHistoryModel() {
+  assert.strictEqual(historyRerunRequiresConfirmation('kx-one', 'kx-one'), false);
+  assert.strictEqual(historyRerunRequiresConfirmation('kx-recorded', 'kx-target'), true);
+
+  assert.strictEqual(DEFAULT_QUERY_HISTORY_MAX_ENTRIES, 100);
+  assert.strictEqual(MIN_QUERY_HISTORY_MAX_ENTRIES, 1);
+  assert.strictEqual(MAX_QUERY_HISTORY_MAX_ENTRIES, 1000);
+  assert.strictEqual(safeHistoryLimit(1), 1);
+  assert.strictEqual(safeHistoryLimit(1000), 1000);
+  assert.strictEqual(safeHistoryLimit('10'), DEFAULT_QUERY_HISTORY_MAX_ENTRIES);
+  assert.strictEqual(safeHistoryLimit(0), DEFAULT_QUERY_HISTORY_MAX_ENTRIES);
+  assert.strictEqual(safeHistoryLimit(1001), DEFAULT_QUERY_HISTORY_MAX_ENTRIES);
+  assert.strictEqual(safeHistoryLimit(12, 7), 12);
+  assert.strictEqual(safeHistoryLimit('bad', 7), 7);
+
+  const safe = historyEntry({
+    id: 'entry-safe',
+    timestamp: 300,
+    kind: 'selection',
+    status: 'failed',
+    durationMs: 12.5,
+    queryText: 'select from trade',
+  });
+  const normalized = normalizeQueryHistoryEntry({
+    ...safe,
+    result: [{ password: 'must-not-persist' }],
+    password: 'must-not-persist',
+    error: 'remote payload',
+    host: 'private.example.test',
+    username: 'private-user',
+  });
+  assert.deepStrictEqual(normalized, safe);
+  assert.deepStrictEqual(
+    Object.keys(normalized).sort(),
+    ['connectionId', 'connectionName', 'durationMs', 'id', 'kind', 'queryText', 'status', 'timestamp']
+  );
+  for (const invalid of [
+    null,
+    {},
+    { ...safe, id: '' },
+    { ...safe, connectionId: '' },
+    { ...safe, connectionName: '' },
+    { ...safe, timestamp: -1 },
+    { ...safe, timestamp: 1.5 },
+    { ...safe, kind: 'preview' },
+    { ...safe, status: 'pending' },
+    { ...safe, durationMs: -1 },
+    { ...safe, durationMs: Infinity },
+    { ...safe, queryText: '' },
+  ]) {
+    assert.strictEqual(normalizeQueryHistoryEntry(invalid), undefined);
+  }
+  for (const kind of ['line', 'selection', 'script']) {
+    for (const status of ['succeeded', 'failed', 'canceled']) {
+      assert.ok(normalizeQueryHistoryEntry(historyEntry({ id: `${kind}-${status}`, kind, status })));
+    }
+  }
+
+  const oldest = historyEntry({ id: 'oldest', timestamp: 100 });
+  const equalA = historyEntry({ id: 'equal-a', timestamp: 200 });
+  const equalB = historyEntry({ id: 'equal-b', timestamp: 200 });
+  const newest = historyEntry({ id: 'newest', timestamp: 300 });
+  assert.deepStrictEqual(
+    sortHistoryNewestFirst([oldest, equalA, newest, equalB]).map(entry => entry.id),
+    ['newest', 'equal-a', 'equal-b', 'oldest'],
+    'newest ordering must be deterministic and stable for equal timestamps'
+  );
+  assert.deepStrictEqual(
+    normalizeQueryHistoryEntries([
+      oldest,
+      { ...newest, result: [1, 2, 3] },
+      { ...newest, timestamp: 50 },
+      equalA,
+      { ...safe, id: '' },
+    ], 3).map(entry => entry.id),
+    ['newest', 'equal-a', 'oldest'],
+    'corrupt entries and duplicate IDs must be stripped before the configured bound is applied'
+  );
+  assert.deepStrictEqual(normalizeQueryHistoryEntries('corrupt'), []);
+
+  assert.strictEqual(historyTransportKind('line', 'a:1'), 'query');
+  assert.strictEqual(historyTransportKind('selection', 'a:1'), 'query');
+  assert.strictEqual(historyTransportKind('selection', 'a:1\nb:2'), 'script');
+  assert.strictEqual(historyTransportKind('selection', 'a:1\r\nb:2'), 'script');
+  assert.strictEqual(historyTransportKind('script', '1+1'), 'script');
+  assert.strictEqual(historyTransportKind({ ...safe, kind: 'selection', queryText: 'x\ny' }), 'script');
+
+  const initialMemento = createHistoryMemento([
+    { ...oldest, password: 'strip-me', result: [42] },
+    { ...newest, error: 'strip-me' },
+    { ...safe, id: '' },
+  ]);
+  const initialStore = new QueryHistoryStore(initialMemento, { maxEntries: 2 });
+  assert.deepStrictEqual(initialStore.entries().map(entry => entry.id), ['newest', 'oldest']);
+  const pruned = await initialStore.prune();
+  assert.deepStrictEqual(pruned.map(entry => entry.id), ['newest', 'oldest']);
+  assertHistoryStorageShape(initialMemento.value);
+  assert.ok(!JSON.stringify(initialMemento.value).includes('strip-me'));
+
+  let nextId = 0;
+  let configuredLimit = 3;
+  const memento = createHistoryMemento();
+  const store = new QueryHistoryStore(memento, {
+    maxEntries: () => configuredLimit,
+    now: () => 999,
+    createId: () => `generated-${++nextId}`,
+  });
+  const generation = store.captureGeneration();
+  const inputs = [
+    { timestamp: 100, queryText: 'line query', kind: 'line', status: 'succeeded' },
+    { timestamp: 300, queryText: 'selection query', kind: 'selection', status: 'failed' },
+    { timestamp: 200, queryText: 'script query', kind: 'script', status: 'canceled' },
+  ].map(item => ({
+    connectionId: 'kx-history',
+    connectionName: 'History q',
+    durationMs: 5,
+    ...item,
+    result: ['must not persist'],
+    password: 'must not persist',
+  }));
+  await Promise.all(inputs.map(input => store.record(input, generation)));
+  assert.deepStrictEqual(
+    store.entries().map(entry => entry.queryText),
+    ['selection query', 'script query', 'line query'],
+    'serialized concurrent writes must retain every issued execution newest-first'
+  );
+  assert.strictEqual(memento.updates.length, 3);
+  assertHistoryStorageShape(memento.value);
+  assert.ok(!JSON.stringify(memento.value).includes('must not persist'));
+
+  configuredLimit = 2;
+  assert.deepStrictEqual((await store.prune()).map(entry => entry.queryText), ['selection query', 'script query']);
+  const deletedId = store.entries()[0].id;
+  assert.strictEqual(await store.delete('missing-id'), false);
+  assert.strictEqual(await store.delete(deletedId), true);
+  assert.strictEqual(store.entries().some(entry => entry.id === deletedId), false);
+  assert.strictEqual(await store.delete(deletedId), false);
+  configuredLimit = 1;
+  assert.strictEqual((await store.prune()).length, 1);
+
+  const invalidGeneration = store.captureGeneration();
+  store.invalidatePending();
+  const writesBeforeInvalidRecord = memento.updates.length;
+  assert.strictEqual(await store.record(inputs[0], invalidGeneration), undefined);
+  assert.strictEqual(memento.updates.length, writesBeforeInvalidRecord);
+  await assert.rejects(
+    () => store.record({ ...inputs[0], queryText: '' }, store.captureGeneration()),
+    /invalid KX query history entry/
+  );
+
+  const beforeRaceEntry = historyEntry({ id: 'before-race', timestamp: 1, queryText: 'before race' });
+  const delayedMemento = createBlockingHistoryMemento([beforeRaceEntry]);
+  const delayedStore = new QueryHistoryStore(delayedMemento, {
+    createId: (() => {
+      let id = 0;
+      return () => `delayed-${++id}`;
+    })(),
+  });
+  const beforeClear = delayedStore.captureGeneration();
+  const firstRecord = delayedStore.record({ ...inputs[0], timestamp: 10 }, beforeClear);
+  await delayedMemento.updateStarted;
+  const queuedStaleRecord = delayedStore.record({ ...inputs[1], timestamp: 20 }, beforeClear);
+  const clearing = delayedStore.clear();
+  delayedMemento.releaseUpdate();
+  assert.strictEqual(await firstRecord, undefined, 'a write invalidated while pending must not return a live entry');
+  assert.strictEqual(await queuedStaleRecord, undefined, 'a pre-clear token must not write after Clear');
+  await clearing;
+  assert.deepStrictEqual(delayedStore.entries(), []);
+  assert.strictEqual(delayedMemento.value, undefined);
+  assert.strictEqual(
+    delayedMemento.updates.length,
+    3,
+    'the in-flight write must roll back its previous snapshot before the queued clear is committed'
+  );
+  assert.deepStrictEqual(delayedMemento.updates[1], [beforeRaceEntry]);
+  assert.strictEqual(delayedMemento.updates[2], undefined);
+
+  const staleAfterClear = delayedStore.record({ ...inputs[2], timestamp: 30 }, beforeClear);
+  assert.strictEqual(await staleAfterClear, undefined);
+  assert.strictEqual(delayedMemento.value, undefined);
+  assert.strictEqual(QUERY_HISTORY_STORAGE_KEY, 'vscode-kdb.queryHistory.v1');
+}
+
+async function testTreeProviders() {
+  const treeVscode = createVscodeTreeHarness();
+  const {
+    ServerCategoryTreeItem,
+    ServerExplorerTreeProvider,
+    ServerObjectTreeItem,
+    ServerStatusTreeItem,
+  } = requireOutWithMocks('server-explorer', { vscode: treeVscode.vscode });
+  const {
+    EmptyQueryHistoryTreeItem,
+    QueryHistoryFeature,
+    QueryHistoryTreeItem,
+    QueryHistoryTreeProvider,
+  } = requireOutWithMocks('query-history', { vscode: treeVscode.vscode });
+
+  let active = validateConnection({
+    id: 'kx-tree',
+    name: 'Tree q',
+    host: 'localhost',
+    port: 5000,
+    database: '.analytics',
+    username: '',
+  });
+  let connected = false;
+  let metaFailure;
+  const managerCalls = [];
+  const diagnostics = [];
+  const variablesValue = modelQTable(['name', 'type'], [
+    { name: 'answer', type: -7 },
+    { name: 'calculate', type: 100 },
+  ]);
+  const columnsValue = modelQTable(['c', 't', 'f', 'a'], [
+    { c: 'sym', t: 's', f: '', a: '' },
+    { c: 'size', t: 'j', f: '', a: '' },
+  ]);
+  const store = {
+    activeConnection: () => active,
+  };
+  const manager = {
+    isConnected: id => !!active && connected && id === active.id,
+    async executeInConfiguredNamespace(connection, query) {
+      managerCalls.push({ connection: { ...connection }, query });
+      if (query === SERVER_TABLES_QUERY) {
+        return ['trade'];
+      }
+      if (query === SERVER_VARIABLES_QUERY) {
+        return variablesValue;
+      }
+      if (query === buildServerTableMetaQuery('trade')) {
+        if (metaFailure) {
+          throw metaFailure;
+        }
+        return columnsValue;
+      }
+      throw new Error(`unexpected tree query ${query}`);
+    },
+  };
+  const provider = new ServerExplorerTreeProvider(store, manager, {
+    event: event => diagnostics.push(event),
+  });
+
+  assert.strictEqual(
+    provider.hasAvailableConnection(),
+    true,
+    'a configured active profile keeps the opt-in view available even while disconnected'
+  );
+  let root = await provider.getChildren();
+  assert.strictEqual(root.length, 1);
+  assert.ok(root[0] instanceof ServerStatusTreeItem);
+  assert.match(String(root[0].label), /active KX profile is disconnected/i);
+  assert.deepStrictEqual(managerCalls, [], 'provider construction and initial tree reads must not query q');
+
+  await provider.refresh();
+  assert.deepStrictEqual(managerCalls, [], 'Refresh while disconnected must not issue metadata');
+  assert.match(treeVscode.warnings.at(-1), /active connected direct q IPC profile/);
+
+  connected = true;
+  assert.strictEqual(provider.hasAvailableConnection(), true);
+  await provider.refresh();
+  assert.deepStrictEqual(
+    managerCalls.map(call => call.query),
+    [SERVER_TABLES_QUERY, SERVER_VARIABLES_QUERY]
+  );
+  assert.ok(managerCalls.every(call => call.connection.database === '.analytics'));
+  root = await provider.getChildren();
+  assert.strictEqual(root.length, 2);
+  assert.ok(root.every(item => item instanceof ServerCategoryTreeItem));
+  assert.deepStrictEqual(root.map(item => [item.label, item.description]), [
+    ['Tables', '1'],
+    ['Variables & Functions', '2'],
+  ]);
+  const tableCategory = root.find(item => item.category === 'tables');
+  const variableCategory = root.find(item => item.category === 'variables');
+  const tableItems = await provider.getChildren(tableCategory);
+  const variableItems = await provider.getChildren(variableCategory);
+  assert.strictEqual(tableItems.length, 1);
+  assert.strictEqual(tableItems[0].objectName, 'trade');
+  assert.deepStrictEqual(variableItems.map(item => [item.objectName, item.kind]), [
+    ['answer', 'variable'],
+    ['calculate', 'function'],
+  ]);
+  assert.deepStrictEqual(provider.resolveObject(tableItems[0]), tableItems[0]);
+  assert.strictEqual(
+    provider.resolveObject(new ServerObjectTreeItem(
+      'trade',
+      'table',
+      tableItems[0].snapshot,
+      true,
+      tableItems[0].generation
+    )),
+    undefined,
+    'commands must reject lookalike/unowned tree items'
+  );
+  assert.strictEqual(provider.resolveObject({ label: 'trade' }), undefined);
+
+  const columns = await provider.getChildren(tableItems[0]);
+  assert.deepStrictEqual(columns.map(item => item.column.name), ['sym', 'size']);
+  assert.strictEqual(managerCalls.at(-1).query, '0!meta `trade');
+  assert.ok(diagnostics.some(event =>
+    event.phase === 'query' && event.status === 'success' && event.details.operation === 'meta'
+  ));
+
+  await provider.refresh();
+  root = await provider.getChildren();
+  assert.ok(root.every(item => item.generation > tableCategory.generation));
+  const callsAfterSameProfileRefresh = managerCalls.length;
+  const staleCategoryChildren = await provider.getChildren(tableCategory);
+  assert.strictEqual(staleCategoryChildren.length, 1);
+  assert.ok(staleCategoryChildren[0] instanceof ServerStatusTreeItem);
+  assert.match(String(staleCategoryChildren[0].label), /metadata changed/i);
+  assert.strictEqual(provider.resolveObject(tableItems[0]), undefined);
+  const staleTableChildren = await provider.getChildren(tableItems[0]);
+  assert.strictEqual(staleTableChildren.length, 1);
+  assert.ok(staleTableChildren[0] instanceof ServerStatusTreeItem);
+  assert.match(String(staleTableChildren[0].label), /metadata changed/i);
+  assert.strictEqual(
+    managerCalls.length,
+    callsAfterSameProfileRefresh,
+    'old category/object generations must never trigger same-profile metadata calls'
+  );
+  const refreshedTableCategory = root.find(item => item.category === 'tables');
+  const refreshedTable = (await provider.getChildren(refreshedTableCategory))[0];
+  metaFailure = new Error('missing/permission denied');
+  const failedColumns = await provider.getChildren(refreshedTable);
+  assert.strictEqual(failedColumns.length, 1);
+  assert.ok(failedColumns[0] instanceof ServerStatusTreeItem);
+  assert.match(String(failedColumns[0].label), /missing\/permission denied/);
+  const callsAfterMetaFailure = managerCalls.length;
+  await provider.getChildren(refreshedTable);
+  assert.strictEqual(
+    managerCalls.length,
+    callsAfterMetaFailure + 1,
+    'a failed meta lookup must remain retryable on the next expansion instead of crashing/staying stale'
+  );
+  metaFailure = undefined;
+  await provider.refresh();
+  root = await provider.getChildren();
+  const retryTable = (await provider.getChildren(root.find(item => item.category === 'tables')))[0];
+  assert.deepStrictEqual((await provider.getChildren(retryTable)).map(item => item.column.name), ['sym', 'size']);
+
+  active = { ...active, database: '.other' };
+  provider.connectionStateChanged();
+  root = await provider.getChildren();
+  assert.strictEqual(root.length, 1);
+  assert.ok(root[0] instanceof ServerStatusTreeItem);
+  assert.match(String(root[0].label), /Select Refresh Server Explorer/);
+  active = { ...active, id: 'kx-tree-replaced' };
+  provider.connectionStateChanged();
+  assert.strictEqual((await provider.getChildren()).length, 1);
+  connected = false;
+  provider.connectionStateChanged();
+  assert.strictEqual(provider.hasAvailableConnection(), true);
+  assert.match(String((await provider.getChildren())[0].label), /disconnected/i);
+  active = undefined;
+  provider.connectionStateChanged();
+  assert.strictEqual(provider.hasAvailableConnection(), false);
+  provider.dispose();
+
+  const staleTables = deferred();
+  let staleActive = validateConnection({
+    id: 'kx-stale',
+    name: 'Stale q',
+    host: 'localhost',
+    port: 5001,
+    database: '.analytics',
+    username: '',
+  });
+  const staleProvider = new ServerExplorerTreeProvider(
+    { activeConnection: () => staleActive },
+    {
+      isConnected: id => id === staleActive.id,
+      async executeInConfiguredNamespace(_connection, query) {
+        return query === SERVER_TABLES_QUERY ? staleTables.promise : variablesValue;
+      },
+    },
+    { event() {} }
+  );
+  const staleRefresh = staleProvider.refresh();
+  staleActive = { ...staleActive, database: '.changed' };
+  staleProvider.connectionStateChanged();
+  staleTables.resolve(['staleTable']);
+  await staleRefresh;
+  const staleRoot = await staleProvider.getChildren();
+  assert.strictEqual(staleRoot.length, 1);
+  assert.ok(staleRoot[0] instanceof ServerStatusTreeItem);
+  assert.match(String(staleRoot[0].label), /Select Refresh Server Explorer/);
+  staleProvider.dispose();
+
+  const cancellationTables = deferred();
+  const cancellationCalls = [];
+  const cancellationConnection = validateConnection({
+    id: 'kx-cancel-metadata',
+    name: 'Cancelable q',
+    host: 'localhost',
+    port: 5002,
+    database: '.analytics',
+    username: '',
+  });
+  const cancellationProvider = new ServerExplorerTreeProvider(
+    { activeConnection: () => cancellationConnection },
+    {
+      isConnected: id => id === cancellationConnection.id,
+      async executeInConfiguredNamespace(_connection, query) {
+        cancellationCalls.push(query);
+        if (query === SERVER_TABLES_QUERY) {
+          return cancellationTables.promise;
+        }
+        if (query === SERVER_VARIABLES_QUERY) {
+          return variablesValue;
+        }
+        throw new Error(`unexpected cancellation query ${query}`);
+      },
+    },
+    { event: event => diagnostics.push(event) }
+  );
+  const canceledRefresh = cancellationProvider.refresh();
+  assert.deepStrictEqual(cancellationCalls, [SERVER_TABLES_QUERY]);
+  treeVscode.cancelLatestProgress();
+  await canceledRefresh;
+  assert.deepStrictEqual(
+    cancellationCalls,
+    [SERVER_TABLES_QUERY],
+    'canceling the lazy metadata chain must not enqueue the variables request'
+  );
+  assert.match(String((await cancellationProvider.getChildren())[0].label), /canceled locally/i);
+  cancellationTables.resolve(['lateTable']);
+  await Promise.resolve();
+  assert.deepStrictEqual(cancellationCalls, [SERVER_TABLES_QUERY]);
+  cancellationProvider.dispose();
+
+  const timeoutTables = deferred();
+  const timeoutCalls = [];
+  const timeoutDiagnostics = [];
+  let timeoutConnected = false;
+  const timeoutConnection = validateConnection({
+    id: 'kx-timeout-metadata',
+    name: 'Timeout q',
+    host: 'localhost',
+    port: 5003,
+    database: '.analytics',
+    username: '',
+  });
+  const timeoutProvider = new ServerExplorerTreeProvider(
+    { activeConnection: () => timeoutConnection },
+    {
+      isConnected: id => timeoutConnected && id === timeoutConnection.id,
+      async executeInConfiguredNamespace(_connection, query) {
+        timeoutCalls.push(query);
+        if (query === SERVER_TABLES_QUERY) {
+          return timeoutTables.promise;
+        }
+        throw new Error(`unexpected timeout query ${query}`);
+      },
+    },
+    { event: event => timeoutDiagnostics.push(event) }
+  );
+  timeoutProvider.connectionStateChanged();
+  assert.match(String((await timeoutProvider.getChildren())[0].label), /disconnected/i);
+  timeoutConnected = true;
+  timeoutProvider.connectionStateChanged();
+  assert.match(
+    String((await timeoutProvider.getChildren())[0].label),
+    /Connected\. Select Refresh Server Explorer to load/i,
+    'reconnecting an idle explorer must present an explicit manual Refresh state'
+  );
+
+  const timedOutRefresh = timeoutProvider.refresh();
+  assert.deepStrictEqual(timeoutCalls, [SERVER_TABLES_QUERY]);
+  timeoutConnected = false;
+  timeoutProvider.connectionStateChanged();
+  timeoutTables.reject(new Error('timed out after 25 ms'));
+  await timedOutRefresh;
+  let timeoutRoot = await timeoutProvider.getChildren();
+  assert.strictEqual(timeoutRoot.length, 1);
+  assert.match(timeoutRoot[0].contextValue, /status\.error$/);
+  assert.match(String(timeoutRoot[0].label), /Server Explorer refresh failed/i);
+  assert.match(String(timeoutRoot[0].label), /timed out after 25 ms/i);
+  assert.match(String(timeoutRoot[0].label), /active KX profile is disconnected/i);
+  assert.match(String(timeoutRoot[0].label), /reconnect it before retrying/i);
+  const timeoutRefreshDiagnostics = timeoutDiagnostics.filter(event =>
+    event.details?.operation === 'refresh'
+  );
+  assert.deepStrictEqual(
+    timeoutRefreshDiagnostics.map(event => event.status),
+    ['start', 'failed'],
+    'a transport timeout racing disconnect is a failed refresh, not a canceled/stale result'
+  );
+
+  timeoutConnected = true;
+  timeoutProvider.connectionStateChanged();
+  timeoutRoot = await timeoutProvider.getChildren();
+  assert.match(String(timeoutRoot[0].label), /Server Explorer refresh failed/i);
+  assert.match(String(timeoutRoot[0].label), /timed out after 25 ms/i);
+  assert.match(String(timeoutRoot[0].label), /Connected\. Select Refresh Server Explorer to retry/i);
+  assert.doesNotMatch(String(timeoutRoot[0].label), /is disconnected|reconnect it/i);
+  timeoutConnected = false;
+  timeoutProvider.connectionStateChanged();
+  timeoutRoot = await timeoutProvider.getChildren();
+  assert.match(String(timeoutRoot[0].label), /Server Explorer refresh failed/i);
+  assert.match(String(timeoutRoot[0].label), /timed out after 25 ms/i);
+  assert.match(String(timeoutRoot[0].label), /active KX profile is disconnected/i);
+  assert.match(String(timeoutRoot[0].label), /reconnect it before retrying/i);
+  assert.doesNotMatch(
+    String(timeoutRoot[0].label),
+    /Connected\. Select Refresh/,
+    'disconnecting again must replace connected retry guidance instead of retaining contradictory states'
+  );
+  timeoutProvider.dispose();
+
+  const historyMemento = createHistoryMemento([
+    historyEntry({
+      id: 'removed',
+      connectionId: 'kx-removed',
+      connectionName: 'Removed q',
+      timestamp: 300,
+      queryText: '[command](command:evil)',
+    }),
+    historyEntry({
+      id: 'renamed',
+      connectionId: 'kx-renamed',
+      connectionName: 'Old q name',
+      timestamp: 200,
+      queryText: 'select from trade',
+    }),
+  ]);
+  const historyStore = new QueryHistoryStore(historyMemento);
+  const historyProvider = new QueryHistoryTreeProvider(historyStore, {
+    connection(id) {
+      return id === 'kx-renamed'
+        ? { id, name: 'Current q name', database: '.analytics' }
+        : undefined;
+    },
+  });
+  const historyItems = historyProvider.getChildren();
+  assert.deepStrictEqual(historyItems.map(item => item.entry.id), ['removed', 'renamed']);
+  assert.ok(historyItems.every(item => item instanceof QueryHistoryTreeItem));
+  assert.match(historyItems[0].description, /Removed q \(profile removed\)/);
+  assert.match(historyItems[1].description, /Current q name \(recorded as Old q name\)/);
+  assert.strictEqual(typeof historyItems[0].tooltip, 'string', 'sensitive query tooltips must remain untrusted plain text');
+  assert.match(historyItems[0].tooltip, /\[command\]\(command:evil\)/);
+  assert.deepStrictEqual(historyProvider.resolveEntry(historyItems[1]).id, 'renamed');
+  assert.strictEqual(
+    historyProvider.resolveEntry(new QueryHistoryTreeItem(historyItems[1].entry, 'Current q name')),
+    undefined,
+    'history commands must reject lookalike/unowned items'
+  );
+  assert.strictEqual(historyProvider.resolveEntry({ entry: historyItems[1].entry }), undefined);
+  await historyStore.delete('renamed');
+  assert.strictEqual(historyProvider.resolveEntry(historyItems[1]), undefined, 'deleted owned items must resolve stale-safe');
+  historyProvider.dispose();
+
+  const labelEntry = historyEntry({
+    id: 'live-label',
+    connectionId: 'kx-live-label',
+    connectionName: 'Recorded label',
+    timestamp: 400,
+    queryText: 'show label',
+  });
+  const labelStore = new QueryHistoryStore(createHistoryMemento([labelEntry]));
+  let currentLabel = 'First current label';
+  const connectionTreeChanges = new treeVscode.vscode.EventEmitter();
+  const historyFeature = new QueryHistoryFeature(
+    labelStore,
+    {
+      connection(id) {
+        return id === 'kx-live-label'
+          ? { id, name: currentLabel, database: '.analytics' }
+          : undefined;
+      },
+    },
+    { onDidChangeTreeData: connectionTreeChanges.event },
+    async () => undefined
+  );
+  const historyTreeView = treeVscode.createdTreeViews.find(view => view.id === 'vscode-kdb.queryHistory');
+  assert.ok(historyTreeView, 'QueryHistoryFeature must register its tree view');
+  const featureProvider = historyTreeView.options.treeDataProvider;
+  assert.match(featureProvider.getChildren()[0].description, /First current label/);
+  let labelRefreshes = 0;
+  featureProvider.onDidChangeTreeData(() => labelRefreshes++);
+  const refreshesBeforeRename = labelRefreshes;
+  currentLabel = 'Renamed current label';
+  connectionTreeChanges.fire(undefined);
+  assert.strictEqual(
+    labelRefreshes,
+    refreshesBeforeRename + 1,
+    'connection tree changes must invalidate rendered Query History labels'
+  );
+  assert.match(featureProvider.getChildren()[0].description, /Renamed current label/);
+  historyFeature.dispose();
+  const refreshesAfterDispose = labelRefreshes;
+  connectionTreeChanges.fire(undefined);
+  assert.strictEqual(labelRefreshes, refreshesAfterDispose, 'disposed history features must release label listeners');
+
+  const emptyProvider = new QueryHistoryTreeProvider(
+    new QueryHistoryStore(createHistoryMemento()),
+    { connection: () => undefined }
+  );
+  const emptyItems = emptyProvider.getChildren();
+  assert.strictEqual(emptyItems.length, 1);
+  assert.ok(emptyItems[0] instanceof EmptyQueryHistoryTreeItem);
+  emptyProvider.dispose();
+}
+
+async function testFeatureControlsLifecycle() {
+  const settings = {
+    'vscode-kdb.features.serverExplorer': false,
+    'vscode-kdb.features.queryHistory': false,
+    'vscode-kdb.queryHistory.maxEntries': 100,
+  };
+  const contextCommands = [];
+  const serverInstances = [];
+  const historyInstances = [];
+  class FakeServerExplorerFeature {
+    constructor(...args) {
+      this.args = args;
+      this.disposed = false;
+      serverInstances.push(this);
+    }
+
+    dispose() {
+      this.disposed = true;
+    }
+  }
+  class FakeQueryHistoryFeature {
+    constructor(...args) {
+      this.args = args;
+      this.disposed = false;
+      this.pruneCalls = 0;
+      historyInstances.push(this);
+    }
+
+    capture() {
+      return { feature: this, generation: 0 };
+    }
+
+    async record() {}
+
+    async prune() {
+      this.pruneCalls++;
+    }
+
+    dispose() {
+      this.disposed = true;
+    }
+  }
+  const fakeVscode = {
+    workspace: {
+      getConfiguration(section) {
+        return {
+          get(key, fallback) {
+            const fullKey = `${section}.${key}`;
+            return Object.prototype.hasOwnProperty.call(settings, fullKey) ? settings[fullKey] : fallback;
+          },
+        };
+      },
+    },
+    commands: {
+      async executeCommand(...args) {
+        contextCommands.push(args);
+      },
+    },
+    window: {
+      showWarningMessage() {},
+    },
+  };
+  const { FeatureControls } = requireOutWithMocks('feature-controls', {
+    vscode: fakeVscode,
+    './server-explorer': {
+      SERVER_EXPLORER_AVAILABLE_CONTEXT: 'vscode-kdb.serverExplorer.available',
+      ServerExplorerFeature: FakeServerExplorerFeature,
+    },
+    './query-history': {
+      QueryHistoryFeature: FakeQueryHistoryFeature,
+    },
+  });
+  const workspaceState = createHistoryMemento();
+  const featureConnectionTree = { onDidChangeTreeData() { return { dispose() {} }; } };
+  const controls = new FeatureControls(
+    { workspaceState },
+    { connection: () => undefined },
+    {},
+    featureConnectionTree,
+    {},
+    async () => undefined,
+    async () => undefined
+  );
+  assert.strictEqual(serverInstances.length, 0, 'disabled Server Explorer must not register its view/commands');
+  assert.strictEqual(historyInstances.length, 0, 'disabled Query History must not register its view/commands');
+  assert.ok(contextCommands.some(args =>
+    args[0] === 'setContext' && args[1] === 'vscode-kdb.serverExplorer.available' && args[2] === false
+  ));
+
+  settings['vscode-kdb.features.serverExplorer'] = true;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.serverExplorer'));
+  assert.strictEqual(serverInstances.length, 1);
+  assert.strictEqual(serverInstances[0].args[2], featureConnectionTree);
+  controls.configurationChanged(configurationEvent('unrelated.setting'));
+  assert.strictEqual(serverInstances.length, 1, 'unrelated changes must not duplicate feature registrations');
+  settings['vscode-kdb.features.serverExplorer'] = false;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.serverExplorer'));
+  assert.strictEqual(serverInstances[0].disposed, true);
+
+  settings['vscode-kdb.features.queryHistory'] = true;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
+  assert.strictEqual(historyInstances.length, 1);
+  assert.strictEqual(
+    historyInstances[0].args[2],
+    featureConnectionTree,
+    'Query History must observe connection tree changes so stored labels rerender after rename/removal'
+  );
+  const sharedHistoryStore = historyInstances[0].args[0];
+  controls.configurationChanged(configurationEvent('vscode-kdb.queryHistory.maxEntries'));
+  await Promise.resolve();
+  assert.strictEqual(historyInstances[0].pruneCalls, 1);
+  settings['vscode-kdb.features.queryHistory'] = false;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
+  assert.strictEqual(historyInstances[0].disposed, true);
+  settings['vscode-kdb.features.queryHistory'] = true;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
+  assert.strictEqual(historyInstances.length, 2);
+  assert.strictEqual(historyInstances[1].args[0], sharedHistoryStore, 'toggle cycles must reuse local history storage safely');
+
+  controls.dispose();
+  assert.strictEqual(historyInstances[1].disposed, true);
+  settings['vscode-kdb.features.serverExplorer'] = true;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.serverExplorer'));
+  assert.strictEqual(serverInstances.length, 1, 'disposed controls must never register features again');
 }
 
 function testConnectionFormModel() {
@@ -1191,8 +2224,13 @@ async function testConnectionManagerLifecycle() {
       this.canceled = true;
     }
 
-    async query(query) {
+    async query(query, onIssued) {
       capturedQueries.push(query);
+      try {
+        onIssued?.();
+      } catch {
+        // Match KdbIpcClient: local history observers cannot disrupt a written request.
+      }
       if (nextQueryError) {
         const error = nextQueryError;
         nextQueryError = undefined;
@@ -1226,7 +2264,12 @@ async function testConnectionManagerLifecycle() {
   });
   let stateChanges = 0;
   const stateSubscription = retryManager.onDidChangeState(() => stateChanges++);
-  await assert.rejects(() => retryManager.connect(connection), /injected SecretStorage get failure/);
+  let connectFailureIssued = 0;
+  await assert.rejects(
+    () => retryManager.execute(connection, '1+1', () => connectFailureIssued++),
+    /injected SecretStorage get failure/
+  );
+  assert.strictEqual(connectFailureIssued, 0, 'queries that fail before connect must not be marked issued');
   const initialClient = await retryManager.connect(connection);
   assert.strictEqual(passwordAttempts, 2, 'a failed secret lookup must not poison later connection attempts');
   assert.strictEqual(retryManager.isConnected(connection.id), true);
@@ -1235,17 +2278,41 @@ async function testConnectionManagerLifecycle() {
   assert.strictEqual(Object.prototype.hasOwnProperty.call(initialClient.options, 'timeoutMs'), false);
 
   const namespacedConnection = { ...connection, database: '.analytics' };
-  await retryManager.execute(namespacedConnection, 'answer');
+  let successfulQueryIssued = 0;
+  await retryManager.execute(namespacedConnection, 'answer', () => successfulQueryIssued++);
+  assert.strictEqual(successfulQueryIssued, 1);
   assert.strictEqual(capturedQueries.at(-1), queryInNamespace('answer', '.analytics'));
-  await retryManager.executeScript(namespacedConnection, 'a:1\na+1');
+  let successfulScriptIssued = 0;
+  await retryManager.executeScript(namespacedConnection, 'a:1\na+1', () => successfulScriptIssued++);
+  assert.strictEqual(successfulScriptIssued, 1);
   assert.strictEqual(capturedQueries.at(-1), qScriptInNamespace('a:1\na+1', '.analytics'));
+  let strictIssued = 0;
+  await retryManager.executeInConfiguredNamespace(connection, 'string system "d"', () => strictIssued++);
+  assert.strictEqual(strictIssued, 1);
+  assert.strictEqual(
+    capturedQueries.at(-1),
+    queryInNamespaceStrict('string system "d"', '.'),
+    'Server Explorer preview/metadata must use the strict root namespace wrapper'
+  );
+  await retryManager.executeInConfiguredNamespace(namespacedConnection, 'tables[]');
+  assert.strictEqual(capturedQueries.at(-1), queryInNamespaceStrict('tables[]', '.analytics'));
+  await retryManager.execute(namespacedConnection, '2+2', () => {
+    throw new Error('history observer failure');
+  });
+  assert.strictEqual(
+    capturedQueries.at(-1),
+    queryInNamespace('2+2', '.analytics'),
+    'history observers must never prevent the q transport call'
+  );
 
   const genuineQError = new FakeKdbQError('type');
   nextQueryError = genuineQError;
+  let qFailureIssued = 0;
   await assert.rejects(
-    () => retryManager.execute(namespacedConnection, 'badQuery'),
+    () => retryManager.execute(namespacedConnection, 'badQuery', () => qFailureIssued++),
     error => error === genuineQError
   );
+  assert.strictEqual(qFailureIssued, 1, 'genuine q failures occur after the request is issued');
   assert.strictEqual(
     retryManager.isConnected(connection.id),
     true,
@@ -1253,7 +2320,12 @@ async function testConnectionManagerLifecycle() {
   );
 
   nextQueryError = new Error('injected transport failure');
-  await assert.rejects(() => retryManager.execute(namespacedConnection, '1+1'), /transport failure/);
+  let transportFailureIssued = 0;
+  await assert.rejects(
+    () => retryManager.execute(namespacedConnection, '1+1', () => transportFailureIssued++),
+    /transport failure/
+  );
+  assert.strictEqual(transportFailureIssued, 1, 'transport failures after query() starts are issued');
   assert.strictEqual(
     retryManager.isConnected(connection.id),
     false,
@@ -1261,7 +2333,12 @@ async function testConnectionManagerLifecycle() {
   );
 
   nextConnectError = new Error('injected connect failure');
-  await assert.rejects(() => retryManager.connect(connection), /connect failure/);
+  let openFailureIssued = 0;
+  await assert.rejects(
+    () => retryManager.execute(connection, '1+1', () => openFailureIssued++),
+    /connect failure/
+  );
+  assert.strictEqual(openFailureIssued, 0, 'TCP/handshake failure must not create a history entry');
   assert.strictEqual(retryManager.isConnected(connection.id), false, 'failed opens must not leave stale state');
   const reconnectedClient = await retryManager.connect(connection);
   assert.strictEqual(retryManager.isConnected(connection.id), true, 'a failed open must remain retryable');
@@ -1461,10 +2538,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.1.3');
+  assert.strictEqual(manifest.version, '0.1.4');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.1.3');
-  assert.strictEqual(packageLock.packages[''].version, '0.1.3');
+  assert.strictEqual(packageLock.version, '0.1.4');
+  assert.strictEqual(packageLock.packages[''].version, '0.1.4');
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -1488,6 +2565,13 @@ function testManifestAndSources() {
     'KX: Connect',
     'KX: Disconnect',
     'KX: Test Connection',
+    'KX: Refresh Server Explorer',
+    'KX: Preview Server Object',
+    'KX Query History: Rerun Query',
+    'KX Query History: Copy Query',
+    'KX Query History: Insert into Active Editor',
+    'KX Query History: Delete Entry',
+    'KX: Clear Query History',
     'KX: Run Selection / Current Line',
     'KX: Run q Script',
     'KX: Run Selection in New Result',
@@ -1525,11 +2609,119 @@ function testManifestAndSources() {
   assert.ok(activityContainers.some(container => container.title === 'KX' && container.icon === 'icons/kx-activity.png'));
   const viewGroups = Object.values(contributions.views || {}).flat();
   assert.ok(viewGroups.some(view => view && view.name === 'KX Connections'));
+  const serverExplorerView = viewGroups.find(view => view && view.id === 'vscode-kdb.serverExplorer');
+  assert.ok(serverExplorerView, 'KX Server Explorer view contribution is missing');
+  assert.strictEqual(serverExplorerView.name, 'KX Server Explorer');
+  assert.match(serverExplorerView.when, /config\.vscode-kdb\.features\.serverExplorer/);
+  assert.match(serverExplorerView.when, /vscode-kdb\.serverExplorer\.available/);
+  const queryHistoryView = viewGroups.find(view => view && view.id === 'vscode-kdb.queryHistory');
+  assert.ok(queryHistoryView, 'KX Query History view contribution is missing');
+  assert.strictEqual(queryHistoryView.name, 'KX Query History');
+  assert.match(queryHistoryView.when, /config\.vscode-kdb\.features\.queryHistory/);
+
+  const commandById = Object.fromEntries(commands.map(command => [command.command, command]));
+  const serverCommandIds = [
+    'vscode-kdb.refreshServerExplorer',
+    'vscode-kdb.previewServerObject',
+  ];
+  const historyCommandIds = [
+    'vscode-kdb.rerunQueryHistoryEntry',
+    'vscode-kdb.copyQueryHistoryEntry',
+    'vscode-kdb.insertQueryHistoryEntry',
+    'vscode-kdb.deleteQueryHistoryEntry',
+    'vscode-kdb.clearQueryHistory',
+  ];
+  serverCommandIds.forEach(id => {
+    assert.match(commandById[id].enablement, /config\.vscode-kdb\.features\.serverExplorer/);
+    assert.match(commandById[id].enablement, /vscode-kdb\.serverExplorer\.available/);
+  });
+  historyCommandIds.forEach(id => {
+    assert.match(commandById[id].enablement, /config\.vscode-kdb\.features\.queryHistory/);
+  });
+  const menus = contributions.menus || {};
+  const allMenuItems = Object.values(menus).flat();
+  for (const id of [...serverCommandIds, ...historyCommandIds]) {
+    const items = allMenuItems.filter(item => item.command === id);
+    assert.ok(items.length > 0, `${id} must have an explicitly gated menu contribution`);
+    items.forEach(item => {
+      const when = String(item.when || '');
+      const expectedFeature = serverCommandIds.includes(id) ? 'serverExplorer' : 'queryHistory';
+      assert.ok(
+        when === 'false' || when.includes(`config.vscode-kdb.features.${expectedFeature}`),
+        `${id} menu item is not feature-gated: ${when}`
+      );
+    });
+  }
+  const previewContextItems = (menus['view/item/context'] || [])
+    .filter(item => item.command === 'vscode-kdb.previewServerObject');
+  assert.strictEqual(previewContextItems.length, 1);
+  assert.ok(
+    previewContextItems[0].when.includes('serverExplorer\\.object\\.(table|variable)$'),
+    'Preview must be contributed only for table and variable tree contexts'
+  );
+  assert.ok(!previewContextItems[0].when.includes('function'));
+  const paletteItems = (menus.commandPalette || []);
+  assert.match(
+    paletteItems.find(item => item.command === 'vscode-kdb.refreshServerExplorer').when,
+    /serverExplorer\.available/
+  );
+  for (const itemOnlyId of [
+    'vscode-kdb.previewServerObject',
+    'vscode-kdb.rerunQueryHistoryEntry',
+    'vscode-kdb.copyQueryHistoryEntry',
+    'vscode-kdb.insertQueryHistoryEntry',
+    'vscode-kdb.deleteQueryHistoryEntry',
+  ]) {
+    assert.strictEqual(
+      paletteItems.find(item => item.command === itemOnlyId).when,
+      'false',
+      `${itemOnlyId} must not appear as a dead item-only command in the Command Palette`
+    );
+  }
 
   const configuration = Array.isArray(contributions.configuration)
     ? contributions.configuration
     : [contributions.configuration || {}];
   const configurationProperties = Object.assign({}, ...configuration.map(item => item.properties || {}));
+  const serverFeatureSetting = configurationProperties['vscode-kdb.features.serverExplorer'];
+  assert.strictEqual(serverFeatureSetting.type, 'boolean');
+  assert.strictEqual(serverFeatureSetting.scope, 'window');
+  assert.strictEqual(serverFeatureSetting.default, false);
+  assert.match(serverFeatureSetting.description, /Disabled by default/);
+  assert.match(serverFeatureSetting.description, /active direct q IPC profile/i);
+  assert.match(serverFeatureSetting.description, /disconnected state stays visible/i);
+  assert.match(serverFeatureSetting.description, /only while connected/i);
+  assert.match(serverFeatureSetting.description, /explicitly invoked|explicit/i);
+  const historyFeatureSetting = configurationProperties['vscode-kdb.features.queryHistory'];
+  assert.strictEqual(historyFeatureSetting.type, 'boolean');
+  assert.strictEqual(historyFeatureSetting.scope, 'window');
+  assert.strictEqual(historyFeatureSetting.default, false);
+  assert.match(historyFeatureSetting.description, /Disabled by default/);
+  assert.match(historyFeatureSetting.description, /local VS Code workspace extension storage/i);
+  assert.match(historyFeatureSetting.description, /not sent as telemetry/i);
+  assert.match(historyFeatureSetting.description, /not.*Settings Sync/i);
+  const previewLimitSetting = configurationProperties['vscode-kdb.serverExplorer.previewCellLimit'];
+  assert.strictEqual(previewLimitSetting.type, 'integer');
+  assert.strictEqual(previewLimitSetting.scope, 'window');
+  assert.strictEqual(previewLimitSetting.default, DEFAULT_SERVER_PREVIEW_CELL_LIMIT);
+  assert.strictEqual(previewLimitSetting.minimum, MIN_SERVER_PREVIEW_CELL_LIMIT);
+  assert.strictEqual(previewLimitSetting.maximum, MAX_SERVER_PREVIEW_CELL_LIMIT);
+  assert.match(previewLimitSetting.description, /server-side .*preview cap/i);
+  assert.match(previewLimitSetting.description, /explicit confirmation/i);
+  assert.match(previewLimitSetting.description, /functions\/projections are metadata-only/i);
+  const historyLimitSetting = configurationProperties['vscode-kdb.queryHistory.maxEntries'];
+  assert.strictEqual(historyLimitSetting.type, 'integer');
+  assert.strictEqual(historyLimitSetting.scope, 'window');
+  assert.strictEqual(historyLimitSetting.default, DEFAULT_QUERY_HISTORY_MAX_ENTRIES);
+  assert.strictEqual(historyLimitSetting.minimum, MIN_QUERY_HISTORY_MAX_ENTRIES);
+  assert.strictEqual(historyLimitSetting.maximum, MAX_QUERY_HISTORY_MAX_ENTRIES);
+  assert.match(historyLimitSetting.description, /local VS Code workspace extension storage/i);
+  assert.match(historyLimitSetting.description, /Result payloads are never stored/i);
+  assert.strictEqual(
+    Object.keys(configurationProperties).some(key => /queryHistory\.(?:entries|queries|storage)/i.test(key)),
+    false,
+    'query text must not be persisted through syncable VS Code settings'
+  );
   const connectionsSetting = configurationProperties['vscode-kdb.connections'];
   assert.ok(connectionsSetting, 'vscode-kdb.connections must be globally configurable');
   assert.strictEqual(connectionsSetting.type, 'array');
@@ -1582,7 +2774,20 @@ function testManifestAndSources() {
   const sourceFiles = walkFiles(path.join(ROOT, 'src')).filter(file => file.endsWith('.ts'));
   assert.ok(sourceFiles.length >= 5, 'expected standalone TypeScript implementation files');
   const sources = sourceFiles.map(file => [file, fs.readFileSync(file, 'utf8')]);
-  sources.forEach(([file, source]) => assertNoSqlToolsRuntimeReference(source, path.relative(ROOT, file)));
+  sources.forEach(([file, source]) => {
+    const label = path.relative(ROOT, file);
+    assertNoSqlToolsRuntimeReference(source, label);
+    assertNoVscodeQRuntimeReference(source, label);
+  });
+
+  const lockPackagePaths = Object.keys(packageLock.packages || {});
+  assert.strictEqual(
+    lockPackagePaths.some(name => /node_modules\/(?:@sqltools(?:\/|$)|[^/]*vscode-q(?:\/|$))/i.test(name)),
+    false,
+    'package-lock.json must not contain SQLTools or vscode-q packages'
+  );
+  const forbiddenHeavyDependencies = /(?:ag-grid|plotly|perspective|tree-sitter|language-server|vscode-languageclient|notebook)/i;
+  assert.strictEqual(Object.keys(dependencies).some(name => forbiddenHeavyDependencies.test(name)), false);
 
   const storeSource = readSource('connection-store.ts');
   assert.ok(/context\.secrets\.(store|get|delete)/.test(storeSource), 'passwords must use VS Code SecretStorage');
@@ -1602,6 +2807,123 @@ function testManifestAndSources() {
   const commandsSource = readSource('connection-commands.ts');
   const modelSource = readSource('connection-form-model.ts');
   const extensionSource = readSource('extension.ts');
+  const featureControlsSource = readSource('feature-controls.ts');
+  const serverExplorerSource = readSource('server-explorer.ts');
+  const historySource = readSource('query-history.ts');
+  const historyModelSource = readSource('query-history-model.ts');
+  assert.match(featureControlsSource, /context\.workspaceState/);
+  assert.ok(
+    !/context\.globalState/.test(`${featureControlsSource}\n${historySource}`),
+    'query history must use workspace-local Memento storage'
+  );
+  assert.ok(!/ConfigurationTarget|\.update\([^)]*queryHistory/.test(historySource));
+  assert.ok(!/sendTelemetry|createTelemetryLogger|TelemetryLogger|\bfetch\s*\(|XMLHttpRequest/.test(
+    `${historySource}\n${historyModelSource}`
+  ), 'query history must not transmit query contents or telemetry');
+  assert.ok(!/createWebviewPanel|WebviewPanel|\.webview\b/.test(`${serverExplorerSource}\n${historySource}`));
+  assert.ok(!/setInterval\s*\(/.test(serverExplorerSource), 'Server Explorer must remain manual-refresh by default');
+  assert.match(serverExplorerSource, /executeInConfiguredNamespace/);
+  assert.match(serverExplorerSource, /showWarningMessage\([\s\S]*?\{ modal: true \}[\s\S]*?'Preview'/);
+  const serverPreviewSource = sourceSection(
+    serverExplorerSource,
+    'private async preview(',
+    'export class ServerExplorerTreeProvider'
+  );
+  const initialPreviewResolveIndex = serverPreviewSource.indexOf(
+    'const item = this.provider.resolveObject(argument)'
+  );
+  const previewModalIndex = serverPreviewSource.indexOf('const decision = await vscode.window.showWarningMessage(');
+  const confirmedPreviewResolveIndex = serverPreviewSource.indexOf(
+    'const confirmedItem = this.provider.resolveObject(item)'
+  );
+  const confirmedConnectionIndex = serverPreviewSource.indexOf(
+    'this.provider.currentConnectionFor(confirmedItem.snapshot)'
+  );
+  const runPreviewIndex = serverPreviewSource.indexOf('await runPreview(');
+  assert.ok(
+    initialPreviewResolveIndex >= 0 && initialPreviewResolveIndex < previewModalIndex &&
+      previewModalIndex < confirmedPreviewResolveIndex &&
+      confirmedPreviewResolveIndex < confirmedConnectionIndex &&
+      confirmedConnectionIndex < runPreviewIndex,
+    'Preview approval must re-resolve the same owned generation and active namespace before any q preview is run'
+  );
+  assert.match(
+    serverPreviewSource,
+    /await runPreview\([\s\S]*?buildServerPreviewQuery\(confirmedItem\.objectName, confirmedItem\.kind, limit\)[\s\S]*?stillCurrent\.id/
+  );
+  assert.match(featureControlsSource, /get<boolean>\('serverExplorer', false\)/);
+  assert.match(featureControlsSource, /get<boolean>\('queryHistory', false\)/);
+  assert.match(featureControlsSource, /this\.serverExplorer\.dispose\(\)/);
+  assert.match(featureControlsSource, /this\.queryHistory\.dispose\(\)/);
+  assert.match(extensionSource, /historyKind: hasSelection \? 'selection' : 'line'/);
+  assert.match(extensionSource, /historyKind: 'script'/);
+  assert.match(extensionSource, /manager\.executeInConfiguredNamespace\(connection, text, onIssued\)/);
+  const executeQTextSource = sourceSection(
+    extensionSource,
+    'async function executeQText(',
+    'function toPanelResult('
+  );
+  const targetSelectionIndex = executeQTextSource.indexOf('await activeConnectionForRun(store, manager)');
+  const noTargetIndex = executeQTextSource.indexOf('if (!connection)');
+  const rerunConfirmationIndex = executeQTextSource.indexOf('historyRerunRequiresConfirmation(');
+  const latestTargetIndex = executeQTextSource.indexOf('const latestTarget = store.activeConnection()');
+  const sameTargetIndex = executeQTextSource.indexOf('sameExecutionTarget(connection, latestTarget)');
+  const resultsPanelIndex = executeQTextSource.indexOf('KxResultsPanel.showLoading(');
+  const transportIssueIndex = executeQTextSource.indexOf('const executionPromise = request.transport');
+  assert.ok(
+    targetSelectionIndex >= 0 && targetSelectionIndex < noTargetIndex &&
+      noTargetIndex < rerunConfirmationIndex && rerunConfirmationIndex < latestTargetIndex &&
+      latestTargetIndex < sameTargetIndex && sameTargetIndex < resultsPanelIndex &&
+      resultsPanelIndex < transportIssueIndex,
+    'history reruns must select a target, confirm mismatches, then revalidate the exact target before panel creation or q issue'
+  );
+  assert.match(
+    executeQTextSource,
+    /historyRerunRequiresConfirmation\([\s\S]*?showWarningMessage\([\s\S]*?\{ modal: true \}[\s\S]*?'Rerun on Active Connection'/
+  );
+  assert.match(
+    executeQTextSource,
+    /if \(request\.recordedHistoryConnection\) \{[\s\S]*?store\.activeConnection\(\)[\s\S]*?sameExecutionTarget\(connection, latestTarget\)[\s\S]*?connection = latestTarget;/
+  );
+  const sameTargetSource = sourceSection(
+    extensionSource,
+    'function sameExecutionTarget(',
+    'class QRunCodeLensProvider'
+  );
+  for (const field of ['id', 'host', 'port', 'database', 'username', 'connectTimeoutMs', 'queryTimeoutMs']) {
+    assert.match(
+      sameTargetSource,
+      new RegExp(`left\\.${field} === right\\.${field}`),
+      `history rerun target revalidation must include ${field}`
+    );
+  }
+  const activeRunSource = sourceSection(
+    extensionSource,
+    'async function activeConnectionForRun(',
+    'function updatePerfTraceSetting('
+  );
+  assert.match(activeRunSource, /const active = store\.activeConnection\(\);[\s\S]*?if \(active\) \{[\s\S]*?return active;/);
+  assert.match(activeRunSource, /if \(!connections\.length\)[\s\S]*?return undefined;/);
+  assert.match(
+    activeRunSource,
+    /let connection = connections\[0\];[\s\S]*?if \(connections\.length > 1\)[\s\S]*?setActiveConnection\(connection\.id\)/,
+    'a sole configured but unrelated profile is selected as the target and still reaches the post-selection mismatch confirmation'
+  );
+  const historyRerunSource = sourceSection(historySource, 'private async rerun(', 'private async copy(');
+  assert.match(historyRerunSource, /await runQuery\(entry\)/);
+  assert.ok(!/Rerun on Active Connection|\{ modal: true \}/.test(historyRerunSource));
+  assert.match(historySource, /connectionTree\.onDidChangeTreeData\(\(\) => this\.provider\.refresh\(\)\)/);
+
+  const firstPartyCodeAndAssets = [
+    path.join(ROOT, 'syntaxes', 'q.tmLanguage.json'),
+    ...walkFiles(path.join(ROOT, 'icons')),
+  ];
+  firstPartyCodeAndAssets.forEach(file => {
+    const content = fs.readFileSync(file).toString('latin1');
+    assertNoVscodeQRuntimeReference(content, path.relative(ROOT, file));
+    assertNoSqlToolsRuntimeReference(content, path.relative(ROOT, file));
+    assert.ok(!/jshinonome/i.test(content), `${path.relative(ROOT, file)} must not contain q Professional assets/source`);
+  });
   const htmlSection = sourceSection(panelSource, 'export function connectionFormHtml', 'function isRecord');
   const interpolations = [...htmlSection.matchAll(/\$\{([^}]+)\}/g)].map(match => match[1]);
   assert.deepStrictEqual(
@@ -1709,6 +3031,7 @@ function testManifestAndSources() {
   [
     'src/**',
     'test/**',
+    'scripts/**',
     'tmp/**',
     'docs/**',
     'mkdocs-src/**',
@@ -1717,6 +3040,16 @@ function testManifestAndSources() {
     '**/*.map',
     'CODEX*',
     'PROMPT*',
+    '**/*.pem',
+    '**/*.key',
+    '**/*.p12',
+    '**/*.pfx',
+    '**/.npmrc',
+    '**/coverage/**',
+    '**/*.tar',
+    '**/*.gz',
+    '**/*.7z',
+    '**/*.rar',
     '*.vsix',
     '*.zip',
   ].forEach(pattern => {
@@ -1774,6 +3107,230 @@ function requireOutWithMocks(moduleName, mocks) {
     }
   }
   throw new Error(`Compiled module out/${moduleName}.js is missing. Run npm run compile first.`);
+}
+
+function modelQTable(columns, rows) {
+  return {
+    qtype: 'table',
+    columns: columns.slice(),
+    rows: rows.map(row => ({ ...row })),
+    columnData: [],
+    rowCount: rows.length,
+  };
+}
+
+function historyEntry(overrides = {}) {
+  return {
+    id: 'entry-default',
+    connectionId: 'kx-history',
+    connectionName: 'History q',
+    timestamp: 100,
+    kind: 'line',
+    status: 'succeeded',
+    durationMs: 5,
+    queryText: '1+1',
+    ...overrides,
+  };
+}
+
+function cloneMaybe(value) {
+  return value === undefined ? undefined : cloneJson(value);
+}
+
+function createHistoryMemento(initialValue) {
+  let stored = cloneMaybe(initialValue);
+  const updates = [];
+  return {
+    get(key) {
+      assert.strictEqual(key, QUERY_HISTORY_STORAGE_KEY);
+      return cloneMaybe(stored);
+    },
+    async update(key, value) {
+      assert.strictEqual(key, QUERY_HISTORY_STORAGE_KEY);
+      await Promise.resolve();
+      stored = cloneMaybe(value);
+      updates.push(cloneMaybe(value));
+    },
+    get value() {
+      return cloneMaybe(stored);
+    },
+    updates,
+  };
+}
+
+function createBlockingHistoryMemento(initialValue) {
+  let stored = cloneMaybe(initialValue);
+  let firstUpdate = true;
+  let markUpdateStarted;
+  let releaseUpdate;
+  const updateStarted = new Promise(resolve => {
+    markUpdateStarted = resolve;
+  });
+  const gate = new Promise(resolve => {
+    releaseUpdate = resolve;
+  });
+  const updates = [];
+  return {
+    get(key) {
+      assert.strictEqual(key, QUERY_HISTORY_STORAGE_KEY);
+      return cloneMaybe(stored);
+    },
+    async update(key, value) {
+      assert.strictEqual(key, QUERY_HISTORY_STORAGE_KEY);
+      if (firstUpdate) {
+        firstUpdate = false;
+        markUpdateStarted();
+        await gate;
+      }
+      stored = cloneMaybe(value);
+      updates.push(cloneMaybe(value));
+    },
+    get value() {
+      return cloneMaybe(stored);
+    },
+    updateStarted,
+    releaseUpdate,
+    updates,
+  };
+}
+
+function assertHistoryStorageShape(value) {
+  assert.ok(Array.isArray(value));
+  const allowed = ['connectionId', 'connectionName', 'durationMs', 'id', 'kind', 'queryText', 'status', 'timestamp'];
+  value.forEach(entry => {
+    assert.deepStrictEqual(Object.keys(entry).sort(), allowed);
+    for (const forbidden of ['result', 'results', 'password', 'username', 'host', 'error', 'messages']) {
+      assert.strictEqual(Object.prototype.hasOwnProperty.call(entry, forbidden), false);
+    }
+  });
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function configurationEvent(changedKey) {
+  return {
+    affectsConfiguration(key) {
+      return key === changedKey;
+    },
+  };
+}
+
+function createVscodeTreeHarness() {
+  const warnings = [];
+  const errors = [];
+  const information = [];
+  const createdTreeViews = [];
+  const registeredCommands = new Map();
+  const progressControllers = [];
+  class EventEmitter {
+    constructor() {
+      this.listeners = new Set();
+      this.event = listener => {
+        this.listeners.add(listener);
+        return { dispose: () => this.listeners.delete(listener) };
+      };
+    }
+
+    fire(value) {
+      [...this.listeners].forEach(listener => listener(value));
+    }
+
+    dispose() {
+      this.listeners.clear();
+    }
+  }
+  class TreeItem {
+    constructor(label, collapsibleState) {
+      this.label = label;
+      this.collapsibleState = collapsibleState;
+    }
+  }
+  class ThemeIcon {
+    constructor(id, color) {
+      this.id = id;
+      this.color = color;
+    }
+  }
+  const createCancellationController = () => {
+    let canceled = false;
+    const listeners = new Set();
+    return {
+      token: {
+        get isCancellationRequested() {
+          return canceled;
+        },
+        onCancellationRequested(listener) {
+          listeners.add(listener);
+          return { dispose: () => listeners.delete(listener) };
+        },
+      },
+      cancel() {
+        if (canceled) {
+          return;
+        }
+        canceled = true;
+        [...listeners].forEach(listener => listener());
+      },
+    };
+  };
+  const harness = {
+    warnings,
+    errors,
+    information,
+    createdTreeViews,
+    registeredCommands,
+    progressControllers,
+    cancelLatestProgress() {
+      assert.ok(progressControllers.length > 0, 'no cancellable progress operation was created');
+      progressControllers.at(-1).cancel();
+    },
+    vscode: {
+      EventEmitter,
+      TreeItem,
+      ThemeIcon,
+      TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
+      ProgressLocation: { Notification: 15 },
+      commands: {
+        registerCommand(id, handler) {
+          registeredCommands.set(id, handler);
+          return { dispose: () => registeredCommands.delete(id) };
+        },
+      },
+      window: {
+        createTreeView(id, options) {
+          const view = { id, options, disposed: false };
+          createdTreeViews.push(view);
+          return { dispose: () => { view.disposed = true; } };
+        },
+        async withProgress(_options, task) {
+          const controller = createCancellationController();
+          progressControllers.push(controller);
+          return task({}, controller.token);
+        },
+        showWarningMessage(message) {
+          warnings.push(message);
+          return undefined;
+        },
+        showErrorMessage(message) {
+          errors.push(message);
+          return undefined;
+        },
+        showInformationMessage(message) {
+          information.push(message);
+          return undefined;
+        },
+      },
+    },
+  };
+  return harness;
 }
 
 function createVscodeRuntimeMock(settings = {}) {
@@ -2061,6 +3618,18 @@ function assertNoSqlToolsRuntimeReference(source, label) {
     /kdb-sqltools/i,
   ];
   forbidden.forEach(pattern => assert.ok(!pattern.test(source), `${label} contains forbidden standalone dependency/path ${pattern}`));
+}
+
+function assertNoVscodeQRuntimeReference(source, label) {
+  const forbidden = [
+    /jshinonome\/vscode-q/i,
+    /(?:from|require\s*\()\s*['"][^'"]*vscode-q/i,
+    /[\\/]vscode-q[\\/]/i,
+  ];
+  forbidden.forEach(pattern => assert.ok(
+    !pattern.test(source),
+    `${label} contains forbidden q Professional/vscode-q runtime source or asset reference ${pattern}`
+  ));
 }
 
 function walkFiles(directory) {

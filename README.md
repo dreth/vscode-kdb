@@ -1,8 +1,8 @@
 # KX for VS Code
 
-KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, a KX activity-bar view, and a high-performance native result panel.
+KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, optional first-party server exploration and local query history, and a high-performance native result panel.
 
-Version 0.1.3 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
+Version 0.1.4 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
 
 Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed parity matrix](PARITY.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
 
@@ -20,8 +20,9 @@ Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed p
 3. In **KX Connections**, choose **Add Connection**. The **KX Connection** form shows the direct host, port, namespace, optional authentication, and timeout overrides together. Enter a unique name, `localhost`, port `5000`, and `.` for the root namespace, then choose **Save Connection**.
 4. Test the connection, set it active, and connect. Opening a connection is also handled automatically when a query first needs it.
 5. Open a `.q` file and run the current line, a selection, or the complete script.
+6. If wanted, enable the disabled-by-default Server Explorer or Query History feature in VS Code Settings.
 
-The value shown as **Database / Namespace** is a q namespace, such as `.` or `.app`. Raw editor queries run in that namespace, and the connection's previous namespace is restored after execution.
+The value shown as **Database / Namespace** is a q namespace, such as `.` or `.app`. Non-root editor wrappers and all Server Explorer requests temporarily apply that namespace and restore the connection's previous namespace; root editor queries retain transparent raw-q behavior.
 
 ## Connections
 
@@ -61,7 +62,28 @@ Validation failures and Cancel leave both persisted data and any connected clien
 
 Safe connection metadata is kept in the global user setting `vscode-kdb.connections`: connection ID, name, host, port, database/namespace, username, and optional `connectTimeoutMs` / `queryTimeoutMs` overrides. Passwords are never written to settings. Each password is stored under a connection-specific key in VS Code `SecretStorage`, using the credential protection provided by VS Code and the operating system at rest. Removing a connection removes its stored secret. Passwords are not included in extension logs, documentation samples, packaged files, connection errors, or saved-profile messages sent to the webview.
 
-Direct q IPC is plaintext in transit, including authentication and query traffic. Phase 1 does not add TLS, SSH tunnelling, or a gateway. Use loopback or a trusted private network, or establish a separately managed secure tunnel before connecting to a remote q process.
+Direct q IPC is plaintext in transit, including authentication and query traffic. The standalone product does not add TLS, SSH tunnelling, or a gateway. Use loopback or a trusted private network, or establish a separately managed secure tunnel before connecting to a remote q process.
+
+## Feature controls
+
+The two 0.1.4 sidebar features are independent and disabled by default:
+
+```json
+{
+  "vscode-kdb.features.serverExplorer": false,
+  "vscode-kdb.features.queryHistory": false
+}
+```
+
+This keeps remote metadata queries, sidebar weight, and query-text persistence opt-in. Disabling a feature stops its provider and hides its view and commands. Disabling Query History also stops future writes, but does not silently erase existing workspace-local entries; re-enable it and run **KX: Clear Query History** to remove retained entries.
+
+## Server Explorer
+
+When `vscode-kdb.features.serverExplorer` is enabled and an active direct q IPC profile exists, **KX Server Explorer** appears separately from **KX Connections**. A disconnected profile remains visible with a clear reconnect status; metadata requests require it to be connected. The explorer is manual-refresh only: **KX: Refresh Server Explorer** queries the configured connection namespace, uses q-native `tables[]` for tables, and obtains variable/function names and safe type-category metadata without fetching their values. A name is shown as a function only when q's type metadata safely identifies it as one; other objects remain accurately labelled as variables.
+
+Expanding a table explicitly runs `meta` in the same configured namespace and shows its column metadata. Permission failures, missing objects, disconnects, timeouts, cancellation, and connection or namespace changes replace or invalidate stale tree data and can be retried with Refresh. Cancel is local to the wait and does not interrupt q work already sent. The explorer does not auto-refresh, install server scripts, change persistent server state, or expose SSH, TLS, gateway, Insights, or namespace-browsing controls.
+
+Preview is a separate confirmed action for a selected table or variable. Functions and projections are metadata-only because captured arguments can exceed any honest cell limit. Only standard q identifiers matching a letter followed by letters, digits, or underscores, up to 255 characters, are accepted; tree labels are never executed as arbitrary q text. `vscode-kdb.serverExplorer.previewCellLimit` defaults to `10000` and accepts `1` through `1000000`. Tables are capped server-side to approximately that many cells, while lists and dictionaries are capped to that many outer items. Scalars and nested values can still be large, so every preview displays a warning before opening the normal KX Results panel.
 
 ## Running q
 
@@ -75,11 +97,21 @@ The extension contributes minimal q language support for `.q` files and these ed
 
 Multiline selections are preserved as selected and evaluated using q's own script-line grouping. There is no SQL parser, extension-owned statement splitter, current-block inference, or hidden session-file behavior.
 
+The native TextMate grammar was reviewed for 0.1.4 and left unchanged because no reliable token-coverage defect was found. `.k` is not associated with q: broadening that file association without a demonstrated, testable need could conflict with other VS Code language support.
+
 Whole-document runs and multiline selections use [q's own documented script-line grouping](https://code.kx.com/q/ref/dotq/#ld-load-and-group), including q indentation and script termination rules; they require q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer). Single-line selections and current-line execution remain raw q queries and do not use this grouping helper.
 
 Queries use the active connection. A normal run replaces the active result panel; **Run Selection in New Result** keeps the existing panel and opens another.
 
 Canceling a result wait is local and best-effort: the panel stops waiting immediately, but q computation or side effects already sent to the server can continue. It does not cancel other queued result panels on the same connection. Use **Disconnect** when you intentionally need to close that connection and fail its outstanding work.
+
+## Query History
+
+When `vscode-kdb.features.queryHistory` is enabled, issued editor executions are stored newest first in **KX Query History**. Recording starts only after a line, selection, or script is actually sent. Each local entry contains the exact query text, stable connection ID and recorded label, timestamp, execution kind, status (`succeeded`, `failed`, or `canceled` after an issued run's local wait is canceled), and duration; result payloads and passwords are never stored. Runs that never reach q are not recorded.
+
+History uses VS Code workspace `Memento` storage on the local machine. It is not written to user or workspace settings, registered for Settings Sync, transmitted as telemetry, or sent anywhere except when the user explicitly reruns that q text. `vscode-kdb.queryHistory.maxEntries` defaults to `100` and accepts `1` through `1000`; lowering it prunes the oldest retained entries.
+
+Entry actions rerun, copy, insert into the active editor, or delete one entry. **KX: Clear Query History** requires confirmation. Rerun uses the same exact q execution, active-connection, configured-namespace, timeout, cancellation, error, diagnostic, and result pipeline as editor execution. After normal connection selection resolves the target, KX confirms every mismatch with the recorded stable ID—even when no profile was active or the recorded profile was removed—before issuing text. Renamed or removed profiles remain safely identified without exposing credentials.
 
 ## Result panel
 
@@ -106,9 +138,9 @@ For additional safe operation timings, enable this setting explicitly:
 
 The setting is opt-in and is never changed automatically. Performance tracing adds operation durations, sizes/counts, and memory details to the KX output without logging query values or credentials.
 
-## Phase 1 scope
+## Focused standalone scope
 
-Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.3; unreliable metadata placeholders are deliberately omitted.
+Version 0.1.4 remains direct-q-IPC-only. Its Server Explorer is intentionally limited to read-only metadata and confirmed previews in the current configured namespace; it is not a KDB-X, q Professional, Insights, gateway, or remote-administration replacement. SSH setup, TLS termination, gateway or broker configuration, namespace browsing, remote connection orchestration, notebooks, and server-side interruption remain outside this release.
 
 ## Development and verification
 
@@ -122,7 +154,7 @@ npm run test:unit
 npm test
 ```
 
-`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection-form payload and timeout validation, SecretStorage keep/replace/clear behavior, persisted-first connection lifecycle, namespace wrapping, diagnostics/redaction, result conversion, and manifest/source/webview guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these Phase 1 behaviors can be tested deterministically without it. Release 0.1.3 does not claim a visual Extension Host E2E run, and no screenshot is presented as test evidence.
+`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection-form payload and timeout validation, SecretStorage keep/replace/clear behavior, persisted-first connection lifecycle, namespace wrapping, Server Explorer request/identifier/stale/preview contracts, Query History privacy/storage/order/rerun contracts, diagnostics/redaction, result conversion, and manifest/source/webview guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these behaviors can be tested deterministically without it. Release 0.1.4 does not claim a visual Extension Host E2E run, and no screenshot is presented as test evidence.
 
 If a local q executable is available at `~/.kx/bin/q`, run the optional live IPC test:
 
@@ -150,10 +182,25 @@ Package the extension with either the project script or an explicit artifact pat
 
 ```sh
 npm run package
-npx @vscode/vsce package --out vscode-kdb-0.1.3.vsix
+npx @vscode/vsce package --out vscode-kdb-0.1.4.vsix
+python - <<'PY'
+from pathlib import Path
+from zipfile import ZIP_DEFLATED, ZipFile
+
+source = Path("vscode-kdb-0.1.4.vsix")
+with ZipFile("vscode-kdb-0.1.4-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+    archive.write(source, arcname=source.name)
+PY
+python scripts/audit-release.py vscode-kdb-0.1.4.vsix vscode-kdb-0.1.4-vsix.zip
 ```
 
-The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.
+The wrapper contains exactly one file: the byte-identical VSIX. The release auditor checks both archives' paths, duplicates, encryption flags, symlinks, CRCs, manifest/assets, compiled/runtime inventory, nested archives, credential indicators, forbidden sources, raw embedded bytes, names, versions, and SHA-256 hashes. The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.
+
+## Competitive references and reuse
+
+[q Professional / `jshinonome/vscode-q` at `1481ba419edee8e53be6bb4f6f134d1fb04f1ed1`](https://github.com/jshinonome/vscode-q/tree/1481ba419edee8e53be6bb4f6f134d1fb04f1ed1) informed the documented product-capability audit only. That public snapshot is all-rights-reserved, so no source code or assets were copied.
+
+[KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected as an Apache-2.0 reference, but 0.1.4 adapts no source code or assets from it. Server Explorer, Query History, and their tests are standalone-native implementations. SQLTools remains absent as a runtime or UI dependency. See [PARITY.md](PARITY.md) for the bounded competitive audit; these references do not imply full KDB-X or q Professional parity.
 
 ## License
 
