@@ -54,16 +54,16 @@ The defaults are `/opt/data/home/projects/kdb-sqltools` at commit `af2c7c9209322
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.1.4.vsix
+npx @vscode/vsce package --out vscode-kdb-0.1.5.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.1.4.vsix")
-with ZipFile("vscode-kdb-0.1.4-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.1.5.vsix")
+with ZipFile("vscode-kdb-0.1.5-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.1.4.vsix vscode-kdb-0.1.4-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.1.5.vsix vscode-kdb-0.1.5-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.

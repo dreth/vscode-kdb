@@ -127,6 +127,7 @@ export interface KdbConnectionOptions {
   queryTimeoutMs?: number;
   timeoutMs?: number;
   onDidClose?: () => void;
+  onDidPhase?: (phase: KxDiagnosticPhase, status: KxDiagnosticStatus) => void;
   diagnostics?: KxDiagnostics;
 }
 
@@ -160,7 +161,7 @@ interface QIpcQueryPerf {
   copyBytesCopied: number;
 }
 
-type KdbIpcPhase = 'connect' | 'handshake' | 'query';
+export type KdbIpcPhase = 'connect' | 'handshake' | 'query';
 
 interface PendingConnect {
   socket: net.Socket;
@@ -177,7 +178,10 @@ export class KdbQError extends Error {
 }
 
 export class KdbIpcError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly phase?: KdbIpcPhase
+  ) {
     super(message);
     this.name = 'KdbIpcError';
   }
@@ -857,6 +861,11 @@ export class KdbIpcClient {
     details?: PerfDetails
   ): void {
     try {
+      this.options.onDidPhase?.(phase, status);
+    } catch {
+      // Local phase observers must never disrupt q IPC operations.
+    }
+    try {
       this.options.diagnostics?.event({
         phase,
         endpoint: this.endpointLabel(),
@@ -883,7 +892,10 @@ export class KdbIpcClient {
       err.message,
       [this.options.username || '', this.options.password || '']
     );
-    const wrapped = new KdbIpcError(`kdb+ ${phase} failed for ${this.endpointLabel()}: ${detail}`);
+    const wrapped = new KdbIpcError(
+      `kdb+ ${phase} failed for ${this.endpointLabel()}: ${detail}`,
+      phase
+    );
     const code = (err as NodeJS.ErrnoException).code;
     if (code) {
       (wrapped as NodeJS.ErrnoException).code = code;

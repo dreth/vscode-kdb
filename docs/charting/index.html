@@ -897,6 +897,7 @@
 <li>a draggable chart/table splitter; and</li>
 <li>PNG export of the rendered canvas, including custom bars, boxes, and candles.</li>
 </ul>
+<p>The first full render captures an immutable original X-domain and retains the original full sample. Manual drag zoom, auto-refinement, explicit <strong>Refine zoom</strong>, resize/rerender, and refined samples do not replace them. <strong>Reset zoom</strong> restores that original numeric or temporal domain and original sample, returns Y to automatic scaling, clears selection and tooltip state, and clears pending auto-refinement timer/state. The button state is derived from the current scale with a small deterministic floating-point tolerance.</p>
 <p>Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step retain sampled gaps for missing/non-finite Y values; other generic types skip them where appropriate.</p>
 <p>Generic series use min/max-aware reduction, bars keep aligned x clusters, boxes use bounded x buckets, and candlesticks use OHLC-aware aggregation. Grouping retains at most 12 categories and 36 generated group/Y series. Status text reports source rows, eligible rows, sampled points, the algorithm, and warnings.</p>
 <h2 id="limits-and-settings">Limits and settings</h2>

@@ -18,7 +18,19 @@ const {
   qValueToColumnarPanel,
   serializeTextQuery,
 } = requireOut('q-ipc');
-const { qSelectionExecutionKind, selectedTextOrCurrentLine } = requireOut('q-text');
+const {
+  formatQTextForDisplay,
+  lexQText,
+  qSelectionExecutionKind,
+  qTextRenderModel,
+  selectedTextOrCurrentLine,
+} = requireOut('q-text');
+const {
+  captureChartFullXRange,
+  chartZoomDataAfterResponse,
+  chartRangeIsZoomed,
+  planChartZoomReset,
+} = requireOut('chart-zoom');
 const {
   DEFAULT_CONNECTION_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
@@ -40,6 +52,12 @@ const {
   parseConnectionFormPayload,
   passwordUpdateForForm,
 } = requireOut('connection-form-model');
+const {
+  CONNECTION_TEST_QUERY,
+  ConnectionTestError,
+  connectionTestNamespaceQuery,
+  connectionTestNamespaceResultIsSafe,
+} = requireOut('connection-test');
 const { persistConnectionUpdate } = requireOut('connection-lifecycle');
 const {
   KX_OUTPUT_CHANNEL_NAME,
@@ -92,6 +110,7 @@ const tests = [
   ['q IPC codec and receive buffering', testQIpc],
   ['diagnostics and performance trace redaction', testDiagnostics],
   ['exact q selection/current-line text', testQText],
+  ['qText result settings and live panel updates', testQTextResultPanelSettings],
   ['connection validation and namespace wrapping', testConnections],
   ['server explorer request and metadata model', testServerExplorerModel],
   ['query history privacy and persistence model', testQueryHistoryModel],
@@ -99,9 +118,11 @@ const tests = [
   ['feature controls enable and disable lifecycle', testFeatureControlsLifecycle],
   ['connection form payload and password semantics', testConnectionFormModel],
   ['connection webview lifecycle', testConnectionFormPanelLifecycle],
+  ['connection form host testing', testConnectionFormHostTesting],
   ['connection SecretStorage transactions', testConnectionStoreTransactions],
   ['post-persist active connection lifecycle', testConnectionUpdateLifecycle],
   ['connection manager lifecycle races', testConnectionManagerLifecycle],
+  ['chart zoom baseline and reset lifecycle', testChartZoomLifecycle],
   ['columnar result windows and exports', testColumnarResults],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
@@ -117,6 +138,161 @@ const tests = [
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
 });
+
+function testChartZoomLifecycle() {
+  let deferredFull = captureChartFullXRange(null, null, false);
+  assert.strictEqual(deferredFull, null, 'pre-commit scale state must not invent a baseline');
+  const initialCandidate = { min: 0, max: 100 };
+  deferredFull = captureChartFullXRange(deferredFull, initialCandidate, false);
+  const full = deferredFull;
+  assert.deepStrictEqual(full, { min: 0, max: 100 });
+  assert.ok(Object.isFrozen(full), 'the original full X range must be immutable');
+  initialCandidate.min = 25;
+  assert.deepStrictEqual(full, { min: 0, max: 100 }, 'baseline capture must copy the rendered range');
+  const replacement = captureChartFullXRange(full, { min: 200, max: 300 }, false);
+  assert.deepStrictEqual(replacement, { min: 200, max: 300 }, 'a new base render must capture its own full domain');
+  assert.notStrictEqual(replacement, full);
+
+  const originalSample = {
+    requestId: 1,
+    x: [0, 50, 100],
+    series: [{ columnName: 'price', values: [10, 20, 30] }],
+  };
+  const initialDataState = chartZoomDataAfterResponse(null, originalSample, false);
+  assert.strictEqual(initialDataState.data, originalSample);
+  assert.strictEqual(initialDataState.originalData, originalSample, 'base response must capture the original sample');
+  assert.strictEqual(initialDataState.dataIsRefinement, false);
+
+  const manualZoom = { min: 20, max: 40 };
+  assert.strictEqual(chartRangeIsZoomed(full, manualZoom), true, 'manual drag range must be detected as zoomed');
+  const manualReset = planChartZoomReset(
+    initialDataState.data,
+    initialDataState.originalData,
+    initialDataState.dataIsRefinement,
+    full,
+    1
+  );
+  assert.strictEqual(manualReset.data, originalSample);
+  assert.strictEqual(manualReset.restoredOriginalData, false);
+  assert.strictEqual(manualReset.dataIsRefinement, false);
+  assert.strictEqual(manualReset.requestIsRefinement, false);
+  assert.deepStrictEqual(manualReset.xScale, full, 'manual reset must target the immutable original X range');
+  assert.notStrictEqual(manualReset.xScale, full, 'the plot scale input must stay separate from the baseline object');
+  assert.deepStrictEqual(manualReset.yScale, { min: null, max: null }, 'manual reset must restore Y auto-scale');
+  assert.strictEqual(chartRangeIsZoomed(full, manualReset.xScale), false, 'manual zoom reset must return to the baseline');
+  assert.strictEqual(manualReset.autoRefineKey, '');
+  assert.strictEqual(manualReset.clearAutoRefineTimer, true);
+  assert.strictEqual(manualReset.clearSelection, true);
+  assert.strictEqual(manualReset.hideTooltip, true);
+
+  const refinedSample = {
+    requestId: 2,
+    x: [20, 30, 40],
+    series: [{ columnName: 'price', values: [14, 16, 18] }],
+  };
+  const refinedDataState = chartZoomDataAfterResponse(
+    initialDataState.originalData,
+    refinedSample,
+    true
+  );
+  assert.strictEqual(refinedDataState.data, refinedSample);
+  assert.strictEqual(refinedDataState.originalData, originalSample, 'refinement must preserve the original sample');
+  assert.strictEqual(refinedDataState.dataIsRefinement, true);
+  const refinedRender = { min: 20, max: 40 };
+  const afterRefine = captureChartFullXRange(full, refinedRender, true);
+  assert.strictEqual(afterRefine, full, 'refinement render must retain the original baseline object');
+  assert.strictEqual(chartRangeIsZoomed(afterRefine, refinedRender), true);
+  const afterRefineRerender = captureChartFullXRange(afterRefine, { min: 21, max: 39 }, true);
+  assert.strictEqual(afterRefineRerender, full, 'refinement rerender must not replace the original domain');
+  const refinedReset = planChartZoomReset(
+    refinedDataState.data,
+    refinedDataState.originalData,
+    refinedDataState.dataIsRefinement,
+    afterRefineRerender,
+    3
+  );
+  assert.strictEqual(refinedReset.restoredOriginalData, true);
+  assert.notStrictEqual(refinedReset.data, originalSample, 'restoration must not mutate the retained sample object');
+  assert.deepStrictEqual(refinedReset.data, { ...originalSample, requestId: 3 });
+  assert.deepStrictEqual(originalSample, {
+    requestId: 1,
+    x: [0, 50, 100],
+    series: [{ columnName: 'price', values: [10, 20, 30] }],
+  });
+  assert.strictEqual(refinedReset.dataIsRefinement, false);
+  assert.strictEqual(refinedReset.requestIsRefinement, false);
+  assert.deepStrictEqual(refinedReset.xScale, full, 'refined reset must target the original domain, not the refined range');
+  assert.notStrictEqual(refinedReset.xScale, full);
+  assert.deepStrictEqual(refinedReset.yScale, { min: null, max: null });
+  assert.strictEqual(chartRangeIsZoomed(full, refinedReset.xScale), false);
+  assert.strictEqual(refinedReset.autoRefineKey, '');
+  assert.strictEqual(refinedReset.clearAutoRefineTimer, true);
+  assert.strictEqual(refinedReset.clearSelection, true);
+  assert.strictEqual(refinedReset.hideTooltip, true);
+
+  const numericEpsilonFull = { min: -50, max: 50 };
+  assert.strictEqual(chartRangeIsZoomed(numericEpsilonFull, { min: -50 + 5e-8, max: 50 - 5e-8 }), false);
+  assert.strictEqual(chartRangeIsZoomed(numericEpsilonFull, { min: -50 + 2e-7, max: 50 }), true);
+  const day = 24 * 60 * 60 * 1000;
+  const temporalFull = { min: 1700000000000, max: 1700000000000 + day };
+  assert.strictEqual(chartRangeIsZoomed(temporalFull, { min: temporalFull.min + 0.01, max: temporalFull.max }), false);
+  assert.strictEqual(chartRangeIsZoomed(temporalFull, { min: temporalFull.min + 1, max: temporalFull.max }), true);
+  assert.strictEqual(captureChartFullXRange(null, { min: 4, max: 4 }, false), null);
+  assert.strictEqual(chartRangeIsZoomed(full, { min: NaN, max: 40 }), false);
+
+  const panelSource = readSource('kx-results-panel.ts');
+  const zoomSource = readSource('chart-zoom.ts');
+  assert.match(zoomSource, /return Object\.freeze\(\{ min: rendered\.min, max: rendered\.max \}\)/);
+  assert.match(panelSource, /let chartOriginalData = null;/);
+  assert.match(panelSource, /let chartDataIsRefinement = false;/);
+  assert.match(panelSource, /\$\{isValidChartRange\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{captureChartFullXRange\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartZoomDataAfterResponse\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{planChartZoomReset\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartRangeIsZoomed\.toString\(\)\}/);
+  assert.match(panelSource, /<button id="resetChartZoom" disabled>Reset zoom<\/button>/);
+  assert.match(panelSource, /resetChartZoomButton\.addEventListener\('click', resetChartZoom\)/);
+  assert.match(panelSource, /setScale: \[updateChartZoomState\]/);
+  assert.match(panelSource, /chartFullXRange = captureChartFullXRange\([\s\S]*?chartDataIsRefinement \|\| !!chartFullXRange[\s\S]*?\);/);
+  const zoomStateSource = sourceSection(panelSource, '      function updateChartZoomState(self) {', '      function currentChartZoomRange() {');
+  assert.match(zoomStateSource, /const currentRange = chartXScaleRange\(self\);/);
+  assert.match(zoomStateSource, /if \(!chartFullXRange && !chartDataIsRefinement\)/);
+  assert.match(zoomStateSource, /chartFullXRange = captureChartFullXRange\(null, currentRange, false\);/);
+  assert.match(zoomStateSource, /chartZoomed = chartRangeIsZoomed\(chartFullXRange, currentRange\);/);
+
+  const chartDataSource = sourceSection(panelSource, '      function setChartData(value) {', '      function normalizeChartData(value) {');
+  assert.match(chartDataSource, /const chartDataState = chartZoomDataAfterResponse\(/);
+  assert.match(chartDataSource, /chartOriginalData = chartDataState\.originalData;/);
+  assert.match(chartDataSource, /chartDataIsRefinement = chartDataState\.dataIsRefinement;/);
+
+  const resetSource = sourceSection(panelSource, '      function resetChartZoom() {', '      function clearChartZoomTransientState() {');
+  assert.match(resetSource, /const reset = planChartZoomReset\(/);
+  assert.match(resetSource, /chartData = reset\.data;/);
+  assert.match(resetSource, /chartDataIsRefinement = reset\.dataIsRefinement;/);
+  assert.match(resetSource, /chartRequestIsRefinement = reset\.requestIsRefinement;/);
+  assert.match(resetSource, /if \(reset\.restoredOriginalData\) \{[\s\S]*?drawChart\(\);[\s\S]*?\}/);
+  assert.match(resetSource, /chartUPlot\.setScale\('x', reset\.xScale\);/);
+  assert.match(resetSource, /chartUPlot\.setScale\('y', reset\.yScale\);/);
+  assert.match(resetSource, /chartLastAutoRefineKey = reset\.autoRefineKey;/);
+  assert.match(resetSource, /if \(reset\.clearAutoRefineTimer\) \{[\s\S]*?clearChartAutoRefineTimer\(\);/);
+  assert.match(resetSource, /if \(reset\.clearSelection\) \{[\s\S]*?clearChartSelection\(\);/);
+  assert.match(resetSource, /if \(reset\.hideTooltip\) \{[\s\S]*?hideChartTooltip\(\);/);
+
+  const optionsSource = sourceSection(panelSource, '      function renderChartOptions() {', '      function populateCandlestickColumnSelect');
+  assert.match(optionsSource, /if \(!chartRendered\) \{[\s\S]*?clearChartZoomBaseline\(\);[\s\S]*?\}/);
+  assert.ok(!/clearChartZoomBaseline\(\);\s*chartXColumn/.test(optionsSource), 'option refresh must preserve a rendered chart baseline');
+
+  const requestSource = sourceSection(panelSource, '      function requestChartDataForRange(xRange, messageText) {', '      function exportChartPng() {');
+  assert.match(requestSource, /type: 'requestChart'/);
+  assert.match(requestSource, /version: data\.version/);
+  assert.match(requestSource, /requestId: latestChartRequestId/);
+  assert.match(requestSource, /message\.xMin = xRange\.min;/);
+  assert.match(requestSource, /message\.xMax = xRange\.max;/);
+  assert.match(chartDataSource, /toNonNegativeInteger\(value\.version, -1\) !== data\.version/);
+  assert.match(chartDataSource, /toNonNegativeInteger\(value\.requestId, -1\) !== latestChartRequestId/);
+  const messageSource = sourceSection(panelSource, "        } else if (msg.type === 'chartData' && msg.data) {", "      actionFormat.addEventListener('change'");
+  assert.match(messageSource, /setChartData\(msg\.data\);/);
+}
 
 async function testQIpc() {
   assert.strictEqual(
@@ -182,6 +358,7 @@ async function testQIpc() {
     () => new KdbIpcClient({ host: '127.0.0.1', port, timeoutMs: 500 }).connect(),
     error => error &&
       error.name === 'KdbIpcError' &&
+      error.phase === 'connect' &&
       error.message.includes(`127.0.0.1:${port}`) &&
       /connect failed/i.test(error.message),
     'connection errors must identify the direct q host and port'
@@ -203,6 +380,7 @@ async function testQIpc() {
         () => assert.rejects(
           () => resetClient.connect(),
           error => error &&
+            error.phase === 'handshake' &&
             /handshake failed/i.test(error.message) &&
             error.message.includes(`127.0.0.1:${resetPort}`)
         ),
@@ -604,6 +782,243 @@ function testQText() {
   assert.strictEqual(qSelectionExecutionKind('a:1'), 'query');
   assert.strictEqual(qSelectionExecutionKind('a:1\nb:2'), 'script');
   assert.strictEqual(qSelectionExecutionKind('a:1\r\nb:2'), 'script');
+
+  const tokenSource = [
+    '/ <tag data-x="comment"> &',
+    '\\l /safe/path',
+    'select sum price by sym from .analytics.trade where date=2026.07.22, ts=2026.07.22D12:34:56.123;',
+    'if[0101b;show "<img src=x> \\\"quoted\\\" &";`"symbol;<tag>"]; .Q.enlist 0x2a 0N -42.5e2 +/: 1',
+  ].join('\n');
+  const lexed = lexQText(tokenSource);
+  assert.strictEqual(lexed.valid, true);
+  assert.strictEqual(lexed.tokens.map(token => token.text).join(''), tokenSource, 'lexer tokens must preserve exact order and bytes');
+  lexed.tokens.forEach((token, index) => {
+    assert.strictEqual(token.text, tokenSource.slice(token.start, token.end));
+    if (index > 0) {
+      assert.strictEqual(token.start, lexed.tokens[index - 1].end, 'lexer tokens must be contiguous');
+    }
+  });
+  const tokenKinds = new Set(lexed.tokens.map(token => token.kind));
+  for (const kind of ['comment', 'command', 'system', 'namespace', 'string', 'symbol', 'temporal', 'number', 'keyword', 'builtin', 'operator']) {
+    assert.ok(tokenKinds.has(kind), `qText lexer did not emit ${kind}`);
+  }
+  assert.ok(lexed.tokens.some(token => token.kind === 'string' && token.text.includes('<img src=x>')));
+  assert.ok(lexed.tokens.some(token => token.kind === 'comment' && token.text.includes('<tag')));
+  assert.ok(lexed.tokens.some(token => token.kind === 'number' && token.text === '0101b'));
+  assert.strictEqual(lexQText('"unterminated <tag>').valid, false);
+  assert.strictEqual(lexQText('/\nunterminated block').valid, false);
+
+  const slashSource = [
+    '+/1 2 3',
+    'f/[1 2;3 4]',
+    'a:1/2',
+    'a:1 / trailing <tag attr="x"> & ; { [ ) ] }  ',
+    'b:2\t/tab trailing comment',
+  ].join('\n');
+  const slashLexed = lexQText(slashSource);
+  assert.strictEqual(slashLexed.valid, true);
+  assert.strictEqual(slashLexed.tokens.map(token => token.text).join(''), slashSource);
+  assert.ok(slashLexed.tokens.some(token => token.kind === 'operator' && token.text.includes('+/')));
+  assert.strictEqual(
+    slashLexed.tokens.filter(token => token.kind === 'operator' && token.text.includes('/')).length,
+    3,
+    'attached over/adverb and operator slashes must not become comments'
+  );
+  assert.strictEqual(slashLexed.tokens.filter(token => token.kind === 'comment').length, 2);
+  assert.ok(slashLexed.tokens.some(token => token.kind === 'comment' && token.text === '/ trailing <tag attr="x"> & ; { [ ) ] }  '));
+  assert.ok(slashLexed.tokens.some(token => token.kind === 'comment' && token.text === '/tab trailing comment'));
+
+  const validEscapedString = String.raw`"\\\"\n\r\t\123\377"`;
+  const validEscapedSymbol = '`' + String.raw`"symbol\\\"\141"`;
+  const validEscapedSource = `{[x]a:${validEscapedString};b:${validEscapedSymbol};x}`;
+  const validEscapedLexed = lexQText(validEscapedSource);
+  assert.strictEqual(validEscapedLexed.valid, true, 'documented q string escapes must be accepted');
+  assert.ok(validEscapedLexed.tokens.some(token => token.kind === 'string' && token.text === validEscapedString));
+  assert.ok(validEscapedLexed.tokens.some(token => token.kind === 'symbol' && token.text === validEscapedSymbol));
+  const validEscapedFormatted = formatQTextForDisplay(validEscapedSource);
+  assert.strictEqual(validEscapedFormatted.applied, true);
+  assert.ok(validEscapedFormatted.text.includes(validEscapedString));
+  assert.ok(validEscapedFormatted.text.includes(validEscapedSymbol));
+
+  const hostileRaw = '<script>"&\'\u0000\u0001\n / not-a-comment-after-code';
+  const disabled = qTextRenderModel(hostileRaw, { syntaxHighlighting: false, displayFormatting: false });
+  assert.deepStrictEqual(disabled, {
+    text: hostileRaw,
+    formatted: false,
+    highlighted: false,
+    segments: [{ kind: 'plain', text: hostileRaw }],
+  });
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(disabled, 'html'), false);
+  assert.strictEqual(disabled.segments.map(segment => segment.text).join(''), hostileRaw);
+
+  const supported = '{[x;y]a:x+y;b:{[z]"literal;{<tag>&}";z*2};b[a]}[1]';
+  const formatted = formatQTextForDisplay(supported);
+  assert.strictEqual(formatted.applied, true);
+  assert.strictEqual(
+    formatted.text,
+    '{\n  [x;y]a:x+y;\n  b:{\n    [z]"literal;{<tag>&}";\n    z*2\n  };\n  b[a]\n}[1]'
+  );
+  assert.strictEqual(formatQTextForDisplay(formatted.text).text, formatted.text, 'display formatting must be idempotent');
+  assert.ok(formatted.text.includes('"literal;{<tag>&}"'), 'string bytes must remain unchanged');
+  assert.ok(formatted.text.endsWith('}[1]'), 'a safe projection suffix must remain byte-for-byte after lambda formatting');
+
+  const commentSource = '{[x]a:1;\n / comment ; { <tag> &  \nb:x+1;b}';
+  const formattedComment = formatQTextForDisplay(commentSource);
+  assert.strictEqual(formattedComment.applied, true);
+  assert.ok(formattedComment.text.includes('/ comment ; { <tag> &  '), 'comment bytes must remain unchanged');
+  const trailingComment = '/ trailing <tag data-x="&"> & ; { [ ) ] }  ';
+  const trailingCommentSource = `{[x]a:1; b:x+1 ${trailingComment}\n b}`;
+  const trailingCommentFormatted = formatQTextForDisplay(trailingCommentSource);
+  assert.strictEqual(trailingCommentFormatted.applied, true);
+  assert.ok(trailingCommentFormatted.text.includes(trailingComment), 'trailing comment bytes must remain unchanged');
+  assert.strictEqual(
+    lexQText(trailingCommentFormatted.text).tokens.find(token => token.kind === 'comment').text,
+    trailingComment
+  );
+  const malformedEscapes = [
+    String.raw`{[x]a:"bad\q";x}`,
+    '{[x]a:`' + String.raw`"bad\8"` + ';x}',
+    String.raw`{[x]a:"short\12";x}`,
+    String.raw`{[x]a:"out-of-byte-range\400";x}`,
+    String.raw`{[x]a:"out-of-byte-range\777";x}`,
+    '{[x]a:"raw\nnewline";x}',
+    '{[x]a:`"raw\rnewline";x}',
+  ];
+  malformedEscapes.forEach(value => {
+    assert.strictEqual(lexQText(value).valid, false, `malformed q quoted literal must be rejected: ${JSON.stringify(value)}`);
+    assert.deepStrictEqual(formatQTextForDisplay(value), { text: value, applied: false });
+  });
+  for (const malformed of [
+    '{[x]"unterminated}',
+    '{[x]a:(1;2}',
+    '{[x]a:1',
+    '{[x]a:1}\u0000',
+    'select from t where x=1',
+  ]) {
+    assert.deepStrictEqual(formatQTextForDisplay(malformed), { text: malformed, applied: false });
+  }
+
+  const highlighted = qTextRenderModel(supported, { syntaxHighlighting: true, displayFormatting: true });
+  assert.strictEqual(highlighted.formatted, true);
+  assert.strictEqual(highlighted.highlighted, true);
+  assert.strictEqual(highlighted.segments.map(segment => segment.text).join(''), highlighted.text);
+  assert.ok(highlighted.segments.some(segment => segment.kind === 'string' && segment.text === '"literal;{<tag>&}"'));
+  assert.ok(!highlighted.segments.some(segment => segment.kind !== 'string' && segment.text.includes('<tag>')));
+  const malformedHighlighted = qTextRenderModel('"<tag attr=\'x\'>&\u0001', {
+    syntaxHighlighting: true,
+    displayFormatting: true,
+  });
+  assert.strictEqual(malformedHighlighted.text, '"<tag attr=\'x\'>&\u0001');
+  assert.strictEqual(malformedHighlighted.formatted, false);
+  assert.strictEqual(malformedHighlighted.highlighted, false);
+  assert.deepStrictEqual(malformedHighlighted.segments, [{ kind: 'plain', text: malformedHighlighted.text }]);
+  assert.strictEqual(malformedHighlighted.segments.map(segment => segment.text).join(''), malformedHighlighted.text);
+}
+
+async function testQTextResultPanelSettings() {
+  const harness = createQTextResultsPanelHarness();
+  const { KxResultsPanel } = requireOutWithVscode('kx-results-panel', harness.vscode);
+  const firstRaw = '{[x;y]a:x+y;b:a*2;b}[1]';
+  const secondRaw = '<tag attr="x"> & "raw"';
+  KxResultsPanel.showResult(harness.context, {
+    mode: 'text',
+    text: firstRaw,
+    query: 'value f',
+    connectionName: 'local',
+    elapsedMs: 1,
+    messages: [],
+  });
+  await harness.emitMessage(0, { type: 'ready' });
+  const firstPanel = harness.panels[0];
+  const firstMetadata = firstPanel.posted.find(message => message.type === 'resultMeta').result;
+  assert.strictEqual(firstMetadata.settings.qTextSyntaxHighlighting, false);
+  assert.strictEqual(firstMetadata.settings.qTextDisplayFormatting, false);
+  assert.deepStrictEqual(firstMetadata.qTextRender, {
+    text: firstRaw,
+    formatted: false,
+    highlighted: false,
+    segments: [{ kind: 'plain', text: firstRaw }],
+  });
+  assert.ok(firstPanel.webview.html.includes('var(--vscode-symbolIcon-functionForeground'));
+  assert.ok(firstPanel.webview.html.includes("span.textContent = segment.text"));
+  assert.ok(firstPanel.webview.html.includes("toNonNegativeInteger(msg.version, -1) === data.version"));
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write/.test(firstPanel.webview.html));
+
+  KxResultsPanel.showResult(harness.context, {
+    mode: 'text',
+    text: secondRaw,
+    query: 'value g',
+    connectionName: 'local',
+    elapsedMs: 2,
+    messages: [],
+  }, 'new');
+  await harness.emitMessage(1, { type: 'ready' });
+  const secondPanel = harness.panels[1];
+
+  await harness.emitMessage(0, {
+    type: 'updateSetting',
+    key: 'qTextSyntaxHighlighting',
+    value: true,
+    density: 'standard',
+  });
+  assert.deepStrictEqual(harness.updates.at(-1), {
+    key: 'vscode-kdb.results.qText.syntaxHighlighting',
+    value: true,
+    target: 'global',
+  });
+  for (const panel of [firstPanel, secondPanel]) {
+    const message = panel.posted.filter(value => value.type === 'settings').at(-1);
+    assert.strictEqual(message.settings.qTextSyntaxHighlighting, true, 'setting updates must reach every open panel');
+    assert.strictEqual(message.qTextRender.highlighted, true);
+  }
+
+  await harness.emitMessage(0, {
+    type: 'updateSetting',
+    key: 'qTextDisplayFormatting',
+    value: true,
+    density: 'standard',
+  });
+  assert.deepStrictEqual(harness.updates.at(-1), {
+    key: 'vscode-kdb.results.qText.displayFormatting',
+    value: true,
+    target: 'global',
+  });
+  const formattedMessage = firstPanel.posted.filter(value => value.type === 'settings').at(-1);
+  assert.strictEqual(formattedMessage.version, firstMetadata.version);
+  assert.strictEqual(formattedMessage.qTextRender.formatted, true);
+  assert.strictEqual(formattedMessage.qTextRender.highlighted, true);
+  assert.strictEqual(formattedMessage.qTextRender.text, formatQTextForDisplay(firstRaw).text);
+  const fallbackMessage = secondPanel.posted.filter(value => value.type === 'settings').at(-1);
+  assert.strictEqual(fallbackMessage.qTextRender.text, secondRaw);
+  assert.strictEqual(fallbackMessage.qTextRender.formatted, false);
+
+  harness.setSetting('vscode-kdb.results.qText.syntaxHighlighting', false);
+  harness.setSetting('vscode-kdb.results.qText.displayFormatting', false);
+  KxResultsPanel.configurationChanged(configurationEvent('vscode-kdb.results.qText'));
+  for (const panel of [firstPanel, secondPanel]) {
+    const message = panel.posted.filter(value => value.type === 'settings').at(-1);
+    assert.strictEqual(message.settings.qTextSyntaxHighlighting, false);
+    assert.strictEqual(message.settings.qTextDisplayFormatting, false);
+    assert.strictEqual(message.qTextRender.text, panel === firstPanel ? firstRaw : secondRaw);
+  }
+
+  const replacementRaw = '{[z]z+1;z}';
+  KxResultsPanel.showResult(harness.context, {
+    mode: 'text',
+    text: replacementRaw,
+    query: 'value h',
+    connectionName: 'local',
+    elapsedMs: 3,
+    messages: [],
+  });
+  const replacementMetadata = firstPanel.posted.filter(message => message.type === 'resultMeta').at(-1).result;
+  assert.strictEqual(replacementMetadata.text, replacementRaw, 'a reused panel must keep the new raw qText');
+  assert.strictEqual(replacementMetadata.qTextRender.text, replacementRaw);
+  await harness.emitMessage(0, { type: 'copyText', version: replacementMetadata.version });
+  assert.strictEqual(harness.clipboard.at(-1), replacementRaw, 'copy must use underlying raw qText, never formatted display text');
+
+  firstPanel.dispose();
+  secondPanel.dispose();
 }
 
 function testConnections() {
@@ -1770,6 +2185,21 @@ function testConnectionFormModel() {
   assert.strictEqual(passwordUpdateForForm('edit', '', true, true), null, 'clear is explicit');
   assert.throws(() => passwordUpdateForForm('add', '', true, false), /no saved password/i);
   assert.throws(() => passwordUpdateForForm('edit', '', true, false), /no saved password/i);
+
+  const namespaceProbe = connectionTestNamespaceQuery('.analytics.market');
+  assert.strictEqual(
+    namespaceProbe,
+    '(string system"d";99h=type value `.analytics.market;string system"d")'
+  );
+  assert.ok(!namespaceProbe.includes('{'), 'connection testing must not inject a server-side lambda');
+  assert.ok(!/system\s*"d\s+/.test(namespaceProbe), 'the namespace probe must never change the q session namespace');
+  assert.strictEqual(connectionTestNamespaceResultIsSafe(['.', true, '.']), true);
+  assert.strictEqual(connectionTestNamespaceResultIsSafe(['.', false, '.']), false);
+  assert.strictEqual(connectionTestNamespaceResultIsSafe(['.', true, '.changed']), false);
+  assert.strictEqual(connectionTestNamespaceResultIsSafe(['.', true]), false);
+  assert.throws(() => connectionTestNamespaceQuery('.bad-name'), /namespace/i);
+  assert.throws(() => connectionTestNamespaceQuery('.'), /does not require/i);
+  assert.strictEqual(CONNECTION_TEST_QUERY, '0b', 'the standalone query probe must be a read-only literal');
 }
 
 async function testConnectionFormPanelLifecycle() {
@@ -1905,6 +2335,322 @@ async function testConnectionFormPanelLifecycle() {
   const closedCompletion = closedPanel.waitForCompletion();
   closeHarness.panel.dispose();
   assert.strictEqual(await closedCompletion, 'cancelled', 'closing the tab must release command callers');
+
+  const testHarness = createVscodePanelHarness();
+  const { ConnectionFormPanel: TestFormPanel } = requireOutWithVscode('connection-form-panel', testHarness.vscode);
+  const testAttempts = [];
+  const panelSecret = ['panel', 'test', 'secret'].join('-');
+  const testPanel = new TestFormPanel(initial, {
+    async onSave() {},
+    onTest(payload, signal, onProgress) {
+      const pending = deferred();
+      const attempt = { payload, signal, pending };
+      testAttempts.push(attempt);
+      onProgress({
+        phase: 'connect',
+        endpoint: 'unsaved.example.test:6100',
+        usedSavedPassword: true,
+      });
+      return pending.promise;
+    },
+  });
+  const testPayload = { password: panelSecret, sentinel: 'current-unsaved-values' };
+  const firstRun = testPanel.onMessage({ type: 'test', session: testPanel.session, payload: testPayload });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(testAttempts.length, 1);
+  const firstTestId = testHarness.posted.find(message => message.type === 'testStatus').testId;
+
+  const secondRun = testPanel.onMessage({ type: 'test', session: testPanel.session, payload: testPayload });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(testAttempts.length, 2);
+  assert.strictEqual(testAttempts[0].signal.aborted, true, 'a new test must cancel the previous temporary test');
+  const secondRunning = testHarness.posted.filter(message =>
+    message.type === 'testStatus' && message.state === 'running'
+  ).at(-1);
+  assert.ok(secondRunning.testId > firstTestId);
+  await testPanel.onMessage({
+    type: 'cancelTest',
+    session: testPanel.session,
+    testId: firstTestId,
+  });
+  assert.strictEqual(testAttempts[1].signal.aborted, false, 'a stale cancel message must not cancel the replacement test');
+  testAttempts[1].pending.resolve({
+    endpoint: 'unsaved.example.test:6100',
+    connectTimeoutMs: 1250,
+    queryTimeoutMs: 2500,
+    namespaceTested: true,
+    usedSavedPassword: true,
+  });
+  await secondRun;
+  testAttempts[0].pending.resolve({
+    endpoint: 'stale.example.test:1',
+    connectTimeoutMs: 1,
+    queryTimeoutMs: 1,
+    namespaceTested: false,
+    usedSavedPassword: false,
+  });
+  await firstRun;
+  const successfulStatuses = testHarness.posted.filter(message =>
+    message.type === 'testStatus' && message.state === 'success'
+  );
+  assert.strictEqual(successfulStatuses.length, 1, 'a superseded test must not overwrite current status');
+  assert.strictEqual(successfulStatuses[0].testId, secondRunning.testId);
+  assert.match(successfulStatuses[0].message, /saved password from VS Code SecretStorage was used/i);
+  assert.ok(!JSON.stringify(testHarness.posted).includes(panelSecret), 'the extension must never reflect a form password');
+  assert.ok(!JSON.stringify(testHarness.posted).includes('stale.example.test'), 'stale completions must not post diagnostics');
+
+  const explicitCancelRun = testPanel.onMessage({
+    type: 'test',
+    session: testPanel.session,
+    payload: testPayload,
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  const cancelAttempt = testAttempts.at(-1);
+  const cancelTestId = testHarness.posted.filter(message =>
+    message.type === 'testStatus' && message.state === 'running'
+  ).at(-1).testId;
+  await testPanel.onMessage({
+    type: 'cancelTest',
+    session: testPanel.session,
+    testId: cancelTestId,
+  });
+  assert.strictEqual(cancelAttempt.signal.aborted, true);
+  assert.match(testHarness.posted.at(-1).message, /^Cancel phase:/);
+  cancelAttempt.pending.reject(new ConnectionTestError('cancel', 'unsaved.example.test:6100'));
+  await explicitCancelRun;
+
+  const validationHarness = createVscodePanelHarness();
+  const { ConnectionFormPanel: ValidationFormPanel } = requireOutWithVscode(
+    'connection-form-panel',
+    validationHarness.vscode
+  );
+  const validationPanel = new ValidationFormPanel(initial, {
+    async onSave() {},
+    async onTest() {
+      throw new ConnectionFormValidationError('Port must be an integer from 1 to 65535.', 'port');
+    },
+  });
+  await validationPanel.onMessage({ type: 'test', session: validationPanel.session, payload: {} });
+  assert.deepStrictEqual(
+    validationHarness.posted.find(message => message.type === 'error'),
+    { type: 'error', field: 'port', message: 'Port must be an integer from 1 to 65535.' }
+  );
+  assert.deepStrictEqual(
+    validationHarness.posted.filter(message => message.type === 'testStatus').at(-1).phase,
+    'validation'
+  );
+
+  const saveTestHarness = createVscodePanelHarness();
+  const { ConnectionFormPanel: SaveTestFormPanel } = requireOutWithVscode(
+    'connection-form-panel',
+    saveTestHarness.vscode
+  );
+  const pendingSaveTest = deferred();
+  let saveTestSignal;
+  const savePayloads = [];
+  const saveTestPanel = new SaveTestFormPanel(initial, {
+    async onSave(payload) {
+      savePayloads.push(payload);
+    },
+    async onTest(_payload, signal) {
+      saveTestSignal = signal;
+      return pendingSaveTest.promise;
+    },
+  });
+  const pendingRun = saveTestPanel.onMessage({ type: 'test', session: saveTestPanel.session, payload: testPayload });
+  await new Promise(resolve => setImmediate(resolve));
+  const saveCompletion = saveTestPanel.waitForCompletion();
+  await saveTestPanel.onMessage({ type: 'save', session: saveTestPanel.session, payload: { save: true } });
+  assert.strictEqual(saveTestSignal.aborted, true, 'Save must cancel the temporary test before persisting');
+  assert.deepStrictEqual(savePayloads, [{ save: true }]);
+  assert.strictEqual(await saveCompletion, 'saved');
+  pendingSaveTest.reject(new ConnectionTestError('cancel', 'unsaved.example.test:6100'));
+  await pendingRun;
+
+  const closeTestHarness = createVscodePanelHarness();
+  const { ConnectionFormPanel: CloseTestFormPanel } = requireOutWithVscode(
+    'connection-form-panel',
+    closeTestHarness.vscode
+  );
+  const pendingCloseTest = deferred();
+  let closeTestSignal;
+  const closeTestPanel = new CloseTestFormPanel(initial, {
+    async onSave() {},
+    async onTest(_payload, signal) {
+      closeTestSignal = signal;
+      return pendingCloseTest.promise;
+    },
+  });
+  const closeRun = closeTestPanel.onMessage({ type: 'test', session: closeTestPanel.session, payload: {} });
+  await new Promise(resolve => setImmediate(resolve));
+  const closeTestCompletion = closeTestPanel.waitForCompletion();
+  closeTestHarness.panel.dispose();
+  assert.strictEqual(closeTestSignal.aborted, true, 'closing the form must cancel its temporary transport');
+  assert.strictEqual(await closeTestCompletion, 'cancelled');
+  pendingCloseTest.reject(new ConnectionTestError('cancel', 'panel.example.test:5000'));
+  await closeRun;
+}
+
+async function testConnectionFormHostTesting() {
+  const vscodeHarness = createVscodeTreeHarness();
+  const { ConnectionCommands } = requireOutWithVscode('connection-commands', vscodeHarness.vscode);
+  const savedSecret = ['saved', 'host', 'secret'].join('-');
+  const enteredSecret = ['entered', 'host', 'secret'].join('-');
+  const editing = validateConnection({
+    id: 'kx-host-test',
+    name: 'Saved profile',
+    host: 'saved.example.test',
+    port: 5000,
+    database: '.',
+    username: 'saved-user',
+  });
+  let passwordReads = 0;
+  const forbiddenMutations = [];
+  const store = {
+    connections: () => [editing],
+    async password(id) {
+      passwordReads++;
+      assert.strictEqual(id, editing.id);
+      return savedSecret;
+    },
+    async add() { forbiddenMutations.push('add'); },
+    async update() { forbiddenMutations.push('update'); },
+    async remove() { forbiddenMutations.push('remove'); },
+    async setActiveConnection() { forbiddenMutations.push('setActive'); },
+  };
+  const temporaryTests = [];
+  const manager = {
+    async testTemporary(connection, options) {
+      temporaryTests.push({ connection, options });
+      options.onPhase('connect');
+      options.onPhase('handshake');
+      options.onPhase('namespace');
+      options.onPhase('query');
+      return { connectTimeoutMs: 0, queryTimeoutMs: 9876 };
+    },
+    connect() { throw new Error('form testing must not touch an active saved connection'); },
+    disconnect() { throw new Error('form testing must not touch an active saved connection'); },
+  };
+  let treeRefreshes = 0;
+  const commands = new ConnectionCommands(store, manager, { refresh: () => treeRefreshes++ });
+  const payload = {
+    name: ' Unsaved profile ',
+    host: 'unsaved.example.test',
+    port: '6100',
+    database: 'analytics',
+    username: 'unsaved-user',
+    password: '',
+    clearPassword: false,
+    connectTimeoutMs: '0',
+    queryTimeoutMs: '9876',
+  };
+  const progress = [];
+  const controller = new AbortController();
+  const result = await commands.testConnectionForm(
+    payload,
+    editing.id,
+    editing,
+    true,
+    controller.signal,
+    value => progress.push(value)
+  );
+  assert.deepStrictEqual(temporaryTests[0].connection, {
+    id: editing.id,
+    name: 'Unsaved profile',
+    host: 'unsaved.example.test',
+    port: 6100,
+    database: '.analytics',
+    username: 'unsaved-user',
+    connectTimeoutMs: 0,
+    queryTimeoutMs: 9876,
+  });
+  assert.strictEqual(temporaryTests[0].options.password, savedSecret);
+  assert.strictEqual(temporaryTests[0].options.signal, controller.signal);
+  assert.deepStrictEqual(progress.map(item => item.phase), ['connect', 'handshake', 'namespace', 'query']);
+  assert.ok(progress.every(item => item.usedSavedPassword === true));
+  assert.deepStrictEqual(result, {
+    endpoint: 'unsaved.example.test:6100',
+    connectTimeoutMs: 0,
+    queryTimeoutMs: 9876,
+    namespaceTested: true,
+    usedSavedPassword: true,
+  });
+  assert.strictEqual(passwordReads, 1);
+  assert.deepStrictEqual(forbiddenMutations, []);
+  assert.strictEqual(treeRefreshes, 0);
+  assert.ok(!JSON.stringify(result).includes(savedSecret), 'saved secrets must not be returned to the renderer');
+
+  await commands.testConnectionForm(
+    { ...payload, password: enteredSecret },
+    editing.id,
+    editing,
+    true,
+    new AbortController().signal,
+    () => undefined
+  );
+  assert.strictEqual(temporaryTests.at(-1).options.password, enteredSecret);
+  assert.strictEqual(passwordReads, 1, 'an entered password must not read or combine with the saved secret');
+
+  await commands.testConnectionForm(
+    { ...payload, clearPassword: true },
+    editing.id,
+    editing,
+    true,
+    new AbortController().signal,
+    () => undefined
+  );
+  assert.strictEqual(temporaryTests.at(-1).options.password, undefined);
+  assert.strictEqual(passwordReads, 1, 'explicit Clear must not fetch the saved secret for testing');
+
+  const testsBeforeValidation = temporaryTests.length;
+  await assert.rejects(
+    () => commands.testConnectionForm(
+      { ...payload, port: 'not-a-port' },
+      editing.id,
+      editing,
+      true,
+      new AbortController().signal,
+      () => undefined
+    ),
+    error => error instanceof ConnectionFormValidationError && error.field === 'port'
+  );
+  assert.strictEqual(temporaryTests.length, testsBeforeValidation, 'validation failure must not open a socket');
+
+  const canceled = new AbortController();
+  canceled.abort();
+  await assert.rejects(
+    () => commands.testConnectionForm(
+      payload,
+      editing.id,
+      editing,
+      true,
+      canceled.signal,
+      () => undefined
+    ),
+    error => error instanceof ConnectionTestError && error.phase === 'cancel'
+  );
+  assert.strictEqual(temporaryTests.length, testsBeforeValidation);
+
+  const secretFailureCommands = new ConnectionCommands({
+    connections: () => [editing],
+    async password() {
+      throw new Error(`injected SecretStorage failure ${savedSecret}`);
+    },
+  }, manager, { refresh() {} });
+  await assert.rejects(
+    () => secretFailureCommands.testConnectionForm(
+      payload,
+      editing.id,
+      editing,
+      true,
+      new AbortController().signal,
+      () => undefined
+    ),
+    error => error instanceof ConnectionTestError &&
+      error.phase === 'validation' &&
+      !error.message.includes(savedSecret)
+  );
+  assert.deepStrictEqual(forbiddenMutations, []);
 }
 
 async function testConnectionStoreTransactions() {
@@ -2192,10 +2938,18 @@ async function testConnectionManagerLifecycle() {
   };
   const fakeVscode = createVscodeRuntimeMock(runtimeSettings);
   class FakeKdbQError extends Error {}
+  class FakeKdbIpcError extends Error {
+    constructor(message, phase, code) {
+      super(message);
+      this.phase = phase;
+      this.code = code;
+    }
+  }
   const capturedQueries = [];
   const createdClients = [];
   let nextConnectError;
   let nextQueryError;
+  let nextQueryDeferred;
   class FakeKdbIpcClient {
     constructor(options) {
       this.options = options;
@@ -2205,11 +2959,15 @@ async function testConnectionManagerLifecycle() {
     }
 
     async connect() {
+      this.options.onDidPhase?.('connect', 'start');
       if (nextConnectError) {
         const error = nextConnectError;
         nextConnectError = undefined;
         throw error;
       }
+      this.options.onDidPhase?.('connect', 'success');
+      this.options.onDidPhase?.('handshake', 'start');
+      this.options.onDidPhase?.('handshake', 'success');
     }
 
     async close() {
@@ -2236,12 +2994,27 @@ async function testConnectionManagerLifecycle() {
         nextQueryError = undefined;
         throw error;
       }
+      if (nextQueryDeferred) {
+        const pending = nextQueryDeferred;
+        nextQueryDeferred = undefined;
+        return pending.promise;
+      }
+      if (query === CONNECTION_TEST_QUERY) {
+        return false;
+      }
+      if (query === connectionTestNamespaceQuery('.analytics')) {
+        return ['.', true, '.'];
+      }
       return 2;
     }
   }
   const { ConnectionManager } = requireOutWithMocks('connection-manager', {
     vscode: fakeVscode,
-    './q-ipc': { KdbIpcClient: FakeKdbIpcClient, KdbQError: FakeKdbQError },
+    './q-ipc': {
+      KdbIpcClient: FakeKdbIpcClient,
+      KdbIpcError: FakeKdbIpcError,
+      KdbQError: FakeKdbQError,
+    },
   });
   const connection = validateConnection({
     id: 'kx-lifecycle',
@@ -2437,6 +3210,93 @@ async function testConnectionManagerLifecycle() {
   assert.strictEqual(testClient.options.connectTimeoutMs, 0);
   assert.strictEqual(testClient.options.queryTimeoutMs, 9750);
   assert.strictEqual(testClient.closed, true, 'test connections must always be temporary');
+  assert.strictEqual(timeoutManager.isConnected(changedRuntime.id), true, 'testing must not disrupt the saved active client');
+
+  const temporaryPhases = [];
+  const queriesBeforeNamespaceTest = capturedQueries.length;
+  const formSecret = ['temporary', 'form', 'secret'].join('-');
+  const temporaryTimeouts = await timeoutManager.testTemporary(
+    { ...changedRuntime, database: '.analytics' },
+    { password: formSecret, onPhase: phase => temporaryPhases.push(phase) }
+  );
+  assert.deepStrictEqual(temporaryTimeouts, { connectTimeoutMs: 0, queryTimeoutMs: 9750 });
+  assert.deepStrictEqual(temporaryPhases, ['connect', 'handshake', 'namespace', 'query']);
+  assert.deepStrictEqual(capturedQueries.slice(queriesBeforeNamespaceTest), [
+    connectionTestNamespaceQuery('.analytics'),
+    CONNECTION_TEST_QUERY,
+  ]);
+  const namespacedTestClient = createdClients.at(-1);
+  assert.strictEqual(namespacedTestClient.options.password, formSecret);
+  assert.strictEqual(namespacedTestClient.closed, true);
+  assert.notStrictEqual(namespacedTestClient, replacementClient);
+  assert.strictEqual(replacementClient.closed, false, 'the active saved transport must remain untouched');
+
+  const diagnosticSecret = ['diagnostic', 'secret'].join('-');
+  nextConnectError = new FakeKdbIpcError(
+    `handshake rejected ${diagnosticSecret} ${CONNECTION_TEST_QUERY}`,
+    'handshake',
+    'EAUTH'
+  );
+  await assert.rejects(
+    () => timeoutManager.testTemporary(changedRuntime, { password: diagnosticSecret }),
+    error => error instanceof ConnectionTestError &&
+      error.phase === 'handshake' &&
+      error.code === 'EAUTH' &&
+      !error.message.includes(diagnosticSecret) &&
+      !error.message.includes(CONNECTION_TEST_QUERY)
+  );
+  assert.strictEqual(createdClients.at(-1).closed, true, 'handshake failures must close the temporary client');
+
+  nextConnectError = new FakeKdbIpcError('connect refused', 'connect', 'ECONNREFUSED');
+  await assert.rejects(
+    () => timeoutManager.testTemporary(changedRuntime),
+    error => error instanceof ConnectionTestError &&
+      error.phase === 'connect' &&
+      /ECONNREFUSED/.test(error.message)
+  );
+  assert.strictEqual(createdClients.at(-1).closed, true);
+
+  nextQueryError = new FakeKdbQError(`namespace request failed ${diagnosticSecret}`);
+  await assert.rejects(
+    () => timeoutManager.testTemporary({ ...changedRuntime, database: '.analytics' }),
+    error => error instanceof ConnectionTestError &&
+      error.phase === 'namespace' &&
+      !error.message.includes(diagnosticSecret) &&
+      !error.message.includes(connectionTestNamespaceQuery('.analytics'))
+  );
+  assert.strictEqual(createdClients.at(-1).closed, true);
+
+  nextQueryError = new Error(`query request failed ${diagnosticSecret} ${CONNECTION_TEST_QUERY}`);
+  await assert.rejects(
+    () => timeoutManager.testTemporary(changedRuntime),
+    error => error instanceof ConnectionTestError &&
+      error.phase === 'query' &&
+      !error.message.includes(diagnosticSecret) &&
+      !error.message.includes(CONNECTION_TEST_QUERY)
+  );
+  assert.strictEqual(createdClients.at(-1).closed, true);
+
+  const testCancellation = new AbortController();
+  const pendingCancellationQuery = deferred();
+  nextQueryDeferred = pendingCancellationQuery;
+  const canceledTestPromise = timeoutManager.testTemporary(changedRuntime, {
+    signal: testCancellation.signal,
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  const canceledClient = createdClients.at(-1);
+  testCancellation.abort();
+  assert.strictEqual(canceledClient.canceled, true, 'abort must destroy the in-flight temporary transport');
+  assert.strictEqual(capturedQueries.at(-1), CONNECTION_TEST_QUERY);
+  // The real client rejects a pending query in cancel(); release the deterministic fake the same way.
+  pendingCancellationQuery.reject(new Error('fake transport canceled'));
+  await assert.rejects(
+    canceledTestPromise,
+    error => error instanceof ConnectionTestError &&
+      error.phase === 'cancel' &&
+      !error.message.includes('fake transport canceled')
+  );
+  assert.strictEqual(canceledClient.closed, true);
 
   runtimeSettings.connectionTimeoutMs = 4321;
   runtimeSettings.queryTimeoutMs = null;
@@ -2538,10 +3398,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.1.4');
+  assert.strictEqual(manifest.version, '0.1.5');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.1.4');
-  assert.strictEqual(packageLock.packages[''].version, '0.1.4');
+  assert.strictEqual(packageLock.version, '0.1.5');
+  assert.strictEqual(packageLock.packages[''].version, '0.1.5');
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -2769,6 +3629,19 @@ function testManifestAndSources() {
   assert.strictEqual(performanceTraceSetting.default, false);
   assert.match(performanceTraceSetting.description, /Output > KX/);
   assert.match(performanceTraceSetting.description, /Query text and credentials are omitted/);
+  const qTextSyntaxSetting = configurationProperties['vscode-kdb.results.qText.syntaxHighlighting'];
+  assert.strictEqual(qTextSyntaxSetting.type, 'boolean');
+  assert.strictEqual(qTextSyntaxSetting.default, false);
+  assert.match(qTextSyntaxSetting.description, /result webviews only/i);
+  assert.match(qTextSyntaxSetting.description, /theme colors/i);
+  assert.match(qTextSyntaxSetting.description, /does not change q source-editor/i);
+  const qTextFormattingSetting = configurationProperties['vscode-kdb.results.qText.displayFormatting'];
+  assert.strictEqual(qTextFormattingSetting.type, 'boolean');
+  assert.strictEqual(qTextFormattingSetting.default, false);
+  assert.match(qTextFormattingSetting.description, /non-mutating display-only/i);
+  assert.match(qTextFormattingSetting.description, /lambda, projection, and block/i);
+  assert.match(qTextFormattingSetting.description, /unsupported, ambiguous, or malformed text is shown exactly as returned/i);
+  assert.match(qTextFormattingSetting.description, /q is never evaluated/i);
   assert.strictEqual(Object.keys(configurationProperties).some(key => /^sqltools\./i.test(key)), false);
 
   const sourceFiles = walkFiles(path.join(ROOT, 'src')).filter(file => file.endsWith('.ts'));
@@ -2786,7 +3659,7 @@ function testManifestAndSources() {
     false,
     'package-lock.json must not contain SQLTools or vscode-q packages'
   );
-  const forbiddenHeavyDependencies = /(?:ag-grid|plotly|perspective|tree-sitter|language-server|vscode-languageclient|notebook)/i;
+  const forbiddenHeavyDependencies = /(?:ag-grid|plotly|perspective|shiki|prism|monaco|tree-sitter|language-server|vscode-languageclient|notebook)/i;
   assert.strictEqual(Object.keys(dependencies).some(name => forbiddenHeavyDependencies.test(name)), false);
 
   const storeSource = readSource('connection-store.ts');
@@ -2806,7 +3679,11 @@ function testManifestAndSources() {
   const panelSource = readSource('connection-form-panel.ts');
   const commandsSource = readSource('connection-commands.ts');
   const modelSource = readSource('connection-form-model.ts');
+  const managerSource = readSource('connection-manager.ts');
+  const ipcSource = readSource('q-ipc.ts');
+  const connectionTestSource = readSource('connection-test.ts');
   const extensionSource = readSource('extension.ts');
+  const resultsPanelSource = readSource('kx-results-panel.ts');
   const featureControlsSource = readSource('feature-controls.ts');
   const serverExplorerSource = readSource('server-explorer.ts');
   const historySource = readSource('query-history.ts');
@@ -2858,6 +3735,14 @@ function testManifestAndSources() {
   assert.match(extensionSource, /historyKind: hasSelection \? 'selection' : 'line'/);
   assert.match(extensionSource, /historyKind: 'script'/);
   assert.match(extensionSource, /manager\.executeInConfiguredNamespace\(connection, text, onIssued\)/);
+  assert.match(extensionSource, /KxResultsPanel\.configurationChanged\(event\)/);
+  assert.match(resultsPanelSource, /event\.affectsConfiguration\('vscode-kdb\.results\.qText'\)/);
+  assert.match(resultsPanelSource, /qTextRenderModel\(this\.result\.text, qTextRenderOptions\(settings\)\)/);
+  const copyQTextSource = sourceSection(resultsPanelSource, '  private async copyText(', '  private async exportText(');
+  assert.match(copyQTextSource, /clipboard\.writeText\(this\.result\.text\)/);
+  const exportQTextSource = sourceSection(resultsPanelSource, '  private async exportText(', '  private async confirmLargeCopyExport(');
+  assert.match(exportQTextSource, /const text = this\.result\.text;/);
+  assert.match(exportQTextSource, /Buffer\.from\(text, 'utf8'\)/);
   const executeQTextSource = sourceSection(
     extensionSource,
     'async function executeQText(',
@@ -2939,6 +3824,21 @@ function testManifestAndSources() {
   assert.match(panelSource, /public waitForCompletion\(\): Promise<ConnectionFormResult>/);
   assert.match(panelSource, /this\.finish\('cancelled'\)/);
   assert.match(panelSource, /localResourceRoots: \[\]/);
+  assert.match(panelSource, /private nextTestId = 1;/);
+  assert.match(panelSource, /this\.activeTest !== test/);
+  assert.match(panelSource, /test\.controller\.abort\(\)/);
+  assert.match(panelSource, /await this\.cancelActiveTest\(true\);[\s\S]*?this\.callbacks\.onSave/);
+  assert.match(commandsSource, /onTest: \(payload, signal, onProgress\) => this\.testConnectionForm/);
+  assert.match(commandsSource, /password = await this\.store\.password\(editing\.id\)/);
+  assert.match(commandsSource, /this\.manager\.testTemporary\(parsed\.connection/);
+  assert.match(managerSource, /public async testTemporary\(/);
+  assert.match(managerSource, /finally \{[\s\S]*?await client\.close\(\)/);
+  assert.match(managerSource, /connectionTestNamespaceResultIsSafe/);
+  assert.match(ipcSource, /public readonly phase\?: KdbIpcPhase/);
+  assert.match(connectionTestSource, /export const CONNECTION_TEST_QUERY = '0b'/);
+  assert.match(connectionTestSource, /99h=type value/);
+  assert.ok(!/queryInNamespace|qScriptInNamespace/.test(connectionTestSource));
+  assert.ok(!/system\\?"d\s+/.test(connectionTestSource), 'temporary testing must not change the remote namespace');
 
   const htmlHarness = createVscodePanelHarness();
   const {
@@ -2978,10 +3878,19 @@ function testManifestAndSources() {
   assert.match(formHtml, /TCP connect and q IPC handshake/i);
   assert.match(formHtml, /timer starts when (?:this connection sends|the query is sent)/i);
   assert.match(formHtml, /id="formError"[^>]*role="alert"[^>]*aria-live="assertive"[^>]*tabindex="-1"/);
+  assert.match(formHtml, /id="testStatus"[^>]*role="status"[^>]*aria-live="polite"[^>]*aria-atomic="true"/);
   assert.match(formHtml, /id="save"[^>]*type="submit"[^>]*>Save Connection<\/button>/);
+  assert.match(formHtml, /id="testConnection"[^>]*type="button"[^>]*>Test Connection<\/button>/);
+  assert.match(formHtml, /id="cancelTest"[^>]*type="button"[^>]*>Cancel Test<\/button>/);
   assert.match(formHtml, /id="cancel"[^>]*>Cancel<\/button>/);
   assert.match(formHtml, /id="delete"[^>]*>Delete Connection<\/button>/);
   assert.match(formHtml, /form\.addEventListener\('submit'/);
+  assert.match(formHtml, /testConnection\.addEventListener\('click'/);
+  assert.match(formHtml, /post\('test', formPayload\(\)\)/);
+  assert.match(formHtml, /post\('cancelTest'[^\n]*testId: activeTestId/);
+  assert.match(formHtml, /message\.testId === activeTestId && message\.sequence <= activeTestSequence/);
+  assert.match(formHtml, /save\.disabled = busy \|\| !form\.checkValidity\(\)/);
+  assert.ok(!/save\.disabled\s*=\s*[^;]*testing/.test(formHtml), 'testing must not disable Save');
   assert.match(formHtml, /event\.key === 'Escape'/);
   assert.match(formHtml, /window\.setTimeout\(\(\) => controls\.name\.focus\(\)/);
   assert.match(formHtml, /controls\.password\.value = ''/);
@@ -3408,6 +4317,159 @@ function createVscodePanelHarness() {
         createWebviewPanel(viewType, title, column, options) {
           harness.created = { viewType, title, column, options };
           return panel;
+        },
+      },
+    },
+  };
+  return harness;
+}
+
+function createQTextResultsPanelHarness() {
+  const panels = [];
+  const updates = [];
+  const clipboard = [];
+  const settings = Object.create(null);
+  const context = {
+    extensionPath: ROOT,
+    globalState: {
+      get() {
+        return undefined;
+      },
+      async update() {
+        return undefined;
+      },
+    },
+  };
+
+  class Disposable {
+    constructor(dispose) {
+      this.disposeCallback = dispose;
+    }
+    dispose() {
+      this.disposeCallback();
+    }
+  }
+
+  const harness = {
+    panels,
+    updates,
+    clipboard,
+    context,
+    setSetting(key, value) {
+      settings[key] = value;
+    },
+    async emitMessage(panelIndex, message) {
+      const panel = panels[panelIndex];
+      assert.ok(panel, `result panel ${panelIndex} does not exist`);
+      [...panel.messageListeners].forEach(listener => listener(message));
+      await new Promise(resolve => setImmediate(resolve));
+    },
+    vscode: {
+      ConfigurationTarget: { Global: 'global' },
+      Disposable,
+      Uri: {
+        file(fsPath) {
+          return {
+            fsPath,
+            toString() {
+              return `file://${fsPath}`;
+            },
+          };
+        },
+      },
+      ViewColumn: {
+        Active: 'active',
+        Beside: 'beside',
+        One: 'one',
+        Two: 'two',
+        Three: 'three',
+      },
+      env: {
+        clipboard: {
+          async writeText(value) {
+            clipboard.push(value);
+          },
+        },
+      },
+      workspace: {
+        getConfiguration(section) {
+          return {
+            get(key, fallback) {
+              const fullKey = `${section}.${key}`;
+              return Object.prototype.hasOwnProperty.call(settings, fullKey) ? settings[fullKey] : fallback;
+            },
+            async update(key, value, target) {
+              const fullKey = `${section}.${key}`;
+              settings[fullKey] = value;
+              updates.push({ key: fullKey, value, target });
+            },
+          };
+        },
+      },
+      window: {
+        activeTextEditor: undefined,
+        createWebviewPanel(viewType, title, viewColumn, options) {
+          const disposeListeners = new Set();
+          const messageListeners = new Set();
+          const viewStateListeners = new Set();
+          const posted = [];
+          const webview = {
+            cspSource: 'vscode-webview://qtext-results-test',
+            html: '',
+            asWebviewUri(uri) {
+              return `vscode-webview-resource://${uri.fsPath}`;
+            },
+            async postMessage(message) {
+              posted.push(message);
+              return true;
+            },
+            onDidReceiveMessage(listener) {
+              messageListeners.add(listener);
+              return { dispose: () => messageListeners.delete(listener) };
+            },
+          };
+          const panel = {
+            viewType,
+            title,
+            viewColumn,
+            options,
+            webview,
+            posted,
+            messageListeners,
+            active: true,
+            visible: true,
+            disposed: false,
+            reveal(column) {
+              panel.viewColumn = column;
+              panel.visible = true;
+              panel.active = true;
+            },
+            onDidDispose(listener) {
+              disposeListeners.add(listener);
+              return { dispose: () => disposeListeners.delete(listener) };
+            },
+            onDidChangeViewState(listener) {
+              viewStateListeners.add(listener);
+              return { dispose: () => viewStateListeners.delete(listener) };
+            },
+            dispose() {
+              if (panel.disposed) {
+                return;
+              }
+              panel.disposed = true;
+              panel.active = false;
+              panel.visible = false;
+              [...disposeListeners].forEach(listener => listener());
+            },
+          };
+          panels.push(panel);
+          return panel;
+        },
+        showErrorMessage() {
+          return undefined;
+        },
+        showWarningMessage() {
+          return undefined;
         },
       },
     },

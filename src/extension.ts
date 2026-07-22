@@ -105,6 +105,7 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.workspace.onDidChangeConfiguration(event => {
       features.configurationChanged(event);
+      KxResultsPanel.configurationChanged(event);
       if (event.affectsConfiguration('vscode-kdb.performance.trace')) {
         updatePerfTraceSetting();
       }

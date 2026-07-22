@@ -13,6 +13,14 @@ import {
   normalizeChartType,
 } from './charting';
 import {
+  captureChartFullXRange,
+  chartZoomDataAfterResponse,
+  chartRangeIsZoomed,
+  isValidChartRange,
+  planChartZoomReset,
+} from './chart-zoom';
+export { chartRangeIsZoomed } from './chart-zoom';
+import {
   ArrayDisplayFormat,
   CellRange,
   CellTextOptions,
@@ -39,6 +47,7 @@ import {
   localDataServerFullExportCellLimitValue,
 } from './local-data-server';
 import { endPerfSpan, isPerfTraceEnabled, perfSpan } from './perf';
+import { QTextRenderModel, qTextRenderModel } from './q-text';
 
 type KxPanelResultMode = 'table' | 'text';
 
@@ -76,6 +85,7 @@ interface KxPanelMetadata {
   hiddenColumnNames: string[];
   rowCount: number;
   text?: string;
+  qTextRender?: QTextRenderModel;
   query: string;
   connectionName: string;
   elapsedMs: number;
@@ -116,6 +126,8 @@ interface KxPanelSettings {
   chartDecimalPlaces: number;
   chartZoomMinSampledPoints: number;
   chartZoomMaxSampledPoints: number;
+  qTextSyntaxHighlighting: boolean;
+  qTextDisplayFormatting: boolean;
   arrayDisplayFormat: ArrayDisplayFormat;
   functionDisplayStrategy: KxPanelQResultDisplayStrategy;
   dictionaryDisplayStrategy: KxPanelQResultDisplayStrategy;
@@ -132,11 +144,6 @@ interface SavedChartSelection {
   highColumn?: string;
   lowColumn?: string;
   closeColumn?: string;
-}
-
-interface ChartRange {
-  readonly min: number;
-  readonly max: number;
 }
 
 interface KxPanelShowOptions {
@@ -189,6 +196,8 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   chartDecimalPlaces: CHART_DECIMAL_PLACES_DEFAULT,
   chartZoomMinSampledPoints: CHART_ZOOM_MIN_SAMPLED_POINTS,
   chartZoomMaxSampledPoints: CHART_ZOOM_MAX_SAMPLED_POINTS,
+  qTextSyntaxHighlighting: false,
+  qTextDisplayFormatting: false,
   arrayDisplayFormat: 'commaSpace',
   functionDisplayStrategy: 'qText',
   dictionaryDisplayStrategy: 'grid',
@@ -409,6 +418,17 @@ export class KxResultsPanel {
         console.error(toError(error).message);
       });
     });
+  }
+
+  public static configurationChanged(event: vscode.ConfigurationChangeEvent): void {
+    if (event.affectsConfiguration('vscode-kdb.results.qText')) {
+      KxResultsPanel.postSettingsToOpenPanels();
+    }
+  }
+
+  private static postSettingsToOpenPanels(): void {
+    const settings = panelSettings();
+    KxResultsPanel.panels.forEach(panel => panel.postSettings(settings));
   }
 
   private constructor(context: vscode.ExtensionContext, viewColumn: vscode.ViewColumn = initialResultViewColumn()) {
@@ -659,6 +679,13 @@ export class KxResultsPanel {
     }
   }
 
+  private postSettings(settings: KxPanelSettings = panelSettings()): void {
+    const qTextRender = this.result && isTextPanelResult(this.result)
+      ? qTextRenderModel(this.result.text, qTextRenderOptions(settings))
+      : undefined;
+    this.post({ type: 'settings', settings, version: this.version, qTextRender });
+  }
+
   private metadataForResult(result: KxPanelResult): KxPanelMetadata {
     if (isTextPanelResult(result)) {
       const settings = panelSettings();
@@ -670,6 +697,7 @@ export class KxResultsPanel {
         hiddenColumnNames: [],
         rowCount: 0,
         text: result.text,
+        qTextRender: qTextRenderModel(result.text, qTextRenderOptions(settings)),
         query: result.query,
         connectionName: result.connectionName,
         elapsedMs: result.elapsedMs,
@@ -1307,7 +1335,7 @@ export class KxResultsPanel {
           true,
           vscode.ConfigurationTarget.Global
         );
-        this.post({ type: 'settings', settings: panelSettings() });
+        KxResultsPanel.postSettingsToOpenPanels();
         if (!this.isCurrentVersion(requestVersion)) {
           return;
         }
@@ -1699,7 +1727,7 @@ export class KxResultsPanel {
       panelDensity(message && message.density ? message.density : config.get<string>('density'))
     );
     await config.update(settingKey, normalized.value, vscode.ConfigurationTarget.Global);
-    this.post({ type: 'settings', settings: panelSettings() });
+    KxResultsPanel.postSettingsToOpenPanels();
   }
 
   private isCurrentVersion(version: number): boolean {
@@ -2316,6 +2344,42 @@ export class KxResultsPanel {
       overflow-wrap: anywhere;
       user-select: text;
     }
+    .qtext-display-status {
+      padding: 5px 14px;
+      color: var(--vscode-descriptionForeground);
+      border-bottom: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+      font-size: 0.92em;
+    }
+    .q-token-comment {
+      color: var(--vscode-editorCodeLens-foreground, var(--vscode-descriptionForeground));
+      font-style: italic;
+    }
+    .q-token-command,
+    .q-token-system,
+    .q-token-namespace {
+      color: var(--vscode-symbolIcon-namespaceForeground, var(--vscode-textLink-foreground));
+    }
+    .q-token-string {
+      color: var(--vscode-debugTokenExpression-string, var(--vscode-symbolIcon-stringForeground));
+    }
+    .q-token-symbol {
+      color: var(--vscode-symbolIcon-enumMemberForeground, var(--vscode-debugTokenExpression-value));
+    }
+    .q-token-temporal,
+    .q-token-number {
+      color: var(--vscode-debugTokenExpression-number, var(--vscode-symbolIcon-numberForeground));
+    }
+    .q-token-keyword {
+      color: var(--vscode-symbolIcon-keywordForeground, var(--vscode-textLink-foreground));
+      font-weight: 600;
+    }
+    .q-token-builtin {
+      color: var(--vscode-symbolIcon-functionForeground, var(--vscode-editor-foreground));
+    }
+    .q-token-operator {
+      color: var(--vscode-symbolIcon-operatorForeground, var(--vscode-editor-foreground));
+    }
     #canvas {
       position: relative;
       min-width: 100%;
@@ -2493,6 +2557,8 @@ export class KxResultsPanel {
             <option value="space">Spaces</option>
             <option value="raw">Raw brackets</option>
           </select></label>
+          <label class="checkbox" title="Result-webview qText only; source-editor highlighting is unchanged"><input id="settingsQTextSyntaxHighlighting" type="checkbox">Highlight qText output</label>
+          <label class="checkbox" title="Display-only; unsupported, ambiguous, or malformed qText remains unchanged"><input id="settingsQTextDisplayFormatting" type="checkbox">Format supported qText output</label>
           <label class="settings-row"><span>Functions</span><select id="settingsFunctionDisplayStrategy">
             <option value="grid">Grid</option>
             <option value="qText">qText</option>
@@ -2590,6 +2656,7 @@ export class KxResultsPanel {
     </div>
   </div>
   <div id="textViewport" class="text-viewport" tabindex="0" hidden>
+    <div id="qTextDisplayStatus" class="qtext-display-status" role="status" aria-live="polite" hidden></div>
     <pre id="textViewer" class="text-viewer"></pre>
   </div>
   <script nonce="${nonce}" src="${uplotScriptUri}"></script>
@@ -2620,6 +2687,8 @@ export class KxResultsPanel {
         chartDecimalPlaces: 4,
         chartZoomMinSampledPoints: ${CHART_ZOOM_MIN_SAMPLED_POINTS},
         chartZoomMaxSampledPoints: ${CHART_ZOOM_MAX_SAMPLED_POINTS},
+        qTextSyntaxHighlighting: false,
+        qTextDisplayFormatting: false,
         arrayDisplayFormat: 'commaSpace',
         functionDisplayStrategy: 'qText',
         dictionaryDisplayStrategy: 'grid',
@@ -2629,6 +2698,7 @@ export class KxResultsPanel {
       const viewport = document.getElementById('viewport');
       const textViewport = document.getElementById('textViewport');
       const textViewer = document.getElementById('textViewer');
+      const qTextDisplayStatus = document.getElementById('qTextDisplayStatus');
       const canvas = document.getElementById('canvas');
       const header = document.getElementById('header');
       const rowsLayer = document.getElementById('rows');
@@ -2659,6 +2729,8 @@ export class KxResultsPanel {
       const settingsChartDecimalPlaces = document.getElementById('settingsChartDecimalPlaces');
       const settingsElapsedTimeDisplay = document.getElementById('settingsElapsedTimeDisplay');
       const settingsArrayDisplayFormat = document.getElementById('settingsArrayDisplayFormat');
+      const settingsQTextSyntaxHighlighting = document.getElementById('settingsQTextSyntaxHighlighting');
+      const settingsQTextDisplayFormatting = document.getElementById('settingsQTextDisplayFormatting');
       const settingsFunctionDisplayStrategy = document.getElementById('settingsFunctionDisplayStrategy');
       const settingsDictionaryDisplayStrategy = document.getElementById('settingsDictionaryDisplayStrategy');
       const settingsListDisplayStrategy = document.getElementById('settingsListDisplayStrategy');
@@ -2739,11 +2811,13 @@ export class KxResultsPanel {
       let chartOptionsRequestId = 0;
       let chartOptions = { xColumns: [], yColumns: [], groupColumns: [], warnings: [] };
       let chartData = null;
+      let chartOriginalData = null;
       let chartRendered = null;
       let chartUPlot = null;
       let chartZoomed = false;
       let chartFullXRange = null;
       let chartRequestIsRefinement = false;
+      let chartDataIsRefinement = false;
       let chartZoomStateSuspended = false;
       let chartControlsDirty = false;
       let chartResizeState = null;
@@ -2755,6 +2829,10 @@ export class KxResultsPanel {
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
       const CHART_AUTO_REFINE_DELAY_MS = 450;
+      ${isValidChartRange.toString()}
+      ${captureChartFullXRange.toString()}
+      ${chartZoomDataAfterResponse.toString()}
+      ${planChartZoomReset.toString()}
       ${chartRangeIsZoomed.toString()}
       window.addEventListener('message', event => {
         const msg = event.data || {};
@@ -2767,6 +2845,9 @@ export class KxResultsPanel {
         } else if (msg.type === 'searchResults') {
           setSearchResults(msg);
         } else if (msg.type === 'settings') {
+          if (toNonNegativeInteger(msg.version, -1) === data.version && msg.qTextRender) {
+            data.qTextRender = normalizeQTextRenderModel(msg.qTextRender, data.text);
+          }
           applySettings(msg.settings);
           updateSummary();
           updateLargeResultWarning();
@@ -2857,6 +2938,8 @@ export class KxResultsPanel {
       collapseSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(false));
       settingsElapsedTimeDisplay.addEventListener('change', () => updateSetting('elapsedTimeDisplay', String(settingsElapsedTimeDisplay.value || 'auto')));
       settingsArrayDisplayFormat.addEventListener('change', () => updateSetting('arrayDisplayFormat', normalizeArrayDisplayFormat(settingsArrayDisplayFormat.value)));
+      settingsQTextSyntaxHighlighting.addEventListener('change', () => updateSetting('qTextSyntaxHighlighting', !!settingsQTextSyntaxHighlighting.checked));
+      settingsQTextDisplayFormatting.addEventListener('change', () => updateSetting('qTextDisplayFormatting', !!settingsQTextDisplayFormatting.checked));
       settingsFunctionDisplayStrategy.addEventListener('change', () => updateSetting('functionDisplayStrategy', normalizeQResultDisplayStrategy(settingsFunctionDisplayStrategy.value, 'qText')));
       settingsDictionaryDisplayStrategy.addEventListener('change', () => updateSetting('dictionaryDisplayStrategy', normalizeQResultDisplayStrategy(settingsDictionaryDisplayStrategy.value, 'grid')));
       settingsListDisplayStrategy.addEventListener('change', () => updateSetting('listDisplayStrategy', normalizeQResultDisplayStrategy(settingsListDisplayStrategy.value, 'grid')));
@@ -3028,6 +3111,7 @@ export class KxResultsPanel {
       function setResultMeta(result) {
         applySettings(result.settings);
         const mode = result.mode === 'text' ? 'text' : 'table';
+        const resultText = mode === 'text' ? String(result.text || '') : '';
         const nextColumns = Array.isArray(result.columns) ? result.columns.map(String) : [];
         if (!sameColumnNames(columnWidthSchema, nextColumns)) {
           columnWidthOverrides = Object.create(null);
@@ -3042,7 +3126,8 @@ export class KxResultsPanel {
           hiddenColumnNames: Array.isArray(result.hiddenColumnNames) ? result.hiddenColumnNames.map(String) : [],
           hiddenColumnCount: toNonNegativeInteger(result.hiddenColumnCount, 0),
           rowCount: toNonNegativeInteger(result.rowCount, 0),
-          text: mode === 'text' ? String(result.text || '') : '',
+          text: resultText,
+          qTextRender: normalizeQTextRenderModel(result.qTextRender, resultText),
           messages: Array.isArray(result.messages) ? result.messages.map(String) : [],
           guardrailMessage: result.guardrailMessage ? String(result.guardrailMessage) : '',
           query: result.query || '',
@@ -3487,7 +3572,11 @@ export class KxResultsPanel {
           requestChartDataForRange(null, restored ? 'Rendering restored chart settings...' : 'Rendering chart...');
           return;
         }
-        updateChartControls();
+        if (chartUPlot && chartFullXRange) {
+          updateChartZoomState(chartUPlot);
+        } else {
+          updateChartControls();
+        }
       }
 
       function normalizeChartOptions(value) {
@@ -3530,8 +3619,10 @@ export class KxResultsPanel {
       }
 
       function renderChartOptions() {
-        chartRequestIsRefinement = false;
-        clearChartZoomBaseline();
+        if (!chartRendered) {
+          chartRequestIsRefinement = false;
+          clearChartZoomBaseline();
+        }
         chartXColumn.textContent = '';
         chartGroupColumn.textContent = '';
         chartYColumns.textContent = '';
@@ -3795,7 +3886,9 @@ export class KxResultsPanel {
 
       function clearChartZoomBaseline() {
         chartFullXRange = null;
+        chartOriginalData = null;
         chartZoomed = false;
+        chartDataIsRefinement = false;
         chartLastAutoRefineKey = '';
         clearChartAutoRefineTimer();
       }
@@ -3952,7 +4045,14 @@ export class KxResultsPanel {
           drawChart();
           return;
         }
-        chartData = normalized;
+        const chartDataState = chartZoomDataAfterResponse(
+          chartOriginalData,
+          normalized,
+          chartRequestIsRefinement
+        );
+        chartData = chartDataState.data;
+        chartOriginalData = chartDataState.originalData;
+        chartDataIsRefinement = chartDataState.dataIsRefinement;
         chartRendered = null;
         chartControlsDirty = false;
         const warnings = chartData.warnings.length > 0 ? ' ' + chartData.warnings.join(' ') : '';
@@ -4098,7 +4198,18 @@ export class KxResultsPanel {
         if (toNonNegativeInteger(msg.requestId, -1) !== latestChartRequestId || chartControlsDirty) {
           return;
         }
+        const canRestoreOriginal = chartRequestIsRefinement && !!chartOriginalData && !!chartFullXRange;
         chartRequestIsRefinement = false;
+        if (canRestoreOriginal) {
+          chartData = { ...chartOriginalData, requestId: latestChartRequestId };
+          chartDataIsRefinement = false;
+          chartRendered = null;
+          chartControlsDirty = false;
+          chartStatus.textContent = String(msg.message || 'Chart refinement failed.') + ' Original full chart restored.';
+          clearChartZoomTransientState();
+          drawChart();
+          return;
+        }
         clearChartZoomBaseline();
         chartStatus.textContent = String(msg.message || 'Chart failed.');
         chartData = null;
@@ -4148,12 +4259,11 @@ export class KxResultsPanel {
         try {
           chartUPlot = new window.uPlot(chartUPlotOptions(dimensions), chartAlignedData(), chartPlot);
           chartRendered = { version: chartData.version, requestId: chartData.requestId };
-          if (!chartRequestIsRefinement) {
-            const renderedXRange = chartXScaleRange(chartUPlot);
-            chartFullXRange = renderedXRange
-              ? Object.freeze({ min: renderedXRange.min, max: renderedXRange.max })
-              : null;
-          }
+          chartFullXRange = captureChartFullXRange(
+            chartFullXRange,
+            chartXScaleRange(chartUPlot),
+            chartDataIsRefinement || !!chartFullXRange
+          );
           chartZoomStateSuspended = false;
           updateChartZoomState(chartUPlot);
           notifyChartRendered();
@@ -4768,30 +4878,61 @@ export class KxResultsPanel {
       }
 
       function resetChartZoom() {
-        if (!chartUPlot) {
-          return;
+        const reset = planChartZoomReset(
+          chartData,
+          chartOriginalData,
+          chartDataIsRefinement,
+          chartFullXRange,
+          latestChartRequestId
+        );
+        chartData = reset.data;
+        chartDataIsRefinement = reset.dataIsRefinement;
+        chartRequestIsRefinement = reset.requestIsRefinement;
+        applyChartZoomResetTransient(reset);
+        if (reset.restoredOriginalData) {
+          chartRendered = null;
+          drawChart();
         }
-        const xRange = chartFullXRange;
-        if (!xRange) {
-          clearChartSelection();
-          hideChartTooltip();
-          clearChartAutoRefineTimer();
-          updateChartZoomState(chartUPlot);
+        if (!chartUPlot || !reset.xScale || !reset.yScale) {
+          if (chartUPlot) {
+            updateChartZoomState(chartUPlot);
+          } else {
+            updateChartControls();
+          }
           return;
         }
         chartZoomStateSuspended = true;
         try {
           chartUPlot.batch(() => {
-            chartUPlot.setScale('x', { min: xRange.min, max: xRange.max });
-            chartUPlot.setScale('y', { min: null, max: null });
+            chartUPlot.setScale('x', reset.xScale);
+            chartUPlot.setScale('y', reset.yScale);
           });
         } finally {
           chartZoomStateSuspended = false;
         }
+        applyChartZoomResetTransient(reset);
+        updateChartZoomState(chartUPlot);
+        chartStatus.textContent = 'Zoom reset to the original full data range.';
+      }
+
+      function applyChartZoomResetTransient(reset) {
+        chartLastAutoRefineKey = reset.autoRefineKey;
+        if (reset.clearAutoRefineTimer) {
+          clearChartAutoRefineTimer();
+        }
+        if (reset.clearSelection) {
+          clearChartSelection();
+        }
+        if (reset.hideTooltip) {
+          hideChartTooltip();
+        }
+      }
+
+      function clearChartZoomTransientState() {
+        chartLastAutoRefineKey = '';
+        clearChartAutoRefineTimer();
         clearChartSelection();
         hideChartTooltip();
-        clearChartAutoRefineTimer();
-        updateChartZoomState(chartUPlot);
       }
 
       function clearChartSelection() {
@@ -4804,7 +4945,11 @@ export class KxResultsPanel {
         if (chartZoomStateSuspended) {
           return;
         }
-        chartZoomed = chartRangeIsZoomed(chartFullXRange, chartXScaleRange(self));
+        const currentRange = chartXScaleRange(self);
+        if (!chartFullXRange && !chartDataIsRefinement) {
+          chartFullXRange = captureChartFullXRange(null, currentRange, false);
+        }
+        chartZoomed = chartRangeIsZoomed(chartFullXRange, currentRange);
         if (chartZoomed) {
           queueChartAutoRefine();
         } else {
@@ -5242,6 +5387,12 @@ export class KxResultsPanel {
           chartDecimalPlaces: boundedSetting(value.chartDecimalPlaces, DEFAULT_SETTINGS.chartDecimalPlaces, 0, 12),
           chartZoomMinSampledPoints,
           chartZoomMaxSampledPoints,
+          qTextSyntaxHighlighting: typeof value.qTextSyntaxHighlighting === 'boolean'
+            ? value.qTextSyntaxHighlighting
+            : DEFAULT_SETTINGS.qTextSyntaxHighlighting,
+          qTextDisplayFormatting: typeof value.qTextDisplayFormatting === 'boolean'
+            ? value.qTextDisplayFormatting
+            : DEFAULT_SETTINGS.qTextDisplayFormatting,
           arrayDisplayFormat: normalizeArrayDisplayFormat(value.arrayDisplayFormat),
           functionDisplayStrategy: normalizeQResultDisplayStrategy(value.functionDisplayStrategy, DEFAULT_SETTINGS.functionDisplayStrategy),
           dictionaryDisplayStrategy: normalizeQResultDisplayStrategy(value.dictionaryDisplayStrategy, DEFAULT_SETTINGS.dictionaryDisplayStrategy),
@@ -5263,6 +5414,8 @@ export class KxResultsPanel {
         settingsChartDecimalPlaces.value = String(settings.chartDecimalPlaces);
         settingsElapsedTimeDisplay.value = settings.elapsedTimeDisplay;
         settingsArrayDisplayFormat.value = settings.arrayDisplayFormat;
+        settingsQTextSyntaxHighlighting.checked = settings.qTextSyntaxHighlighting;
+        settingsQTextDisplayFormatting.checked = settings.qTextDisplayFormatting;
         settingsFunctionDisplayStrategy.value = settings.functionDisplayStrategy;
         settingsDictionaryDisplayStrategy.value = settings.dictionaryDisplayStrategy;
         settingsListDisplayStrategy.value = settings.listDisplayStrategy;
@@ -5290,6 +5443,8 @@ export class KxResultsPanel {
           chartDecimalPlaces: settings.chartDecimalPlaces,
           chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
           chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
+          qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
+          qTextDisplayFormatting: settings.qTextDisplayFormatting,
           arrayDisplayFormat: settings.arrayDisplayFormat,
           functionDisplayStrategy: settings.functionDisplayStrategy,
           dictionaryDisplayStrategy: settings.dictionaryDisplayStrategy,
@@ -5655,11 +5810,64 @@ export class KxResultsPanel {
         empty.hidden = true;
         canvas.style.width = '';
         canvas.style.height = '';
-        const text = data.text || '';
-        if (textViewer.textContent !== text) {
-          textViewer.textContent = text;
+        const rawText = data.text || '';
+        const model = normalizeQTextRenderModel(data.qTextRender, rawText);
+        qTextDisplayStatus.hidden = !settings.qTextDisplayFormatting;
+        qTextDisplayStatus.textContent = !settings.qTextDisplayFormatting
+          ? ''
+          : model.formatted
+            ? 'Display-only qText formatting applied.'
+            : 'qText display formatting left this output unchanged.';
+        textViewer.textContent = '';
+        if (!settings.qTextSyntaxHighlighting || !model.highlighted) {
+          textViewer.textContent = settings.qTextDisplayFormatting ? model.text : rawText;
+        } else {
+          const fragment = document.createDocumentFragment();
+          model.segments.forEach(segment => {
+            if (segment.kind === 'plain') {
+              fragment.appendChild(document.createTextNode(segment.text));
+              return;
+            }
+            const span = document.createElement('span');
+            span.className = qTextTokenClass(segment.kind);
+            span.textContent = segment.text;
+            fragment.appendChild(span);
+          });
+          textViewer.appendChild(fragment);
         }
         updateAutoFitControlState();
+      }
+
+      function normalizeQTextRenderModel(value, fallbackText) {
+        const fallback = String(fallbackText || '');
+        if (!value || typeof value !== 'object' || typeof value.text !== 'string') {
+          return { text: fallback, formatted: false, highlighted: false, segments: [{ kind: 'plain', text: fallback }] };
+        }
+        const text = value.text;
+        if (value.highlighted !== true || !Array.isArray(value.segments)) {
+          return { text, formatted: value.formatted === true, highlighted: false, segments: [{ kind: 'plain', text }] };
+        }
+        const segments = [];
+        for (const segment of value.segments) {
+          if (!segment || typeof segment.text !== 'string' || !isQTextTokenKind(segment.kind)) {
+            return { text, formatted: value.formatted === true, highlighted: false, segments: [{ kind: 'plain', text }] };
+          }
+          segments.push({ kind: segment.kind, text: segment.text });
+        }
+        if (segments.map(segment => segment.text).join('') !== text) {
+          return { text, formatted: value.formatted === true, highlighted: false, segments: [{ kind: 'plain', text }] };
+        }
+        return { text, formatted: value.formatted === true, highlighted: true, segments };
+      }
+
+      function isQTextTokenKind(kind) {
+        return kind === 'plain' || kind === 'comment' || kind === 'command' || kind === 'system' ||
+          kind === 'namespace' || kind === 'string' || kind === 'symbol' || kind === 'temporal' ||
+          kind === 'number' || kind === 'keyword' || kind === 'builtin' || kind === 'operator';
+      }
+
+      function qTextTokenClass(kind) {
+        return isQTextTokenKind(kind) && kind !== 'plain' ? 'q-token-' + kind : '';
       }
 
       function scrollStateForViewport() {
@@ -6427,6 +6635,7 @@ export class KxResultsPanel {
           hiddenColumnCount: 0,
           rowCount: 0,
           text: '',
+          qTextRender: { text: '', formatted: false, highlighted: false, segments: [{ kind: 'plain', text: '' }] },
           messages: [],
           guardrailMessage: '',
           query: '',
@@ -6541,11 +6750,26 @@ function panelSettings(): KxPanelSettings {
     elapsedTimeDisplay: panelElapsedTimeDisplay(config.get<string>('elapsedTimeDisplay')),
     chartDecimalPlaces: chartDecimalPlacesSettingValue(config.get<number>('viewer.chartDecimalPlaces')),
     ...chartZoomSamplePointSettings(config),
+    qTextSyntaxHighlighting: booleanSetting(
+      config.get<boolean>('qText.syntaxHighlighting'),
+      DEFAULT_PANEL_SETTINGS.qTextSyntaxHighlighting
+    ),
+    qTextDisplayFormatting: booleanSetting(
+      config.get<boolean>('qText.displayFormatting'),
+      DEFAULT_PANEL_SETTINGS.qTextDisplayFormatting
+    ),
     arrayDisplayFormat: panelArrayDisplayFormat(config.get<string>('viewer.arrayDisplayFormat')),
     functionDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.functionDisplayStrategy'), 'qText'),
     dictionaryDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.dictionaryDisplayStrategy'), 'grid'),
     listDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.listDisplayStrategy'), 'grid'),
     objectDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.objectDisplayStrategy'), 'grid'),
+  };
+}
+
+function qTextRenderOptions(settings: KxPanelSettings): { syntaxHighlighting: boolean; displayFormatting: boolean } {
+  return {
+    syntaxHighlighting: settings.qTextSyntaxHighlighting,
+    displayFormatting: settings.qTextDisplayFormatting,
   };
 }
 
@@ -6619,6 +6843,12 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
   if (key === 'cellWidth' || key === 'rowHeight' || key === 'fontSize') {
     return `${density}.${key}`;
   }
+  if (key === 'qTextSyntaxHighlighting') {
+    return 'qText.syntaxHighlighting';
+  }
+  if (key === 'qTextDisplayFormatting') {
+    return 'qText.displayFormatting';
+  }
   if (
     key === 'arrayDisplayFormat' ||
     key === 'chartDecimalPlaces' ||
@@ -6681,6 +6911,8 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   dictionaryDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
   listDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
   objectDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
+  qTextSyntaxHighlighting: booleanSettingUpdate,
+  qTextDisplayFormatting: booleanSettingUpdate,
 };
 
 function normalizePanelSettingUpdate(key: any, value: any): { key: string; value: PanelSettingUpdateValue } | null {
@@ -6802,21 +7034,6 @@ function sameColumnNames(left: string[] | undefined, right: string[]): boolean {
     }
   }
   return true;
-}
-
-export function chartRangeIsZoomed(full: ChartRange | null | undefined, current: ChartRange | null | undefined): boolean {
-  if (!full || !current ||
-    !Number.isFinite(full.min) ||
-    !Number.isFinite(full.max) ||
-    !Number.isFinite(current.min) ||
-    !Number.isFinite(current.max) ||
-    full.max <= full.min ||
-    current.max <= current.min) {
-    return false;
-  }
-
-  const tolerance = Math.max(1e-9, Math.abs(full.max - full.min) * 1e-9);
-  return Math.abs(current.min - full.min) > tolerance || Math.abs(current.max - full.max) > tolerance;
 }
 
 function chartSelectionStorageKey(columns: string[]): string {

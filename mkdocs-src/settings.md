@@ -59,11 +59,13 @@ Enabled performance records also retain their `[vscode-kdb:perf]` Extension Host
 | `vscode-kdb.results.viewer.dictionaryDisplayStrategy` | `grid` | `grid`, `qText` | Top-level dictionaries. |
 | `vscode-kdb.results.viewer.listDisplayStrategy` | `grid` | `grid`, `qText` | Top-level general/mixed/object lists. |
 | `vscode-kdb.results.viewer.objectDisplayStrategy` | `grid` | `grid`, `qText` | Other top-level composite objects. |
+| `vscode-kdb.results.qText.syntaxHighlighting` | `false` | Boolean | Apply lightweight, theme-aware q token colors only to qText result display. Raw text is rendered through text nodes/spans, never raw HTML. |
+| `vscode-kdb.results.qText.displayFormatting` | `false` | Boolean | Apply conservative view-only layout to supported balanced q lambda/block structures; malformed or ambiguous input remains exact raw qText. |
 | `vscode-kdb.results.density` | `standard` | `compact`, `standard`, `comfortable` | Active grid density. |
 | `vscode-kdb.results.showRowIndex` | `true` | Boolean | Show the visual row-number column. |
 | `vscode-kdb.results.elapsedTimeDisplay` | `auto` | `auto`, `milliseconds` | Result elapsed-time formatting. |
 
-True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation.
+True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels.
 
 Array display examples:
 
@@ -120,6 +122,8 @@ Array display examples:
   "vscode-kdb.performance.trace": false,
   "vscode-kdb.results.viewer.arrayDisplayFormat": "space",
   "vscode-kdb.results.viewer.functionDisplayStrategy": "qText",
+  "vscode-kdb.results.qText.syntaxHighlighting": false,
+  "vscode-kdb.results.qText.displayFormatting": false,
   "vscode-kdb.results.density": "standard",
   "vscode-kdb.results.includeHeaders": true,
   "vscode-kdb.results.includeRowIndex": true,

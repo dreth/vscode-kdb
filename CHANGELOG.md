@@ -4,6 +4,16 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.1.5 - 2026-07-22
+
+- Added an accessible **Test Connection** button to the real Add/Edit form. It validates current unsaved fields and effective timeouts, uses a fresh cancellable direct q IPC socket, proves handshake/namespace/minimal-response phases, closes reliably, and never saves or disturbs an active profile.
+- Preserved password boundaries while testing: typed secrets stay in memory, blank edits may resolve a saved SecretStorage value only in the extension host, Clear tests without it, and status reveals only whether a saved secret was used. Generation and disposal guards suppress stale results without logging or reflecting credentials or request text.
+- Fixed standalone chart **Reset zoom** by retaining the original full sample and an immutable X-domain baseline across manual zoom, auto/explicit refinement, and rerender. Reset now restores numeric or temporal X, returns Y to auto-scale, and clears selection, tooltip, and refinement timers. The same known SQLTools UI defect is intentionally deferred to a later compatibility backport.
+- Added disabled-by-default `vscode-kdb.results.qText.syntaxHighlighting` and `vscode-kdb.results.qText.displayFormatting`. Highlighting is dependency-free, theme-aware, qText-only, and text-node safe; formatting is a conservative non-mutating view transform with exact raw fallback for malformed or ambiguous input. Open/reused panels receive live setting updates.
+- Added focused model/host/webview/source tests for temporary connection-test success/failure/cancel/close/stale/secret behavior, chart baseline/epsilon/refine/rerender/reset behavior, and qText lexer ordering, HTML safety, disabled exact output, setting propagation, supported formatting, content preservation, and fallback.
+- Used q Professional documentation as product inspiration only and inspected KX qlint integration as linting rather than a general qText pretty-printer. No q Professional, KX extension, vscode-q, or SQLTools code/assets were copied; no dependency or third-party notice was added.
+- Kept 0.1.5 focused, direct-q-IPC-only, and unpublished from Marketplace. Deterministic and live q checks do not constitute visual Extension Host E2E or complete parity evidence.
+
 ## 0.1.4 - 2026-07-22
 
 - Added a disabled-by-default, first-party **KX Server Explorer** for the active direct q IPC profile, including clear disconnected/reconnect status. Manual connected refresh lists current-namespace tables through `tables[]`, classifies names conservatively as variables or safely identified functions, and expands table columns through `meta` without eagerly fetching values.

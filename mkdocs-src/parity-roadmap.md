@@ -4,27 +4,27 @@ KX for VS Code is being developed as the future first-party KX product. During t
 
 The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) and [machine-readable JSON](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.json) record 63 classified cases / 379 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. The result is valid executable evidence with known gaps, not source-of-truth sign-off or a claim that the products are functionally or visually identical.
 
-The repository manifest is at `0.1.4` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
+The repository manifest is at `0.1.5` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
 
 ## Current standalone architecture
 
 The extension has seven deliberate layers:
 
-1. **VS Code surface:** q language contribution, editor commands, KX activity-bar views, the KX-owned single-screen connection form, notifications, and `KX` Output channel.
+1. **VS Code surface:** q language contribution, editor commands, KX activity-bar views, the KX-owned single-screen connection form and unsaved-value test path, notifications, and `KX` Output channel.
 2. **Connection ownership:** application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.
 3. **Direct q IPC:** handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.
 4. **Optional server metadata:** disabled-by-default manual `tables[]`, conservative name/type categories, on-demand `meta`, and confirmed bounded previews for one active configured namespace.
 5. **Optional local history:** disabled-by-default workspace `Memento` records for actually issued editor queries, with no results, sync, settings, telemetry, or passwords.
-6. **Result capabilities:** columnar storage, virtual grid/q-text presentation, search/sort/selection, copy/export, and safe chart transformations.
+6. **Result capabilities:** columnar storage, virtual grid/q-text presentation, opt-in safe qText readability, search/sort/selection, copy/export, safe chart transformations, and immutable original-domain zoom reset.
 7. **Optional local access:** per-panel tokenized HTTP endpoints bound to loopback.
 
 There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, or session-file hooks in this graph. The **KX Connection** form, focused Server Explorer, Query History, and their storage/lifecycle behavior are owned entirely by this extension.
 
 ## Focused standalone boundary
 
-Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, opt-in focused server metadata and previews, opt-in privacy-aware local history, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path and visual verification remain partial as recorded in `PARITY.md`.
+Present foundations include a responsive single-screen direct-connection form, extension-host validation, temporary unsaved-value connection testing, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, opt-in focused server metadata and previews, opt-in privacy-aware local history, result viewing with optional safe qText readability, charting including candlesticks and original-domain reset, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path and visual verification remain partial as recorded in `PARITY.md`.
 
-Known gaps and partial areas remain. The three ranked executable gaps are standalone Extension Host automation, a compatible reference multiline script-grouping adapter, and an explicit standalone q-block product decision. The six recorded external boundaries are Extension Host/visual/manual UX, authenticated q, remote/SSH/TLS/IPv6/multi-version q, spreadsheet rendering, VSIX/Marketplace evidence, and server-side cancellation after dispatch. The Server Explorer is deliberately limited to the active direct profile and configured namespace; it is not broad namespace navigation, Insights/gateway integration, server administration, or a write surface. Deterministic source/tree guards are not visual E2E, and release 0.1.4 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
+Known gaps and partial areas remain. The three ranked executable gaps are standalone Extension Host automation, a compatible reference multiline script-grouping adapter, and an explicit standalone q-block product decision. The six recorded external boundaries are Extension Host/visual/manual UX, authenticated q, remote/SSH/TLS/IPv6/multi-version q, spreadsheet rendering, VSIX/Marketplace evidence, and server-side cancellation after dispatch. The Server Explorer is deliberately limited to the active direct profile and configured namespace; it is not broad namespace navigation, Insights/gateway integration, server administration, or a write surface. Deterministic model/host/webview/source guards are not visual E2E, and release 0.1.5 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
 
 Some SQLTools behaviors are deliberately omitted rather than missing:
 
@@ -46,8 +46,8 @@ Some SQLTools behaviors are deliberately omitted rather than missing:
 
 Server Explorer and Query History move useful standalone parity forward without reproducing the breadth of KDB-X or q Professional. The product remains intentionally strongest at direct q execution and table/result visualization, with small opt-in workflow surfaces instead of bundled gateway, administration, notebook, or compatibility subsystems.
 
-- [q Professional / `jshinonome/vscode-q` at `1481ba419edee8e53be6bb4f6f134d1fb04f1ed1`](https://github.com/jshinonome/vscode-q/tree/1481ba419edee8e53be6bb4f6f134d1fb04f1ed1) supplied documented feature and interaction inspiration only. That public snapshot is all-rights-reserved; no code or assets were copied.
-- [KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected under Apache-2.0, but no source code, logic, or assets were adapted for 0.1.4.
+- [q Professional / `jshinonome/vscode-k-pro` at `fc9afacaeaf5e90eb013eb34426488841cc24f2a`](https://github.com/jshinonome/vscode-k-pro/tree/fc9afacaeaf5e90eb013eb34426488841cc24f2a) documents a formatter and supplied product-level readability inspiration only. Its public repository is all-rights-reserved; no code, logic, or assets were copied.
+- [KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected under Apache-2.0. Its qlint command is linting, not a general qText result pretty-printer. No source code, logic, or assets were adapted for 0.1.5.
 - SQLTools remains absent as a runtime or UI dependency. The new views and local storage do not depend on SQLTools connection, result, or session abstractions.
 
 The native q grammar was also audited and left unchanged because no reliable token-coverage defect was found. `.k` remains unassociated until a demonstrated, testable need justifies the compatibility risk.

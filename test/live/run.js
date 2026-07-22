@@ -11,6 +11,11 @@ const FIXTURE = path.join(__dirname, 'fixture.q');
 const { KdbIpcClient, qValueToColumnarPanel } = requireOut('q-ipc');
 const { qScriptInNamespace, queryInNamespace, queryInNamespaceStrict } = requireOut('connection');
 const {
+  CONNECTION_TEST_QUERY,
+  connectionTestNamespaceQuery,
+  connectionTestNamespaceResultIsSafe,
+} = requireOut('connection-test');
+const {
   SERVER_TABLES_QUERY,
   SERVER_VARIABLES_QUERY,
   buildServerPreviewQuery,
@@ -51,6 +56,27 @@ async function runAssertions(port) {
     await client.connect();
     assert.ok(client.getProtocolVersion() >= 1);
     assert.strictEqual(await client.query('1+1'), 2);
+
+    const temporaryTestClient = new KdbIpcClient({
+      host: '127.0.0.1',
+      port,
+      connectTimeoutMs: 2000,
+      queryTimeoutMs: 2000,
+    });
+    try {
+      await temporaryTestClient.connect();
+      const namespaceResult = await temporaryTestClient.query(connectionTestNamespaceQuery('.analytics'));
+      assert.strictEqual(connectionTestNamespaceResultIsSafe(namespaceResult), true);
+      assert.strictEqual(await temporaryTestClient.query(CONNECTION_TEST_QUERY), false);
+      assert.strictEqual(
+        await temporaryTestClient.query('string system"d"'),
+        '.',
+        'the read-only namespace test must leave the temporary session at its original namespace'
+      );
+    } finally {
+      await temporaryTestClient.close();
+    }
+    assert.strictEqual(await client.query('1+1'), 2, 'temporary testing must not disrupt the active saved session');
 
     const table = qValueToColumnarPanel(await client.query('select sym,size from trade'));
     assert.strictEqual(table.mode, 'grid');
