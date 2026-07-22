@@ -66,6 +66,9 @@
     "test": "npm run compile && node test/run.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:live-q": "npm run compile && node test/live/run.js",
+    "test:parity": "node scripts/run-cross-parity.js",
+    "test:parity:self": "node test/parity/self-test.js",
+    "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
     "package": "npm run compile && vsce package --out vscode-kdb-0.1.4.vsix",
     "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.4.vsix"
   },

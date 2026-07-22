@@ -3037,6 +3037,8 @@ function testManifestAndSources() {
     'mkdocs-src/**',
     'mkdocs.yml',
     'PARITY.md',
+    'PARITY_RUN.md',
+    'PARITY_RUN.json',
     '**/*.map',
     'CODEX*',
     'PROMPT*',
