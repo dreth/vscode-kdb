@@ -10,6 +10,7 @@ const ROOT = path.resolve(__dirname, '..');
 
 const {
   KdbIpcClient,
+  KdbQError,
   QIpcReceiveBuffer,
   deserializeQMessage,
   deserializeQPayload,
@@ -28,12 +29,25 @@ const {
   validateConnection,
 } = requireOut('connection');
 const {
+  KX_OUTPUT_CHANNEL_NAME,
+  KxDiagnostics,
+  REDACTED_DIAGNOSTIC_VALUE,
+  redactDiagnosticText,
+  sanitizeDiagnosticDetails,
+} = requireOut('diagnostics');
+const {
+  configurePerfOutput,
+  configurePerfTrace,
+  perfMark,
+} = requireOut('perf');
+const {
   createColumnarPanelResult,
   rowsToColumnarPanelResult,
 } = requireOut('kx-results');
 
 const tests = [
   ['q IPC codec and receive buffering', testQIpc],
+  ['diagnostics and performance trace redaction', testDiagnostics],
   ['exact q selection/current-line text', testQText],
   ['connection validation and namespace wrapping', testConnections],
   ['connection SecretStorage transactions', testConnectionStoreTransactions],
@@ -122,6 +136,199 @@ async function testQIpc() {
       /connect failed/i.test(error.message),
     'connection errors must identify the direct q host and port'
   );
+
+  let resetConnections = 0;
+  const resetServer = net.createServer(socket => {
+    resetConnections++;
+    socket.destroy();
+  });
+  await listen(resetServer);
+  const resetAddress = resetServer.address();
+  const resetPort = resetAddress && typeof resetAddress === 'object' ? resetAddress.port : 0;
+  const resetClient = new KdbIpcClient({ host: '127.0.0.1', port: resetPort, timeoutMs: 500 });
+  try {
+    for (const attempt of ['initial', 'retry']) {
+      await assertCompletesWithin(
+        `q IPC handshake reset ${attempt}`,
+        () => assert.rejects(
+          () => resetClient.connect(),
+          error => error &&
+            /handshake failed/i.test(error.message) &&
+            error.message.includes(`127.0.0.1:${resetPort}`)
+        ),
+        1000
+      );
+    }
+    assert.strictEqual(resetConnections, 2, 'a failed handshake must clear connectPromise for retry');
+  } finally {
+    await closeServer(resetServer);
+  }
+
+  const heldSockets = [];
+  const stalledServer = net.createServer(socket => heldSockets.push(socket));
+  const accepted = new Promise(resolve => stalledServer.once('connection', resolve));
+  await listen(stalledServer);
+  const stalledAddress = stalledServer.address();
+  const stalledPort = stalledAddress && typeof stalledAddress === 'object' ? stalledAddress.port : 0;
+  const stalledClient = new KdbIpcClient({ host: '127.0.0.1', port: stalledPort, timeoutMs: 5000 });
+  const stalledConnect = stalledClient.connect();
+  try {
+    await accepted;
+    stalledClient.cancel(new Error('test cancel'));
+    await assertCompletesWithin(
+      'q IPC handshake cancellation',
+      () => assert.rejects(
+        () => stalledConnect,
+        error => error &&
+          /(connect|handshake) failed/i.test(error.message) &&
+          error.message.includes(`127.0.0.1:${stalledPort}`) &&
+          /test cancel/.test(error.message)
+      ),
+      1000
+    );
+    await assert.rejects(
+      () => stalledClient.query('1'),
+      /connection is not open/,
+      'canceling an in-flight connect must leave no usable stale socket state'
+    );
+  } finally {
+    heldSockets.forEach(socket => socket.destroy());
+    await closeServer(stalledServer);
+  }
+}
+
+async function testDiagnostics() {
+  assert.strictEqual(KX_OUTPUT_CHANNEL_NAME, 'KX');
+  const fakeUsername = ['diag', 'user'].join('-');
+  const fakeSecret = ['never', 'emit', 'this'].join('-');
+  const queryText = ['show', 'private', 'query', 'value'].join(' ');
+  const qErrorText = ['private', 'q', 'error', 'value'].join('-');
+
+  const redacted = redactDiagnosticText(
+    `password=${fakeSecret} token:abc https://${fakeUsername}:${fakeSecret}@q.example.test/`,
+    [fakeUsername, fakeSecret]
+  );
+  assert.ok(!redacted.includes(fakeUsername));
+  assert.ok(!redacted.includes(fakeSecret));
+  assert.ok(!redacted.includes('abc'));
+  assert.ok(redacted.includes(REDACTED_DIAGNOSTIC_VALUE));
+
+  const circular = {};
+  circular.self = circular;
+  const safeDetails = sanitizeDiagnosticDetails({
+    password: fakeSecret,
+    query: queryText,
+    queryChars: queryText.length,
+    note: `authorization: ${fakeSecret}`,
+    nested: { token: fakeSecret },
+    circular,
+  }, [fakeSecret]);
+  assert.strictEqual(safeDetails.password, REDACTED_DIAGNOSTIC_VALUE);
+  assert.strictEqual(safeDetails.query, REDACTED_DIAGNOSTIC_VALUE);
+  assert.strictEqual(safeDetails.queryChars, queryText.length);
+  assert.ok(!JSON.stringify(safeDetails).includes(fakeSecret));
+  assert.strictEqual(safeDetails.circular.self, '[circular]');
+
+  const structuredLines = [];
+  const structuredDiagnostics = new KxDiagnostics({ appendLine: value => structuredLines.push(value) });
+  structuredDiagnostics.event({
+    phase: 'connect',
+    endpoint: 'safe.example.test:5000',
+    status: 'start',
+    details: {
+      phase: 'query',
+      endpoint: `password=${fakeSecret}`,
+      status: 'failed',
+    },
+    secrets: [fakeSecret],
+  });
+  const structuredEvent = JSON.parse(structuredLines[0]);
+  assert.strictEqual(structuredEvent.phase, 'connect', 'details must not override the diagnostic phase');
+  assert.strictEqual(structuredEvent.endpoint, 'safe.example.test:5000', 'details must not override the endpoint');
+  assert.strictEqual(structuredEvent.status, 'start', 'details must not override the diagnostic status');
+  assert.ok(!structuredLines[0].includes(fakeSecret));
+
+  const diagnosticLines = [];
+  const diagnostics = new KxDiagnostics(
+    { appendLine: value => diagnosticLines.push(value) },
+    () => new Date('2026-07-22T00:00:00.000Z')
+  );
+  const scalarResponse = hex('010200000d000000fa01000000');
+  const errorResponse = qResponse(Buffer.concat([int8(-128), cString(qErrorText)]));
+  let queryCount = 0;
+  const server = net.createServer(socket => {
+    let handshakeComplete = false;
+    socket.on('data', () => {
+      if (!handshakeComplete) {
+        handshakeComplete = true;
+        socket.write(Buffer.from([3]));
+        return;
+      }
+      queryCount++;
+      socket.write(queryCount === 1 ? scalarResponse : errorResponse);
+    });
+  });
+  await listen(server);
+  const address = server.address();
+  const port = address && typeof address === 'object' ? address.port : 0;
+  const client = new KdbIpcClient({
+    host: '127.0.0.1',
+    port,
+    username: fakeUsername,
+    password: fakeSecret,
+    timeoutMs: 1000,
+    diagnostics,
+  });
+  try {
+    await client.connect();
+    assert.strictEqual(await client.query(queryText), 1);
+    await assert.rejects(
+      () => client.query(`${queryText};second`),
+      error => error instanceof KdbQError && error.message === qErrorText,
+      'a genuine q IPC error must reject as KdbQError'
+    );
+  } finally {
+    await client.close();
+    await closeServer(server);
+  }
+
+  const diagnosticsText = diagnosticLines.join('\n');
+  assert.ok(!diagnosticsText.includes(fakeUsername), 'diagnostics must redact the authentication username');
+  assert.ok(!diagnosticsText.includes(fakeSecret), 'diagnostics must redact the authentication secret');
+  assert.ok(!diagnosticsText.includes(queryText), 'diagnostics must omit q source text');
+  assert.ok(!diagnosticsText.includes(qErrorText), 'diagnostics must omit q error values');
+  const events = diagnosticLines.map(line => JSON.parse(line));
+  const endpoint = `127.0.0.1:${port}`;
+  assert.ok(events.every(event => event.endpoint === endpoint));
+  assert.ok(events.some(event => event.phase === 'connect' && event.status === 'success'));
+  assert.ok(events.some(event => event.phase === 'handshake' && event.status === 'success'));
+  assert.ok(events.some(event => event.phase === 'query' && event.status === 'success'));
+  assert.ok(events.some(event =>
+    event.phase === 'query' && event.status === 'failed' && event.errorName === 'KdbQError'
+  ));
+  assert.ok(events.some(event => event.phase === 'close' && event.status === 'success'));
+
+  const perfLines = [];
+  const originalConsoleLog = console.log;
+  console.log = () => undefined;
+  configurePerfOutput(value => perfLines.push(value));
+  configurePerfTrace(true);
+  try {
+    perfMark('test.redaction', {
+      query: queryText,
+      queryChars: queryText.length,
+      password: fakeSecret,
+      endpoint,
+    });
+  } finally {
+    configurePerfTrace(undefined);
+    configurePerfOutput(undefined);
+    console.log = originalConsoleLog;
+  }
+  assert.strictEqual(perfLines.length, 1);
+  assert.ok(!perfLines[0].includes(queryText));
+  assert.ok(!perfLines[0].includes(fakeSecret));
+  assert.ok(perfLines[0].includes(`"queryChars":${queryText.length}`));
 }
 
 function testQText() {
@@ -278,13 +485,22 @@ async function testConnectionStoreTransactions() {
 async function testConnectionManagerLifecycle() {
   const fakeVscode = createVscodeRuntimeMock();
   class FakeKdbQError extends Error {}
+  const capturedQueries = [];
+  let nextConnectError;
+  let nextQueryError;
   class FakeKdbIpcClient {
     constructor(options) {
       this.options = options;
       this.closed = false;
     }
 
-    async connect() {}
+    async connect() {
+      if (nextConnectError) {
+        const error = nextConnectError;
+        nextConnectError = undefined;
+        throw error;
+      }
+    }
 
     async close() {
       this.closed = true;
@@ -297,7 +513,13 @@ async function testConnectionManagerLifecycle() {
       this.closed = true;
     }
 
-    async query() {
+    async query(query) {
+      capturedQueries.push(query);
+      if (nextQueryError) {
+        const error = nextQueryError;
+        nextQueryError = undefined;
+        throw error;
+      }
       return 2;
     }
   }
@@ -324,12 +546,55 @@ async function testConnectionManagerLifecycle() {
       return undefined;
     },
   });
+  let stateChanges = 0;
+  const stateSubscription = retryManager.onDidChangeState(() => stateChanges++);
   await assert.rejects(() => retryManager.connect(connection), /injected SecretStorage get failure/);
   await retryManager.connect(connection);
   assert.strictEqual(passwordAttempts, 2, 'a failed secret lookup must not poison later connection attempts');
   assert.strictEqual(retryManager.isConnected(connection.id), true);
+
+  const namespacedConnection = { ...connection, database: '.analytics' };
+  await retryManager.execute(namespacedConnection, 'answer');
+  assert.strictEqual(capturedQueries.at(-1), queryInNamespace('answer', '.analytics'));
+  await retryManager.executeScript(namespacedConnection, 'a:1\na+1');
+  assert.strictEqual(capturedQueries.at(-1), qScriptInNamespace('a:1\na+1', '.analytics'));
+
+  const genuineQError = new FakeKdbQError('type');
+  nextQueryError = genuineQError;
+  await assert.rejects(
+    () => retryManager.execute(namespacedConnection, 'badQuery'),
+    error => error === genuineQError
+  );
+  assert.strictEqual(
+    retryManager.isConnected(connection.id),
+    true,
+    'a genuine q error must not be converted to result data or drop a healthy connection'
+  );
+
+  nextQueryError = new Error('injected transport failure');
+  await assert.rejects(() => retryManager.execute(namespacedConnection, '1+1'), /transport failure/);
+  assert.strictEqual(
+    retryManager.isConnected(connection.id),
+    false,
+    'a transport failure must immediately clear the connected tree state'
+  );
+
+  nextConnectError = new Error('injected connect failure');
+  await assert.rejects(() => retryManager.connect(connection), /connect failure/);
+  assert.strictEqual(retryManager.isConnected(connection.id), false, 'failed opens must not leave stale state');
+  const reconnectedClient = await retryManager.connect(connection);
+  assert.strictEqual(retryManager.isConnected(connection.id), true, 'a failed open must remain retryable');
+  reconnectedClient.options.onDidClose();
+  assert.strictEqual(
+    retryManager.isConnected(connection.id),
+    false,
+    'a remote close callback must refresh the connection state immediately'
+  );
+  assert.ok(stateChanges >= 5, 'connection lifecycle transitions must emit tree refresh events');
+
   await retryManager.disconnectAll();
   assert.strictEqual(retryManager.isConnected(connection.id), false);
+  stateSubscription.dispose();
   retryManager.dispose();
 
   let resolvePassword;
@@ -500,6 +765,11 @@ function testManifestAndSources() {
   assert.strictEqual(connectionsSetting.type, 'array');
   const storedFields = Object.keys(((connectionsSetting.items || {}).properties) || {}).sort();
   assert.deepStrictEqual(storedFields, ['database', 'host', 'id', 'name', 'port', 'username']);
+  const performanceTraceSetting = configurationProperties['vscode-kdb.performance.trace'];
+  assert.strictEqual(performanceTraceSetting.type, 'boolean');
+  assert.strictEqual(performanceTraceSetting.default, false);
+  assert.match(performanceTraceSetting.description, /Output > KX/);
+  assert.match(performanceTraceSetting.description, /Query text and credentials are omitted/);
   assert.strictEqual(Object.keys(configurationProperties).some(key => /^sqltools\./i.test(key)), false);
 
   const sourceFiles = walkFiles(path.join(ROOT, 'src')).filter(file => file.endsWith('.ts'));
@@ -515,7 +785,20 @@ function testManifestAndSources() {
   assert.ok(!/password/i.test(safeBlock), 'serialized connection settings must never include passwords');
 
   const vscodeIgnore = fs.readFileSync(path.join(ROOT, '.vscodeignore'), 'utf8');
-  ['src/**', 'test/**', 'tmp/**', '**/*.map', 'CODEX*', 'PROMPT*', '*.vsix', '*.zip'].forEach(pattern => {
+  [
+    'src/**',
+    'test/**',
+    'tmp/**',
+    'docs/**',
+    'mkdocs-src/**',
+    'mkdocs.yml',
+    'PARITY.md',
+    '**/*.map',
+    'CODEX*',
+    'PROMPT*',
+    '*.vsix',
+    '*.zip',
+  ].forEach(pattern => {
     assert.ok(vscodeIgnore.includes(pattern), `.vscodeignore must exclude ${pattern}`);
   });
 }
@@ -699,6 +982,15 @@ function qTable(columns, vectors) {
   ]);
 }
 
+function qResponse(payload) {
+  const message = Buffer.alloc(8 + payload.length);
+  message.writeUInt8(1, 0);
+  message.writeUInt8(2, 1);
+  message.writeInt32LE(message.length, 4);
+  payload.copy(message, 8);
+  return message;
+}
+
 function genericList(items) {
   return Buffer.concat([vectorHeader(0, items.length), ...items]);
 }
@@ -740,6 +1032,22 @@ function listen(server) {
 
 function closeServer(server) {
   return new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
+}
+
+async function assertCompletesWithin(label, operation, timeoutMs) {
+  let timeout;
+  try {
+    return await Promise.race([
+      operation(),
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} did not complete within ${timeoutMs} ms`)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) {
+      clearTimeout(timeout);
+    }
+  }
 }
 
 async function unusedLoopbackPort() {

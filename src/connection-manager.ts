@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
-import { KxConnection, qScriptInNamespace, queryInNamespace } from './connection';
+import { connectionEndpoint, KxConnection, qScriptInNamespace, queryInNamespace } from './connection';
 import { ConnectionStore } from './connection-store';
+import type { KxDiagnostics } from './diagnostics';
 import { KdbIpcClient, KdbQError, QValue } from './q-ipc';
 
 const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
@@ -12,7 +13,10 @@ export class ConnectionManager implements vscode.Disposable {
 
   public readonly onDidChangeState = this.stateEmitter.event;
 
-  public constructor(private readonly store: ConnectionStore) {}
+  public constructor(
+    private readonly store: ConnectionStore,
+    private readonly diagnostics?: KxDiagnostics
+  ) {}
 
   public isConnected(connectionId: string): boolean {
     return this.clients.has(connectionId) && !this.opening.has(connectionId);
@@ -43,14 +47,21 @@ export class ConnectionManager implements vscode.Disposable {
           password,
           timeoutMs: this.connectionTimeoutMs(),
           onDidClose: () => client && this.dropClient(connection.id, client),
+          diagnostics: this.diagnostics,
         });
         this.clients.set(connection.id, client);
         await client.connect();
         return client;
       } catch (error) {
+        if (!client) {
+          this.writeConnectFailure(connection, error, this.opening.get(connection.id) !== opening);
+        }
         if (client) {
+          const shouldCancel = this.clients.get(connection.id) === client;
           this.dropClient(connection.id, client);
-          client.cancel(toError(error));
+          if (shouldCancel) {
+            client.cancel(toError(error));
+          }
         }
         throw error;
       } finally {
@@ -97,21 +108,31 @@ export class ConnectionManager implements vscode.Disposable {
       return await client.query(query);
     } catch (error) {
       if (!(error instanceof KdbQError)) {
+        const shouldCancel = this.clients.get(connection.id) === client;
         this.dropClient(connection.id, client);
-        client.cancel(toError(error));
+        if (shouldCancel) {
+          client.cancel(toError(error));
+        }
       }
       throw error;
     }
   }
 
   public async test(connection: KxConnection): Promise<void> {
-    const password = await this.store.password(connection.id);
+    let password: string | undefined;
+    try {
+      password = await this.store.password(connection.id);
+    } catch (error) {
+      this.writeConnectFailure(connection, error, false);
+      throw error;
+    }
     const client = new KdbIpcClient({
       host: connection.host,
       port: connection.port,
       username: connection.username,
       password,
       timeoutMs: this.connectionTimeoutMs(),
+      diagnostics: this.diagnostics,
     });
     try {
       await client.connect();
@@ -153,6 +174,21 @@ export class ConnectionManager implements vscode.Disposable {
     return Number.isFinite(configured) && configured >= 0
       ? Math.floor(configured)
       : DEFAULT_CONNECTION_TIMEOUT_MS;
+  }
+
+  private writeConnectFailure(connection: KxConnection, error: unknown, canceled: boolean): void {
+    try {
+      this.diagnostics?.event({
+        phase: 'connect',
+        endpoint: connectionEndpoint(connection),
+        status: canceled ? 'canceled' : 'failed',
+        details: { stage: 'credentials' },
+        error,
+        includeErrorMessage: false,
+      });
+    } catch {
+      // Diagnostics must never disrupt connection state cleanup.
+    }
   }
 }
 

@@ -1,0 +1,49 @@
+# Running q
+
+The extension executes q text; it does not parse SQL, split SQL statements, or infer a SQLTools-style session.
+
+## Commands and keybindings
+
+| Command | Windows/Linux | macOS | Behavior |
+| --- | --- | --- | --- |
+| **KX: Run Selection / Current Line** | `Ctrl+Enter` | `Cmd+Enter` | Run the exact non-empty selection, or the exact current physical line. Reuse the active/available KX result panel. |
+| **KX: Run Selection in New Result** | `Ctrl+Shift+Enter` | `Cmd+Shift+Enter` | Use the same extraction semantics and open an independent result panel. |
+| **KX: Run q Script** | `Ctrl+Alt+Enter` | `Cmd+Alt+Enter` | Run the complete active `.q` document and reuse the active/available result panel. |
+
+A code lens at the top of a q document also runs the whole script.
+
+## Exact execution semantics
+
+- A non-empty selection is preserved exactly.
+- With no selection, only the current physical line is used. There is no current-block inference.
+- A single-line selection and current-line execution are sent as raw q expressions.
+- A selection containing a line break is treated as a script.
+- **Run q Script** treats the entire document as a script.
+
+Multiline selections and documents are normalized to line-feed endings and grouped by q's `.Q.ld` script-line grouping. Groups execute in order and the final value is returned. This requires q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer. Older q versions receive a clear script-version error; single-line raw execution does not use `.Q.ld`.
+
+Whitespace, q indentation, and script termination rules still belong to q. Select the intended text when a partial document should run.
+
+## Active connection and namespace
+
+All three editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.
+
+The connection's **Database / Namespace** value is applied consistently:
+
+- `.` evaluates raw current-line/single-line text as sent;
+- a non-root namespace evaluates it after temporarily switching q namespace; and
+- script and multiline paths apply the same namespace around `.Q.ld` grouping.
+
+The wrapper restores the server's previous namespace after success or failure. A q error is rethrown and shown as an error, not converted into an ordinary result row.
+
+## Result placement
+
+The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.
+
+**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files.
+
+## Cancellation boundary
+
+Use the result panel's **Cancel** button or cancel the VS Code progress notification. This stops that panel waiting and protects it from a late result. It is a local wait cancellation: q computation or side effects already sent to the server may continue, and other queued work on the same connection is not canceled.
+
+Use **KX: Disconnect** when you intentionally need to close the connection and fail its outstanding IPC work. Diagnostics distinguish local result-wait cancellation from transport disconnect/cancel transitions.

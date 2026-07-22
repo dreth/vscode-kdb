@@ -2,6 +2,13 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## Unreleased
+
+- Added a source-backed standalone parity matrix, phased architecture roadmap, and post-verification backport policy.
+- Added a reproducible MkDocs Material site with committed generated output and a build-only Pages drift/artifact workflow.
+- Added the `KX` Output channel with redacted connection, handshake, query, cancellation, and close diagnostics plus opt-in safe performance timings.
+- Added direct IPC reliability, q-error, namespace, redaction, and connection-state regression coverage without changing the `0.1.1` version or producing a new VSIX.
+
 ## 0.1.1 - 2026-07-22
 
 - Replaced the standalone extension's prior Marketplace and Activity Bar branding with recolored, transparently padded assets derived from the official KX logo.

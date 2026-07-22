@@ -4,6 +4,8 @@ KX for VS Code is a standalone extension for working with kdb+/q directly in Vis
 
 Version 0.1.1 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
 
+Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed parity matrix](PARITY.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
+
 ## Quick start
 
 1. Start a local q process that listens for IPC connections:
@@ -72,6 +74,18 @@ All q results open in the KX-owned viewer; there is no alternate SQLTools result
 
 Large copy, export, rendering, and chart operations have configurable safety limits. The viewer exposes only implemented actions; it does not contain placeholder explorer or gateway controls.
 
+## Diagnostics
+
+Open **View > Output** and select **KX** for connection, handshake, query, cancellation, disconnect, and close lifecycle diagnostics. Records include the phase and direct host/port where useful, but omit query text and result values. Authentication credentials, SecretStorage values, and local-data-server tokens are redacted or omitted.
+
+For additional safe operation timings, enable this setting explicitly:
+
+```json
+"vscode-kdb.performance.trace": true
+```
+
+The setting is opt-in and is never changed automatically. Performance tracing adds operation durations, sizes/counts, and memory details to the KX output without logging query values or credentials.
+
 ## Phase 1 scope
 
 Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.1; unreliable metadata placeholders are deliberately omitted.
@@ -88,7 +102,7 @@ npm run test:unit
 npm test
 ```
 
-`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection validation and namespace wrapping, result conversion, and manifest/source guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these Phase 1 behaviors can be tested deterministically without it.
+`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection validation and namespace wrapping, connection-manager lifecycle, diagnostics/redaction, result conversion, and manifest/source guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these Phase 1 behaviors can be tested deterministically without it.
 
 If a local q executable is available at `~/.kx/bin/q`, run the optional live IPC test:
 
@@ -97,6 +111,20 @@ npm run test:live-q
 ```
 
 The live runner detects that location automatically and skips cleanly when q is unavailable. Set `VSCODE_KDB_Q_BIN=/path/to/q` to select another executable, or `VSCODE_KDB_LIVE_REQUIRED=1` to make an unavailable q executable fail the run.
+
+The MkDocs sources are under `mkdocs-src/`, and generated `docs/` is committed. Run the same strict build and drift gate as the Pages workflow:
+
+```sh
+python3 -m venv /tmp/vscode-kdb-docs-venv
+. /tmp/vscode-kdb-docs-venv/bin/activate
+python -m pip install --requirement mkdocs-src/requirements.txt
+mkdocs build --strict
+python .github/scripts/clean-mkdocs-output.py docs
+git diff --exit-code -- docs
+test -z "$(git status --porcelain -- docs)"
+```
+
+The workflow uploads generated docs as an artifact but intentionally does not deploy or change repository Pages configuration. See `mkdocs-src/README.md` for the exact documentation and extension contributor checks.
 
 Package the extension with either the project script or an explicit artifact path:
 

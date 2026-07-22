@@ -1,0 +1,59 @@
+site_name: KX for VS Code
+repo_url: https://github.com/dreth/vscode-kdb
+repo_name: dreth/vscode-kdb
+site_description: Standalone q IPC, execution, results, charting, and diagnostics documentation for KX for VS Code.
+docs_dir: mkdocs-src
+site_dir: docs
+exclude_docs: |
+  README.md
+  requirements.txt
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: black
+      accent: lime
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: black
+      accent: lime
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+  features:
+    - navigation.instant
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+    - toc.follow
+    - content.code.copy
+
+plugins:
+  - search
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - md_in_html
+  - pymdownx.superfences
+  - pymdownx.highlight
+  - tables
+
+nav:
+  - Overview: index.md
+  - Installation: installation.md
+  - Connections & SecretStorage: connections.md
+  - Running q: running-q.md
+  - Results Viewer: results-viewer.md
+  - Charting: charting.md
+  - Copy & Export: copy-export.md
+  - Settings: settings.md
+  - Performance & Large Results: performance.md
+  - Local Data Server: local-data-server.md
+  - Troubleshooting: troubleshooting.md
+  - Parity Roadmap & Architecture: parity-roadmap.md
+  - Feedback: feedback.md
