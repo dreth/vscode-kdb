@@ -791,17 +791,18 @@
 <span class="nb">tables</span><span class="w"> </span><span class="ss">`</span><span class="o">.</span><span class="n">analytics</span>
 </code></pre></div>
 <h2 id="phase-1-status">Phase 1 status</h2>
-<p>The current <code>0.1.x</code> line is the first standalone phase. It has no SQLTools runtime dependency and does not create or interpret SQLTools session files.</p>
+<p>The current <code>0.1.3</code> release is in the first standalone phase. It has no SQLTools runtime dependency and does not create or interpret SQLTools session files.</p>
 <p>Implemented foundations include:</p>
 <ul>
-<li>direct q IPC connections with extension-owned metadata and VS Code SecretStorage;</li>
+<li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata and VS Code SecretStorage;</li>
+<li>optional per-profile connect/handshake and query timeout overrides with bounded global defaults;</li>
 <li>exact current-line, selection, and whole-document q execution;</li>
 <li>grid and q-text results, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
 <li>line, scatter, step, bar, box, and candlestick charts;</li>
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>
-<p>Phase 1 is not a full compatibility claim. The extension has no object explorer, built-in SSH or TLS setup, gateway orchestration, SQLTools result target, SQLTools connection UI, or <code>.session.sql</code> behavior. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
+<p>Phase 1 is not a full compatibility claim. The extension has no object explorer, built-in SSH or TLS setup, gateway orchestration, SQLTools result target, SQLTools connection UI, or <code>.session.sql</code> behavior. Release 0.1.3 has deterministic form/source guards but no visual Extension Host E2E or screenshot evidence. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>VS Code <code>1.96.0</code> or newer.</li>
@@ -812,7 +813,7 @@
 <h2 id="common-workflow">Common workflow</h2>
 <ol>
 <li>Start q on a loopback port for local development.</li>
-<li>Add a direct connection from the <strong>KX Connections</strong> sidebar.</li>
+<li>Add a direct connection from the <strong>KX Connections</strong> sidebar. Complete the single-screen endpoint, namespace, and optional authentication fields; use <strong>Advanced direct q IPC</strong> only when this profile needs timeout overrides.</li>
 <li>Test it, set it active, and connect; a run can also connect on demand.</li>
 <li>Open a <code>.q</code> file and run the current line, an exact selection, or the whole document.</li>
 <li>Inspect, chart, copy, or export the result in <strong>KX Results</strong>.</li>

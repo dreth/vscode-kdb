@@ -4,25 +4,25 @@ KX for VS Code is being developed as the future first-party KX product. During t
 
 The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim.
 
-The repository manifest is at `0.1.2` for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
+The repository manifest is at `0.1.3` for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
 
 ## Current standalone architecture
 
 The extension has five deliberate layers:
 
-1. **VS Code surface:** q language contribution, editor commands, KX activity-bar connection tree, notifications, and `KX` Output channel.
-2. **Connection ownership:** application-scoped safe metadata, global active-connection state, and per-connection VS Code SecretStorage keys.
-3. **Direct q IPC:** handshake, serialization/deserialization, ordered queries, timeouts, q errors, transport lifecycle, and namespace/script wrappers.
+1. **VS Code surface:** q language contribution, editor commands, KX activity-bar connection tree, the KX-owned single-screen connection form, notifications, and `KX` Output channel.
+2. **Connection ownership:** application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.
+3. **Direct q IPC:** handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.
 4. **Result capabilities:** columnar storage, virtual grid/q-text presentation, search/sort/selection, copy/export, and safe chart transformations.
 5. **Optional local access:** per-panel tokenized HTTP endpoints bound to loopback.
 
-There are no SQLTools runtime imports, APIs, result targets, connection forms, object-explorer nodes, or session-file hooks in this graph.
+There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, object-explorer nodes, or session-file hooks in this graph. The **KX Connection** form and its storage lifecycle are owned entirely by this extension.
 
 ## Phase 1 boundary
 
-Present foundations include direct connections, authentication and SecretStorage implementation, exact editor execution, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path verification remains partial as recorded in `PARITY.md`.
+Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path verification remains partial as recorded in `PARITY.md`.
 
-Known gaps and partial areas remain. In particular, Phase 1 does not provide an object explorer, built-in SSH/TLS or gateway orchestration, every historical editor convenience, complete visual/manual Extension Host coverage, or proof of end-user functional parity. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
+Known gaps and partial areas remain. In particular, Phase 1 does not provide an object explorer, built-in SSH/TLS or gateway orchestration, every historical editor convenience, complete visual/manual Extension Host coverage, or proof of end-user functional parity. Deterministic source/webview guards are not visual E2E, and release 0.1.3 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
 
 Some SQLTools behaviors are deliberately omitted rather than missing:
 

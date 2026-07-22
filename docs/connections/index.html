@@ -393,6 +393,34 @@
     </span>
   </a>
 
+    <nav class="md-nav" aria-label="Add, edit, and remove">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#password-edits" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Password edits
+
+    </span>
+  </a>
+
+</li>
+
+      </ul>
+    </nav>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#timeout-model" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Timeout model
+
+    </span>
+  </a>
+
 </li>
 
         <li class="md-nav__item">
@@ -763,6 +791,34 @@
     </span>
   </a>
 
+    <nav class="md-nav" aria-label="Add, edit, and remove">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#password-edits" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Password edits
+
+    </span>
+  </a>
+
+</li>
+
+      </ul>
+    </nav>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#timeout-model" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Timeout model
+
+    </span>
+  </a>
+
 </li>
 
         <li class="md-nav__item">
@@ -850,23 +906,31 @@
 </tr>
 <tr>
 <td>Port</td>
-<td>q IPC port from <code>1</code> through <code>65535</code>; the prompt defaults to <code>5000</code>.</td>
+<td>q IPC port from <code>1</code> through <code>65535</code>; a new form defaults to <code>5000</code>.</td>
 </tr>
 <tr>
-<td>Database / Namespace</td>
-<td><code>.</code> for root, or a dot-qualified q namespace such as <code>.analytics</code>.</td>
+<td>Namespace / database</td>
+<td><code>.</code> for root, or a dot-qualified q namespace such as <code>.analytics</code>; a new form defaults to <code>.</code>.</td>
 </tr>
 <tr>
 <td>Username</td>
 <td>Optional q IPC username.</td>
 </tr>
 <tr>
-<td>Authentication secret</td>
-<td>Optional secret combined with the username for the q IPC handshake.</td>
+<td>Password</td>
+<td>Optional secret combined with the username for the q IPC handshake. It is a password input and is stored only in SecretStorage.</td>
+</tr>
+<tr>
+<td>Connect / handshake timeout</td>
+<td>Optional per-connection millisecond override in <strong>Advanced direct q IPC</strong>. Blank inherits the global default.</td>
+</tr>
+<tr>
+<td>Query timeout</td>
+<td>Optional per-connection millisecond override in <strong>Advanced direct q IPC</strong>. Blank inherits the global default.</td>
 </tr>
 </tbody>
 </table>
-<p>Namespaces are normalized to a leading dot. Invalid hosts, ports, namespaces, duplicate names, and unsupported username characters are rejected before storage.</p>
+<p>Namespaces are normalized to a leading dot. Invalid hosts, ports, namespaces, duplicate names, unsupported username characters, and timeout values are rejected before storage. Timeout overrides must be whole numbers from <code>0</code> through <code>2147483647</code>; <code>0</code> disables the corresponding deadline.</p>
 <h2 id="add-edit-and-remove">Add, edit, and remove</h2>
 <p>Use the sidebar toolbar, item context menus, or Command Palette:</p>
 <ul>
@@ -879,7 +943,21 @@
 <li><strong>KX: Test Connection</strong></li>
 <li><strong>KX: Refresh Connections</strong></li>
 </ul>
-<p>Editing offers explicit choices to keep, replace, or remove the stored authentication secret. Removing a connection also removes its secret. Connection changes use rollback handling so a failed settings or secret update does not intentionally leave half-written state.</p>
+<p>Add and Edit open the same dedicated, single-screen <strong>KX Connection</strong> webview. All normal fields are visible together; the two implemented timeout overrides are in a clearly labelled collapsible <strong>Advanced direct q IPC</strong> section. The form is responsive, uses VS Code theme colors, and does not present unsupported SSH, TLS, gateway, broker, keep-alive, or reconnect-policy controls.</p>
+<p>Choose <strong>Save Connection</strong> to submit or <strong>Cancel</strong> to close without changes. Enter submits only while the form is valid; Escape cancels. Each control has a label and description, errors are announced and focus the relevant field, and initial focus moves to the connection name. Browser checks provide immediate feedback, but the extension host treats every webview message as untrusted and validates it again.</p>
+<p>When editing, <strong>Delete Connection</strong> is also available. It asks for explicit confirmation through a modal VS Code notification in the extension host, not browser <code>confirm</code>. Removing a connection also removes its secret.</p>
+<h3 id="password-edits">Password edits</h3>
+<p>A stored password is never read back into or reflected by the webview. On Edit, the password field is empty:</p>
+<ul>
+<li>leave it blank to keep the saved password;</li>
+<li>enter a new password to replace it; or</li>
+<li>select <strong>Clear saved password</strong> to remove it. The control appears only when a saved password exists.</li>
+</ul>
+<p>Connection changes use rollback handling so a failed settings or secret write does not intentionally leave half-written state. A validation error, Cancel, or webview disposal does not modify the saved profile or active client; reopen Edit to try again. Each panel accepts only its own session token and ignores stale messages after disposal.</p>
+<h2 id="timeout-model">Timeout model</h2>
+<p><code>vscode-kdb.connectionTimeoutMs</code> defaults to <code>30000</code>. It is the global direct q IPC connect/handshake deadline. TCP connect gets the full budget, and after TCP succeeds the q IPC handshake gets a new full budget.</p>
+<p><code>vscode-kdb.queryTimeoutMs</code> defaults to <code>null</code>. Null inherits <code>connectionTimeoutMs</code>, preserving the behavior of profiles created before the split query setting. A numeric value sets a distinct global query-response timeout. A blank profile override inherits the corresponding resolved global value; specifically, a blank query override uses the global query value, which under the default <code>null</code> is the global <code>connectionTimeoutMs</code> value.</p>
+<p>All global values and profile overrides accept only integers from <code>0</code> through <code>2147483647</code>; <code>0</code> disables that deadline. Query queue wait is not timed. The query deadline starts when that connection makes the query active and sends it, and runs until the response completes. On expiry the uncertain socket is discarded. Errors identify the <code>connect</code>, <code>handshake</code>, or <code>query</code> phase and direct endpoint without including credentials or query contents.</p>
 <h2 id="active-and-connected-state">Active and connected state</h2>
 <p><strong>Active</strong> identifies the connection used by editor runs. <strong>Connected</strong> means an IPC socket is currently open. They are separate states:</p>
 <ul>
@@ -890,14 +968,16 @@
 <li>Explicit <strong>Disconnect</strong> closes that client's outstanding IPC work.</li>
 </ul>
 <p><strong>Test Connection</strong> uses a temporary connection and verifies that <code>1+1</code> returns <code>2</code>; it does not keep that test socket as the active client.</p>
+<p>Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.</p>
 <h2 id="storage-and-secrets">Storage and secrets</h2>
 <p>Safe metadata is stored in the application-scoped user setting <code>vscode-kdb.connections</code>:</p>
 <ul>
 <li>generated connection ID;</li>
 <li>display name;</li>
 <li>host and port;</li>
-<li>database/namespace; and</li>
-<li>username.</li>
+<li>database/namespace;</li>
+<li>username; and</li>
+<li>optional <code>connectTimeoutMs</code> and <code>queryTimeoutMs</code> overrides.</li>
 </ul>
 <p>Passwords and authentication secrets are not written into that setting. Each connection's secret is stored under an extension-specific key in VS Code <code>SecretStorage</code>, which delegates at-rest protection to VS Code and the operating system.</p>
 <p>Do not add a password field to <code>settings.json</code>. Do not paste credentials into logs, issue reports, or example queries.</p>

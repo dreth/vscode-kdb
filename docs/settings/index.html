@@ -845,12 +845,17 @@
 <tr>
 <td><code>vscode-kdb.connections</code></td>
 <td><code>[]</code></td>
-<td>Safe standalone connection metadata. Manage it through <strong>KX Connections</strong>; secrets are stored separately in SecretStorage.</td>
+<td>Safe standalone connection metadata. Manage it through the <strong>KX Connection</strong> form; passwords are stored separately in SecretStorage.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.connectionTimeoutMs</code></td>
 <td><code>30000</code></td>
-<td>Connect/handshake and query timeout in milliseconds. <code>0</code> disables the timeout.</td>
+<td>Global direct q IPC connect/handshake timeout in milliseconds. TCP connect and q IPC handshake each receive this full budget. <code>0</code> disables both phase deadlines.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.queryTimeoutMs</code></td>
+<td><code>null</code></td>
+<td>Global query-response timeout in milliseconds. <code>null</code> inherits <code>connectionTimeoutMs</code> for compatibility; <code>0</code> disables the query deadline.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.performance.trace</code></td>
@@ -859,6 +864,60 @@
 </tr>
 </tbody>
 </table>
+<p>Timeout settings accept integers from <code>0</code> through <code>2147483647</code>. The query deadline begins when queued work becomes active and is sent, so time waiting behind another query is excluded. A query timeout discards the uncertain client.</p>
+<p>Each object in <code>vscode-kdb.connections</code> has these safe fields:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Required</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>id</code></td>
+<td>Yes</td>
+<td>Extension-generated stable ID.</td>
+</tr>
+<tr>
+<td><code>name</code></td>
+<td>Yes</td>
+<td>Unique display name.</td>
+</tr>
+<tr>
+<td><code>host</code></td>
+<td>Yes</td>
+<td>Direct q host name or IP address.</td>
+</tr>
+<tr>
+<td><code>port</code></td>
+<td>Yes</td>
+<td>Integer from <code>1</code> through <code>65535</code>.</td>
+</tr>
+<tr>
+<td><code>database</code></td>
+<td>Yes</td>
+<td>q namespace, normally <code>.</code> or a value such as <code>.analytics</code>.</td>
+</tr>
+<tr>
+<td><code>username</code></td>
+<td>Yes</td>
+<td>Optional username represented as a string; empty means none.</td>
+</tr>
+<tr>
+<td><code>connectTimeoutMs</code></td>
+<td>No</td>
+<td>Per-connection connect/handshake override. Omit (leave blank in the form) to inherit the global connect default; <code>0</code> disables both deadlines.</td>
+</tr>
+<tr>
+<td><code>queryTimeoutMs</code></td>
+<td>No</td>
+<td>Per-connection query override. Omit (leave blank in the form) to inherit the resolved global query default; <code>0</code> disables it.</td>
+</tr>
+</tbody>
+</table>
+<p>Existing connection objects without either override remain valid and need no migration. The default global <code>queryTimeoutMs: null</code> resolves to the global <code>connectionTimeoutMs</code> value. A blank per-connection query override inherits that resolved global query value; it does not copy a per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; <strong>Clear saved password</strong> removes it explicitly.</p>
 <p>The <code>KX</code> Output channel always receives connection/query lifecycle diagnostics. Performance trace adds detail only when explicitly enabled. The extension does not enable it for you.</p>
 <p>Enabled performance records also retain their <code>[vscode-kdb:perf]</code> Extension Host console entry for development compatibility; use <strong>Output &gt; KX</strong> for normal troubleshooting.</p>
 <h2 id="result-display">Result display</h2>
@@ -1086,6 +1145,7 @@
 <h2 id="example">Example</h2>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.connectionTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">30000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.queryTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.performance.trace&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.viewer.arrayDisplayFormat&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;space&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.viewer.functionDisplayStrategy&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;qText&quot;</span><span class="p">,</span>

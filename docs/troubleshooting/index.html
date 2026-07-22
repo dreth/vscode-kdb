@@ -634,6 +634,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#edited-connection-is-disconnected" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Edited connection is disconnected
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#q-error-appears-in-the-result-panel" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -865,6 +876,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#edited-connection-is-disconnected" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Edited connection is disconnected
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#q-error-appears-in-the-result-panel" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -996,13 +1018,17 @@
 <div class="highlight"><pre><span></span><code>q<span class="w"> </span>-p<span class="w"> </span><span class="m">127</span>.0.0.1:5000
 </code></pre></div>
 <p>Then verify the standalone connection uses host <code>localhost</code> (or <code>127.0.0.1</code>) and port <code>5000</code>. Check that another process is not using the port and that firewalls permit the intended route.</p>
-<p>A <code>connect</code>-phase error generally indicates endpoint, routing, refusal, or timeout. A <code>handshake</code>-phase error means TCP connected but q IPC negotiation/authentication did not complete. Common causes include a non-q service on that port, rejected q credentials, a reset listener, or an incompatible intermediary.</p>
-<p>Use <strong>KX: Test Connection</strong> to open a temporary client and verify <code>1+1</code>. If authentication changed, use <strong>Edit Connection</strong> and explicitly replace or remove the SecretStorage value.</p>
+<p>A <code>connect</code>-phase error generally indicates endpoint, routing, refusal, or timeout. A <code>handshake</code>-phase error means TCP connected but q IPC negotiation/authentication did not complete. Common causes include a non-q service on that port, rejected q credentials, a reset listener, or an incompatible intermediary. TCP connect and handshake each receive a separate full connect-timeout budget, so one does not consume the other's allowance.</p>
+<p>Use <strong>KX: Test Connection</strong> to open a temporary client and verify <code>1+1</code>. If authentication changed, use <strong>Edit Connection</strong>: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select <strong>Clear saved password</strong>. KX never sends the saved password back into the form.</p>
 <h2 id="sidebar-says-disconnected-after-failure">Sidebar says disconnected after failure</h2>
 <p>That is expected after a failed open, transport error, remote close, or explicit disconnect. Partial clients and stale opening promises are dropped, and the tree refreshes to the disconnected state. A subsequent run can connect again on demand.</p>
 <h2 id="query-timed-out">Query timed out</h2>
-<p>The default <code>vscode-kdb.connectionTimeoutMs</code> is 30 seconds. A query timeout drops the failed client so later work does not reuse an uncertain socket. Increase the timeout only when the expected q workload justifies it, and inspect q-side performance first.</p>
-<p>Setting the timeout to <code>0</code> disables it.</p>
+<p><code>vscode-kdb.queryTimeoutMs</code> controls the global query deadline. Its default is <code>null</code>, which inherits the 30-second <code>vscode-kdb.connectionTimeoutMs</code> value for compatibility. The connection form's <strong>Advanced direct q IPC</strong> section can override either timeout for one profile; blank means use the corresponding global default.</p>
+<p>The query timer begins only when this connection makes the queued query active and sends it. Time waiting behind an earlier query is not included. A query timeout drops the failed client so later work does not reuse an uncertain socket. Increase it only when the expected q workload justifies it, and inspect q-side performance first.</p>
+<p>Every timeout must be an integer from <code>0</code> through <code>2147483647</code> milliseconds. Setting one to <code>0</code> disables that deadline. Errors identify the <code>query</code> phase and direct endpoint but omit query contents and credentials.</p>
+<h2 id="edited-connection-is-disconnected">Edited connection is disconnected</h2>
+<p>If a connected profile's host, port, username, password, or timeout changes, this is intentional lifecycle behavior. Save commits the safe profile and requested SecretStorage change first, then disconnects and reconnects using the saved values. If reconnect fails, the profile remains saved and KX warns that it is disconnected; it never keeps using the stale client.</p>
+<p>Name and namespace-only changes do not recycle a healthy client. Validation errors, Cancel, or closing the form without saving do not change storage or the current session.</p>
 <h2 id="q-error-appears-in-the-result-panel">q error appears in the result panel</h2>
 <p>Genuine q error payloads are decoded as errors and preserved. The panel shows endpoint context plus the q error instead of presenting it as a successful result row.</p>
 <p>A genuine q evaluation error does not by itself discard an otherwise healthy IPC client. Transport/protocol failures do drop the uncertain client.</p>
@@ -1031,7 +1057,7 @@
 <p>Maintainers can run the direct live smoke path when a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness is deterministic and does not claim visual/manual VS Code end-to-end coverage.</p>
+<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic form/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.3 produced no screenshot as substitute evidence.</p>
 <h2 id="generated-docs-drift">Generated docs drift</h2>
 <p>Edit files under <code>mkdocs-src/</code>, then run the exact gate in <code>mkdocs-src/README.md</code>. Generated <code>docs/</code> is committed. The workflow builds and uploads an artifact but intentionally does not deploy or alter Pages settings.</p>
 

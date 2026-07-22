@@ -30,7 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
   connectionCommands.register(context);
   updatePerfTraceSetting();
 
-  let connectionSnapshot = connectionSignatures(store.connections());
+  let connectionSnapshot = connectionMap(store.connections());
   context.subscriptions.push(
     manager,
     tree,
@@ -59,14 +59,16 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration('vscode-kdb.performance.trace')) {
         updatePerfTraceSetting();
       }
-      if (!event.affectsConfiguration('vscode-kdb.connections')) {
+      const connectionsChanged = event.affectsConfiguration('vscode-kdb.connections');
+      const timeoutDefaultsChanged = event.affectsConfiguration('vscode-kdb.connectionTimeoutMs') ||
+        event.affectsConfiguration('vscode-kdb.queryTimeoutMs');
+      if (!connectionsChanged && !timeoutDefaultsChanged) {
         return;
       }
-      const nextSnapshot = connectionSignatures(store.connections());
-      for (const [id, signature] of connectionSnapshot) {
-        if (nextSnapshot.get(id) !== signature) {
-          manager.disconnect(id).catch(() => undefined);
-        }
+      const nextSnapshot = connectionMap(store.connections());
+      const connectionIds = new Set([...connectionSnapshot.keys(), ...nextSnapshot.keys()]);
+      for (const id of connectionIds) {
+        void manager.disconnectIfConfigurationChanged(id, nextSnapshot.get(id)).catch(() => undefined);
       }
       connectionSnapshot = nextSnapshot;
       tree.refresh();
@@ -347,8 +349,8 @@ function updatePerfTraceSetting(): void {
     .get<boolean>('trace', false));
 }
 
-function connectionSignatures(connections: readonly KxConnection[]): Map<string, string> {
-  return new Map(connections.map(connection => [connection.id, JSON.stringify(connection)]));
+function connectionMap(connections: readonly KxConnection[]): Map<string, KxConnection> {
+  return new Map(connections.map(connection => [connection.id, connection]));
 }
 
 class QRunCodeLensProvider implements vscode.CodeLensProvider {

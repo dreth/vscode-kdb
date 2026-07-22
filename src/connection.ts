@@ -3,6 +3,8 @@ import { isIP } from 'net';
 export const DEFAULT_HOST = 'localhost';
 export const DEFAULT_PORT = 5000;
 export const DEFAULT_NAMESPACE = '.';
+export const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
+export const MAX_TIMEOUT_MS = 2147483647;
 
 export interface KxConnection {
   id: string;
@@ -11,6 +13,8 @@ export interface KxConnection {
   port: number;
   database: string;
   username: string;
+  connectTimeoutMs?: number;
+  queryTimeoutMs?: number;
 }
 
 export interface ConnectionCandidate {
@@ -20,6 +24,13 @@ export interface ConnectionCandidate {
   port?: unknown;
   database?: unknown;
   username?: unknown;
+  connectTimeoutMs?: unknown;
+  queryTimeoutMs?: unknown;
+}
+
+export interface ConnectionTimeouts {
+  connectTimeoutMs: number;
+  queryTimeoutMs: number;
 }
 
 export class ConnectionValidationError extends Error {
@@ -47,7 +58,7 @@ export function normalizeNamespace(value: unknown): string {
 }
 
 export function normalizeConnection(candidate: ConnectionCandidate): KxConnection {
-  return {
+  const connection: KxConnection = {
     id: String(candidate.id === undefined || candidate.id === null ? '' : candidate.id).trim(),
     name: String(candidate.name === undefined || candidate.name === null ? '' : candidate.name).trim(),
     host: normalizeHost(candidate.host),
@@ -55,6 +66,15 @@ export function normalizeConnection(candidate: ConnectionCandidate): KxConnectio
     database: normalizeNamespace(candidate.database),
     username: String(candidate.username === undefined || candidate.username === null ? '' : candidate.username).trim(),
   };
+  const connectTimeoutMs = normalizeOptionalTimeout(candidate.connectTimeoutMs);
+  const queryTimeoutMs = normalizeOptionalTimeout(candidate.queryTimeoutMs);
+  if (connectTimeoutMs !== undefined) {
+    connection.connectTimeoutMs = connectTimeoutMs;
+  }
+  if (queryTimeoutMs !== undefined) {
+    connection.queryTimeoutMs = queryTimeoutMs;
+  }
+  return connection;
 }
 
 export function validateConnection(
@@ -94,8 +114,66 @@ export function validateConnection(
   if (/[\0\r\n:]/.test(connection.username)) {
     throw new ConnectionValidationError('Username cannot contain colons, line breaks, or null characters.');
   }
+  validateOptionalTimeout(connection.connectTimeoutMs, 'Connect / handshake timeout');
+  validateOptionalTimeout(connection.queryTimeoutMs, 'Query timeout');
 
   return connection;
+}
+
+export function parseOptionalTimeout(value: unknown, label: string): number | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return undefined;
+  }
+  if (typeof value === 'string' && !/^\d+$/.test(value.trim())) {
+    throw new ConnectionValidationError(`${label} must be a whole number from 0 to ${MAX_TIMEOUT_MS}, or blank to inherit.`);
+  }
+  const timeout = typeof value === 'number' ? value : Number(value);
+  validateOptionalTimeout(timeout, label);
+  return timeout;
+}
+
+export function validateOptionalTimeout(timeout: number | undefined, label: string): void {
+  if (timeout === undefined) {
+    return;
+  }
+  if (!Number.isInteger(timeout) || timeout < 0 || timeout > MAX_TIMEOUT_MS) {
+    throw new ConnectionValidationError(`${label} must be a whole number from 0 to ${MAX_TIMEOUT_MS}, or blank to inherit.`);
+  }
+}
+
+export function safeTimeoutMs(value: unknown, fallback: number): number {
+  const safeFallback = isValidTimeout(fallback) ? fallback : DEFAULT_CONNECTION_TIMEOUT_MS;
+  return isValidTimeout(value)
+    ? value
+    : safeFallback;
+}
+
+export function resolveConnectionTimeouts(
+  connection: Pick<KxConnection, 'connectTimeoutMs' | 'queryTimeoutMs'>,
+  globalTimeouts: ConnectionTimeouts
+): ConnectionTimeouts {
+  const globalConnectTimeoutMs = safeTimeoutMs(
+    globalTimeouts.connectTimeoutMs,
+    DEFAULT_CONNECTION_TIMEOUT_MS
+  );
+  const globalQueryTimeoutMs = safeTimeoutMs(
+    globalTimeouts.queryTimeoutMs,
+    globalConnectTimeoutMs
+  );
+  return {
+    connectTimeoutMs: safeTimeoutMs(connection.connectTimeoutMs, globalConnectTimeoutMs),
+    queryTimeoutMs: safeTimeoutMs(connection.queryTimeoutMs, globalQueryTimeoutMs),
+  };
+}
+
+export function connectionSessionChanged(
+  previous: KxConnection,
+  next: KxConnection,
+  passwordChanged = false
+): boolean {
+  return passwordChanged || previous.host !== next.host || previous.port !== next.port ||
+    previous.username !== next.username || previous.connectTimeoutMs !== next.connectTimeoutMs ||
+    previous.queryTimeoutMs !== next.queryTimeoutMs;
 }
 
 export function validateHost(host: string): void {
@@ -135,6 +213,9 @@ export function validateNamespace(namespace: string): void {
   if (namespace === '.') {
     return;
   }
+  if (namespace.length > 512) {
+    throw new ConnectionValidationError('Namespace must be 512 characters or fewer.');
+  }
   if (!/^\.[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(namespace)) {
     throw new ConnectionValidationError('Namespace must be "." or dot-separated q identifiers such as .app or .app.data.');
   }
@@ -157,6 +238,17 @@ export function safeStoredConnections(value: unknown): KxConnection[] {
     }
   }
   return connections;
+}
+
+function normalizeOptionalTimeout(value: unknown): number | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && !value.trim())) {
+    return undefined;
+  }
+  return typeof value === 'number' ? value : Number(value);
+}
+
+function isValidTimeout(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_TIMEOUT_MS;
 }
 
 export function qString(value: unknown): string {

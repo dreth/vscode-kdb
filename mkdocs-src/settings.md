@@ -8,9 +8,27 @@ Connection records are application-scoped user metadata. Other settings can be s
 
 | Setting | Default | Use |
 | --- | --- | --- |
-| `vscode-kdb.connections` | `[]` | Safe standalone connection metadata. Manage it through **KX Connections**; secrets are stored separately in SecretStorage. |
-| `vscode-kdb.connectionTimeoutMs` | `30000` | Connect/handshake and query timeout in milliseconds. `0` disables the timeout. |
+| `vscode-kdb.connections` | `[]` | Safe standalone connection metadata. Manage it through the **KX Connection** form; passwords are stored separately in SecretStorage. |
+| `vscode-kdb.connectionTimeoutMs` | `30000` | Global direct q IPC connect/handshake timeout in milliseconds. TCP connect and q IPC handshake each receive this full budget. `0` disables both phase deadlines. |
+| `vscode-kdb.queryTimeoutMs` | `null` | Global query-response timeout in milliseconds. `null` inherits `connectionTimeoutMs` for compatibility; `0` disables the query deadline. |
 | `vscode-kdb.performance.trace` | `false` | Add safe operation timings, sizes, and counts to **Output > KX**. Query text/values, credentials, and local-server tokens are omitted or redacted. |
+
+Timeout settings accept integers from `0` through `2147483647`. The query deadline begins when queued work becomes active and is sent, so time waiting behind another query is excluded. A query timeout discards the uncertain client.
+
+Each object in `vscode-kdb.connections` has these safe fields:
+
+| Field | Required | Use |
+| --- | --- | --- |
+| `id` | Yes | Extension-generated stable ID. |
+| `name` | Yes | Unique display name. |
+| `host` | Yes | Direct q host name or IP address. |
+| `port` | Yes | Integer from `1` through `65535`. |
+| `database` | Yes | q namespace, normally `.` or a value such as `.analytics`. |
+| `username` | Yes | Optional username represented as a string; empty means none. |
+| `connectTimeoutMs` | No | Per-connection connect/handshake override. Omit (leave blank in the form) to inherit the global connect default; `0` disables both deadlines. |
+| `queryTimeoutMs` | No | Per-connection query override. Omit (leave blank in the form) to inherit the resolved global query default; `0` disables it. |
+
+Existing connection objects without either override remain valid and need no migration. The default global `queryTimeoutMs: null` resolves to the global `connectionTimeoutMs` value. A blank per-connection query override inherits that resolved global query value; it does not copy a per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; **Clear saved password** removes it explicitly.
 
 The `KX` Output channel always receives connection/query lifecycle diagnostics. Performance trace adds detail only when explicitly enabled. The extension does not enable it for you.
 
@@ -79,6 +97,7 @@ Array display examples:
 ```json
 {
   "vscode-kdb.connectionTimeoutMs": 30000,
+  "vscode-kdb.queryTimeoutMs": null,
   "vscode-kdb.performance.trace": false,
   "vscode-kdb.results.viewer.arrayDisplayFormat": "space",
   "vscode-kdb.results.viewer.functionDisplayStrategy": "qText",
