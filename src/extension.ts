@@ -8,6 +8,7 @@ import { KX_OUTPUT_CHANNEL_NAME, KxDiagnostics } from './diagnostics';
 import { FeatureControls } from './feature-controls';
 import { emptyColumnarPanelResult } from './kx-results';
 import { KxPanelResult, KxResultsPanel, KxResultsPanelRunMode } from './kx-results-panel';
+import { NotebookIntegration } from './notebook-integration';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 import {
@@ -29,6 +30,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const manager = new ConnectionManager(store, diagnostics);
   const tree = new ConnectionsTreeProvider(store, manager);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
+  const notebookIntegration = new NotebookIntegration(context);
   activeConnectionManager = manager;
 
   const treeView = vscode.window.createTreeView('vscode-kdb.connections', {
@@ -84,6 +86,7 @@ export function activate(context: vscode.ExtensionContext): void {
     tree,
     treeView,
     output,
+    notebookIntegration,
     { dispose: () => configurePerfOutput(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
       runSelectionOrCurrentLine(context, store, manager, diagnostics, features, 'replace')),

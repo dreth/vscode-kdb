@@ -48,6 +48,7 @@ nav:
   - Installation: installation.md
   - Connections & SecretStorage: connections.md
   - Running q: running-q.md
+  - Jupyter Notebooks: notebooks.md
   - Results Viewer: results-viewer.md
   - Charting: charting.md
   - Copy & Export: copy-export.md

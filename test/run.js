@@ -76,6 +76,32 @@ const {
   rowsToColumnarPanelResult,
 } = requireOut('kx-results');
 const {
+  DEFAULT_NOTEBOOK_BYTE_LIMIT,
+  DEFAULT_NOTEBOOK_ROW_LIMIT,
+  KX_NOTEBOOK_MIME,
+  MAX_NOTEBOOK_BYTE_LIMIT,
+  MAX_NOTEBOOK_ROW_LIMIT,
+  MIN_NOTEBOOK_BYTE_LIMIT,
+  MIN_NOTEBOOK_ROW_LIMIT,
+  createPortableKxResult,
+  notebookResultPlainText,
+  notebookResultStaticHtml,
+  notebookResultToCsv,
+  portableKxResultBytes,
+  validatePortableKxResult,
+} = requireOut('notebook-contract');
+const {
+  hasNotebookQMarker,
+  notebookQMagicLine,
+  safeNotebookByteLimit,
+  safeNotebookPresentation,
+  safeNotebookRowLimit,
+} = requireOut('notebook-settings');
+const {
+  notebookRendererSettingsMessage,
+  parseNotebookRendererMessage,
+} = requireOut('notebook-message');
+const {
   DEFAULT_SERVER_PREVIEW_CELL_LIMIT,
   MAX_SERVER_PREVIEW_CELL_LIMIT,
   MIN_SERVER_PREVIEW_CELL_LIMIT,
@@ -124,6 +150,7 @@ const tests = [
   ['connection manager lifecycle races', testConnectionManagerLifecycle],
   ['chart zoom baseline and reset lifecycle', testChartZoomLifecycle],
   ['columnar result windows and exports', testColumnarResults],
+  ['portable notebook MIME contract and static fallbacks', testNotebookContract],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
 ];
@@ -3389,6 +3416,145 @@ async function testLocalDataServerConcurrency() {
   }
 }
 
+function testNotebookContract() {
+  assert.strictEqual(KX_NOTEBOOK_MIME, 'application/vnd.kx.result+json');
+  assert.strictEqual(safeNotebookPresentation(undefined), 'inline');
+  assert.strictEqual(safeNotebookPresentation('unexpected'), 'inline');
+  assert.strictEqual(safeNotebookPresentation('panel'), 'panel');
+  assert.strictEqual(safeNotebookPresentation('both'), 'both');
+  assert.strictEqual(safeNotebookRowLimit(undefined), DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookRowLimit(-5), MIN_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookRowLimit(MAX_NOTEBOOK_ROW_LIMIT + 1), MAX_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookByteLimit(undefined), DEFAULT_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(safeNotebookByteLimit(1), MIN_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(safeNotebookByteLimit(MAX_NOTEBOOK_BYTE_LIMIT + 1), MAX_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(hasNotebookQMarker('%%q\nselect from t'), true);
+  assert.strictEqual(hasNotebookQMarker('%%q --max-rows 5 --max-bytes 20000\nselect from t'), true);
+  assert.strictEqual(hasNotebookQMarker('\n%%q\nselect from t'), false);
+  assert.strictEqual(hasNotebookQMarker('x:42'), false);
+  assert.strictEqual(notebookQMagicLine({ rowLimit: 25, byteLimit: 20000 }),
+    '%%q --max-rows 25 --max-bytes 20000');
+
+  const source = '<script>alert("source")</script>\n([] sym:`A`B; px:10 20; ts:2026.01.01 2026.01.02)';
+  const payload = createPortableKxResult({
+    columns: [
+      { name: 'sym', type: 'symbol' },
+      { name: 'px', type: 'float' },
+      { name: 'ts', type: 'timestamp' },
+      { name: 'note', type: 'string' },
+    ],
+    rows: [
+      ['<img src=x onerror=alert(1)>', 10.5, new Date('2026-01-01T00:00:00Z'), 'a&b'],
+      ['B', 20.25, new Date('2026-01-02T00:00:00Z'), 'line\nbreak'],
+      ['C', 30, new Date('2026-01-03T00:00:00Z'), { nested: true }],
+    ],
+    rowCount: 1000000,
+    rowLimit: 2,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    label: '<unsafe session>',
+    elapsedMs: 12.5,
+    qSource: source,
+    chart: { visible: true, type: 'line', xColumn: 'ts', yColumns: ['px'] },
+  });
+  assert.strictEqual(payload.version, 1);
+  assert.strictEqual(payload.kind, 'table');
+  assert.strictEqual(payload.data.encoding, 'rows');
+  assert.strictEqual(payload.result.rowCount, 1000000);
+  assert.strictEqual(payload.result.previewRowCount, 2);
+  assert.strictEqual(payload.result.truncated, true);
+  assert.ok(payload.result.truncationReasons.includes('rowLimit'));
+  assert.strictEqual(payload.chart.type, 'line');
+  assert.deepStrictEqual(payload.chart.yColumns, ['px']);
+  assert.strictEqual(payload.data.rows[0][1].kind, 'number');
+  assert.strictEqual(payload.data.rows[0][2].kind, 'temporal');
+  assert.ok(portableKxResultBytes(payload) <= payload.result.byteLimit);
+  assert.deepStrictEqual(validatePortableKxResult(payload), { ok: true, value: payload });
+  assert.deepStrictEqual(parseNotebookRendererMessage({ type: 'ready' }), { type: 'ready' });
+  assert.strictEqual(parseNotebookRendererMessage({ type: 'ready', payload }), undefined);
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({ type: 'openPreview', payload }),
+    { type: 'openPreview', payload }
+  );
+  assert.strictEqual(parseNotebookRendererMessage({ type: 'openPreview', payload, token: 'forbidden' }), undefined);
+  assert.deepStrictEqual(notebookRendererSettingsMessage({
+    presentation: 'inline',
+    rowLimit: DEFAULT_NOTEBOOK_ROW_LIMIT,
+    byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT,
+  }), {
+    type: 'settings',
+    presentation: 'inline',
+    rowLimit: DEFAULT_NOTEBOOK_ROW_LIMIT,
+    byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT,
+  });
+
+  const html = notebookResultStaticHtml(payload);
+  assert.match(html, /Schema:/);
+  assert.match(html, /Rows: 1000000/);
+  assert.match(html, /persisted preview: 2/);
+  assert.match(html, /Preview only/);
+  assert.match(html, /<svg/);
+  assert.match(html, /&lt;unsafe session&gt;/);
+  assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.ok(!html.includes('<script>alert'));
+  assert.ok(!html.includes('<img src=x'));
+  const plain = notebookResultPlainText(payload);
+  assert.match(plain, /KX\/q result/);
+  assert.match(plain, /omitted full result is not stored/i);
+  const csv = notebookResultToCsv(payload);
+  assert.match(csv, /^sym,px,ts,note\n/);
+  assert.ok(csv.includes('<img src=x onerror=alert(1)>'));
+
+  const byteBounded = createPortableKxResult({
+    columns: ['value'],
+    rows: Array.from({ length: 500 }, (_, index) => [`${index}-${'x'.repeat(4000)}`]),
+    rowCount: 500,
+    rowLimit: 500,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+  });
+  assert.ok(byteBounded.result.previewRowCount < 500);
+  assert.ok(byteBounded.result.truncationReasons.includes('byteLimit'));
+  assert.ok(portableKxResultBytes(byteBounded) <= MIN_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(validatePortableKxResult(byteBounded).ok, true);
+
+  const clipped = createPortableKxResult({
+    columns: ['duplicate', 'duplicate'],
+    rows: [['x'.repeat(40000), 1]],
+  });
+  assert.deepStrictEqual(clipped.schema.columns.map(column => column.name), ['duplicate', 'duplicate_2']);
+  assert.ok(clipped.result.truncationReasons.includes('cellValueLimit'));
+  assert.strictEqual(validatePortableKxResult(clipped).ok, true);
+
+  const extraField = JSON.parse(JSON.stringify(payload));
+  extraField.credentials = { password: 'no' };
+  assert.strictEqual(validatePortableKxResult(extraField).ok, false);
+  const invalidCell = JSON.parse(JSON.stringify(payload));
+  invalidCell.data.rows[0][1].value = Infinity;
+  assert.strictEqual(validatePortableKxResult(invalidCell).ok, false);
+  const invalidChart = JSON.parse(JSON.stringify(payload));
+  invalidChart.chart.yColumns = ['missing'];
+  assert.strictEqual(validatePortableKxResult(invalidChart).ok, false);
+  const badCounts = JSON.parse(JSON.stringify(payload));
+  badCounts.result.previewRowCount = 999;
+  assert.strictEqual(validatePortableKxResult(badCounts).ok, false);
+
+  const rendererSource = fs.readFileSync(path.join(ROOT, 'renderer', 'index.ts'), 'utf8');
+  assert.ok(rendererSource.includes("from 'uplot'"));
+  assert.match(rendererSource, /buildChartData\(portableTable\(payload\)/);
+  assert.match(rendererSource, /chartColumnOptions\(portableTable\(payload\)/);
+  assert.match(rendererSource, /MAX_TABLE_PAGE_CELLS\s*=\s*5000/);
+  assert.match(rendererSource, /Previous page/);
+  assert.match(rendererSource, /Next page/);
+  assert.match(rendererSource, /validatePortableKxResult\(raw\)/);
+  assert.match(rendererSource, /context\.postMessage\?\.\(\{ type: 'ready' \}\)/);
+  assert.match(rendererSource, /type: 'openPreview'/);
+  assert.match(rendererSource, /textContent/);
+  assert.ok(!/\.innerHTML\s*=|\.outerHTML\s*=|insertAdjacentHTML|document\.write|\beval\s*\(/.test(rendererSource));
+  const rendererBundlePath = path.join(ROOT, 'renderer', 'kx-notebook-renderer.js');
+  assert.ok(fs.existsSync(rendererBundlePath));
+  const rendererBundle = fs.readFileSync(rendererBundlePath, 'utf8');
+  assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new Function|https?:\/\//.test(rendererBundle));
+}
+
 function testManifestAndSources() {
   const manifestPath = path.join(ROOT, 'package.json');
   assert.ok(fs.existsSync(manifestPath), 'package.json is missing; run this test after the extension scaffold is present');
@@ -3398,10 +3564,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.1.5');
+  assert.strictEqual(manifest.version, '0.2.0');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.1.5');
-  assert.strictEqual(packageLock.packages[''].version, '0.1.5');
+  assert.strictEqual(packageLock.version, '0.2.0');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.0');
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -3435,6 +3601,8 @@ function testManifestAndSources() {
     'KX: Run Selection / Current Line',
     'KX: Run q Script',
     'KX: Run Selection in New Result',
+    'KX: Tag Notebook Cell as q',
+    'KX: Open Saved Notebook Preview in Results Panel',
   ].forEach(title => assert.ok(commandTitles.has(title), `missing command contribution: ${title}`));
 
   const contributedCommandIds = new Set(commands.map(command => String(command.command)));
@@ -3457,14 +3625,34 @@ function testManifestAndSources() {
     [...contributedCommandIds].sort(),
     'every command must have an explicit activation event'
   );
+  assert.ok(
+    manifest.activationEvents.includes('onRenderer:vscode-kdb.kx-notebook-renderer'),
+    'renderer messaging must activate the extension host'
+  );
 
   const commandByTitle = Object.fromEntries(commands.map(command => [command.title, command.command]));
   const keybindings = ((manifest.contributes || {}).keybindings) || [];
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection / Current Line'], 'ctrl+enter', 'cmd+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run q Script'], 'ctrl+alt+enter', 'cmd+alt+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection in New Result'], 'ctrl+shift+enter', 'cmd+shift+enter');
+  assert.strictEqual(
+    keybindings.some(binding => /notebook/i.test(String(binding.when || '')) ||
+      binding.command === commandByTitle['KX: Tag Notebook Cell as q']),
+    false,
+    'notebook q support must not steal Jupyter execution keybindings'
+  );
 
   const contributions = manifest.contributes || {};
+  const notebookRenderers = contributions.notebookRenderer || [];
+  assert.strictEqual(notebookRenderers.length, 1);
+  assert.deepStrictEqual(notebookRenderers[0], {
+    id: 'vscode-kdb.kx-notebook-renderer',
+    displayName: 'KX Notebook Result',
+    entrypoint: './renderer/kx-notebook-renderer.js',
+    mimeTypes: [KX_NOTEBOOK_MIME],
+    requiresMessaging: 'optional',
+  });
+  assert.ok(fs.existsSync(path.join(ROOT, notebookRenderers[0].entrypoint)));
   const activityContainers = (((contributions.viewsContainers || {}).activitybar) || []);
   assert.ok(activityContainers.some(container => container.title === 'KX' && container.icon === 'icons/kx-activity.png'));
   const viewGroups = Object.values(contributions.views || {}).flat();
@@ -3543,6 +3731,25 @@ function testManifestAndSources() {
     ? contributions.configuration
     : [contributions.configuration || {}];
   const configurationProperties = Object.assign({}, ...configuration.map(item => item.properties || {}));
+  const notebookPresentation = configurationProperties['vscode-kdb.notebook.presentation'];
+  assert.strictEqual(notebookPresentation.type, 'string');
+  assert.strictEqual(notebookPresentation.scope, 'window');
+  assert.strictEqual(notebookPresentation.default, 'inline');
+  assert.deepStrictEqual(notebookPresentation.enum, ['inline', 'panel', 'both']);
+  assert.match(notebookPresentation.description, /does not intercept Jupyter execution/i);
+  const notebookRowLimit = configurationProperties['vscode-kdb.notebook.maxOutputRows'];
+  assert.strictEqual(notebookRowLimit.type, 'integer');
+  assert.strictEqual(notebookRowLimit.default, DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(notebookRowLimit.minimum, MIN_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(notebookRowLimit.maximum, MAX_NOTEBOOK_ROW_LIMIT);
+  assert.match(notebookRowLimit.description, /%%q/);
+  assert.match(notebookRowLimit.description, /originating live q session|live KX panel/i);
+  const notebookByteLimit = configurationProperties['vscode-kdb.notebook.maxOutputBytes'];
+  assert.strictEqual(notebookByteLimit.type, 'integer');
+  assert.strictEqual(notebookByteLimit.default, DEFAULT_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(notebookByteLimit.minimum, MIN_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(notebookByteLimit.maximum, MAX_NOTEBOOK_BYTE_LIMIT);
+  assert.match(notebookByteLimit.description, /no credentials or IPC handles/i);
   const serverFeatureSetting = configurationProperties['vscode-kdb.features.serverExplorer'];
   assert.strictEqual(serverFeatureSetting.type, 'boolean');
   assert.strictEqual(serverFeatureSetting.scope, 'window');
@@ -3659,8 +3866,13 @@ function testManifestAndSources() {
     false,
     'package-lock.json must not contain SQLTools or vscode-q packages'
   );
-  const forbiddenHeavyDependencies = /(?:ag-grid|plotly|perspective|shiki|prism|monaco|tree-sitter|language-server|vscode-languageclient|notebook)/i;
+  const forbiddenHeavyDependencies = /(?:ag-grid|plotly|perspective|shiki|prism|monaco|tree-sitter|language-server|vscode-languageclient)/i;
   assert.strictEqual(Object.keys(dependencies).some(name => forbiddenHeavyDependencies.test(name)), false);
+  assert.strictEqual(
+    Object.keys(dependencies).some(name => /notebook/i.test(name) && name !== '@types/vscode-notebook-renderer'),
+    false,
+    'do not add a broad notebook framework dependency'
+  );
 
   const storeSource = readSource('connection-store.ts');
   assert.ok(/context\.secrets\.(store|get|delete)/.test(storeSource), 'passwords must use VS Code SecretStorage');

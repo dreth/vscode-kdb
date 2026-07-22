@@ -366,6 +366,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -728,13 +755,14 @@
 <li>Whether the target is loopback, private network, or a separately managed tunnel.</li>
 <li>Endpoint host category and port, with sensitive infrastructure generalized when needed.</li>
 <li>Which command and execution mode failed: current line, single-line selection, multiline selection, or script.</li>
+<li>For notebooks: Python/IPython and <code>kx_notebook</code> versions, whether an explicit callback or optional PyKX adapter was configured, presentation setting, marker row/byte limits, persisted preview/total row counts, and whether the issue occurs in VS Code rendering, reopen, or static HTML/PDF export.</li>
 <li>Result shape and approximate rows/columns for viewer, chart, copy/export, or performance problems.</li>
 <li>Minimal reproduction steps and expected/actual behavior.</li>
 <li>Relevant <strong>View &gt; Output &gt; KX</strong> records after reviewing them for environment-sensitive metadata.</li>
 <li>Whether <code>vscode-kdb.performance.trace</code> was enabled.</li>
 </ul>
 <p>Never include passwords, authentication strings, SecretStorage contents, tokenized local-data-server URLs, proprietary result values, or production query text. Diagnostics are designed to omit credentials and query values, but review copied output before posting it publicly.</p>
-<p>For charting reports, include the chart type, selected column kinds, whether grouping was enabled, and the displayed sampling/warning status. For cancellation reports, distinguish local panel cancellation from explicit connection disconnect.</p>
+<p>For charting reports, include the chart type, selected column kinds, whether grouping was enabled, and the displayed sampling/warning status. For notebook charts, also distinguish the emitted persisted specification from renderer-only session changes. For cancellation reports, distinguish local panel cancellation from explicit connection disconnect.</p>
 
 
 

@@ -44,6 +44,17 @@ REQUIRED_MEMBERS = {
     "extension/changelog.md",
     "extension/icons/kx-activity.png",
     "extension/icons/kx-marketplace.png",
+    "extension/renderer/kx-notebook-renderer.js",
+    "extension/python/kx_notebook/LICENSE",
+    "extension/python/kx_notebook/README.md",
+    "extension/python/kx_notebook/pyproject.toml",
+    "extension/python/kx_notebook/src/kx_notebook/__init__.py",
+    "extension/python/kx_notebook/src/kx_notebook/contract.py",
+    "extension/python/kx_notebook/src/kx_notebook/display.py",
+    "extension/python/kx_notebook/src/kx_notebook/fallback.py",
+    "extension/python/kx_notebook/src/kx_notebook/magic.py",
+    "extension/python/kx_notebook/src/kx_notebook/pykx.py",
+    "extension/python/kx_notebook/src/kx_notebook/testing.py",
     "extension/syntaxes/q.tmLanguage.json",
 }
 
@@ -58,6 +69,8 @@ ALLOWED_EXTENSION_ROOTS = {
     "icons",
     "syntaxes",
     "node_modules",
+    "python",
+    "renderer",
 }
 
 FORBIDDEN_COMPONENTS = {
@@ -138,6 +151,8 @@ FORBIDDEN_ARCHIVE_SUFFIXES = {
 
 RUNTIME_CODE_PREFIXES = (
     "extension/out/",
+    "extension/python/kx_notebook/src/",
+    "extension/renderer/",
     "extension/syntaxes/",
 )
 RUNTIME_CODE_MEMBERS = {
@@ -336,6 +351,8 @@ def validate_vsix_path_policy(name: str) -> None:
 
     folded_parts = [part.casefold() for part in parts]
     forbidden = sorted(set(folded_parts) & FORBIDDEN_COMPONENTS)
+    if lowered.startswith("extension/python/kx_notebook/src/kx_notebook/"):
+        forbidden = [component for component in forbidden if component != "src"]
     if forbidden:
         raise AuditError(f"VSIX: forbidden path component {forbidden[0]!r}: {name!r}")
 
@@ -392,11 +409,14 @@ def validate_package_assets(package: dict[str, Any], members: dict[str, bytes]) 
 
     languages = contributes.get("languages", [])
     grammars = contributes.get("grammars", [])
+    notebook_renderers = contributes.get("notebookRenderer", [])
     view_containers = contributes.get("viewsContainers", {})
     if not isinstance(languages, list):
         raise AuditError("VSIX: contributes.languages must be an array")
     if not isinstance(grammars, list):
         raise AuditError("VSIX: contributes.grammars must be an array")
+    if not isinstance(notebook_renderers, list):
+        raise AuditError("VSIX: contributes.notebookRenderer must be an array")
     if not isinstance(view_containers, dict):
         raise AuditError("VSIX: contributes.viewsContainers must be an object")
 
@@ -406,6 +426,10 @@ def validate_package_assets(package: dict[str, Any], members: dict[str, bytes]) 
     for grammar in grammars:
         if isinstance(grammar, dict):
             required_extension_member(grammar.get("path"), "grammar", members)
+    for renderer in notebook_renderers:
+        if not isinstance(renderer, dict):
+            raise AuditError("VSIX: notebook renderer contribution must be an object")
+        required_extension_member(renderer.get("entrypoint"), "notebook renderer entrypoint", members)
     for container_group in view_containers.values():
         if not isinstance(container_group, list):
             continue

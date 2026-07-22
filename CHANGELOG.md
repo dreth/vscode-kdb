@@ -4,6 +4,16 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.0 - 2026-07-22
+
+- Added a real VS Code NotebookRenderer for the versioned `application/vnd.kx.result+json` v1 MIME contract. Ordinary Jupyter/IPython `.ipynb` files can now retain bounded KX/q table data, schema, row counts, safe provenance, elapsed time, truncation state, and an optional chart specification directly in code-cell output.
+- Added the focused `python/kx_notebook` IPython helper. It publishes the KX MIME result together with escaped `text/html` and `text/plain` fallbacks, provides an explicit callback-backed `%%q` magic, and offers an opt-in adapter for an already installed/licensed PyKX runtime. The package bundles no q runtime, PyKX binary, credential, IPC handle, or remote bridge.
+- Added compact inline tables, bounded CSV copy, and local uPlot line/scatter/step/bar charts with column controls and Reset zoom. The emitted chart specification persists; renderer-only control changes remain session state. Static export uses the emitted chart specification to include a network-free SVG rather than promising interactive HTML/PDF charts.
+- Added **KX: Tag Notebook Cell as q** using a durable `%%q --max-rows ... --max-bytes ...` marker plus `vscode-kdb` namespaced cell metadata, and **KX: Open Saved Notebook Preview in Results Panel** for bounded-preview handoff to the existing full-screen panel.
+- Added `inline`, `panel`, and `both` notebook presentation, defaulting to `inline`, plus explicit persisted-output limits defaulting to 1,000 rows and 1,000,000 bytes. Valid ranges are 1-10,000 rows and 16,384-10,000,000 bytes; truncation and the absence of omitted data are displayed clearly.
+- Preserved normal Jupyter controller and Python-cell behavior. The extension does not intercept Jupyter execution, create a second direct q connection for notebook cells, or claim recovery of omitted/full results. Extension-driven same-session routing remains deliberately disabled; `%%q` executes only through the evaluator explicitly configured in that Python kernel.
+- Kept normal `.q` editor execution and the existing high-performance KX Results panel unchanged. This focused notebook renderer/protocol is not a full KDB-X or q Professional parity claim.
+
 ## 0.1.5 - 2026-07-22
 
 - Added an accessible **Test Connection** button to the real Add/Edit form. It validates current unsaved fields and effective timeouts, uses a fresh cancellable direct q IPC socket, proves handshake/namespace/minimal-response phases, closes reliably, and never saves or disturbs an active profile.
@@ -61,4 +71,4 @@ All notable changes to KX for VS Code are documented here.
 - Added VSIX packaging and release-artifact exclusion rules.
 - Shipped with no SQLTools dependency, API path, command ID, UI integration, or `.session.sql` behavior.
 
-The standalone product remains direct IPC only. SSH, TLS termination, gateway/broker setup, remote administration, and notebooks are not included.
+Extension-owned `.q` execution remains direct IPC only. SSH, TLS termination, gateway/broker setup, and remote administration are not included. The 0.2.0 notebook helper/renderer path does not add an extension-owned notebook q connection or execution controller.

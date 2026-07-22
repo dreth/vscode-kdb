@@ -2,6 +2,8 @@
 
 The result viewer is designed to stay usable with large tables, but q IPC responses are not streamed through the complete pipeline.
 
+Notebook output uses a different persistence boundary: only a bounded preview is written into `.ipynb`. It never embeds the live panel's complete result eagerly.
+
 ## Memory and rendering model
 
 The extension receives and decodes the complete q IPC response before the panel can show it. Table data is retained in columnar form in the extension host. The webview then requests only visible row/column windows, so DOM and message traffic are virtualized.
@@ -30,8 +32,11 @@ select avg price by 0D00:05 xbar time from trade where date=.z.D
 | Local server full export | Rejects more than 1,000,000 visible cells by default. |
 | Local server slice | Fixed maximum of 1,000,000 requested cells. |
 | q-text | Bounds nested traversal at 16 levels; caps very large output at 1,048,576 characters and marks character truncation. |
+| Notebook persisted preview | Defaults to 1,000 rows and 1,000,000 bytes; accepted settings are 1-10,000 rows and 16,384-10,000,000 bytes. Schema/counts and truncation reasons remain visible. |
 
 Some cell and chart limits are configurable. Internal time, byte-size, group-count, and file-format limits remain protective boundaries. Raising a configurable limit can temporarily block the extension host.
+
+Notebook row/byte options constrain serialization, not q execution. Apply a q-side limit in the evaluator when the full q value itself should not materialize. Omitted rows are never placed in notebook metadata or an extension cache; they remain only in the originating evaluator/session while it retains them. A saved-preview panel handoff cannot recover them.
 
 ## Timeout and queue behavior
 

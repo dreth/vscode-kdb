@@ -14,7 +14,7 @@
         <link rel="prev" href="../connections/">
 
 
-        <link rel="next" href="../results-viewer/">
+        <link rel="next" href="../notebooks/">
 
 
 
@@ -412,6 +412,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#notebook-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook commands
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#exact-execution-semantics" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -481,6 +492,33 @@
 
 </nav>
 
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
     </li>
 
 
@@ -766,6 +804,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#notebook-commands" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook commands
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#exact-execution-semantics" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -852,7 +901,7 @@
 
 
 <h1 id="running-q">Running q</h1>
-<p>The extension executes q text; it does not parse SQL, split SQL statements, or infer a SQLTools-style session.</p>
+<p>The <code>.q</code> editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. Notebook <code>%%q</code> cells use the separate explicit helper path described in <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="commands-and-keybindings">Commands and keybindings</h2>
 <table>
 <thead>
@@ -885,6 +934,27 @@
 </tbody>
 </table>
 <p>A code lens at the top of a q document also runs the whole script.</p>
+<p>These keybindings are gated to normal q text editors. KX for VS Code does not bind or intercept notebook <code>Ctrl+Enter</code> / <code>Ctrl+Shift+Enter</code>; ordinary Jupyter and Python execution remain in control.</p>
+<h2 id="notebook-commands">Notebook commands</h2>
+<table>
+<thead>
+<tr>
+<th>Command</th>
+<th>Behavior</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><strong>KX: Tag Notebook Cell as q</strong></td>
+<td>Adds a durable <code>%%q --max-rows ... --max-bytes ...</code> marker when absent and refreshes versioned <code>vscode-kdb</code> cell metadata. It does not execute the cell.</td>
+</tr>
+<tr>
+<td><strong>KX: Open Saved Notebook Preview in Results Panel</strong></td>
+<td>Opens only a valid bounded KX MIME preview already saved on the selected cell. It never reruns q or recovers omitted rows.</td>
+</tr>
+</tbody>
+</table>
+<p>Run tagged cells through the notebook's normal Python/IPython controller after installing and configuring <code>kx_notebook</code>. The extension does not contribute a controller, monkey-patch Jupyter, or route notebook selections through its direct IPC connection.</p>
 <h2 id="exact-execution-semantics">Exact execution semantics</h2>
 <ul>
 <li>A non-empty selection is preserved exactly.</li>
@@ -898,7 +968,7 @@
 <h2 id="syntax-scope">Syntax scope</h2>
 <p>The existing first-party TextMate grammar was audited for 0.1.4 and left unchanged because no reliable token-coverage defect was found. The extension continues to associate q with <code>.q</code> files only. It does not claim <code>.k</code>: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.</p>
 <h2 id="active-connection-and-namespace">Active connection and namespace</h2>
-<p>All three editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.</p>
+<p>All three normal <code>.q</code> editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.</p>
 <p>The connection's <strong>Database / Namespace</strong> value is applied consistently:</p>
 <ul>
 <li><code>.</code> evaluates raw current-line/single-line text as sent;</li>
@@ -908,7 +978,7 @@
 <p>The wrapper restores the server's previous namespace after success or failure. A q error is rethrown and shown as an error, not converted into an ordinary result row.</p>
 <h2 id="result-placement">Result placement</h2>
 <p>The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.</p>
-<p><strong>Run Selection in New Result</strong> creates another panel. It does not route through SQLTools and does not create <code>.session.sql</code> files.</p>
+<p><strong>Run Selection in New Result</strong> creates another panel. It does not route through SQLTools and does not create <code>.session.sql</code> files. Notebook panel handoff is separate and contains only the saved bounded preview.</p>
 <h2 id="query-history">Query History</h2>
 <p><code>vscode-kdb.features.queryHistory</code> defaults to <code>false</code>. When enabled, <strong>KX Query History</strong> records editor line, selection, and script executions only after the exact text is actually issued to q. A run rejected before issue is not stored. Entries are newest first and contain the query text, stable connection ID and recorded label, timestamp, execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. Result payloads and passwords are never included.</p>
 <p>Storage is the current VS Code workspace's local extension <code>Memento</code>. History is not placed in user/workspace settings, registered for Settings Sync, or transmitted as telemetry. The entry cap is <code>vscode-kdb.queryHistory.maxEntries</code>, default <code>100</code>, with a valid range of <code>1</code> through <code>1000</code>; lowering it removes the oldest excess entries.</p>

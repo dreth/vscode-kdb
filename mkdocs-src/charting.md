@@ -1,8 +1,16 @@
 # Charting
 
-The KX result viewer includes a compact built-in chart for the current visible grid result.
+The KX result viewer includes a compact built-in chart for the current visible grid result. Version 0.2.0 also provides bounded inline notebook charts for persisted KX MIME previews.
 
-The standalone extension does not currently contribute a run-and-auto-chart editor command. Run q first, then open **Chart** from its KX result panel.
+The standalone extension does not currently contribute a run-and-auto-chart `.q` editor command. Run q first, then open **Chart** from its KX result panel.
+
+## Notebook charts
+
+The notebook helper can persist a chart specification for line, scatter, step, or bar using eligible columns from the bounded saved preview. The VS Code NotebookRenderer uses the bundled local uPlot implementation and provides show/hide, type, X column, Y series, point-cap, and Reset zoom controls.
+
+The emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the result with the desired `kx_notebook.Chart` specification to persist a changed selection. The escaped `text/html` fallback renders a network-free static SVG from the emitted specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
+
+Notebook charting never fetches omitted rows. It uses only the bounded rows saved in the MIME payload. Opening that preview in the full KX Results panel does not restore missing data.
 
 ## Open and render
 

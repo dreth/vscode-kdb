@@ -1,8 +1,8 @@
 {
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
-  "description": "Standalone direct q IPC, focused q workflows, and high-performance KX results for VS Code.",
-  "version": "0.1.5",
+  "description": "Standalone direct q IPC, persistent Jupyter notebook results, and high-performance KX results for VS Code.",
+  "version": "0.2.0",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -20,7 +20,8 @@
   "categories": [
     "Programming Languages",
     "Data Science",
-    "Visualization"
+    "Visualization",
+    "Notebooks"
   ],
   "keywords": [
     "kx",
@@ -28,11 +29,14 @@
     "kdb+",
     "q",
     "q ipc",
-    "time series"
+    "time series",
+    "jupyter",
+    "notebooks"
   ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:q",
+    "onRenderer:vscode-kdb.kx-notebook-renderer",
     "onView:vscode-kdb.connections",
     "onView:vscode-kdb.serverExplorer",
     "onView:vscode-kdb.queryHistory",
@@ -57,20 +61,26 @@
     "onCommand:vscode-kdb.copyResultSelection",
     "onCommand:vscode-kdb.openLocalDataServer",
     "onCommand:vscode-kdb.stopLocalDataServer",
-    "onCommand:vscode-kdb.copyLocalDataServerUrl"
+    "onCommand:vscode-kdb.copyLocalDataServerUrl",
+    "onCommand:vscode-kdb.tagNotebookCellAsQ",
+    "onCommand:vscode-kdb.openNotebookPreviewInResults"
   ],
   "scripts": {
     "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./",
+    "compile": "npm run compile:extension && npm run compile:renderer",
+    "compile:extension": "tsc -p ./",
+    "compile:renderer": "tsc -p renderer/tsconfig.json --noEmit && esbuild renderer/index.ts --bundle --format=esm --platform=browser --target=es2022 --loader:.css=text --outfile=renderer/kx-notebook-renderer.js --minify --legal-comments=none",
     "watch": "tsc -watch -p ./",
     "test": "npm run compile && node test/run.js",
     "test:unit": "npm run compile && node test/run.js",
+    "test:notebook-python": "uv run --python 3.9 --no-project --with-editable ./python/kx_notebook python -m unittest discover -s python/kx_notebook/tests -v",
+    "test:notebook-cross": "npm run compile && node scripts/check-notebook-contract.js",
     "test:live-q": "npm run compile && node test/live/run.js",
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.1.5.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.5.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.0.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.0.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -79,7 +89,9 @@
   "devDependencies": {
     "@types/node": "^20.17.0",
     "@types/vscode": "^1.96.0",
+    "@types/vscode-notebook-renderer": "^1.72.4",
     "@vscode/vsce": "^3.6.2",
+    "esbuild": "^0.25.12",
     "typescript": "^5.7.2"
   },
   "contributes": {
@@ -102,6 +114,17 @@
         "language": "q",
         "scopeName": "source.q",
         "path": "./syntaxes/q.tmLanguage.json"
+      }
+    ],
+    "notebookRenderer": [
+      {
+        "id": "vscode-kdb.kx-notebook-renderer",
+        "displayName": "KX Notebook Result",
+        "entrypoint": "./renderer/kx-notebook-renderer.js",
+        "mimeTypes": [
+          "application/vnd.kx.result+json"
+        ],
+        "requiresMessaging": "optional"
       }
     ],
     "commands": [
@@ -221,6 +244,17 @@
         "command": "vscode-kdb.copyLocalDataServerUrl",
         "title": "KX Results: Copy Local Data Server URL",
         "icon": "$(link)"
+      },
+      {
+        "command": "vscode-kdb.tagNotebookCellAsQ",
+        "title": "KX: Tag Notebook Cell as q",
+        "icon": "$(tag)"
+      },
+      {
+        "command": "vscode-kdb.openNotebookPreviewInResults",
+        "title": "KX: Open Saved Notebook Preview in Results Panel",
+        "icon": "$(open-preview)",
+        "enablement": "vscode-kdb.notebookResultAvailable"
       }
     ],
     "keybindings": [
@@ -381,6 +415,10 @@
         {
           "command": "vscode-kdb.clearQueryHistory",
           "when": "config.vscode-kdb.features.queryHistory"
+        },
+        {
+          "command": "vscode-kdb.openNotebookPreviewInResults",
+          "when": "vscode-kdb.notebookResultAvailable"
         }
       ],
       "editor/title": [
@@ -407,6 +445,18 @@
           "group": "navigation@3"
         }
       ],
+      "notebook/cell/title": [
+        {
+          "command": "vscode-kdb.tagNotebookCellAsQ",
+          "when": "notebookEditorFocused && notebookCellType == 'code' && !vscode-kdb.notebookQCell",
+          "group": "inline@20"
+        },
+        {
+          "command": "vscode-kdb.openNotebookPreviewInResults",
+          "when": "notebookEditorFocused && vscode-kdb.notebookQCell && vscode-kdb.notebookResultAvailable",
+          "group": "inline@21"
+        }
+      ],
       "webview/context": [
         {
           "command": "vscode-kdb.copyResultSelection",
@@ -418,6 +468,33 @@
     "configuration": {
       "title": "KX for VS Code",
       "properties": {
+        "vscode-kdb.notebook.presentation": {
+          "type": "string",
+          "scope": "window",
+          "default": "inline",
+          "enum": [
+            "inline",
+            "panel",
+            "both"
+          ],
+          "description": "Presentation for KX MIME results in ordinary Jupyter/IPython notebooks. Inline is the default; panel opens only the saved bounded preview in the KX Results panel; both keeps inline output and also opens that saved preview in the panel. This does not intercept Jupyter execution or recover omitted rows."
+        },
+        "vscode-kdb.notebook.maxOutputRows": {
+          "type": "integer",
+          "scope": "window",
+          "default": 1000,
+          "minimum": 1,
+          "maximum": 10000,
+          "description": "Maximum preview rows written by newly tagged %%q cells. The tag command persists this limit in the cell magic; kx_notebook also validates its own explicit limits. Full large results remain only in the originating live q session or a live KX panel."
+        },
+        "vscode-kdb.notebook.maxOutputBytes": {
+          "type": "integer",
+          "scope": "window",
+          "default": 1000000,
+          "minimum": 16384,
+          "maximum": 10000000,
+          "description": "Maximum combined portable MIME body bytes requested by newly tagged %%q cells. The helper applies this budget across rich JSON and static HTML/plain fallbacks from the same preview; no credentials or IPC handles are stored."
+        },
         "vscode-kdb.features.serverExplorer": {
           "type": "boolean",
           "scope": "window",

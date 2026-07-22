@@ -59,3 +59,9 @@ XLSX export rejects output beyond Excel worksheet limits:
 Parquet export is not implemented.
 
 The local data server uses a separate hard full-export cell limit. Changing the panel copy/export confirmation threshold does not change that server limit. See [Local Data Server](local-data-server.md#limits).
+
+## Notebook output and export
+
+The notebook renderer's **Copy preview CSV** action copies only the bounded rows persisted in that cell's KX MIME payload. It does not query q or recover rows omitted by the row/byte limit.
+
+The companion helper emits escaped `text/html` and `text/plain` alongside `application/vnd.kx.result+json`. The static HTML includes schema, total and preview row counts, a bounded table preview, explicit truncation/transfer notices, and a network-free static SVG when a persisted chart specification is supported. This is the content available to ordinary Jupyter/nbconvert HTML/PDF export. Interactive uPlot controls, zoom, tooltips, clipboard actions, and renderer-only chart changes are not portable to PDF.

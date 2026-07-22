@@ -4,6 +4,18 @@ Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The ma
 
 Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
 
+## Notebook results
+
+| Setting | Default | Values / range | Behavior and tradeoff |
+| --- | --- | --- | --- |
+| `vscode-kdb.notebook.presentation` | `inline` | `inline`, `panel`, `both` | Presentation for validated KX MIME output in ordinary Jupyter/IPython notebooks. `panel` hands off only the saved bounded preview; no mode reruns q or recovers omitted rows. |
+| `vscode-kdb.notebook.maxOutputRows` | `1000` | Integer `1`-`10000` | Maximum preview rows written into newly tagged `%%q` markers. The helper validates the explicit marker value. |
+| `vscode-kdb.notebook.maxOutputBytes` | `1000000` | Integer `16384`-`10000000` | Maximum combined portable MIME body bytes requested by newly tagged `%%q` markers. The helper budgets rich JSON plus static HTML/plain fallbacks from the same preview. |
+
+The tag command persists the current row/byte values in the cell's durable marker and `vscode-kdb` namespaced metadata. These are output-serialization limits, not server-side q limits. The helper/payload excludes credentials, passwords, tokens, IPC handles, and unbounded data. Full omitted data remains only in the originating evaluator/session while it is retained there.
+
+`inline` is the default notebook experience. `panel` opens the saved bounded preview in the existing KX Results panel instead of displaying the inline table/chart. `both` keeps the inline renderer and its explicit saved-preview panel handoff. Renderer-only chart control changes are session state; only the chart specification emitted in the MIME payload persists.
+
 ## Feature Controls
 
 Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.
@@ -117,6 +129,9 @@ Array display examples:
   "vscode-kdb.serverExplorer.previewCellLimit": 10000,
   "vscode-kdb.features.queryHistory": false,
   "vscode-kdb.queryHistory.maxEntries": 100,
+  "vscode-kdb.notebook.presentation": "inline",
+  "vscode-kdb.notebook.maxOutputRows": 1000,
+  "vscode-kdb.notebook.maxOutputBytes": 1000000,
   "vscode-kdb.connectionTimeoutMs": 30000,
   "vscode-kdb.queryTimeoutMs": null,
   "vscode-kdb.performance.trace": false,

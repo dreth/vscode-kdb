@@ -368,6 +368,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -453,6 +480,17 @@
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+        <li class="md-nav__item">
+  <a href="#notebook-charts" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook charts
+
+    </span>
+  </a>
+
+</li>
 
         <li class="md-nav__item">
   <a href="#open-and-render" class="md-nav__link">
@@ -739,6 +777,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#notebook-charts" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook charts
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#open-and-render" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -820,8 +869,12 @@
 
 
 <h1 id="charting">Charting</h1>
-<p>The KX result viewer includes a compact built-in chart for the current visible grid result.</p>
-<p>The standalone extension does not currently contribute a run-and-auto-chart editor command. Run q first, then open <strong>Chart</strong> from its KX result panel.</p>
+<p>The KX result viewer includes a compact built-in chart for the current visible grid result. Version 0.2.0 also provides bounded inline notebook charts for persisted KX MIME previews.</p>
+<p>The standalone extension does not currently contribute a run-and-auto-chart <code>.q</code> editor command. Run q first, then open <strong>Chart</strong> from its KX result panel.</p>
+<h2 id="notebook-charts">Notebook charts</h2>
+<p>The notebook helper can persist a chart specification for line, scatter, step, or bar using eligible columns from the bounded saved preview. The VS Code NotebookRenderer uses the bundled local uPlot implementation and provides show/hide, type, X column, Y series, point-cap, and Reset zoom controls.</p>
+<p>The emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the <code>.ipynb</code>; re-emit the result with the desired <code>kx_notebook.Chart</code> specification to persist a changed selection. The escaped <code>text/html</code> fallback renders a network-free static SVG from the emitted specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.</p>
+<p>Notebook charting never fetches omitted rows. It uses only the bounded rows saved in the MIME payload. Opening that preview in the full KX Results panel does not restore missing data.</p>
 <h2 id="open-and-render">Open and render</h2>
 <ol>
 <li>Run q into a KX result panel.</li>

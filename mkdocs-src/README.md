@@ -33,6 +33,8 @@ npm ci
 npm run compile
 node test/run.js
 npm test
+uv run --no-project --with-editable ./python/kx_notebook \
+  python -m unittest discover -s python/kx_notebook/tests -v
 ```
 
 When a local q executable is available, require the live IPC check instead of allowing it to skip:
@@ -49,21 +51,21 @@ Run the separate cross-extension evidence gate only when the pinned reference ch
 npm run test:parity
 ```
 
-The defaults are `/opt/data/home/projects/kdb-sqltools` at commit `af2c7c920932274f156e31832859fa262068effe` and `/opt/data/home/.kx/bin/q`. See the repository's [`test/parity/README.md`](https://github.com/dreth/vscode-kdb/blob/main/test/parity/README.md) for explicit environment overrides, read-only reference guards, strict mode, and report generation. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains `VALID_WITH_KNOWN_GAPS`; it is not complete functional or visual parity evidence.
+The defaults are `/opt/data/home/projects/kdb-sqltools` at commit `af2c7c920932274f156e31832859fa262068effe` and `/opt/data/home/.kx/bin/q`. See the repository's [`test/parity/README.md`](https://github.com/dreth/vscode-kdb/blob/main/test/parity/README.md) for explicit environment overrides, read-only reference guards, strict mode, and report generation. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not notebook, complete functional, or visual parity evidence.
 
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.1.5.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.0.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.1.5.vsix")
-with ZipFile("vscode-kdb-0.1.5-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.0.vsix")
+with ZipFile("vscode-kdb-0.2.0-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.1.5.vsix vscode-kdb-0.1.5-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.0.vsix vscode-kdb-0.2.0-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.
