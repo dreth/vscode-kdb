@@ -43,6 +43,14 @@ VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 
 Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default location.
 
+Run the separate cross-extension evidence gate only when the pinned reference checkout and required q runtime are available:
+
+```sh
+npm run test:parity
+```
+
+The defaults are `/opt/data/home/projects/kdb-sqltools` at commit `af2c7c920932274f156e31832859fa262068effe` and `/opt/data/home/.kx/bin/q`. See the repository's [`test/parity/README.md`](https://github.com/dreth/vscode-kdb/blob/main/test/parity/README.md) for explicit environment overrides, read-only reference guards, strict mode, and report generation. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains `VALID_WITH_KNOWN_GAPS`; it is not complete functional or visual parity evidence.
+
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh

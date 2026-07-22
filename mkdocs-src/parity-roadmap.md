@@ -2,7 +2,7 @@
 
 KX for VS Code is being developed as the future first-party KX product. During the parity phase, useful capabilities are ported from `kdb-sqltools` into this standalone architecture. Functional parity must be verified by evidence and user testing before the standalone repository becomes the source of truth.
 
-The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim.
+The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) and [machine-readable JSON](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.json) record 63 classified cases / 379 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. The result is valid executable evidence with known gaps, not source-of-truth sign-off or a claim that the products are functionally or visually identical.
 
 The repository manifest is at `0.1.4` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
 
@@ -24,7 +24,7 @@ There are no SQLTools runtime imports, APIs, result targets, connection/session 
 
 Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, opt-in focused server metadata and previews, opt-in privacy-aware local history, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path and visual verification remain partial as recorded in `PARITY.md`.
 
-Known gaps and partial areas remain. The Server Explorer is deliberately limited to the active direct profile and configured namespace, and metadata requests require that profile to be connected; it is not broad namespace navigation, Insights/gateway integration, server administration, or a write surface. The extension also lacks built-in SSH/TLS orchestration, every historical editor convenience, notebooks, complete visual/manual Extension Host coverage, and proof of end-user functional parity. Deterministic source/tree guards are not visual E2E, and release 0.1.4 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
+Known gaps and partial areas remain. The three ranked executable gaps are standalone Extension Host automation, a compatible reference multiline script-grouping adapter, and an explicit standalone q-block product decision. The six recorded external boundaries are Extension Host/visual/manual UX, authenticated q, remote/SSH/TLS/IPv6/multi-version q, spreadsheet rendering, VSIX/Marketplace evidence, and server-side cancellation after dispatch. The Server Explorer is deliberately limited to the active direct profile and configured namespace; it is not broad namespace navigation, Insights/gateway integration, server administration, or a write surface. Deterministic source/tree guards are not visual E2E, and release 0.1.4 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
 
 Some SQLTools behaviors are deliberately omitted rather than missing:
 
@@ -58,7 +58,7 @@ q notebooks belong to a later experimental milestone, not a fake parity checkbox
 
 ## Future shared-core boundary
 
-No monorepo or cross-repository code move is part of the foundation pass. A later extraction should start only after interfaces are stable and both repositories have contract tests.
+No monorepo or cross-repository product code move is part of this pass. Shared executable contract fixtures now cover selected pure/core boundaries, but extraction remains deferred until interfaces are stable, the ranked product decisions are resolved, and both owning repositories can carry their own approved tests.
 
 Good candidates are pure or host-neutral code:
 

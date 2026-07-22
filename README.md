@@ -4,7 +4,7 @@ KX for VS Code is a standalone extension for working with kdb+/q directly in Vis
 
 Version 0.1.4 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
 
-Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed parity matrix](PARITY.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
+Documentation: [standalone user guide](mkdocs-src/index.md), [source-backed parity matrix](PARITY.md), [checked cross-extension evidence](PARITY_RUN.md), and [parity rerun instructions](test/parity/README.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
 
 ## Quick start
 
@@ -155,6 +155,8 @@ npm test
 ```
 
 `node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection-form payload and timeout validation, SecretStorage keep/replace/clear behavior, persisted-first connection lifecycle, namespace wrapping, Server Explorer request/identifier/stale/preview contracts, Query History privacy/storage/order/rerun contracts, diagnostics/redaction, result conversion, and manifest/source/webview guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these behaviors can be tested deterministically without it. Release 0.1.4 does not claim a visual Extension Host E2E run, and no screenshot is presented as test evidence.
+
+Run the pinned cross-extension evidence gate from this standalone checkout with `npm run test:parity`. The checked run contains 63 classified cases and 379 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. It compares q decode/display semantics, editor/namespace contracts, all six pure chart engines, text/XLSX export structure, direct IPC lifecycle/errors, local HTTP behavior, package boundaries, and an anonymous loopback q fixture. `PASS` is case-scoped; this is not complete functional or visual parity. See [the evidence report](PARITY_RUN.md) and [exact paths, overrides, strict mode, and report commands](test/parity/README.md). The default reference is pinned to `kdb-sqltools` commit `af2c7c9` at `/opt/data/home/projects/kdb-sqltools`, and q is required at `/opt/data/home/.kx/bin/q` unless explicitly overridden. The strict sign-off command remains blocked by the three recorded gaps.
 
 If a local q executable is available at `~/.kx/bin/q`, run the optional live IPC test:
 

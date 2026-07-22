@@ -1,0 +1,637 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-22T07:58:03.967Z",
+  "standalone": {
+    "name": "vscode-kdb",
+    "version": "0.1.4",
+    "commit": "48e79e8369f0139e18810834f0ff0bf1e1802272",
+    "dirty": false,
+    "dirtyDisclaimer": "clean tracked worktree"
+  },
+  "reference": {
+    "name": "kdb-sqltools",
+    "version": "0.3.17",
+    "commit": "af2c7c920932274f156e31832859fa262068effe",
+    "expectedCommit": "af2c7c920932274f156e31832859fa262068effe",
+    "dirty": true,
+    "dirtyEntryCount": 55,
+    "dirtyDisclaimer": "55 pre-existing unstaged tracked docs/** entries only; excluded from source evidence",
+    "statusHashBefore": "4a6f553c2235640548395d2c312b691bb1d50f9c80a4d4c94c6ec51dae8029ff",
+    "statusHashAfter": "4a6f553c2235640548395d2c312b691bb1d50f9c80a4d4c94c6ec51dae8029ff"
+  },
+  "q": {
+    "path": "/opt/data/home/.kx/bin/q",
+    "versionEvidence": "q 5 2026.05.01",
+    "fixture": "test/parity/fixture.q",
+    "authentication": "anonymous loopback only"
+  },
+  "canonicalization": [
+    "validated 48-hex local-server tokens",
+    "asserted ephemeral loopback ports",
+    "path separators in path-bearing values",
+    "ZIP timestamps/compression metadata by comparing unzipped entries",
+    "fixture-owned generated IDs fixed at source"
+  ],
+  "checks": [
+    {
+      "name": "standalone dependencies",
+      "command": "npm ls --depth=0",
+      "exitCode": 0,
+      "outcome": "installed dependency tree satisfied package metadata"
+    },
+    {
+      "name": "reference dependencies",
+      "command": "npm ls --depth=0",
+      "exitCode": 0,
+      "outcome": "installed dependency tree satisfied package metadata"
+    },
+    {
+      "name": "standalone compile",
+      "command": "npm run compile",
+      "exitCode": 0,
+      "outcome": "> tsc -p ./"
+    },
+    {
+      "name": "reference compile",
+      "command": "npm run compile",
+      "exitCode": 0,
+      "outcome": "> tsc -p ./"
+    },
+    {
+      "name": "parity runner self-tests",
+      "command": "node test/parity/self-test.js",
+      "exitCode": 0,
+      "outcome": "12 parity support test groups passed."
+    },
+    {
+      "name": "standalone focused suite",
+      "command": "node test/run.js",
+      "exitCode": 0,
+      "outcome": "16 focused test groups passed."
+    },
+    {
+      "name": "standalone required live-q suite",
+      "command": "VSCODE_KDB_LIVE_REQUIRED=1 VSCODE_KDB_Q_BIN=/opt/data/home/.kx/bin/q node test/live/run.js",
+      "exitCode": 0,
+      "outcome": "Live direct q IPC test passed using /opt/data/home/.kx/bin/q"
+    },
+    {
+      "name": "reference focused suite",
+      "command": "node test/run.js",
+      "exitCode": 0,
+      "outcome": "All kdb-sqltools tests passed."
+    },
+    {
+      "name": "reference required live-q suite",
+      "command": "KDB_Q_BIN=/opt/data/home/.kx/bin/q KDB_SQLTOOLS_LIVE_REQUIRED=1 node test/live/run.js",
+      "exitCode": 0,
+      "outcome": "Live kdb+/q test passed using /opt/data/home/.kx/bin/q"
+    },
+    {
+      "name": "cross-extension same-fixture suite",
+      "command": "npm run test:parity",
+      "exitCode": 0,
+      "outcome": "63 classified cases; 379 assertions; VALID_WITH_KNOWN_GAPS"
+    }
+  ],
+  "summary": {
+    "caseCount": 63,
+    "classifiedCaseCount": 63,
+    "assertionCount": 379,
+    "byStatus": {
+      "PASS": 49,
+      "DIFFERENT_BY_DESIGN": 5,
+      "GAP": 3,
+      "NOT_TESTABLE_HERE": 6
+    },
+    "byEvidenceMode": {
+      "deterministic": 38,
+      "live-q": 14,
+      "boundary": 11
+    },
+    "unexpectedCount": 0,
+    "signoffReady": false,
+    "gateResult": "VALID_WITH_KNOWN_GAPS"
+  },
+  "outcomes": [
+    {
+      "id": "ipc-query-serialization",
+      "area": "q IPC query serialization",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Synchronous char-vector query frames are byte-identical."
+    },
+    {
+      "id": "ipc-decode-scalar-int",
+      "area": "q decode/display: primitive",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same primitive payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-vector-int",
+      "area": "q decode/display: vector",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same vector payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-mixed-list",
+      "area": "q decode/display: list",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same list payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-dictionary",
+      "area": "q decode/display: dictionary",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same dictionary payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-table",
+      "area": "q decode/display: table",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same table payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-keyed-table",
+      "area": "q decode/display: keyed-table",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same keyed-table payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-lambda",
+      "area": "q decode/display: function",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same function payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-primitive-function",
+      "area": "q decode/display: function",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same function payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "ipc-decode-q-error",
+      "area": "q decode/display: error",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same error payload and supported grid/qText choices were compared."
+    },
+    {
+      "id": "result-display-legacy-aliases",
+      "area": "q grid/qText settings aliases",
+      "mode": "deterministic",
+      "status": "DIFFERENT_BY_DESIGN",
+      "expectedStatus": "DIFFERENT_BY_DESIGN",
+      "rationale": "SQLTools retains legacy table/text aliases. Standalone accepts only its KX-owned grid/qText core contract and normalizes UI settings at its own panel boundary."
+    },
+    {
+      "id": "editor-exact-selection-current-line",
+      "area": "exact selection and physical current line",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Selections, whitespace, CRLF lines, and clamped cursor positions use the same exact-text contract."
+    },
+    {
+      "id": "editor-blank-line-q-block-helper",
+      "area": "blank-line-bounded q block execution",
+      "mode": "deterministic",
+      "status": "GAP",
+      "expectedStatus": "GAP",
+      "detail": "Reference exposes currentQBlock/selectedTextOrCurrentBlock; standalone intentionally preserves current-line behavior but has not resolved the separate optional block command.",
+      "rank": 3,
+      "action": "Make an explicit first-party product decision: implement a standalone q-block helper/command with tests, or formally exclude it and reclassify this row by design.",
+      "signoff": "The reviewed decision is documented and the executable case asserts the resulting standalone contract."
+    },
+    {
+      "id": "namespace-root-passthrough",
+      "area": "root namespace exact-text passthrough",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both public query wrappers preserve root-namespace q text byte-for-byte."
+    },
+    {
+      "id": "namespace-wrapper-surface",
+      "area": "namespace and multiline wrapper surface",
+      "mode": "deterministic",
+      "status": "DIFFERENT_BY_DESIGN",
+      "expectedStatus": "DIFFERENT_BY_DESIGN",
+      "rationale": "Standalone owns strict-root Server Explorer execution and a .Q.ld script wrapper; SQLTools exposes its legacy raw namespace wrapper through the driver. Semantic common behavior is tested live below."
+    },
+    {
+      "id": "chart-line-temporal-unsorted",
+      "area": "chart data engine: line",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-scatter-multiple-series",
+      "area": "chart data engine: scatter",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-step-grouped",
+      "area": "chart data engine: step",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-bar-grouped",
+      "area": "chart data engine: bar",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-box-repeated-x",
+      "area": "chart data engine: box",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-candlestick-ohlc-aggregation",
+      "area": "chart data engine: candlestick",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-line-minmax-sampling",
+      "area": "chart data engine: line",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-candlestick-invalid-high",
+      "area": "chart data engine: candlestick",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The same rows, selection, grouping, validation, and sampling request were executed by both pure engines."
+    },
+    {
+      "id": "chart-ohlc-exported-aggregation",
+      "area": "candlestick OHLC aggregation",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The exported OHLC aggregator preserved first-open, max-high, min-low, last-close and exact/bucket counts."
+    },
+    {
+      "id": "export-text-tsv",
+      "area": "text export: TSV",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Exact export text, escaping, headers, row index, nested values, and line breaks were compared."
+    },
+    {
+      "id": "export-text-csv",
+      "area": "text export: CSV",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Exact export text, escaping, headers, row index, nested values, and line breaks were compared."
+    },
+    {
+      "id": "export-text-json",
+      "area": "text export: JSON",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Exact export text, escaping, headers, row index, nested values, and line breaks were compared."
+    },
+    {
+      "id": "export-text-ndjson",
+      "area": "text export: NDJSON",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Exact export text, escaping, headers, row index, nested values, and line breaks were compared."
+    },
+    {
+      "id": "export-text-html",
+      "area": "text export: HTML",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Exact export text, escaping, headers, row index, nested values, and line breaks were compared."
+    },
+    {
+      "id": "export-text-markdown",
+      "area": "text export: MARKDOWN",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Exact export text, escaping, headers, row index, nested values, and line breaks were compared."
+    },
+    {
+      "id": "export-xlsx-sheet-limits",
+      "area": "XLSX Excel sheet limits",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Header/index expansion at Excel row and column limits produced identical validation results."
+    },
+    {
+      "id": "export-xlsx-structure",
+      "area": "XLSX workbook structure",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Private test adapters generated the same unzipped OOXML entries; ZIP timestamps/compression bytes were excluded."
+    },
+    {
+      "id": "ipc-connect-refused-classification",
+      "area": "direct IPC refused connection",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both direct clients rejected a closed loopback endpoint as a phase-bearing IPC error without query data."
+    },
+    {
+      "id": "ipc-handshake-timeout-classification",
+      "area": "direct IPC handshake timeout",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "A TCP peer that never completes q IPC handshake produced the same phase/timeout class and closed cleanly."
+    },
+    {
+      "id": "ipc-query-timeout-anonymity",
+      "area": "direct IPC query timeout and error anonymity",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "A stalled issued query timed out in the query phase, destroyed the uncertain transport, and omitted q source text from errors."
+    },
+    {
+      "id": "ipc-genuine-q-error-and-reuse",
+      "area": "genuine q error lifecycle",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "An encoded q error stayed KdbQError and the same healthy socket served the following query."
+    },
+    {
+      "id": "ipc-split-timeouts-and-diagnostics",
+      "area": "direct IPC timeout and diagnostics ownership",
+      "mode": "boundary",
+      "status": "DIFFERENT_BY_DESIGN",
+      "expectedStatus": "DIFFERENT_BY_DESIGN",
+      "rationale": "Standalone owns split connect/query deadlines plus a KX OutputChannel/redaction schema. The pinned SQLTools adapter retains one timeoutMs and console performance tracing."
+    },
+    {
+      "id": "local-data-server-http-contract",
+      "area": "local data server token/range/format behavior",
+      "mode": "deterministic",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both loopback servers exercised valid/invalid tokens, methods, endpoints, metadata, current/slice/selection CSV/JSON/NDJSON, headers, ranges, and limits."
+    },
+    {
+      "id": "local-data-server-empty-result-wording",
+      "area": "local data server product wording",
+      "mode": "deterministic",
+      "status": "DIFFERENT_BY_DESIGN",
+      "expectedStatus": "DIFFERENT_BY_DESIGN",
+      "rationale": "The same no_current_result protocol code is retained, while user-facing text names the owning KX result versus the SQLTools kdb panel."
+    },
+    {
+      "id": "live-q-scalar",
+      "area": "live direct-q: primitive",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-vector",
+      "area": "live direct-q: vector",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-mixed-list",
+      "area": "live direct-q: list",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-dictionary",
+      "area": "live direct-q: dictionary",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-table",
+      "area": "live direct-q: table",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-keyed-table",
+      "area": "live direct-q: keyed-table",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-lambda",
+      "area": "live direct-q: function",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-primitive-function",
+      "area": "live direct-q: function",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-temporal-values",
+      "area": "live direct-q: temporal",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-q-genuine-q-error",
+      "area": "live direct-q: error",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both raw IPC clients queried the same anonymous loopback q process and compared decoded values/errors."
+    },
+    {
+      "id": "live-namespace-root-passthrough",
+      "area": "live direct-q namespace execution/restoration",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both namespace wrappers ran against the same q process and restored the prior root namespace on success/error."
+    },
+    {
+      "id": "live-namespace-analytics-query",
+      "area": "live direct-q namespace execution/restoration",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both namespace wrappers ran against the same q process and restored the prior root namespace on success/error."
+    },
+    {
+      "id": "live-namespace-analytics-error",
+      "area": "live direct-q namespace execution/restoration",
+      "mode": "live-q",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Both namespace wrappers ran against the same q process and restored the prior root namespace on success/error."
+    },
+    {
+      "id": "live-q-multiline-script-grouping",
+      "area": "live direct-q multiline script grouping",
+      "mode": "live-q",
+      "status": "GAP",
+      "expectedStatus": "GAP",
+      "detail": "The standalone .Q.ld wrapper succeeds; the pinned reference raw value wrapper raises a genuine q error for the same multiline source.",
+      "rank": 2,
+      "action": "Backport a compatible q-native script-grouping adapter to the SQLTools driver without changing its UI/session ownership.",
+      "signoff": "The shared LF and CRLF script fixtures return 30 and 5 through both adapters and restore the root namespace after success/error."
+    },
+    {
+      "id": "manifest-standalone-runtime-boundary",
+      "area": "standalone manifest/package boundary",
+      "mode": "boundary",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "The standalone manifest/lock version stayed aligned and no SQLTools runtime, extension dependency, command, configuration, or source import entered the KX package."
+    },
+    {
+      "id": "manifest-product-ux-ownership",
+      "area": "KX versus SQLTools product ownership",
+      "mode": "boundary",
+      "status": "DIFFERENT_BY_DESIGN",
+      "expectedStatus": "DIFFERENT_BY_DESIGN",
+      "rationale": "Standalone owns the KX sidebar/form, SecretStorage, focused Server Explorer, Query History, and one KX result target. Reference owns SQLTools driver/session/UI targets and its extension dependency."
+    },
+    {
+      "id": "standalone-extension-host-automation",
+      "area": "standalone Extension Host automation",
+      "mode": "boundary",
+      "status": "GAP",
+      "expectedStatus": "GAP",
+      "detail": "Reference has test/e2e; standalone has deterministic host-free tests but no test/e2e directory or Extension Host workflow.",
+      "rank": 1,
+      "action": "Add a standalone Extension Host suite for activation, KX connection tree/form/SecretStorage, commands, result-panel protocol, cancellation, and settings without importing SQLTools.",
+      "signoff": "The suite runs in CI and locally on a supported VS Code build from a clean standalone commit."
+    },
+    {
+      "id": "extension-host-visual-manual",
+      "area": "VS Code Extension Host and visual/manual UX",
+      "mode": "boundary",
+      "status": "NOT_TESTABLE_HERE",
+      "expectedStatus": "NOT_TESTABLE_HERE",
+      "rationale": "Neither code nor code-insiders is installed, and this repository has no truthful cross-extension visual browser/Extension Host fixture. Source and webview parsing are not visual evidence.",
+      "signoff": "Record supported VS Code runs for activation, theme/layout, virtual scrolling, selection/keyboard, chart zoom/reset, settings, error states, and screenshots where useful."
+    },
+    {
+      "id": "authenticated-q-endpoint",
+      "area": "authenticated direct q IPC",
+      "mode": "boundary",
+      "status": "NOT_TESTABLE_HERE",
+      "expectedStatus": "NOT_TESTABLE_HERE",
+      "rationale": "The shared fixture is deliberately anonymous and loopback-only; no authenticated endpoint was available or invented.",
+      "signoff": "Run accepted and rejected credentials against an authorized real q endpoint and verify SecretStorage/error redaction without recording credentials."
+    },
+    {
+      "id": "remote-secure-endpoints",
+      "area": "SSH/TLS/IPv6/remote endpoint behavior",
+      "mode": "boundary",
+      "status": "NOT_TESTABLE_HERE",
+      "expectedStatus": "NOT_TESTABLE_HERE",
+      "rationale": "Only anonymous IPv4 loopback direct q was authorized. No SSH/TLS service, remote host, IPv6 listener, or multi-version q matrix was available.",
+      "signoff": "Record separately authorized endpoint tests for every supported transport/address/q-version claim; keep standalone direct-only unless product scope changes."
+    },
+    {
+      "id": "xlsx-application-rendering",
+      "area": "spreadsheet application rendering",
+      "mode": "boundary",
+      "status": "NOT_TESTABLE_HERE",
+      "expectedStatus": "NOT_TESTABLE_HERE",
+      "rationale": "The gate proves OOXML ZIP structure and limits but no Excel/LibreOffice GUI application was available for visual rendering.",
+      "signoff": "Open representative exports in supported spreadsheet applications and record data, escaping, dimensions, and limits."
+    },
+    {
+      "id": "marketplace-package-publication",
+      "area": "VSIX install and Marketplace publication",
+      "mode": "boundary",
+      "status": "NOT_TESTABLE_HERE",
+      "expectedStatus": "NOT_TESTABLE_HERE",
+      "rationale": "This is not a feature release; the gate intentionally does not create a user-facing VSIX, install from Marketplace, or publish.",
+      "signoff": "Use a separately authorized release gate for package inventory, clean Extension Host installation, identity, credentials, hashes, and Marketplace upload."
+    },
+    {
+      "id": "server-side-cancellation-after-dispatch",
+      "area": "server-side q cancellation after dispatch",
+      "mode": "boundary",
+      "status": "NOT_TESTABLE_HERE",
+      "expectedStatus": "NOT_TESTABLE_HERE",
+      "rationale": "Both public products document local wait/transport cancellation limits; the harness does not claim reliable interruption of already-dispatched q work.",
+      "signoff": "Define an authorized server interruption protocol and prove side-effect/cancellation semantics before claiming server-side cancellation."
+    },
+    {
+      "id": "documentation-no-complete-parity-claim",
+      "area": "documentation conclusion boundary",
+      "mode": "boundary",
+      "status": "PASS",
+      "expectedStatus": "PASS",
+      "detail": "Current standalone documentation explicitly denies complete functional/visual parity and defers source-of-truth sign-off."
+    }
+  ]
+}
