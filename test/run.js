@@ -429,7 +429,8 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.1.0');
+  assert.strictEqual(manifest.version, '0.1.1');
+  assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
   assert.ok(!/@sqltools\//i.test(manifestSource), 'package.json must not reference @sqltools packages');
@@ -486,7 +487,7 @@ function testManifestAndSources() {
 
   const contributions = manifest.contributes || {};
   const activityContainers = (((contributions.viewsContainers || {}).activitybar) || []);
-  assert.ok(activityContainers.some(container => container.title === 'KX' && typeof container.icon === 'string'));
+  assert.ok(activityContainers.some(container => container.title === 'KX' && container.icon === 'icons/kx-activity.png'));
   const viewGroups = Object.values(contributions.views || {}).flat();
   assert.ok(viewGroups.some(view => view && view.name === 'KX Connections'));
 
@@ -514,7 +515,7 @@ function testManifestAndSources() {
   assert.ok(!/password/i.test(safeBlock), 'serialized connection settings must never include passwords');
 
   const vscodeIgnore = fs.readFileSync(path.join(ROOT, '.vscodeignore'), 'utf8');
-  ['src/**', 'test/**', '**/*.map', 'CODEX*', 'PROMPT*', '*.vsix', '*.zip'].forEach(pattern => {
+  ['src/**', 'test/**', 'tmp/**', '**/*.map', 'CODEX*', 'PROMPT*', '*.vsix', '*.zip'].forEach(pattern => {
     assert.ok(vscodeIgnore.includes(pattern), `.vscodeignore must exclude ${pattern}`);
   });
 }

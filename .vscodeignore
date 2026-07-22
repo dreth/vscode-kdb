@@ -5,6 +5,7 @@
 .vscode-test/**
 src/**
 test/**
+tmp/**
 tsconfig.json
 package-lock.json
 *.vsix
