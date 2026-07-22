@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
-  "generatedAt": "2026-07-22T07:58:03.967Z",
+  "generatedAt": "2026-07-22T08:41:35.946Z",
   "standalone": {
     "name": "vscode-kdb",
-    "version": "0.1.4",
-    "commit": "48e79e8369f0139e18810834f0ff0bf1e1802272",
+    "version": "0.1.5",
+    "commit": "0c1ca7ddfb4eb48f788f8b32cf865340da2410dd",
     "dirty": false,
     "dirtyDisclaimer": "clean tracked worktree"
   },
@@ -67,7 +67,7 @@
       "name": "standalone focused suite",
       "command": "node test/run.js",
       "exitCode": 0,
-      "outcome": "16 focused test groups passed."
+      "outcome": "19 focused test groups passed."
     },
     {
       "name": "standalone required live-q suite",
@@ -91,13 +91,13 @@
       "name": "cross-extension same-fixture suite",
       "command": "npm run test:parity",
       "exitCode": 0,
-      "outcome": "63 classified cases; 379 assertions; VALID_WITH_KNOWN_GAPS"
+      "outcome": "63 classified cases; 381 assertions; VALID_WITH_KNOWN_GAPS"
     }
   ],
   "summary": {
     "caseCount": 63,
     "classifiedCaseCount": 63,
-    "assertionCount": 379,
+    "assertionCount": 381,
     "byStatus": {
       "PASS": 49,
       "DIFFERENT_BY_DESIGN": 5,
@@ -613,8 +613,8 @@
       "mode": "boundary",
       "status": "NOT_TESTABLE_HERE",
       "expectedStatus": "NOT_TESTABLE_HERE",
-      "rationale": "This is not a feature release; the gate intentionally does not create a user-facing VSIX, install from Marketplace, or publish.",
-      "signoff": "Use a separately authorized release gate for package inventory, clean Extension Host installation, identity, credentials, hashes, and Marketplace upload."
+      "rationale": "The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.1.5 archive inventory and hashes must be verified separately by the release gate.",
+      "signoff": "Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check."
     },
     {
       "id": "server-side-cancellation-after-dispatch",

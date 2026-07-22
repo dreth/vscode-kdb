@@ -4,8 +4,8 @@ This is a bounded executable evidence report, not a claim of complete functional
 
 ## Exact baseline
 
-- Generated: `2026-07-22T07:58:03.967Z`
-- Standalone: `48e79e8369f0139e18810834f0ff0bf1e1802272`, package `vscode-kdb@0.1.4`
+- Generated: `2026-07-22T08:41:35.946Z`
+- Standalone: `0c1ca7ddfb4eb48f788f8b32cf865340da2410dd`, package `vscode-kdb@0.1.5`
 - Reference: `af2c7c920932274f156e31832859fa262068effe`, package `kdb-sqltools@0.3.17`
 - q runtime: `/opt/data/home/.kx/bin/q` (q 5 2026.05.01)
 - Standalone tracked state: clean tracked worktree
@@ -23,11 +23,11 @@ The reference checkout was treated as read-only source evidence. Its pre-existin
 | standalone compile | `npm run compile` | PASS | > tsc -p ./ |
 | reference compile | `npm run compile` | PASS | > tsc -p ./ |
 | parity runner self-tests | `node test/parity/self-test.js` | PASS | 12 parity support test groups passed. |
-| standalone focused suite | `node test/run.js` | PASS | 16 focused test groups passed. |
+| standalone focused suite | `node test/run.js` | PASS | 19 focused test groups passed. |
 | standalone required live-q suite | `VSCODE_KDB_LIVE_REQUIRED=1 VSCODE_KDB_Q_BIN=/opt/data/home/.kx/bin/q node test/live/run.js` | PASS | Live direct q IPC test passed using /opt/data/home/.kx/bin/q |
 | reference focused suite | `node test/run.js` | PASS | All kdb-sqltools tests passed. |
 | reference required live-q suite | `KDB_Q_BIN=/opt/data/home/.kx/bin/q KDB_SQLTOOLS_LIVE_REQUIRED=1 node test/live/run.js` | PASS | Live kdb+/q test passed using /opt/data/home/.kx/bin/q |
-| cross-extension same-fixture suite | `npm run test:parity` | PASS | 63 classified cases; 379 assertions; VALID_WITH_KNOWN_GAPS |
+| cross-extension same-fixture suite | `npm run test:parity` | PASS | 63 classified cases; 381 assertions; VALID_WITH_KNOWN_GAPS |
 
 No documentation build, package command, reset, add, commit, or publication command ran in `kdb-sqltools`.
 
@@ -39,7 +39,7 @@ The complete machine-readable record is checked in as [`PARITY_RUN.json`](PARITY
 {
   "caseCount": 63,
   "classifiedCaseCount": 63,
-  "assertionCount": 379,
+  "assertionCount": 381,
   "byStatus": {
     "PASS": 49,
     "DIFFERENT_BY_DESIGN": 5,
@@ -123,7 +123,7 @@ Deterministic unit equivalence and live direct-q equivalence are counted separat
 | `authenticated-q-endpoint` | authenticated direct q IPC | boundary | **NOT_TESTABLE_HERE** | The shared fixture is deliberately anonymous and loopback-only; no authenticated endpoint was available or invented. |
 | `remote-secure-endpoints` | SSH/TLS/IPv6/remote endpoint behavior | boundary | **NOT_TESTABLE_HERE** | Only anonymous IPv4 loopback direct q was authorized. No SSH/TLS service, remote host, IPv6 listener, or multi-version q matrix was available. |
 | `xlsx-application-rendering` | spreadsheet application rendering | boundary | **NOT_TESTABLE_HERE** | The gate proves OOXML ZIP structure and limits but no Excel/LibreOffice GUI application was available for visual rendering. |
-| `marketplace-package-publication` | VSIX install and Marketplace publication | boundary | **NOT_TESTABLE_HERE** | This is not a feature release; the gate intentionally does not create a user-facing VSIX, install from Marketplace, or publish. |
+| `marketplace-package-publication` | VSIX install and Marketplace publication | boundary | **NOT_TESTABLE_HERE** | The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.1.5 archive inventory and hashes must be verified separately by the release gate. |
 | `server-side-cancellation-after-dispatch` | server-side q cancellation after dispatch | boundary | **NOT_TESTABLE_HERE** | Both public products document local wait/transport cancellation limits; the harness does not claim reliable interruption of already-dispatched q work. |
 | `documentation-no-complete-parity-claim` | documentation conclusion boundary | boundary | **PASS** | Current standalone documentation explicitly denies complete functional/visual parity and defers source-of-truth sign-off. |
 
@@ -143,7 +143,7 @@ Here, “parity-program M3 sign-off” names the cross-extension source-of-truth
 - **authenticated direct q IPC:** The shared fixture is deliberately anonymous and loopback-only; no authenticated endpoint was available or invented. Required evidence: Run accepted and rejected credentials against an authorized real q endpoint and verify SecretStorage/error redaction without recording credentials.
 - **SSH/TLS/IPv6/remote endpoint behavior:** Only anonymous IPv4 loopback direct q was authorized. No SSH/TLS service, remote host, IPv6 listener, or multi-version q matrix was available. Required evidence: Record separately authorized endpoint tests for every supported transport/address/q-version claim; keep standalone direct-only unless product scope changes.
 - **spreadsheet application rendering:** The gate proves OOXML ZIP structure and limits but no Excel/LibreOffice GUI application was available for visual rendering. Required evidence: Open representative exports in supported spreadsheet applications and record data, escaping, dimensions, and limits.
-- **VSIX install and Marketplace publication:** This is not a feature release; the gate intentionally does not create a user-facing VSIX, install from Marketplace, or publish. Required evidence: Use a separately authorized release gate for package inventory, clean Extension Host installation, identity, credentials, hashes, and Marketplace upload.
+- **VSIX install and Marketplace publication:** The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.1.5 archive inventory and hashes must be verified separately by the release gate. Required evidence: Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.
 - **server-side q cancellation after dispatch:** Both public products document local wait/transport cancellation limits; the harness does not claim reliable interruption of already-dispatched q work. Required evidence: Define an authorized server interruption protocol and prove side-effect/cancellation semantics before claiming server-side cancellation.
 
 The environment had no `code` or `code-insiders` command. No authenticated endpoint, VS Code Extension Host, visual browser, spreadsheet application, SSH/TLS service, Marketplace install, or publication was fabricated.
