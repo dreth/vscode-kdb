@@ -4,6 +4,16 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.1.3 - 2026-07-22
+
+- Replaced sequential Add/Edit prompts with one responsive, theme-aware **KX Connection** form containing the direct q IPC endpoint, namespace, authentication, and collapsible advanced timeout controls.
+- Added keyboard and screen-reader form behavior, extension-host payload validation, field-focused errors, password-safe edit semantics, and modal VS Code confirmation for deletion.
+- Added optional per-connection `connectTimeoutMs` and `queryTimeoutMs` overrides plus the global `vscode-kdb.queryTimeoutMs` setting. Blank overrides inherit global defaults, `null` preserves legacy query-timeout inheritance, and `0` disables the relevant bounded deadline.
+- Applied separate full timeout budgets to TCP connect and q IPC handshake, and an end-to-end query-response timer that starts when a query is sent and drops an uncertain timed-out client.
+- Made connected profile edits deterministic: safe settings and requested SecretStorage changes persist first, then session-affecting edits disconnect and reconnect; a failed reconnect leaves the saved profile clearly disconnected.
+- Extended focused coverage for form parsing, timeout resolution and bounds, password keep/replace/clear behavior, safe persistence/redaction, connection-update lifecycle, and source/webview/command guards.
+- Kept the release direct-q-IPC-only with no SQLTools dependency or SSH/TLS/gateway placeholder controls. No visual Extension Host E2E or screenshot evidence is claimed.
+
 ## 0.1.2 - 2026-07-22
 
 - Added redacted connection, handshake, query, cancellation, and close diagnostics in the dedicated `KX` Output channel, with opt-in safe performance timings.

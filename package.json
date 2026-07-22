@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Standalone q IPC connections, q execution, and high-performance KX results for VS Code.",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -57,8 +57,8 @@
     "test": "npm run compile && node test/run.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:live-q": "npm run compile && node test/live/run.js",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.1.2.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.2.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.1.3.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.3.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -338,6 +338,18 @@
                 "default": "",
                 "maxLength": 256,
                 "description": "Optional q IPC username."
+              },
+              "connectTimeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647,
+                "description": "Optional per-connection TCP connect and q IPC handshake timeout override in milliseconds. Omit to inherit the global default; 0 disables both phase deadlines."
+              },
+              "queryTimeoutMs": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 2147483647,
+                "description": "Optional per-connection query response timeout override in milliseconds. Omit to inherit the global default; 0 disables the timeout."
               }
             }
           }
@@ -347,7 +359,19 @@
           "scope": "application",
           "default": 30000,
           "minimum": 0,
-          "description": "Direct q IPC connect and query timeout in milliseconds. Use 0 to disable the timeout."
+          "maximum": 2147483647,
+          "description": "Global direct q IPC TCP connect and handshake timeout in milliseconds. Use 0 to disable both phase deadlines. Existing profiles also use this as the query timeout while queryTimeoutMs is null."
+        },
+        "vscode-kdb.queryTimeoutMs": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "scope": "application",
+          "default": null,
+          "minimum": 0,
+          "maximum": 2147483647,
+          "description": "Global direct q IPC query response timeout in milliseconds. Null inherits connectionTimeoutMs for compatibility; 0 disables the query timeout."
         },
         "vscode-kdb.performance.trace": {
           "type": "boolean",

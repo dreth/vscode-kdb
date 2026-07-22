@@ -1,4 +1,5 @@
 import * as net from 'net';
+import { MAX_TIMEOUT_MS } from './connection';
 import type { KxDiagnosticPhase, KxDiagnosticStatus, KxDiagnostics } from './diagnostics';
 import { ColumnarPanelResult, cellValueToText, createColumnarPanelResult } from './kx-results';
 import { endPerfSpan, isPerfTraceEnabled, perfMark, perfSpan } from './perf';
@@ -122,6 +123,8 @@ export interface KdbConnectionOptions {
   port: number;
   username?: string;
   password?: string;
+  connectTimeoutMs?: number;
+  queryTimeoutMs?: number;
   timeoutMs?: number;
   onDidClose?: () => void;
   diagnostics?: KxDiagnostics;
@@ -371,6 +374,7 @@ export class KdbIpcClient {
     }
 
     const connectStartedMs = Date.now();
+    const timeoutMs = this.connectTimeoutMs();
     this.writeDiagnostic('connect', 'start');
     const connectPromise = new Promise<void>((resolve, reject) => {
       const socket = net.createConnection({
@@ -381,6 +385,14 @@ export class KdbIpcClient {
       let settled = false;
       let phase: KdbIpcPhase = 'connect';
       let phaseStartedMs = connectStartedMs;
+      let phaseTimer: NodeJS.Timeout | undefined;
+
+      const clearPhaseTimer = () => {
+        if (phaseTimer) {
+          clearTimeout(phaseTimer);
+          phaseTimer = undefined;
+        }
+      };
 
       const fail = (error: Error, destroy = true) => {
         if (settled) {
@@ -396,12 +408,21 @@ export class KdbIpcClient {
         reject(wrapped);
       };
 
+      const armPhaseTimer = () => {
+        clearPhaseTimer();
+        if (timeoutMs > 0) {
+          phaseTimer = setTimeout(() => {
+            fail(new KdbIpcError(`timed out after ${timeoutMs} ms`));
+          }, timeoutMs);
+        }
+      };
+
       const cleanup = () => {
+        clearPhaseTimer();
         socket.removeListener('connect', onConnect);
         socket.removeListener('data', onHandshakeData);
         socket.removeListener('error', onError);
         socket.removeListener('close', onClose);
-        socket.removeListener('timeout', onTimeout);
         if (this.connectingSocket === socket) {
           this.connectingSocket = null;
         }
@@ -415,6 +436,7 @@ export class KdbIpcClient {
         phase = 'handshake';
         phaseStartedMs = Date.now();
         this.writeDiagnostic('handshake', 'start');
+        armPhaseTimer();
         socket.write(createHandshake(this.options), error => {
           if (error) {
             fail(error);
@@ -436,7 +458,6 @@ export class KdbIpcClient {
         settled = true;
         cleanup();
         socket.setNoDelay(true);
-        socket.setTimeout(0);
         socket.on('data', this.handleData);
         socket.on('error', this.handleSocketError);
         socket.on('close', this.handleSocketClose);
@@ -456,16 +477,13 @@ export class KdbIpcClient {
 
       const onError = (error: Error) => fail(error);
       const onClose = () => fail(new KdbIpcError('connection closed before q IPC handshake completed'), false);
-      const onTimeout = () => fail(new KdbIpcError(`timed out after ${this.timeoutMs()} ms`));
 
       this.pendingConnect = { socket, fail };
       socket.once('connect', onConnect);
       socket.once('data', onHandshakeData);
       socket.once('error', onError);
       socket.once('close', onClose);
-      if (this.timeoutMs() > 0) {
-        socket.setTimeout(this.timeoutMs(), onTimeout);
-      }
+      armPhaseTimer();
     });
     this.connectPromise = connectPromise;
     try {
@@ -566,8 +584,12 @@ export class KdbIpcClient {
     return this.protocolVersion;
   }
 
-  private timeoutMs(): number {
-    return Math.max(0, Number(this.options.timeoutMs || 0));
+  private connectTimeoutMs(): number {
+    return normalizedTimeoutMs(this.options.connectTimeoutMs ?? this.options.timeoutMs);
+  }
+
+  private queryTimeoutMs(): number {
+    return normalizedTimeoutMs(this.options.queryTimeoutMs ?? this.options.timeoutMs);
   }
 
   private flushQueue() {
@@ -591,11 +613,12 @@ export class KdbIpcClient {
     if (pending.perf) {
       perfMark('q-ipc.query.start', queryPerfDetails(pending.perf));
     }
-    if (this.timeoutMs() > 0) {
+    const timeoutMs = this.queryTimeoutMs();
+    if (timeoutMs > 0) {
       pending.timeout = setTimeout(() => {
-        this.rejectPending(this.phaseError('query', new KdbIpcError(`timed out after ${this.timeoutMs()} ms`)));
+        this.rejectPending(this.phaseError('query', new KdbIpcError(`timed out after ${timeoutMs} ms`)));
         this.socket && this.socket.destroy();
-      }, this.timeoutMs());
+      }, timeoutMs);
     }
 
     const message = serializeTextQuery(pending.query);
@@ -845,13 +868,30 @@ export class KdbIpcClient {
 
   private phaseError(phase: KdbIpcPhase, error: Error): KdbIpcError {
     const err = toError(error);
-    const wrapped = new KdbIpcError(`kdb+ ${phase} failed for ${this.endpointLabel()}: ${err.message}`);
+    const detail = redactIpcErrorMessage(
+      err.message,
+      [this.options.username || '', this.options.password || '']
+    );
+    const wrapped = new KdbIpcError(`kdb+ ${phase} failed for ${this.endpointLabel()}: ${detail}`);
     const code = (err as NodeJS.ErrnoException).code;
     if (code) {
       (wrapped as NodeJS.ErrnoException).code = code;
     }
     return wrapped;
   }
+}
+
+function normalizedTimeoutMs(value: unknown): number {
+  return typeof value === 'number' && Number.isInteger(value) && value >= 0 && value <= MAX_TIMEOUT_MS
+    ? value
+    : 0;
+}
+
+function redactIpcErrorMessage(message: string, secrets: readonly string[]): string {
+  return secrets
+    .filter(secret => !!secret)
+    .sort((left, right) => right.length - left.length)
+    .reduce((safe, secret) => safe.split(secret).join('[redacted]'), message);
 }
 
 export function serializeTextQuery(query: string): Buffer {

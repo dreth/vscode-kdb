@@ -35,7 +35,11 @@ Some cell and chart limits are configurable. Internal time, byte-size, group-cou
 
 ## Timeout and queue behavior
 
-`vscode-kdb.connectionTimeoutMs` defaults to 30,000 milliseconds and applies to connect/handshake and query waits. Set it to `0` only when an unbounded wait is intentional.
+`vscode-kdb.connectionTimeoutMs` defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. `vscode-kdb.queryTimeoutMs` defaults to `null`, which inherits that global connect value for compatibility; set it to an integer for a separate global query-response deadline.
+
+The **KX Connection** form's **Advanced direct q IPC** section accepts optional per-profile `connectTimeoutMs` and `queryTimeoutMs` overrides. Blank inherits the corresponding resolved global value. Every timeout is a whole number from `0` through `2147483647` milliseconds; use `0` only when an unbounded phase wait is intentional.
+
+The query timer starts when queued work becomes active and the client sends it, not when it first enters the per-connection queue. It runs until the response completes. Expiry destroys and drops the uncertain socket so a later query reconnects instead of reusing it.
 
 A connection serializes its q query requests. Local panel cancellation stops waiting for one result but does not remove work already sent to q or cancel other queued panel work. Disconnecting closes the client and fails its outstanding queue.
 

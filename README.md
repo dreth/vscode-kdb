@@ -2,7 +2,7 @@
 
 KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, a KX activity-bar view, and a high-performance native result panel.
 
-Version 0.1.2 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
+Version 0.1.3 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
 
 Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed parity matrix](PARITY.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
 
@@ -17,7 +17,7 @@ Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed p
    The common `q -p 5000` form listens on all network interfaces. Use it only on a trusted, firewalled machine; the loopback form above avoids exposing an unauthenticated local development process to the network.
 
 2. Install KX for VS Code and open the **KX** activity-bar icon.
-3. In **KX Connections**, choose **Add Connection** and enter a unique name, `localhost`, port `5000`, and the q namespace to use. Use `.` for the root namespace.
+3. In **KX Connections**, choose **Add Connection**. The **KX Connection** form shows the direct host, port, namespace, optional authentication, and timeout overrides together. Enter a unique name, `localhost`, port `5000`, and `.` for the root namespace, then choose **Save Connection**.
 4. Test the connection, set it active, and connect. Opening a connection is also handled automatically when a query first needs it.
 5. Open a `.q` file and run the current line, a selection, or the complete script.
 
@@ -35,11 +35,31 @@ Connections belong to this extension and appear in the **KX Connections** sideba
 - **KX: Disconnect**
 - **KX: Test Connection**
 
-Connection errors identify the relevant host and port so endpoint, network, authentication, and q-listener problems can be distinguished. Names must be unique; hosts, ports, and namespaces are validated before they are stored.
+Connection errors identify the failed `connect`, `handshake`, or `query` phase and direct host/port so endpoint, network, authentication, and q-listener problems can be distinguished. They do not include credentials or query contents.
+
+### KX Connection form
+
+**Add Connection** and **Edit Connection** open the same responsive, theme-aware **KX Connection** form instead of a sequence of VS Code prompts. Name, host, port, namespace/database, username, and password are visible together. Name and host are required, names are unique, port is an integer from `1` through `65535`, and namespace defaults to `.`. The help text explains that the endpoint is direct q IPC and that the database value is the q namespace used for editor runs.
+
+The collapsible **Advanced direct q IPC** section provides optional per-connection **Connect / handshake timeout (ms)** and **Query timeout (ms)** overrides. Leave a value blank to use its global default. Only whole numbers from `0` through `2147483647` are accepted; `0` disables that timeout. No SSH, TLS, gateway, broker, keep-alive, or reconnect-policy controls are presented.
+
+**Save Connection** is enabled only when the browser-level form checks pass, and every submitted message is validated again by the extension host before storage. Enter submits a valid form. Escape and **Cancel** close it without changing storage or the current connection. Labels, descriptions, an announced error region, invalid-field focus, and initial name-field focus support keyboard and screen-reader use. **Delete Connection** appears when editing and opens an explicit modal VS Code confirmation; the webview does not use browser `confirm`.
+
+When editing a connection with a saved password, the password input is always empty and says to leave it blank to keep the existing secret. Enter a value to replace the secret, or select **Clear saved password** to delete it. The saved value itself is never sent back to the webview.
+
+### Timeout behavior
+
+`vscode-kdb.connectionTimeoutMs` is the global connect/handshake default and remains `30000` milliseconds. The same complete budget applies separately to the TCP connect phase and then to the q IPC handshake phase. `vscode-kdb.queryTimeoutMs` defaults to `null`, which inherits `connectionTimeoutMs` for compatibility with existing profiles; set an integer to configure a separate global query timeout. A blank per-connection override inherits the corresponding resolved global value.
+
+The query timer starts when a queued query becomes active and is sent; time spent waiting behind an earlier query on the same connection is not included. A query timeout drops the uncertain socket. Every timeout accepts `0` to disable it and is bounded at `2147483647` milliseconds.
+
+### Update lifecycle
+
+Validation failures and Cancel leave both persisted data and any connected client unchanged. Save writes the safe profile and requested SecretStorage change first. If a connected profile's host, port, username, password, or timeout changes, the old client is then disconnected and a reconnect is attempted with the saved settings. A reconnect failure leaves the new profile saved, the client disconnected, and shows a warning; it does not restore or silently reuse the stale client. Name and namespace-only edits do not recycle an otherwise valid client. Deleting a connection removes its stored password and disconnects its client.
 
 ### Security model
 
-Safe connection metadata is kept in the global user setting `vscode-kdb.connections`: connection ID, name, host, port, database/namespace, and username. Passwords are never written to settings. Each password is stored under a connection-specific key in VS Code `SecretStorage`, using the credential protection provided by VS Code and the operating system at rest. Removing a connection removes its stored secret. Passwords are not included in extension logs, documentation samples, packaged files, or connection errors.
+Safe connection metadata is kept in the global user setting `vscode-kdb.connections`: connection ID, name, host, port, database/namespace, username, and optional `connectTimeoutMs` / `queryTimeoutMs` overrides. Passwords are never written to settings. Each password is stored under a connection-specific key in VS Code `SecretStorage`, using the credential protection provided by VS Code and the operating system at rest. Removing a connection removes its stored secret. Passwords are not included in extension logs, documentation samples, packaged files, connection errors, or saved-profile messages sent to the webview.
 
 Direct q IPC is plaintext in transit, including authentication and query traffic. Phase 1 does not add TLS, SSH tunnelling, or a gateway. Use loopback or a trusted private network, or establish a separately managed secure tunnel before connecting to a remote q process.
 
@@ -88,7 +108,7 @@ The setting is opt-in and is never changed automatically. Performance tracing ad
 
 ## Phase 1 scope
 
-Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.2; unreliable metadata placeholders are deliberately omitted.
+Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.3; unreliable metadata placeholders are deliberately omitted.
 
 ## Development and verification
 
@@ -102,7 +122,7 @@ npm run test:unit
 npm test
 ```
 
-`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection validation and namespace wrapping, connection-manager lifecycle, diagnostics/redaction, result conversion, and manifest/source guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these Phase 1 behaviors can be tested deterministically without it.
+`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, connection-form payload and timeout validation, SecretStorage keep/replace/clear behavior, persisted-first connection lifecycle, namespace wrapping, diagnostics/redaction, result conversion, and manifest/source/webview guards. `npm run test:unit` and `npm test` compile and run that same harness. `npm test` is intentionally not labelled as Extension Host E2E: launching Electron reliably is not available in every minimal or headless release environment, while these Phase 1 behaviors can be tested deterministically without it. Release 0.1.3 does not claim a visual Extension Host E2E run, and no screenshot is presented as test evidence.
 
 If a local q executable is available at `~/.kx/bin/q`, run the optional live IPC test:
 
@@ -130,7 +150,7 @@ Package the extension with either the project script or an explicit artifact pat
 
 ```sh
 npm run package
-npx @vscode/vsce package --out vscode-kdb-0.1.2.vsix
+npx @vscode/vsce package --out vscode-kdb-0.1.3.vsix
 ```
 
 The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.

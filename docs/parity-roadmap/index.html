@@ -788,20 +788,20 @@
 <h1 id="parity-roadmap-architecture">Parity Roadmap &amp; Architecture</h1>
 <p>KX for VS Code is being developed as the future first-party KX product. During the parity phase, useful capabilities are ported from <code>kdb-sqltools</code> into this standalone architecture. Functional parity must be verified by evidence and user testing before the standalone repository becomes the source of truth.</p>
 <p>The detailed, source-backed status is maintained in the repository's <a href="https://github.com/dreth/vscode-kdb/blob/main/PARITY.md"><code>PARITY.md</code></a>. Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim.</p>
-<p>The repository manifest is at <code>0.1.2</code> for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.</p>
+<p>The repository manifest is at <code>0.1.3</code> for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.</p>
 <h2 id="current-standalone-architecture">Current standalone architecture</h2>
 <p>The extension has five deliberate layers:</p>
 <ol>
-<li><strong>VS Code surface:</strong> q language contribution, editor commands, KX activity-bar connection tree, notifications, and <code>KX</code> Output channel.</li>
-<li><strong>Connection ownership:</strong> application-scoped safe metadata, global active-connection state, and per-connection VS Code SecretStorage keys.</li>
-<li><strong>Direct q IPC:</strong> handshake, serialization/deserialization, ordered queries, timeouts, q errors, transport lifecycle, and namespace/script wrappers.</li>
+<li><strong>VS Code surface:</strong> q language contribution, editor commands, KX activity-bar connection tree, the KX-owned single-screen connection form, notifications, and <code>KX</code> Output channel.</li>
+<li><strong>Connection ownership:</strong> application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.</li>
+<li><strong>Direct q IPC:</strong> handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.</li>
 <li><strong>Result capabilities:</strong> columnar storage, virtual grid/q-text presentation, search/sort/selection, copy/export, and safe chart transformations.</li>
 <li><strong>Optional local access:</strong> per-panel tokenized HTTP endpoints bound to loopback.</li>
 </ol>
-<p>There are no SQLTools runtime imports, APIs, result targets, connection forms, object-explorer nodes, or session-file hooks in this graph.</p>
+<p>There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, object-explorer nodes, or session-file hooks in this graph. The <strong>KX Connection</strong> form and its storage lifecycle are owned entirely by this extension.</p>
 <h2 id="phase-1-boundary">Phase 1 boundary</h2>
-<p>Present foundations include direct connections, authentication and SecretStorage implementation, exact editor execution, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path verification remains partial as recorded in <code>PARITY.md</code>.</p>
-<p>Known gaps and partial areas remain. In particular, Phase 1 does not provide an object explorer, built-in SSH/TLS or gateway orchestration, every historical editor convenience, complete visual/manual Extension Host coverage, or proof of end-user functional parity. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.</p>
+<p>Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path verification remains partial as recorded in <code>PARITY.md</code>.</p>
+<p>Known gaps and partial areas remain. In particular, Phase 1 does not provide an object explorer, built-in SSH/TLS or gateway orchestration, every historical editor convenience, complete visual/manual Extension Host coverage, or proof of end-user functional parity. Deterministic source/webview guards are not visual E2E, and release 0.1.3 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.</p>
 <p>Some SQLTools behaviors are deliberately omitted rather than missing:</p>
 <ul>
 <li>SQLTools as a runtime dependency;</li>

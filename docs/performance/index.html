@@ -862,7 +862,9 @@
 </table>
 <p>Some cell and chart limits are configurable. Internal time, byte-size, group-count, and file-format limits remain protective boundaries. Raising a configurable limit can temporarily block the extension host.</p>
 <h2 id="timeout-and-queue-behavior">Timeout and queue behavior</h2>
-<p><code>vscode-kdb.connectionTimeoutMs</code> defaults to 30,000 milliseconds and applies to connect/handshake and query waits. Set it to <code>0</code> only when an unbounded wait is intentional.</p>
+<p><code>vscode-kdb.connectionTimeoutMs</code> defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. <code>vscode-kdb.queryTimeoutMs</code> defaults to <code>null</code>, which inherits that global connect value for compatibility; set it to an integer for a separate global query-response deadline.</p>
+<p>The <strong>KX Connection</strong> form's <strong>Advanced direct q IPC</strong> section accepts optional per-profile <code>connectTimeoutMs</code> and <code>queryTimeoutMs</code> overrides. Blank inherits the corresponding resolved global value. Every timeout is a whole number from <code>0</code> through <code>2147483647</code> milliseconds; use <code>0</code> only when an unbounded phase wait is intentional.</p>
+<p>The query timer starts when queued work becomes active and the client sends it, not when it first enters the per-connection queue. It runs until the response completes. Expiry destroys and drops the uncertain socket so a later query reconnects instead of reusing it.</p>
 <p>A connection serializes its q query requests. Local panel cancellation stops waiting for one result but does not remove work already sent to q or cancel other queued panel work. Disconnecting closes the client and fails its outstanding queue.</p>
 <h2 id="diagnostics">Diagnostics</h2>
 <p>Open <strong>View &gt; Output</strong> and select <strong>KX</strong>. Lifecycle events are always available there for connection, handshake, query, cancellation, disconnect, and close transitions. They include the phase and direct <code>host:port</code> where useful.</p>

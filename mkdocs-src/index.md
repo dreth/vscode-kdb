@@ -12,18 +12,19 @@ tables `.analytics
 
 ## Phase 1 status
 
-The current `0.1.x` line is the first standalone phase. It has no SQLTools runtime dependency and does not create or interpret SQLTools session files.
+The current `0.1.3` release is in the first standalone phase. It has no SQLTools runtime dependency and does not create or interpret SQLTools session files.
 
 Implemented foundations include:
 
-- direct q IPC connections with extension-owned metadata and VS Code SecretStorage;
+- direct q IPC connections managed through one responsive **KX Connection** form, with extension-owned safe metadata and VS Code SecretStorage;
+- optional per-profile connect/handshake and query timeout overrides with bounded global defaults;
 - exact current-line, selection, and whole-document q execution;
 - grid and q-text results, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
 - line, scatter, step, bar, box, and candlestick charts;
 - an opt-in tokenized loopback data server; and
 - a dedicated `KX` Output channel with opt-in performance tracing.
 
-Phase 1 is not a full compatibility claim. The extension has no object explorer, built-in SSH or TLS setup, gateway orchestration, SQLTools result target, SQLTools connection UI, or `.session.sql` behavior. See [Parity Roadmap & Architecture](parity-roadmap.md) and the source-backed repository parity matrix before treating a capability as equivalent.
+Phase 1 is not a full compatibility claim. The extension has no object explorer, built-in SSH or TLS setup, gateway orchestration, SQLTools result target, SQLTools connection UI, or `.session.sql` behavior. Release 0.1.3 has deterministic form/source guards but no visual Extension Host E2E or screenshot evidence. See [Parity Roadmap & Architecture](parity-roadmap.md) and the source-backed repository parity matrix before treating a capability as equivalent.
 
 ## Requirements
 
@@ -36,7 +37,7 @@ SQLTools is not required.
 ## Common workflow
 
 1. Start q on a loopback port for local development.
-2. Add a direct connection from the **KX Connections** sidebar.
+2. Add a direct connection from the **KX Connections** sidebar. Complete the single-screen endpoint, namespace, and optional authentication fields; use **Advanced direct q IPC** only when this profile needs timeout overrides.
 3. Test it, set it active, and connect; a run can also connect on demand.
 4. Open a `.q` file and run the current line, an exact selection, or the whole document.
 5. Inspect, chart, copy, or export the result in **KX Results**.

@@ -24,9 +24,9 @@ q -p 127.0.0.1:5000
 
 Then verify the standalone connection uses host `localhost` (or `127.0.0.1`) and port `5000`. Check that another process is not using the port and that firewalls permit the intended route.
 
-A `connect`-phase error generally indicates endpoint, routing, refusal, or timeout. A `handshake`-phase error means TCP connected but q IPC negotiation/authentication did not complete. Common causes include a non-q service on that port, rejected q credentials, a reset listener, or an incompatible intermediary.
+A `connect`-phase error generally indicates endpoint, routing, refusal, or timeout. A `handshake`-phase error means TCP connected but q IPC negotiation/authentication did not complete. Common causes include a non-q service on that port, rejected q credentials, a reset listener, or an incompatible intermediary. TCP connect and handshake each receive a separate full connect-timeout budget, so one does not consume the other's allowance.
 
-Use **KX: Test Connection** to open a temporary client and verify `1+1`. If authentication changed, use **Edit Connection** and explicitly replace or remove the SecretStorage value.
+Use **KX: Test Connection** to open a temporary client and verify `1+1`. If authentication changed, use **Edit Connection**: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select **Clear saved password**. KX never sends the saved password back into the form.
 
 ## Sidebar says disconnected after failure
 
@@ -34,9 +34,17 @@ That is expected after a failed open, transport error, remote close, or explicit
 
 ## Query timed out
 
-The default `vscode-kdb.connectionTimeoutMs` is 30 seconds. A query timeout drops the failed client so later work does not reuse an uncertain socket. Increase the timeout only when the expected q workload justifies it, and inspect q-side performance first.
+`vscode-kdb.queryTimeoutMs` controls the global query deadline. Its default is `null`, which inherits the 30-second `vscode-kdb.connectionTimeoutMs` value for compatibility. The connection form's **Advanced direct q IPC** section can override either timeout for one profile; blank means use the corresponding global default.
 
-Setting the timeout to `0` disables it.
+The query timer begins only when this connection makes the queued query active and sends it. Time waiting behind an earlier query is not included. A query timeout drops the failed client so later work does not reuse an uncertain socket. Increase it only when the expected q workload justifies it, and inspect q-side performance first.
+
+Every timeout must be an integer from `0` through `2147483647` milliseconds. Setting one to `0` disables that deadline. Errors identify the `query` phase and direct endpoint but omit query contents and credentials.
+
+## Edited connection is disconnected
+
+If a connected profile's host, port, username, password, or timeout changes, this is intentional lifecycle behavior. Save commits the safe profile and requested SecretStorage change first, then disconnects and reconnects using the saved values. If reconnect fails, the profile remains saved and KX warns that it is disconnected; it never keeps using the stale client.
+
+Name and namespace-only changes do not recycle a healthy client. Validation errors, Cancel, or closing the form without saving do not change storage or the current session.
 
 ## q error appears in the result panel
 
@@ -86,7 +94,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness is deterministic and does not claim visual/manual VS Code end-to-end coverage.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic form/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.3 produced no screenshot as substitute evidence.
 
 ## Generated docs drift
 

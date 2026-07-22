@@ -1,32 +1,26 @@
 import * as vscode from 'vscode';
 import {
-  ConnectionValidationError,
+  connectionEndpoint,
   DEFAULT_HOST,
   DEFAULT_NAMESPACE,
   DEFAULT_PORT,
   KxConnection,
-  connectionEndpoint,
-  normalizeHost,
-  normalizeNamespace,
-  validateConnection,
-  validateHost,
-  validateNamespace,
-  validatePort,
 } from './connection';
 import { ConnectionManager } from './connection-manager';
 import { ConnectionStore } from './connection-store';
 import { ConnectionTreeItem, ConnectionsTreeProvider } from './connection-tree';
+import { parseConnectionFormPayload } from './connection-form-model';
+import { ConnectionFormPanel, initialConnectionFormValues } from './connection-form-panel';
+import { persistConnectionUpdate } from './connection-lifecycle';
 
 interface ConnectionPick extends vscode.QuickPickItem {
   connection: KxConnection;
 }
 
-type PasswordAction =
-  | { kind: 'keep' }
-  | { kind: 'set'; value: string }
-  | { kind: 'remove' };
-
 export class ConnectionCommands {
+  private activeForm: ConnectionFormPanel | undefined;
+  private formSession: Promise<void> | undefined;
+
   public constructor(
     private readonly store: ConnectionStore,
     private readonly manager: ConnectionManager,
@@ -47,65 +41,13 @@ export class ConnectionCommands {
   }
 
   public async add(): Promise<void> {
-    const values = await this.promptForConnection();
-    if (!values) {
-      return;
-    }
-    const password = await vscode.window.showInputBox({
-      title: 'KX: Add Connection (6/6)',
-      prompt: 'Authentication secret (optional; stored only in VS Code SecretStorage)',
-      password: true,
-      ignoreFocusOut: true,
-      validateInput: value => value.includes('\0') ? 'Authentication secret cannot contain null characters.' : undefined,
-    });
-    if (password === undefined) {
-      return;
-    }
-
-    try {
-      const connection = validateConnection({
-        ...values,
-        id: this.store.newConnectionId(),
-      }, this.store.connections());
-      await this.store.add(connection, password || undefined);
-      this.tree.refresh();
-      vscode.window.showInformationMessage(
-        `Added KX connection "${connection.name}" (${connectionEndpoint(connection)}).`
-      );
-    } catch (error) {
-      this.showFailure('Add connection', error);
-    }
+    await this.openConnectionForm();
   }
 
   public async edit(argument?: unknown): Promise<void> {
-    const current = await this.pickConnection('Edit which KX connection?', argument);
-    if (!current) {
-      return;
-    }
-    const values = await this.promptForConnection(current);
-    if (!values) {
-      return;
-    }
-    const passwordAction = await this.promptForPasswordChange(current);
-    if (!passwordAction) {
-      return;
-    }
-
-    try {
-      const connection = validateConnection({ ...values, id: current.id }, this.store.connections(), current.id);
-      await this.manager.disconnect(current.id);
-      const password = passwordAction.kind === 'set'
-        ? passwordAction.value
-        : passwordAction.kind === 'remove'
-          ? null
-          : undefined;
-      await this.store.update(connection, password);
-      this.tree.refresh();
-      vscode.window.showInformationMessage(
-        `Updated KX connection "${connection.name}" (${connectionEndpoint(connection)}).`
-      );
-    } catch (error) {
-      this.showFailure(`Edit connection "${current.name}"`, error);
+    const connection = await this.pickConnection('Edit which KX connection?', argument);
+    if (connection) {
+      await this.openConnectionForm(connection);
     }
   }
 
@@ -114,20 +56,8 @@ export class ConnectionCommands {
     if (!connection) {
       return;
     }
-    const confirmation = await vscode.window.showWarningMessage(
-      `Remove KX connection "${connection.name}"? Its stored authentication secret will also be deleted.`,
-      { modal: true },
-      'Remove'
-    );
-    if (confirmation !== 'Remove') {
-      return;
-    }
-
     try {
-      await this.manager.disconnect(connection.id);
-      await this.store.remove(connection.id);
-      this.tree.refresh();
-      vscode.window.showInformationMessage(`Removed KX connection "${connection.name}".`);
+      await this.confirmAndRemove(connection);
     } catch (error) {
       this.showFailure(`Remove connection "${connection.name}"`, error);
     }
@@ -205,128 +135,151 @@ export class ConnectionCommands {
     }
   }
 
-  private async promptForConnection(existing?: KxConnection): Promise<Omit<KxConnection, 'id'> | undefined> {
-    const connections = this.store.connections();
-    const name = await vscode.window.showInputBox({
-      title: `KX: ${existing ? 'Edit' : 'Add'} Connection (1/6)`,
-      prompt: 'Unique connection name',
-      value: existing ? existing.name : '',
-      ignoreFocusOut: true,
-      validateInput: value => {
-        const normalized = value.trim();
-        if (!normalized) {
-          return 'Connection name is required.';
-        }
-        return connections.some(item =>
-          item.id !== (existing && existing.id) && item.name.toLocaleLowerCase() === normalized.toLocaleLowerCase()
-        ) ? `A connection named "${normalized}" already exists.` : undefined;
-      },
-    });
-    if (name === undefined) {
-      return undefined;
+  private async openConnectionForm(editing?: KxConnection): Promise<void> {
+    if (this.activeForm) {
+      this.activeForm.reveal();
+      await this.activeForm.waitForCompletion();
+      return;
     }
-
-    const host = await vscode.window.showInputBox({
-      title: `KX: ${existing ? 'Edit' : 'Add'} Connection (2/6)`,
-      prompt: 'Direct q host name or IP address (no URL or SSH gateway)',
-      value: existing ? existing.host : DEFAULT_HOST,
-      ignoreFocusOut: true,
-      validateInput: value => validationMessage(() => validateHost(normalizeHost(value))),
-    });
-    if (host === undefined) {
-      return undefined;
+    if (this.formSession) {
+      await this.formSession;
+      return;
     }
-
-    const portText = await vscode.window.showInputBox({
-      title: `KX: ${existing ? 'Edit' : 'Add'} Connection (3/6)`,
-      prompt: 'q IPC port',
-      value: String(existing ? existing.port : DEFAULT_PORT),
-      ignoreFocusOut: true,
-      validateInput: value => validationMessage(() => validatePort(Number(value))),
-    });
-    if (portText === undefined) {
-      return undefined;
+    const session = this.createConnectionForm(editing);
+    this.formSession = session;
+    try {
+      await session;
+    } finally {
+      if (this.formSession === session) {
+        this.formSession = undefined;
+      }
     }
-
-    const database = await vscode.window.showInputBox({
-      title: `KX: ${existing ? 'Edit' : 'Add'} Connection (4/6)`,
-      prompt: 'q namespace/database (use . for root)',
-      value: existing ? existing.database : DEFAULT_NAMESPACE,
-      ignoreFocusOut: true,
-      validateInput: value => validationMessage(() => validateNamespace(normalizeNamespace(value))),
-    });
-    if (database === undefined) {
-      return undefined;
-    }
-
-    const username = await vscode.window.showInputBox({
-      title: `KX: ${existing ? 'Edit' : 'Add'} Connection (5/6)`,
-      prompt: 'Username (optional)',
-      value: existing ? existing.username : '',
-      ignoreFocusOut: true,
-      validateInput: value => value.length > 256
-        ? 'Username must be 256 characters or fewer.'
-        : /[\r\n\0:]/.test(value)
-          ? 'Username cannot contain colons, line breaks, or null characters.'
-          : undefined,
-    });
-    if (username === undefined) {
-      return undefined;
-    }
-
-    return {
-      name: name.trim(),
-      host: normalizeHost(host),
-      port: Number(portText),
-      database: normalizeNamespace(database),
-      username: username.trim(),
-    };
   }
 
-  private async promptForPasswordChange(connection: KxConnection): Promise<PasswordAction | undefined> {
-    const hasPassword = await this.store.hasPassword(connection.id);
-    const choices: Array<vscode.QuickPickItem & { passwordAction: PasswordAction['kind'] }> = [
-      {
-        label: 'Keep stored authentication secret',
-        description: hasPassword ? 'No change' : 'No secret is currently stored',
-        passwordAction: 'keep',
-      },
-      {
-        label: 'Replace authentication secret',
-        description: 'Save a new value in VS Code SecretStorage',
-        passwordAction: 'set',
-      },
-    ];
-    if (hasPassword) {
-      choices.push({
-        label: 'Remove authentication secret',
-        description: 'Delete it from VS Code SecretStorage',
-        passwordAction: 'remove',
-      });
+  private async createConnectionForm(editing?: KxConnection): Promise<void> {
+    const connections = this.store.connections();
+    const draft: KxConnection = editing || {
+      id: this.store.newConnectionId(),
+      name: '',
+      host: DEFAULT_HOST,
+      port: DEFAULT_PORT,
+      database: DEFAULT_NAMESPACE,
+      username: '',
+    };
+    let hasStoredPassword = false;
+    if (editing) {
+      try {
+        hasStoredPassword = await this.store.hasPassword(editing.id);
+      } catch (error) {
+        this.showFailure(`Open connection "${editing.name}"`, error);
+        return;
+      }
     }
-    const choice = await vscode.window.showQuickPick(choices, {
-      title: 'KX: Edit Connection (6/6)',
-      placeHolder: 'Choose how to handle the stored authentication secret',
-      ignoreFocusOut: true,
+    const globalTimeouts = this.manager.globalTimeouts();
+    const initial = initialConnectionFormValues(
+      editing ? 'edit' : 'add',
+      draft,
+      globalTimeouts.connectTimeoutMs,
+      globalTimeouts.queryTimeoutMs,
+      hasStoredPassword,
+      connections.filter(connection => connection.id !== editing?.id).map(connection => connection.name)
+    );
+
+    const panel = new ConnectionFormPanel(initial, {
+      onSave: payload => this.saveConnectionForm(payload, draft.id, editing),
+      onDelete: editing ? () => this.confirmAndRemove(editing) : undefined,
     });
-    if (!choice) {
-      return undefined;
+    this.activeForm = panel;
+    try {
+      await panel.waitForCompletion();
+    } finally {
+      if (this.activeForm === panel) {
+        this.activeForm = undefined;
+      }
     }
-    if (choice.passwordAction !== 'set') {
-      return { kind: choice.passwordAction };
+  }
+
+  private async saveConnectionForm(
+    payload: unknown,
+    id: string,
+    editing?: KxConnection
+  ): Promise<void> {
+    const current = editing ? this.store.connection(editing.id) : undefined;
+    if (editing && !current) {
+      throw new Error(`KX connection "${editing.name}" no longer exists.`);
     }
-    const value = await vscode.window.showInputBox({
-      title: 'KX: Replace Authentication Secret',
-      prompt: 'New value (stored only in VS Code SecretStorage)',
-      password: true,
-      ignoreFocusOut: true,
-      validateInput: input => !input.length
-        ? 'Enter a value or cancel and choose Remove.'
-        : input.includes('\0')
-          ? 'Authentication secret cannot contain null characters.'
-          : undefined,
+    const hasStoredPassword = current ? await this.store.hasPassword(current.id) : false;
+    const parsed = parseConnectionFormPayload(payload, {
+      id,
+      existingConnections: this.store.connections(),
+      editing: current,
+      hasStoredPassword,
     });
-    return value === undefined ? undefined : { kind: 'set', value };
+
+    if (!current) {
+      await this.store.add(
+        parsed.connection,
+        typeof parsed.passwordUpdate === 'string' ? parsed.passwordUpdate : undefined
+      );
+      this.tree.refresh();
+      vscode.window.showInformationMessage(
+        `Added KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}).`
+      );
+      return;
+    }
+
+    const outcome = await persistConnectionUpdate(
+      this.manager,
+      current,
+      parsed.connection,
+      parsed.passwordUpdate !== undefined,
+      () => this.store.update(parsed.connection, parsed.passwordUpdate, editing)
+    );
+    this.tree.refresh();
+    if (outcome.sessionState === 'reconnect-failed') {
+      const detail = outcome.error ? ` ${outcome.error.message}` : '';
+      vscode.window.showWarningMessage(
+        `Updated KX connection "${parsed.connection.name}", but reconnect failed. ` +
+        `The connection is saved and disconnected.${detail}`
+      );
+      return;
+    }
+    const lifecycle = outcome.sessionState === 'reconnected' ? ' Reconnected with the saved settings.' : '';
+    vscode.window.showInformationMessage(
+      `Updated KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}).${lifecycle}`
+    );
+  }
+
+  private async confirmAndRemove(connection: KxConnection): Promise<boolean> {
+    const current = this.store.connection(connection.id);
+    if (!current) {
+      return true;
+    }
+    const confirmation = await vscode.window.showWarningMessage(
+      `Delete KX connection "${current.name}"? Its saved password will also be deleted.`,
+      { modal: true },
+      'Delete Connection'
+    );
+    if (confirmation !== 'Delete Connection') {
+      return false;
+    }
+
+    await this.store.remove(current.id, connection);
+    let disconnectError: Error | undefined;
+    try {
+      await this.manager.disconnect(current.id);
+    } catch (error) {
+      disconnectError = error instanceof Error ? error : new Error(String(error));
+    }
+    this.tree.refresh();
+    if (disconnectError) {
+      vscode.window.showWarningMessage(
+        `Deleted KX connection "${current.name}", but transport cleanup reported: ${disconnectError.message}`
+      );
+    } else {
+      vscode.window.showInformationMessage(`Deleted KX connection "${current.name}".`);
+    }
+    return true;
   }
 
   private async pickConnection(title: string, argument?: unknown): Promise<KxConnection | undefined> {
@@ -380,14 +333,5 @@ export class ConnectionCommands {
   private showFailure(action: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(`${action} failed: ${message}`);
-  }
-}
-
-function validationMessage(validate: () => void): string | undefined {
-  try {
-    validate();
-    return undefined;
-  } catch (error) {
-    return error instanceof ConnectionValidationError ? error.message : String(error);
   }
 }

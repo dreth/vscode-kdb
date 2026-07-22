@@ -1,14 +1,22 @@
 import * as vscode from 'vscode';
-import { connectionEndpoint, KxConnection, qScriptInNamespace, queryInNamespace } from './connection';
+import {
+  ConnectionTimeouts,
+  connectionEndpoint,
+  DEFAULT_CONNECTION_TIMEOUT_MS,
+  KxConnection,
+  qScriptInNamespace,
+  queryInNamespace,
+  resolveConnectionTimeouts,
+  safeTimeoutMs,
+} from './connection';
 import { ConnectionStore } from './connection-store';
 import type { KxDiagnostics } from './diagnostics';
 import { KdbIpcClient, KdbQError, QValue } from './q-ipc';
 
-const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
-
 export class ConnectionManager implements vscode.Disposable {
   private readonly clients = new Map<string, KdbIpcClient>();
   private readonly opening = new Map<string, Promise<KdbIpcClient>>();
+  private readonly sessionSignatures = new Map<string, string>();
   private readonly stateEmitter = new vscode.EventEmitter<void>();
 
   public readonly onDidChangeState = this.stateEmitter.event;
@@ -22,12 +30,49 @@ export class ConnectionManager implements vscode.Disposable {
     return this.clients.has(connectionId) && !this.opening.has(connectionId);
   }
 
+  public globalTimeouts(): ConnectionTimeouts {
+    const configuration = vscode.workspace.getConfiguration('vscode-kdb');
+    const connectTimeoutMs = safeTimeoutMs(
+      configuration.get<unknown>('connectionTimeoutMs'),
+      DEFAULT_CONNECTION_TIMEOUT_MS
+    );
+    const configuredQueryTimeout = configuration.get<unknown>('queryTimeoutMs', null);
+    const queryTimeoutMs = configuredQueryTimeout === null || configuredQueryTimeout === undefined
+      ? connectTimeoutMs
+      : safeTimeoutMs(configuredQueryTimeout, connectTimeoutMs);
+    return { connectTimeoutMs, queryTimeoutMs };
+  }
+
+  public timeoutsFor(connection: KxConnection): ConnectionTimeouts {
+    return resolveConnectionTimeouts(connection, this.globalTimeouts());
+  }
+
+  public async disconnectIfConfigurationChanged(
+    connectionId: string,
+    connection?: KxConnection
+  ): Promise<void> {
+    if (!connection) {
+      return this.disconnect(connectionId);
+    }
+    const current = this.sessionSignatures.get(connectionId);
+    if (current && current !== connectionRuntimeSignature(connection, this.timeoutsFor(connection))) {
+      await this.disconnect(connectionId);
+    }
+  }
+
   public async connect(connection: KxConnection): Promise<KdbIpcClient> {
-    const pending = this.opening.get(connection.id);
+    const timeouts = this.timeoutsFor(connection);
+    const signature = connectionRuntimeSignature(connection, timeouts);
+    let pending = this.opening.get(connection.id);
+    let existing = this.clients.get(connection.id);
+    if ((pending || existing) && this.sessionSignatures.get(connection.id) !== signature) {
+      await this.disconnect(connection.id);
+      pending = this.opening.get(connection.id);
+      existing = this.clients.get(connection.id);
+    }
     if (pending) {
       return pending;
     }
-    const existing = this.clients.get(connection.id);
     if (existing) {
       return existing;
     }
@@ -45,7 +90,8 @@ export class ConnectionManager implements vscode.Disposable {
           port: connection.port,
           username: connection.username,
           password,
-          timeoutMs: this.connectionTimeoutMs(),
+          connectTimeoutMs: timeouts.connectTimeoutMs,
+          queryTimeoutMs: timeouts.queryTimeoutMs,
           onDidClose: () => client && this.dropClient(connection.id, client),
           diagnostics: this.diagnostics,
         });
@@ -67,11 +113,15 @@ export class ConnectionManager implements vscode.Disposable {
       } finally {
         if (this.opening.get(connection.id) === opening) {
           this.opening.delete(connection.id);
+          if (!this.clients.has(connection.id)) {
+            this.sessionSignatures.delete(connection.id);
+          }
           this.stateEmitter.fire();
         }
       }
     })();
     this.opening.set(connection.id, opening);
+    this.sessionSignatures.set(connection.id, signature);
     return opening;
   }
 
@@ -84,6 +134,7 @@ export class ConnectionManager implements vscode.Disposable {
 
     this.clients.delete(connectionId);
     this.opening.delete(connectionId);
+    this.sessionSignatures.delete(connectionId);
     this.stateEmitter.fire();
 
     if (opening) {
@@ -126,12 +177,14 @@ export class ConnectionManager implements vscode.Disposable {
       this.writeConnectFailure(connection, error, false);
       throw error;
     }
+    const timeouts = this.timeoutsFor(connection);
     const client = new KdbIpcClient({
       host: connection.host,
       port: connection.port,
       username: connection.username,
       password,
-      timeoutMs: this.connectionTimeoutMs(),
+      connectTimeoutMs: timeouts.connectTimeoutMs,
+      queryTimeoutMs: timeouts.queryTimeoutMs,
       diagnostics: this.diagnostics,
     });
     try {
@@ -154,6 +207,7 @@ export class ConnectionManager implements vscode.Disposable {
     const clients = Array.from(this.clients.values());
     this.clients.clear();
     this.opening.clear();
+    this.sessionSignatures.clear();
     clients.forEach(client => client.cancel(new Error('KX extension deactivated.')));
     this.stateEmitter.dispose();
   }
@@ -164,16 +218,8 @@ export class ConnectionManager implements vscode.Disposable {
     }
     this.clients.delete(connectionId);
     this.opening.delete(connectionId);
+    this.sessionSignatures.delete(connectionId);
     this.stateEmitter.fire();
-  }
-
-  private connectionTimeoutMs(): number {
-    const configured = vscode.workspace
-      .getConfiguration('vscode-kdb')
-      .get<number>('connectionTimeoutMs', DEFAULT_CONNECTION_TIMEOUT_MS);
-    return Number.isFinite(configured) && configured >= 0
-      ? Math.floor(configured)
-      : DEFAULT_CONNECTION_TIMEOUT_MS;
   }
 
   private writeConnectFailure(connection: KxConnection, error: unknown, canceled: boolean): void {
@@ -194,4 +240,14 @@ export class ConnectionManager implements vscode.Disposable {
 
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
+}
+
+function connectionRuntimeSignature(connection: KxConnection, timeouts: ConnectionTimeouts): string {
+  return JSON.stringify({
+    host: connection.host,
+    port: connection.port,
+    username: connection.username,
+    connectTimeoutMs: timeouts.connectTimeoutMs,
+    queryTimeoutMs: timeouts.queryTimeoutMs,
+  });
 }
