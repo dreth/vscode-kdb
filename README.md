@@ -2,7 +2,7 @@
 
 KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, a KX activity-bar view, and a high-performance native result panel.
 
-Version 0.1.1 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
+Version 0.1.2 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
 
 Documentation: [standalone user guide](mkdocs-src/index.md) and [source-backed parity matrix](PARITY.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
 
@@ -88,7 +88,7 @@ The setting is opt-in and is never changed automatically. Performance tracing ad
 
 ## Phase 1 scope
 
-Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.1; unreliable metadata placeholders are deliberately omitted.
+Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.2; unreliable metadata placeholders are deliberately omitted.
 
 ## Development and verification
 
@@ -130,7 +130,7 @@ Package the extension with either the project script or an explicit artifact pat
 
 ```sh
 npm run package
-npx @vscode/vsce package --out vscode-kdb-0.1.1.vsix
+npx @vscode/vsce package --out vscode-kdb-0.1.2.vsix
 ```
 
 The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.

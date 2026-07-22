@@ -4,10 +4,12 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
-- Added a source-backed standalone parity matrix, phased architecture roadmap, and post-verification backport policy.
-- Added a reproducible MkDocs Material site with committed generated output and a build-only Pages drift/artifact workflow.
-- Added the `KX` Output channel with redacted connection, handshake, query, cancellation, and close diagnostics plus opt-in safe performance timings.
-- Added direct IPC reliability, q-error, namespace, redaction, and connection-state regression coverage without changing the `0.1.1` version or producing a new VSIX.
+## 0.1.2 - 2026-07-22
+
+- Added redacted connection, handshake, query, cancellation, and close diagnostics in the dedicated `KX` Output channel, with opt-in safe performance timings.
+- Added strict, reproducible MkDocs sources, committed normalized output, and a build-only Pages drift/artifact gate.
+- Added `PARITY.md` as a source-backed roadmap and evidence ledger; this release does not claim complete functional or visual parity.
+- Hardened direct q IPC connection lifecycle, q-error and namespace handling, redaction, state refresh, and regression coverage.
 
 ## 0.1.1 - 2026-07-22
 
