@@ -62,7 +62,7 @@ All global values and profile overrides accept only integers from `0` through `2
 
 ## Active and connected state
 
-**Active** identifies the connection used by editor runs. **Connected** means an IPC socket is currently open. They are separate states:
+**Active** identifies the connection used by normal `.q` editor runs. **Connected** means an IPC socket is currently open. They are separate states:
 
 - The first added connection becomes active.
 - A run opens the active connection on demand when needed.
@@ -71,6 +71,8 @@ All global values and profile overrides accept only integers from `0` through `2
 - Explicit **Disconnect** closes that client's outstanding IPC work.
 
 Both the form button and the saved-profile **KX: Test Connection** command use temporary connections and a deliberately minimal safe response request; neither keeps the test socket as the active client.
+
+Notebook `%%q` execution does not use this connection manager. The `kx_notebook` helper calls only the evaluator explicitly configured in that Python kernel; optional PyKX uses that kernel's existing PyKX object. Version 0.2.0 deliberately does not intercept Jupyter to route a cell through the extension session and does not create a second extension direct-q connection. Opening a saved notebook preview in KX Results transfers only the bounded stored rows and cannot recover a full live result.
 
 Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.
 

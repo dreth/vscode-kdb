@@ -368,6 +368,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -507,6 +534,17 @@
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+
+        <li class="md-nav__item">
+  <a href="#notebook-results" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook results
+
+    </span>
+  </a>
+
+</li>
 
         <li class="md-nav__item">
   <a href="#feature-controls" class="md-nav__link">
@@ -755,6 +793,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#notebook-results" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook results
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#feature-controls" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -854,6 +903,39 @@
 <h1 id="settings">Settings</h1>
 <p>Open VS Code Settings and search for <code>vscode-kdb</code>, or edit settings JSON. The manifest is the source of truth for accepted values.</p>
 <p>Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.</p>
+<h2 id="notebook-results">Notebook results</h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Values / range</th>
+<th>Behavior and tradeoff</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vscode-kdb.notebook.presentation</code></td>
+<td><code>inline</code></td>
+<td><code>inline</code>, <code>panel</code>, <code>both</code></td>
+<td>Presentation for validated KX MIME output in ordinary Jupyter/IPython notebooks. <code>panel</code> hands off only the saved bounded preview; no mode reruns q or recovers omitted rows.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.notebook.maxOutputRows</code></td>
+<td><code>1000</code></td>
+<td>Integer <code>1</code>-<code>10000</code></td>
+<td>Maximum preview rows written into newly tagged <code>%%q</code> markers. The helper validates the explicit marker value.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.notebook.maxOutputBytes</code></td>
+<td><code>1000000</code></td>
+<td>Integer <code>16384</code>-<code>10000000</code></td>
+<td>Maximum combined portable MIME body bytes requested by newly tagged <code>%%q</code> markers. The helper budgets rich JSON plus static HTML/plain fallbacks from the same preview.</td>
+</tr>
+</tbody>
+</table>
+<p>The tag command persists the current row/byte values in the cell's durable marker and <code>vscode-kdb</code> namespaced metadata. These are output-serialization limits, not server-side q limits. The helper/payload excludes credentials, passwords, tokens, IPC handles, and unbounded data. Full omitted data remains only in the originating evaluator/session while it is retained there.</p>
+<p><code>inline</code> is the default notebook experience. <code>panel</code> opens the saved bounded preview in the existing KX Results panel instead of displaying the inline table/chart. <code>both</code> keeps the inline renderer and its explicit saved-preview panel handoff. Renderer-only chart control changes are session state; only the chart specification emitted in the MIME payload persists.</p>
 <h2 id="feature-controls">Feature Controls</h2>
 <p>Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.</p>
 <table>
@@ -1222,6 +1304,9 @@
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.serverExplorer.previewCellLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">10000</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.features.queryHistory&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.queryHistory.maxEntries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.presentation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;inline&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.maxOutputRows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.maxOutputBytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.connectionTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">30000</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.queryTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">null</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.performance.trace&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>

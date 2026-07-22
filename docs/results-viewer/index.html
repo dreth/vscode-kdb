@@ -11,7 +11,7 @@
 
 
 
-        <link rel="prev" href="../running-q/">
+        <link rel="prev" href="../notebooks/">
 
 
         <link rel="next" href="../charting/">
@@ -367,6 +367,33 @@
 
 
 
+    <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
 
 
     <li class="md-nav__item md-nav__item--active">
@@ -474,6 +501,23 @@
 
     </span>
   </a>
+
+    <nav class="md-nav" aria-label="Result tabs">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#notebook-saved-previews" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook saved previews
+
+    </span>
+  </a>
+
+</li>
+
+      </ul>
+    </nav>
 
 </li>
 
@@ -819,6 +863,23 @@
     </span>
   </a>
 
+    <nav class="md-nav" aria-label="Result tabs">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#notebook-saved-previews" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook saved previews
+
+    </span>
+  </a>
+
+</li>
+
+      </ul>
+    </nav>
+
 </li>
 
         <li class="md-nav__item">
@@ -886,7 +947,7 @@
 
 
 <h1 id="results-viewer">Results Viewer</h1>
-<p>Every editor run targets the extension-owned <strong>KX Results</strong> viewer. There is no SQLTools result target or session-file fallback.</p>
+<p>Every normal <code>.q</code> editor run targets the extension-owned <strong>KX Results</strong> viewer. There is no SQLTools result target or session-file fallback. An ordinary notebook can also hand a valid saved KX MIME preview to this viewer, but only the bounded rows stored in the <code>.ipynb</code> are transferred.</p>
 <h2 id="grid-and-q-text-modes">Grid and q-text modes</h2>
 <p>True q tables and keyed tables always use the grid, and scalars use a small synthetic grid. Vectors/lists, dictionaries, functions, and other decoded composite values use either a synthetic grid or deterministic q-like text according to the <a href="../settings/#result-display">display strategy settings</a>.</p>
 <p>The defaults are:</p>
@@ -907,6 +968,9 @@
 <h2 id="result-tabs">Result tabs</h2>
 <p>Normal selection/current-line and script runs reuse an existing KX panel. <strong>Run Selection in New Result</strong> opens another panel. The first panel uses <code>vscode-kdb.results.viewer.initialViewColumn</code>; a new panel uses the current KX result panel's editor group when one is available.</p>
 <p>Panels preserve editor focus on creation. Replacing a loading result locally cancels the previous panel wait so its late response cannot overwrite newer output.</p>
+<h3 id="notebook-saved-previews">Notebook saved previews</h3>
+<p><strong>KX: Open Saved Notebook Preview in Results Panel</strong> and the inline renderer action open the selected cell's validated <code>application/vnd.kx.result+json</code> v1 payload. The panel identifies the saved preview and reports persisted versus total row count. If output is truncated, omitted rows are not in the notebook or panel and cannot be recovered.</p>
+<p>This is a presentation handoff, not extension-driven notebook execution or a live-result handle. The panel does not rerun the cell, open another q connection, or claim the helper used the extension's IPC session. Normal panel richness remains available for the stored preview; large live data remains available only when its originating evaluator/session separately retains it.</p>
 <h2 id="selection-and-navigation">Selection and navigation</h2>
 <p>The grid supports:</p>
 <ul>

@@ -19,6 +19,7 @@ doc/**
 coverage/**
 **/coverage/**
 tsconfig.json
+renderer/tsconfig.json
 package-lock.json
 *.vsix
 *.zip

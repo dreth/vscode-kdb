@@ -368,6 +368,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -809,6 +836,7 @@
 
 <h1 id="performance-large-results">Performance &amp; Large Results</h1>
 <p>The result viewer is designed to stay usable with large tables, but q IPC responses are not streamed through the complete pipeline.</p>
+<p>Notebook output uses a different persistence boundary: only a bounded preview is written into <code>.ipynb</code>. It never embeds the live panel's complete result eagerly.</p>
 <h2 id="memory-and-rendering-model">Memory and rendering model</h2>
 <p>The extension receives and decodes the complete q IPC response before the panel can show it. Table data is retained in columnar form in the extension host. The webview then requests only visible row/column windows, so DOM and message traffic are virtualized.</p>
 <p>Virtual scrolling reduces browser work; it does not reduce the original q response, decode allocation, or extension-host storage. Limit at the q server when the full dataset is not required:</p>
@@ -858,9 +886,14 @@
 <td>q-text</td>
 <td>Bounds nested traversal at 16 levels; caps very large output at 1,048,576 characters and marks character truncation.</td>
 </tr>
+<tr>
+<td>Notebook persisted preview</td>
+<td>Defaults to 1,000 rows and 1,000,000 bytes; accepted settings are 1-10,000 rows and 16,384-10,000,000 bytes. Schema/counts and truncation reasons remain visible.</td>
+</tr>
 </tbody>
 </table>
 <p>Some cell and chart limits are configurable. Internal time, byte-size, group-count, and file-format limits remain protective boundaries. Raising a configurable limit can temporarily block the extension host.</p>
+<p>Notebook row/byte options constrain serialization, not q execution. Apply a q-side limit in the evaluator when the full q value itself should not materialize. Omitted rows are never placed in notebook metadata or an extension cache; they remain only in the originating evaluator/session while it retains them. A saved-preview panel handoff cannot recover them.</p>
 <h2 id="timeout-and-queue-behavior">Timeout and queue behavior</h2>
 <p><code>vscode-kdb.connectionTimeoutMs</code> defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. <code>vscode-kdb.queryTimeoutMs</code> defaults to <code>null</code>, which inherits that global connect value for compatibility; set it to an integer for a separate global query-response deadline.</p>
 <p>The <strong>KX Connection</strong> form's <strong>Advanced direct q IPC</strong> section accepts optional per-profile <code>connectTimeoutMs</code> and <code>queryTimeoutMs</code> overrides. Blank inherits the corresponding resolved global value. Every timeout is a whole number from <code>0</code> through <code>2147483647</code> milliseconds; use <code>0</code> only when an unbounded phase wait is intentional.</p>

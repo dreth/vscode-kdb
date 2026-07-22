@@ -2,7 +2,9 @@
 
 ## Requirements
 
-KX for VS Code requires VS Code `1.96.0` or newer and a kdb+/q process reachable over q IPC. The extension does not bundle q or a kdb+ license.
+KX for VS Code requires VS Code `1.96.0` or newer and a kdb+/q process reachable over q IPC for normal `.q` editor execution. The extension does not bundle q or a kdb+ license.
+
+Notebook publishing additionally requires Python 3.9 or newer, IPython, and the focused `kx_notebook` helper installed in the selected notebook kernel. The helper bundles no q runtime or PyKX binary. Optional PyKX use must be installed, configured, licensed, and enabled separately in that kernel.
 
 SQLTools is neither installed nor activated by this extension.
 
@@ -47,6 +49,29 @@ The common `q -p 5000` form can listen beyond loopback. Use it only on a trusted
 
 The result should open in a KX-owned result panel. If it does not, see [Troubleshooting](troubleshooting.md) and inspect **View > Output > KX**.
 
+## Install the notebook helper
+
+Install `python/kx_notebook` into the same Python environment used by the Jupyter/IPython kernel. For an editable source install without modifying system Python:
+
+```sh
+uv venv /tmp/vscode-kdb-kx-notebook
+uv pip install --python /tmp/vscode-kdb-kx-notebook/bin/python \
+  --editable ./python/kx_notebook
+```
+
+The packaged VSIX includes the same helper source under `python/kx_notebook`; KX for VS Code never installs it into a kernel automatically.
+
+Then configure an evaluator callback owned by that kernel and load the magic:
+
+```python
+from kx_notebook import configure_evaluator
+
+configure_evaluator(lambda source: my_existing_q_session(source))
+%load_ext kx_notebook
+```
+
+Use **KX: Tag Notebook Cell as q** to add the durable `%%q` marker and configured output limits. The extension does not install a notebook controller, intercept Microsoft Jupyter, or open a q connection for the helper. See [Jupyter/IPython Notebooks](notebooks.md).
+
 ## Verify a source checkout
 
 The maintained non-visual checks are:
@@ -56,6 +81,8 @@ npm ci
 npm run compile
 node test/run.js
 npm test
+uv run --no-project --with-editable ./python/kx_notebook \
+  python -m unittest discover -s python/kx_notebook/tests -v
 ```
 
 When a local q executable is available:

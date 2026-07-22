@@ -1,6 +1,6 @@
 # Results Viewer
 
-Every editor run targets the extension-owned **KX Results** viewer. There is no SQLTools result target or session-file fallback.
+Every normal `.q` editor run targets the extension-owned **KX Results** viewer. There is no SQLTools result target or session-file fallback. An ordinary notebook can also hand a valid saved KX MIME preview to this viewer, but only the bounded rows stored in the `.ipynb` are transferred.
 
 ## Grid and q-text modes
 
@@ -34,6 +34,12 @@ This reduces rendering work; it does not stream the q response. The complete IPC
 Normal selection/current-line and script runs reuse an existing KX panel. **Run Selection in New Result** opens another panel. The first panel uses `vscode-kdb.results.viewer.initialViewColumn`; a new panel uses the current KX result panel's editor group when one is available.
 
 Panels preserve editor focus on creation. Replacing a loading result locally cancels the previous panel wait so its late response cannot overwrite newer output.
+
+### Notebook saved previews
+
+**KX: Open Saved Notebook Preview in Results Panel** and the inline renderer action open the selected cell's validated `application/vnd.kx.result+json` v1 payload. The panel identifies the saved preview and reports persisted versus total row count. If output is truncated, omitted rows are not in the notebook or panel and cannot be recovered.
+
+This is a presentation handoff, not extension-driven notebook execution or a live-result handle. The panel does not rerun the cell, open another q connection, or claim the helper used the extension's IPC session. Normal panel richness remains available for the stored preview; large live data remains available only when its originating evaluator/session separately retains it.
 
 ## Selection and navigation
 

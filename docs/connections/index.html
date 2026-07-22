@@ -520,6 +520,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -984,7 +1011,7 @@
 <p><code>vscode-kdb.queryTimeoutMs</code> defaults to <code>null</code>. Null inherits <code>connectionTimeoutMs</code>, preserving the behavior of profiles created before the split query setting. A numeric value sets a distinct global query-response timeout. A blank profile override inherits the corresponding resolved global value; specifically, a blank query override uses the global query value, which under the default <code>null</code> is the global <code>connectionTimeoutMs</code> value.</p>
 <p>All global values and profile overrides accept only integers from <code>0</code> through <code>2147483647</code>; <code>0</code> disables that deadline. Query queue wait is not timed. The query deadline starts when that connection makes the query active and sends it, and runs until the response completes. On expiry the uncertain socket is discarded. Errors identify the <code>connect</code>, <code>handshake</code>, or <code>query</code> phase and direct endpoint without including credentials or query contents.</p>
 <h2 id="active-and-connected-state">Active and connected state</h2>
-<p><strong>Active</strong> identifies the connection used by editor runs. <strong>Connected</strong> means an IPC socket is currently open. They are separate states:</p>
+<p><strong>Active</strong> identifies the connection used by normal <code>.q</code> editor runs. <strong>Connected</strong> means an IPC socket is currently open. They are separate states:</p>
 <ul>
 <li>The first added connection becomes active.</li>
 <li>A run opens the active connection on demand when needed.</li>
@@ -993,6 +1020,7 @@
 <li>Explicit <strong>Disconnect</strong> closes that client's outstanding IPC work.</li>
 </ul>
 <p>Both the form button and the saved-profile <strong>KX: Test Connection</strong> command use temporary connections and a deliberately minimal safe response request; neither keeps the test socket as the active client.</p>
+<p>Notebook <code>%%q</code> execution does not use this connection manager. The <code>kx_notebook</code> helper calls only the evaluator explicitly configured in that Python kernel; optional PyKX uses that kernel's existing PyKX object. Version 0.2.0 deliberately does not intercept Jupyter to route a cell through the extension session and does not create a second extension direct-q connection. Opening a saved notebook preview in KX Results transfers only the bounded stored rows and cannot recover a full live result.</p>
 <p>Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.</p>
 <h2 id="storage-and-secrets">Storage and secrets</h2>
 <p>Safe metadata is stored in the application-scoped user setting <code>vscode-kdb.connections</code>:</p>

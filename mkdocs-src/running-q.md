@@ -1,6 +1,6 @@
 # Running q
 
-The extension executes q text; it does not parse SQL, split SQL statements, or infer a SQLTools-style session.
+The `.q` editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. Notebook `%%q` cells use the separate explicit helper path described in [Jupyter/IPython Notebooks](notebooks.md).
 
 ## Commands and keybindings
 
@@ -11,6 +11,17 @@ The extension executes q text; it does not parse SQL, split SQL statements, or i
 | **KX: Run q Script** | `Ctrl+Alt+Enter` | `Cmd+Alt+Enter` | Run the complete active `.q` document and reuse the active/available result panel. |
 
 A code lens at the top of a q document also runs the whole script.
+
+These keybindings are gated to normal q text editors. KX for VS Code does not bind or intercept notebook `Ctrl+Enter` / `Ctrl+Shift+Enter`; ordinary Jupyter and Python execution remain in control.
+
+## Notebook commands
+
+| Command | Behavior |
+| --- | --- |
+| **KX: Tag Notebook Cell as q** | Adds a durable `%%q --max-rows ... --max-bytes ...` marker when absent and refreshes versioned `vscode-kdb` cell metadata. It does not execute the cell. |
+| **KX: Open Saved Notebook Preview in Results Panel** | Opens only a valid bounded KX MIME preview already saved on the selected cell. It never reruns q or recovers omitted rows. |
+
+Run tagged cells through the notebook's normal Python/IPython controller after installing and configuring `kx_notebook`. The extension does not contribute a controller, monkey-patch Jupyter, or route notebook selections through its direct IPC connection.
 
 ## Exact execution semantics
 
@@ -30,7 +41,7 @@ The existing first-party TextMate grammar was audited for 0.1.4 and left unchang
 
 ## Active connection and namespace
 
-All three editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.
+All three normal `.q` editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.
 
 The connection's **Database / Namespace** value is applied consistently:
 
@@ -44,7 +55,7 @@ The wrapper restores the server's previous namespace after success or failure. A
 
 The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.
 
-**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files.
+**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files. Notebook panel handoff is separate and contains only the saved bounded preview.
 
 ## Query History
 

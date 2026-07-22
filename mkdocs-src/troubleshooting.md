@@ -108,6 +108,51 @@ Only standard q table and variable identifiers are shown as previewable objects.
 
 Every Preview asks for confirmation. `vscode-kdb.serverExplorer.previewCellLimit` defaults to approximately `10000` table cells or `10000` outer list/dictionary items and accepts `1` through `1000000`. Nested values and scalars may still be large. Functions/projections are not previewed. Canceling the local wait does not interrupt work already sent to q.
 
+## `%%q` is not registered
+
+Install `python/kx_notebook` into the exact Python environment selected as the notebook kernel, then configure an evaluator and load the IPython extension:
+
+```python
+from kx_notebook import configure_evaluator
+
+configure_evaluator(lambda source: my_existing_q_session(source))
+%load_ext kx_notebook
+```
+
+The helper deliberately has no implicit q connection. If no callback is configured, it raises an actionable error instead of borrowing the extension's active connection. If using the optional PyKX adapter, install/configure/license PyKX separately and explicitly call `kx_notebook.pykx.configure_pykx()`.
+
+## Tagging a q cell did not execute it
+
+That is expected. **KX: Tag Notebook Cell as q** inserts or preserves the durable `%%q --max-rows ... --max-bytes ...` marker and refreshes `vscode-kdb` namespaced cell metadata. Run the cell through the notebook's normal Python/IPython execution action. The extension does not contribute a controller or intercept Jupyter keybindings.
+
+## Notebook KX output is invalid or shows the static fallback
+
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.0 `kx_notebook` helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+
+The escaped `text/html` and `text/plain` fallbacks remain useful in viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
+
+## Notebook preview is truncated
+
+`vscode-kdb.notebook.maxOutputRows` defaults to `1000` and accepts `1` through `10000`. `vscode-kdb.notebook.maxOutputBytes` defaults to `1000000` and accepts `16384` through `10000000`. The tag command writes those values into the cell marker; the helper may retain fewer rows to honor the complete byte budget.
+
+These settings bound persisted output only. They do not change the q expression or add a server-side limit. Apply a q-side limit or aggregation in the evaluator when necessary. Omitted rows are not in the notebook, hidden metadata, or an extension cache.
+
+## Open in KX Results has only the preview
+
+This is the intended 0.2.0 contract. **KX: Open Saved Notebook Preview in Results Panel** transfers only the validated rows already stored in the selected cell. It does not rerun q, locate a live result, share an IPC handle, or recover omitted rows. A reopened notebook can still hand off its saved preview precisely because that bounded data is portable.
+
+Full large data remains only in the originating evaluator/session while it is available. Use normal `.q` editor execution when the extension's direct q session and live full-result panel are required.
+
+## Notebook chart changes did not persist
+
+Chart type/column/point-cap changes and zoom made only in the VS Code renderer are session state. Persist a `kx_notebook.Chart` specification when emitting the output, then rerun the cell. The static HTML/PDF fallback uses that emitted specification to draw a network-free SVG; it cannot preserve interactive uPlot state.
+
+## Notebook q used a different session than the `.q` editor
+
+Notebook execution and `.q` editor execution are deliberately separate in 0.2.0. The helper calls only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not share the extension's direct IPC session, and the extension does not open a second connection for notebook cells.
+
+Extension-driven same-session routing would require supported execution ownership that the normal Jupyter controller does not expose here. It remains disabled rather than being approximated through unsupported interception.
+
 ## Query History is missing or incomplete
 
 `vscode-kdb.features.queryHistory` defaults to `false`. Enable it for the current window/workspace to show the view. Only editor line, selection, and script executions actually issued while the feature is enabled are recorded; rejected pre-issue runs and result payloads are not.
@@ -124,7 +169,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic connection-test, qText, chart-reset, tree/history, and source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.5 produced no screenshot as substitute evidence.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook-contract/renderer-message, connection-test, qText, chart-reset, tree/history, and source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. The Python helper has a separate isolated `uv`/`unittest` suite; neither suite presents a screenshot as substitute evidence.
 
 ## Generated docs drift
 

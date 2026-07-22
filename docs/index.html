@@ -457,6 +457,33 @@
 
 
     <li class="md-nav__item">
+      <a href="notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="results-viewer/" class="md-nav__link">
 
 
@@ -784,19 +811,20 @@
 
 
 <h1 id="kx-for-vs-code">KX for VS Code</h1>
-<p>KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It owns its q IPC connections, q editor commands, optional focused Server Explorer and Query History, results viewer, charting, local data server, and diagnostics.</p>
+<p>KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It owns its q IPC connections, q editor commands, optional focused Server Explorer and Query History, portable Jupyter/IPython result renderer/helper, results viewer, charting, local data server, and diagnostics.</p>
 <p>It sends q text to the selected q process. It does not translate ANSI SQL to q:</p>
 <div class="highlight"><pre><span></span><code><span class="ow">select</span><span class="w"> </span><span class="ow">from</span><span class="w"> </span><span class="n">trade</span><span class="w"> </span><span class="nb">where</span><span class="w"> </span><span class="n">sym</span><span class="o">=</span><span class="ss">`AAPL</span>
 <span class="nb">meta</span><span class="w"> </span><span class="n">trade</span>
 <span class="nb">tables</span><span class="w"> </span><span class="ss">`</span><span class="o">.</span><span class="n">analytics</span>
 </code></pre></div>
 <h2 id="standalone-status">Standalone status</h2>
-<p>The current <code>0.1.5</code> release remains focused and direct-q-IPC-only. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.</p>
+<p>The current <code>0.2.0</code> release keeps <code>.q</code> editor execution focused and direct-q-IPC-only, and adds persistent bounded KX/q results to ordinary Jupyter/IPython notebooks. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.</p>
 <p>Implemented foundations include:</p>
 <ul>
 <li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value <strong>Test Connection</strong> path;</li>
 <li>optional per-profile connect/handshake and query timeout overrides with bounded global defaults;</li>
 <li>exact current-line, selection, and whole-document q execution;</li>
+<li>a real VS Code NotebookRenderer for <code>application/vnd.kx.result+json</code> v1 plus the focused <code>kx_notebook</code> IPython helper, durable <code>%%q</code> tagging, bounded persistent previews, static HTML/text export fallbacks, and optional saved-preview panel handoff;</li>
 <li>a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand <code>meta</code>, confirmed bounded table/variable previews, and metadata-only functions/projections;</li>
 <li>disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;</li>
 <li>grid and q-text results, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
@@ -804,12 +832,13 @@
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>
-<p>This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, or notebooks. Release 0.1.5 has deterministic model/host/webview/source guards but no visual Extension Host E2E or screenshot evidence. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
+<p>This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, Jupyter controller interception, extension-driven same-session notebook routing, or full omitted-result recovery. Deterministic model/host/renderer/source guards are not visual Extension Host E2E or screenshot evidence. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>VS Code <code>1.96.0</code> or newer.</li>
 <li>A reachable kdb+/q process listening for q IPC.</li>
 <li>Credentials accepted by that process, if authentication is enabled.</li>
+<li>For notebook publishing, a Python 3.9+ IPython kernel with the separately installed <code>kx_notebook</code> helper and an explicit evaluator callback; optional PyKX remains separately installed/licensed.</li>
 </ul>
 <p>SQLTools is not required.</p>
 <h2 id="common-workflow">Common workflow</h2>
@@ -819,6 +848,7 @@
 <li>Test it, set it active, and connect; a run can also connect on demand.</li>
 <li>Open a <code>.q</code> file and run the current line, an exact selection, or the whole document.</li>
 <li>Inspect, chart, copy, or export the result in <strong>KX Results</strong>.</li>
+<li>In an ordinary Jupyter notebook, install/configure <code>kx_notebook</code>, tag a code cell with <strong>KX: Tag Notebook Cell as q</strong>, and run it through the normal Python/IPython kernel to save a bounded inline KX result.</li>
 <li>Open <strong>View &gt; Output</strong> and select <strong>KX</strong> when diagnosing lifecycle or IPC failures.</li>
 <li>Optionally enable Server Explorer or Query History in Settings; both default off to avoid surprise metadata queries or query-text persistence.</li>
 </ol>
@@ -827,6 +857,7 @@
 <li><a href="installation/">Installation</a>: requirements, local development, and first connection.</li>
 <li><a href="connections/">Connections &amp; SecretStorage</a>: direct IPC, namespaces, authentication, and lifecycle.</li>
 <li><a href="running-q/">Running q</a>: exact editor semantics and cancellation boundaries.</li>
+<li><a href="notebooks/">Jupyter/IPython Notebooks</a>: helper setup, <code>%%q</code>, MIME persistence, bounds, static export, and same-session limits.</li>
 <li><a href="results-viewer/">Results Viewer</a>: grids, q text, selection, search, sort, and column controls.</li>
 <li><a href="charting/">Charting</a>: chart types, controls, sampling, and PNG export.</li>
 <li><a href="copy-export/">Copy &amp; Export</a>: formats and safety prompts.</li>

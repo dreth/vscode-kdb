@@ -391,6 +391,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#install-the-notebook-helper" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Install the notebook helper
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#verify-a-source-checkout" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -451,6 +462,33 @@
 
 
     Running q
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
 
 
 
@@ -777,6 +815,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#install-the-notebook-helper" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Install the notebook helper
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#verify-a-source-checkout" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -809,7 +858,8 @@
 
 <h1 id="installation">Installation</h1>
 <h2 id="requirements">Requirements</h2>
-<p>KX for VS Code requires VS Code <code>1.96.0</code> or newer and a kdb+/q process reachable over q IPC. The extension does not bundle q or a kdb+ license.</p>
+<p>KX for VS Code requires VS Code <code>1.96.0</code> or newer and a kdb+/q process reachable over q IPC for normal <code>.q</code> editor execution. The extension does not bundle q or a kdb+ license.</p>
+<p>Notebook publishing additionally requires Python 3.9 or newer, IPython, and the focused <code>kx_notebook</code> helper installed in the selected notebook kernel. The helper bundles no q runtime or PyKX binary. Optional PyKX use must be installed, configured, licensed, and enabled separately in that kernel.</p>
 <p>SQLTools is neither installed nor activated by this extension.</p>
 <h2 id="install-the-extension">Install the extension</h2>
 <p>Use a project-approved distribution of <strong>KX for VS Code</strong>. When installing a locally supplied VSIX, use VS Code's <strong>Extensions: Install from VSIX...</strong> command and confirm the extension name, publisher, and version before installation.</p>
@@ -838,12 +888,28 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 <li>Press <code>Ctrl+Enter</code> on Windows/Linux or <code>Cmd+Enter</code> on macOS.</li>
 </ol>
 <p>The result should open in a KX-owned result panel. If it does not, see <a href="../troubleshooting/">Troubleshooting</a> and inspect <strong>View &gt; Output &gt; KX</strong>.</p>
+<h2 id="install-the-notebook-helper">Install the notebook helper</h2>
+<p>Install <code>python/kx_notebook</code> into the same Python environment used by the Jupyter/IPython kernel. For an editable source install without modifying system Python:</p>
+<div class="highlight"><pre><span></span><code>uv<span class="w"> </span>venv<span class="w"> </span>/tmp/vscode-kdb-kx-notebook
+uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span>/tmp/vscode-kdb-kx-notebook/bin/python<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--editable<span class="w"> </span>./python/kx_notebook
+</code></pre></div>
+<p>The packaged VSIX includes the same helper source under <code>python/kx_notebook</code>; KX for VS Code never installs it into a kernel automatically.</p>
+<p>Then configure an evaluator callback owned by that kernel and load the magic:</p>
+<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">kx_notebook</span><span class="w"> </span><span class="kn">import</span> <span class="n">configure_evaluator</span>
+
+<span class="n">configure_evaluator</span><span class="p">(</span><span class="k">lambda</span> <span class="n">source</span><span class="p">:</span> <span class="n">my_existing_q_session</span><span class="p">(</span><span class="n">source</span><span class="p">))</span>
+<span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
+</code></pre></div>
+<p>Use <strong>KX: Tag Notebook Cell as q</strong> to add the durable <code>%%q</code> marker and configured output limits. The extension does not install a notebook controller, intercept Microsoft Jupyter, or open a q connection for the helper. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="verify-a-source-checkout">Verify a source checkout</h2>
 <p>The maintained non-visual checks are:</p>
 <div class="highlight"><pre><span></span><code>npm<span class="w"> </span>ci
 npm<span class="w"> </span>run<span class="w"> </span>compile
 node<span class="w"> </span>test/run.js
 npm<span class="w"> </span><span class="nb">test</span>
+uv<span class="w"> </span>run<span class="w"> </span>--no-project<span class="w"> </span>--with-editable<span class="w"> </span>./python/kx_notebook<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>python<span class="w"> </span>-m<span class="w"> </span>unittest<span class="w"> </span>discover<span class="w"> </span>-s<span class="w"> </span>python/kx_notebook/tests<span class="w"> </span>-v
 </code></pre></div>
 <p>When a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q

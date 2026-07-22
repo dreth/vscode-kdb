@@ -368,6 +368,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -519,6 +546,17 @@
     <span class="md-ellipsis">
 
         Guardrails
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#notebook-output-and-export" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook output and export
 
     </span>
   </a>
@@ -765,6 +803,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#notebook-output-and-export" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Notebook output and export
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -870,6 +919,9 @@
 </ul>
 <p>Parquet export is not implemented.</p>
 <p>The local data server uses a separate hard full-export cell limit. Changing the panel copy/export confirmation threshold does not change that server limit. See <a href="../local-data-server/#limits">Local Data Server</a>.</p>
+<h2 id="notebook-output-and-export">Notebook output and export</h2>
+<p>The notebook renderer's <strong>Copy preview CSV</strong> action copies only the bounded rows persisted in that cell's KX MIME payload. It does not query q or recover rows omitted by the row/byte limit.</p>
+<p>The companion helper emits escaped <code>text/html</code> and <code>text/plain</code> alongside <code>application/vnd.kx.result+json</code>. The static HTML includes schema, total and preview row counts, a bounded table preview, explicit truncation/transfer notices, and a network-free static SVG when a persisted chart specification is supported. This is the content available to ordinary Jupyter/nbconvert HTML/PDF export. Interactive uPlot controls, zoom, tooltips, clipboard actions, and renderer-only chart changes are not portable to PDF.</p>
 
 
 
