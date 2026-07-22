@@ -843,10 +843,10 @@ async function boundaryCases(ctx) {
     area: 'VSIX install and Marketplace publication',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'This is not a feature release; the gate intentionally does not create a user-facing VSIX, install from Marketplace, or publish.',
-    signoff: 'Use a separately authorized release gate for package inventory, clean Extension Host installation, identity, credentials, hashes, and Marketplace upload.',
+    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.1.5 archive inventory and hashes must be verified separately by the release gate.',
+    signoff: 'Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.',
   }, t => {
-    t.equal(standalone.packageJson.version, '0.1.4');
+    t.equal(standalone.packageJson.version, '0.1.5');
     t.equal(reference.packageJson.version, '0.3.17');
   });
 

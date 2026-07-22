@@ -1030,6 +1030,18 @@
 <td>Other top-level composite objects.</td>
 </tr>
 <tr>
+<td><code>vscode-kdb.results.qText.syntaxHighlighting</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
+<td>Apply lightweight, theme-aware q token colors only to qText result display. Raw text is rendered through text nodes/spans, never raw HTML.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.results.qText.displayFormatting</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
+<td>Apply conservative view-only layout to supported balanced q lambda/block structures; malformed or ambiguous input remains exact raw qText.</td>
+</tr>
+<tr>
 <td><code>vscode-kdb.results.density</code></td>
 <td><code>standard</code></td>
 <td><code>compact</code>, <code>standard</code>, <code>comfortable</code></td>
@@ -1049,7 +1061,7 @@
 </tr>
 </tbody>
 </table>
-<p>True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation.</p>
+<p>True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels.</p>
 <p>Array display examples:</p>
 <table>
 <thead>
@@ -1215,6 +1227,8 @@
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.performance.trace&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.viewer.arrayDisplayFormat&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;space&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.viewer.functionDisplayStrategy&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;qText&quot;</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.results.qText.syntaxHighlighting&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.results.qText.displayFormatting&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.density&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;standard&quot;</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.includeHeaders&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.results.includeRowIndex&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>

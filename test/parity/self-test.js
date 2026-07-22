@@ -476,7 +476,7 @@ function testEvidenceReport() {
   const evidence = {
     schemaVersion: 1,
     generatedAt: '2026-07-22T00:00:00.000Z',
-    standalone: { commit: 'standalone', name: 'vscode-kdb', version: '0.1.4', dirtyDisclaimer: 'clean' },
+    standalone: { commit: 'standalone', name: 'vscode-kdb', version: '0.1.5', dirtyDisclaimer: 'clean' },
     reference: {
       commit: 'reference',
       name: 'kdb-sqltools',

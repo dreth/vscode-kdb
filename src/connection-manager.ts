@@ -10,9 +10,23 @@ import {
   resolveConnectionTimeouts,
   safeTimeoutMs,
 } from './connection';
+import {
+  CONNECTION_TEST_QUERY,
+  ConnectionTestError,
+  ConnectionTestPhase,
+  connectionTestEndpoint,
+  connectionTestNamespaceQuery,
+  connectionTestNamespaceResultIsSafe,
+} from './connection-test';
 import { ConnectionStore } from './connection-store';
 import type { KxDiagnostics } from './diagnostics';
-import { KdbIpcClient, KdbQError, QValue } from './q-ipc';
+import { KdbIpcClient, KdbIpcError, KdbQError, QValue } from './q-ipc';
+
+export interface TemporaryConnectionTestOptions {
+  password?: string;
+  signal?: AbortSignal;
+  onPhase?: (phase: Exclude<ConnectionTestPhase, 'validation' | 'cancel'>) => void;
+}
 
 export class ConnectionManager implements vscode.Disposable {
   private readonly clients = new Map<string, KdbIpcClient>();
@@ -198,24 +212,89 @@ export class ConnectionManager implements vscode.Disposable {
       this.writeConnectFailure(connection, error, false);
       throw error;
     }
+    await this.testTemporary(connection, { password });
+  }
+
+  public async testTemporary(
+    connection: KxConnection,
+    options: TemporaryConnectionTestOptions = {}
+  ): Promise<ConnectionTimeouts> {
+    const endpoint = connectionTestEndpoint(connection);
     const timeouts = this.timeoutsFor(connection);
+    let currentPhase: Exclude<ConnectionTestPhase, 'validation' | 'cancel'> = 'connect';
+    let operationFailed = true;
+    const reportPhase = (phase: Exclude<ConnectionTestPhase, 'validation' | 'cancel'>): void => {
+      currentPhase = phase;
+      try {
+        options.onPhase?.(phase);
+      } catch {
+        // UI progress observers must never disrupt a temporary IPC test.
+      }
+    };
     const client = new KdbIpcClient({
       host: connection.host,
       port: connection.port,
       username: connection.username,
-      password,
+      password: options.password,
       connectTimeoutMs: timeouts.connectTimeoutMs,
       queryTimeoutMs: timeouts.queryTimeoutMs,
       diagnostics: this.diagnostics,
+      onDidPhase: (phase, status) => {
+        if (status === 'start' && (phase === 'connect' || phase === 'handshake')) {
+          reportPhase(phase);
+        }
+      },
     });
+    const cancel = (): void => {
+      client.cancel(new Error('KX connection test canceled.'));
+    };
+    options.signal?.addEventListener('abort', cancel, { once: true });
     try {
-      await client.connect();
-      const result = await client.query('1+1');
-      if (result !== 2) {
-        throw new Error('q IPC test returned an unexpected result for 1+1.');
+      if (options.signal?.aborted) {
+        throw new ConnectionTestError('cancel', endpoint);
       }
+      await client.connect();
+      if (connection.database !== '.') {
+        reportPhase('namespace');
+        const namespaceResult = await client.query(connectionTestNamespaceQuery(connection.database));
+        if (!connectionTestNamespaceResultIsSafe(namespaceResult)) {
+          throw new ConnectionTestError('namespace', endpoint);
+        }
+      }
+      reportPhase('query');
+      const result = await client.query(CONNECTION_TEST_QUERY);
+      if (result !== false) {
+        throw new ConnectionTestError('query', endpoint);
+      }
+      operationFailed = false;
+      return timeouts;
+    } catch (error) {
+      if (error instanceof ConnectionTestError) {
+        throw error;
+      }
+      if (options.signal?.aborted) {
+        throw new ConnectionTestError('cancel', endpoint);
+      }
+      const phase = (currentPhase === 'connect' || currentPhase === 'handshake') &&
+        error instanceof KdbIpcError &&
+        (error.phase === 'connect' || error.phase === 'handshake')
+        ? error.phase
+        : currentPhase;
+      throw new ConnectionTestError(phase, endpoint, error);
     } finally {
-      await client.close();
+      options.signal?.removeEventListener('abort', cancel);
+      try {
+        await client.close();
+      } catch (error) {
+        try {
+          client.cancel(new Error('KX connection test cleanup canceled.'));
+        } catch {
+          // The temporary transport is already unusable.
+        }
+        if (!operationFailed) {
+          throw new ConnectionTestError('cancel', endpoint, error);
+        }
+      }
     }
   }
 

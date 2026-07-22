@@ -12,21 +12,21 @@ tables `.analytics
 
 ## Standalone status
 
-The current `0.1.4` release remains focused and direct-q-IPC-only. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.
+The current `0.1.5` release remains focused and direct-q-IPC-only. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.
 
 Implemented foundations include:
 
-- direct q IPC connections managed through one responsive **KX Connection** form, with extension-owned safe metadata and VS Code SecretStorage;
+- direct q IPC connections managed through one responsive **KX Connection** form, with extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value **Test Connection** path;
 - optional per-profile connect/handshake and query timeout overrides with bounded global defaults;
 - exact current-line, selection, and whole-document q execution;
 - a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand `meta`, confirmed bounded table/variable previews, and metadata-only functions/projections;
 - disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;
-- grid and q-text results, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
-- line, scatter, step, bar, box, and candlestick charts;
+- grid and q-text results, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
+- line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;
 - an opt-in tokenized loopback data server; and
 - a dedicated `KX` Output channel with opt-in performance tracing.
 
-This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, `.session.sql` behavior, or notebooks. Release 0.1.4 has deterministic tree/feature/source guards but no visual Extension Host E2E or screenshot evidence. See [Parity Roadmap & Architecture](parity-roadmap.md) and the source-backed repository parity matrix before treating a capability as equivalent.
+This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, `.session.sql` behavior, or notebooks. Release 0.1.5 has deterministic model/host/webview/source guards but no visual Extension Host E2E or screenshot evidence. See [Parity Roadmap & Architecture](parity-roadmap.md) and the source-backed repository parity matrix before treating a capability as equivalent.
 
 ## Requirements
 

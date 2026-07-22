@@ -791,20 +791,20 @@
 <span class="nb">tables</span><span class="w"> </span><span class="ss">`</span><span class="o">.</span><span class="n">analytics</span>
 </code></pre></div>
 <h2 id="standalone-status">Standalone status</h2>
-<p>The current <code>0.1.4</code> release remains focused and direct-q-IPC-only. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.</p>
+<p>The current <code>0.1.5</code> release remains focused and direct-q-IPC-only. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.</p>
 <p>Implemented foundations include:</p>
 <ul>
-<li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata and VS Code SecretStorage;</li>
+<li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value <strong>Test Connection</strong> path;</li>
 <li>optional per-profile connect/handshake and query timeout overrides with bounded global defaults;</li>
 <li>exact current-line, selection, and whole-document q execution;</li>
 <li>a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand <code>meta</code>, confirmed bounded table/variable previews, and metadata-only functions/projections;</li>
 <li>disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;</li>
-<li>grid and q-text results, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
-<li>line, scatter, step, bar, box, and candlestick charts;</li>
+<li>grid and q-text results, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
+<li>line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;</li>
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>
-<p>This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, or notebooks. Release 0.1.4 has deterministic tree/feature/source guards but no visual Extension Host E2E or screenshot evidence. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
+<p>This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, or notebooks. Release 0.1.5 has deterministic model/host/webview/source guards but no visual Extension Host E2E or screenshot evidence. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>VS Code <code>1.96.0</code> or newer.</li>

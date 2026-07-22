@@ -26,7 +26,7 @@ Then verify the standalone connection uses host `localhost` (or `127.0.0.1`) and
 
 A `connect`-phase error generally indicates endpoint, routing, refusal, or timeout. A `handshake`-phase error means TCP connected but q IPC negotiation/authentication did not complete. Common causes include a non-q service on that port, rejected q credentials, a reset listener, or an incompatible intermediary. TCP connect and handshake each receive a separate full connect-timeout budget, so one does not consume the other's allowance.
 
-Use **KX: Test Connection** to open a temporary client and verify `1+1`. If authentication changed, use **Edit Connection**: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select **Clear saved password**. KX never sends the saved password back into the form.
+Use **KX: Test Connection** to open a temporary client and perform the minimal safe response check. If authentication changed, use **Edit Connection**: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select **Clear saved password**. KX never sends the saved password back into the form.
 
 ## Sidebar says disconnected after failure
 
@@ -65,6 +65,12 @@ Upgrade q, or execute a valid single-line expression using **Run Selection / Cur
 Open the connection and confirm **Database / Namespace** is `.` or a dot-qualified namespace such as `.analytics`. Editor paths temporarily switch to that namespace and restore the prior value. Errors are rethrown after restoration.
 
 If code depends on a different namespace midway through a script, make that q behavior explicit in the script rather than relying on hidden editor state.
+
+## Form Test Connection failed
+
+The form tests current unsaved values and reports the failing `validation`, `connect`, `handshake`, `namespace`, `query`, or `cancel` phase. Confirm the displayed safe host/port, q listener, credentials, namespace, and timeout values. A non-root namespace must already resolve to a q namespace; the test does not create one or install a server helper.
+
+Starting a new test, saving, canceling, or closing the form cancels the previous temporary socket. An edit with a blank password reports when it used the saved SecretStorage value, without displaying that value. **Clear saved password** deliberately tests without it. Testing never saves the form or changes an active saved connection.
 
 ## Cancel did not stop server work
 
@@ -118,7 +124,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic form/tree/history/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.4 produced no screenshot as substitute evidence.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic connection-test, qText, chart-reset, tree/history, and source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.5 produced no screenshot as substitute evidence.
 
 ## Generated docs drift
 

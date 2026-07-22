@@ -10,8 +10,14 @@ import { ConnectionManager } from './connection-manager';
 import { ConnectionStore } from './connection-store';
 import { ConnectionTreeItem, ConnectionsTreeProvider } from './connection-tree';
 import { parseConnectionFormPayload } from './connection-form-model';
-import { ConnectionFormPanel, initialConnectionFormValues } from './connection-form-panel';
+import {
+  ConnectionFormPanel,
+  ConnectionFormTestProgress,
+  ConnectionFormTestResult,
+  initialConnectionFormValues,
+} from './connection-form-panel';
 import { persistConnectionUpdate } from './connection-lifecycle';
+import { ConnectionTestError, connectionTestEndpoint } from './connection-test';
 
 interface ConnectionPick extends vscode.QuickPickItem {
   connection: KxConnection;
@@ -187,6 +193,14 @@ export class ConnectionCommands {
 
     const panel = new ConnectionFormPanel(initial, {
       onSave: payload => this.saveConnectionForm(payload, draft.id, editing),
+      onTest: (payload, signal, onProgress) => this.testConnectionForm(
+        payload,
+        draft.id,
+        editing,
+        hasStoredPassword,
+        signal,
+        onProgress
+      ),
       onDelete: editing ? () => this.confirmAndRemove(editing) : undefined,
     });
     this.activeForm = panel;
@@ -197,6 +211,55 @@ export class ConnectionCommands {
         this.activeForm = undefined;
       }
     }
+  }
+
+  private async testConnectionForm(
+    payload: unknown,
+    id: string,
+    editing: KxConnection | undefined,
+    hasStoredPassword: boolean,
+    signal: AbortSignal,
+    onProgress: (progress: ConnectionFormTestProgress) => void
+  ): Promise<ConnectionFormTestResult> {
+    const parsed = parseConnectionFormPayload(payload, {
+      id,
+      existingConnections: this.store.connections(),
+      editing,
+      hasStoredPassword,
+    });
+    const endpoint = connectionTestEndpoint(parsed.connection);
+    if (signal.aborted) {
+      throw new ConnectionTestError('cancel', endpoint);
+    }
+
+    let password: string | undefined;
+    let usedSavedPassword = false;
+    if (typeof parsed.passwordUpdate === 'string') {
+      password = parsed.passwordUpdate;
+    } else if (parsed.passwordUpdate === undefined && editing) {
+      try {
+        password = await this.store.password(editing.id);
+        usedSavedPassword = password !== undefined;
+      } catch (error) {
+        throw new ConnectionTestError('validation', endpoint, error);
+      }
+    }
+    if (signal.aborted) {
+      throw new ConnectionTestError('cancel', endpoint);
+    }
+
+    const timeouts = await this.manager.testTemporary(parsed.connection, {
+      password,
+      signal,
+      onPhase: phase => onProgress({ phase, endpoint, usedSavedPassword }),
+    });
+    return {
+      endpoint,
+      connectTimeoutMs: timeouts.connectTimeoutMs,
+      queryTimeoutMs: timeouts.queryTimeoutMs,
+      namespaceTested: parsed.connection.database !== '.',
+      usedSavedPassword,
+    };
   }
 
   private async saveConnectionForm(

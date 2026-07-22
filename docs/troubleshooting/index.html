@@ -678,6 +678,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#form-test-connection-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Form Test Connection failed
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#cancel-did-not-stop-server-work" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -953,6 +964,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#form-test-connection-failed" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Form Test Connection failed
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#cancel-did-not-stop-server-work" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -1085,7 +1107,7 @@
 </code></pre></div>
 <p>Then verify the standalone connection uses host <code>localhost</code> (or <code>127.0.0.1</code>) and port <code>5000</code>. Check that another process is not using the port and that firewalls permit the intended route.</p>
 <p>A <code>connect</code>-phase error generally indicates endpoint, routing, refusal, or timeout. A <code>handshake</code>-phase error means TCP connected but q IPC negotiation/authentication did not complete. Common causes include a non-q service on that port, rejected q credentials, a reset listener, or an incompatible intermediary. TCP connect and handshake each receive a separate full connect-timeout budget, so one does not consume the other's allowance.</p>
-<p>Use <strong>KX: Test Connection</strong> to open a temporary client and verify <code>1+1</code>. If authentication changed, use <strong>Edit Connection</strong>: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select <strong>Clear saved password</strong>. KX never sends the saved password back into the form.</p>
+<p>Use <strong>KX: Test Connection</strong> to open a temporary client and perform the minimal safe response check. If authentication changed, use <strong>Edit Connection</strong>: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select <strong>Clear saved password</strong>. KX never sends the saved password back into the form.</p>
 <h2 id="sidebar-says-disconnected-after-failure">Sidebar says disconnected after failure</h2>
 <p>That is expected after a failed open, transport error, remote close, or explicit disconnect. Partial clients and stale opening promises are dropped, and the tree refreshes to the disconnected state. A subsequent run can connect again on demand.</p>
 <h2 id="query-timed-out">Query timed out</h2>
@@ -1105,6 +1127,9 @@
 <h2 id="namespace-behavior-looks-wrong">Namespace behavior looks wrong</h2>
 <p>Open the connection and confirm <strong>Database / Namespace</strong> is <code>.</code> or a dot-qualified namespace such as <code>.analytics</code>. Editor paths temporarily switch to that namespace and restore the prior value. Errors are rethrown after restoration.</p>
 <p>If code depends on a different namespace midway through a script, make that q behavior explicit in the script rather than relying on hidden editor state.</p>
+<h2 id="form-test-connection-failed">Form Test Connection failed</h2>
+<p>The form tests current unsaved values and reports the failing <code>validation</code>, <code>connect</code>, <code>handshake</code>, <code>namespace</code>, <code>query</code>, or <code>cancel</code> phase. Confirm the displayed safe host/port, q listener, credentials, namespace, and timeout values. A non-root namespace must already resolve to a q namespace; the test does not create one or install a server helper.</p>
+<p>Starting a new test, saving, canceling, or closing the form cancels the previous temporary socket. An edit with a blank password reports when it used the saved SecretStorage value, without displaying that value. <strong>Clear saved password</strong> deliberately tests without it. Testing never saves the form or changes an active saved connection.</p>
 <h2 id="cancel-did-not-stop-server-work">Cancel did not stop server work</h2>
 <p>Panel/progress cancellation is local to the result wait. q computation or side effects already sent can continue, and other queued panel work is not canceled. Use <strong>KX: Disconnect</strong> to close that client's transport and fail its outstanding queue, while remembering that server-side interruption is still best-effort.</p>
 <h2 id="huge-result-is-slow">Huge result is slow</h2>
@@ -1139,7 +1164,7 @@
 <p>Maintainers can run the direct live smoke path when a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic form/tree/history/source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.4 produced no screenshot as substitute evidence.</p>
+<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic connection-test, qText, chart-reset, tree/history, and source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. Release 0.1.5 produced no screenshot as substitute evidence.</p>
 <h2 id="generated-docs-drift">Generated docs drift</h2>
 <p>Edit files under <code>mkdocs-src/</code>, then run the exact gate in <code>mkdocs-src/README.md</code>. Generated <code>docs/</code> is committed. The workflow builds and uploads an artifact but intentionally does not deploy or alter Pages settings.</p>
 

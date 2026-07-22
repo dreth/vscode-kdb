@@ -34,6 +34,10 @@ Add and Edit open the same dedicated, single-screen **KX Connection** webview. A
 
 Choose **Save Connection** to submit or **Cancel** to close without changes. Enter submits only while the form is valid; Escape cancels. Each control has a label and description, errors are announced and focus the relevant field, and initial focus moves to the connection name. Browser checks provide immediate feedback, but the extension host treats every webview message as untrusted and validates it again.
 
+Choose the visible **Test Connection** button to validate and test the current unsaved form values without saving. The name, host, port, namespace, username, password choice, and resolved per-profile/global timeouts are all taken from the current form. A fresh temporary socket proves TCP connect and q IPC handshake, validates a non-root namespace through a read-only type/current-namespace expression, performs a minimal response check, and closes. The test does not alter the saved profile, active connection, Query History, or remote definitions.
+
+Test status is announced and identifies the `validation`, `connect`, `handshake`, `namespace`, `query`, or `cancel` phase with the safe direct host/port only. Starting another test cancels the older one. Save remains available during a test and cancels that test before normal persistence; Cancel, Escape, and closing the panel also cancel and close the temporary transport. Late responses from superseded or closed tests are ignored.
+
 When editing, **Delete Connection** is also available. It asks for explicit confirmation through a modal VS Code notification in the extension host, not browser `confirm`. Removing a connection also removes its secret.
 
 ### Password edits
@@ -43,6 +47,8 @@ A stored password is never read back into or reflected by the webview. On Edit, 
 - leave it blank to keep the saved password;
 - enter a new password to replace it; or
 - select **Clear saved password** to remove it. The control appears only when a saved password exists.
+
+The same rules apply to testing: a blank edit can use the saved secret only when the extension host retrieves it from SecretStorage, and status discloses only that a saved secret was used. A new password remains in memory for the test; Clear means do not use the saved secret. No password is reflected into the webview, logs, settings, history, or test status.
 
 Connection changes use rollback handling so a failed settings or secret write does not intentionally leave half-written state. A validation error, Cancel, or webview disposal does not modify the saved profile or active client; reopen Edit to try again. Each panel accepts only its own session token and ignores stale messages after disposal.
 
@@ -64,7 +70,7 @@ All global values and profile overrides accept only integers from `0` through `2
 - A transport failure or remote close drops the client and refreshes the sidebar state.
 - Explicit **Disconnect** closes that client's outstanding IPC work.
 
-**Test Connection** uses a temporary connection and verifies that `1+1` returns `2`; it does not keep that test socket as the active client.
+Both the form button and the saved-profile **KX: Test Connection** command use temporary connections and a deliberately minimal safe response request; neither keeps the test socket as the active client.
 
 Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.
 

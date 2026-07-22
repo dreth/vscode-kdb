@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Standalone direct q IPC, focused q workflows, and high-performance KX results for VS Code.",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -69,8 +69,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.1.4.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.4.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.1.5.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.1.5.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -548,6 +548,16 @@
             "three"
           ],
           "description": "Editor group used for the first KX result panel."
+        },
+        "vscode-kdb.results.qText.syntaxHighlighting": {
+          "type": "boolean",
+          "default": false,
+          "description": "Highlight qText output in KX result webviews only, using VS Code theme colors. Disabled by default; this does not change q source-editor highlighting."
+        },
+        "vscode-kdb.results.qText.displayFormatting": {
+          "type": "boolean",
+          "default": false,
+          "description": "Apply conservative, non-mutating display-only formatting to supported qText lambda, projection, and block structures in KX result webviews. Disabled by default; unsupported, ambiguous, or malformed text is shown exactly as returned, and q is never evaluated."
         },
         "vscode-kdb.results.viewer.arrayDisplayFormat": {
           "type": "string",

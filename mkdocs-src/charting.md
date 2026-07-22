@@ -47,6 +47,8 @@ The bundled uPlot assets run locally under the VS Code webview content security 
 - a draggable chart/table splitter; and
 - PNG export of the rendered canvas, including custom bars, boxes, and candles.
 
+The first full render captures an immutable original X-domain and retains the original full sample. Manual drag zoom, auto-refinement, explicit **Refine zoom**, resize/rerender, and refined samples do not replace them. **Reset zoom** restores that original numeric or temporal domain and original sample, returns Y to automatic scaling, clears selection and tooltip state, and clears pending auto-refinement timer/state. The button state is derived from the current scale with a small deterministic floating-point tolerance.
+
 Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step retain sampled gaps for missing/non-finite Y values; other generic types skip them where appropriate.
 
 Generic series use min/max-aware reduction, bars keep aligned x clusters, boxes use bounded x buckets, and candlesticks use OHLC-aware aggregation. Grouping retains at most 12 categories and 36 generated group/Y series. Status text reports source rows, eligible rows, sampled points, the algorithm, and warnings.

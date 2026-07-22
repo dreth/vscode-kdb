@@ -5,6 +5,11 @@ import {
   ConnectionFormMode,
   ConnectionFormValidationError,
 } from './connection-form-model';
+import {
+  ConnectionTestError,
+  ConnectionTestPhase,
+  connectionTestFailureMessage,
+} from './connection-test';
 
 export interface ConnectionFormInitialValues {
   mode: ConnectionFormMode;
@@ -23,7 +28,26 @@ export interface ConnectionFormInitialValues {
 
 export interface ConnectionFormCallbacks {
   onSave(payload: unknown): Promise<void>;
+  onTest?(
+    payload: unknown,
+    signal: AbortSignal,
+    onProgress: (progress: ConnectionFormTestProgress) => void
+  ): Promise<ConnectionFormTestResult>;
   onDelete?(): Promise<boolean>;
+}
+
+export interface ConnectionFormTestProgress {
+  phase: Exclude<ConnectionTestPhase, 'validation' | 'cancel'>;
+  endpoint: string;
+  usedSavedPassword: boolean;
+}
+
+export interface ConnectionFormTestResult {
+  endpoint: string;
+  connectTimeoutMs: number;
+  queryTimeoutMs: number;
+  namespaceTested: boolean;
+  usedSavedPassword: boolean;
 }
 
 export type ConnectionFormResult = 'saved' | 'deleted' | 'cancelled';
@@ -32,6 +56,24 @@ interface FormMessage {
   type?: unknown;
   session?: unknown;
   payload?: unknown;
+  testId?: unknown;
+}
+
+interface ConnectionFormTestStatus {
+  type: 'testStatus';
+  testId: number;
+  sequence: number;
+  state: 'running' | 'success' | 'failure' | 'canceled';
+  phase: ConnectionTestPhase;
+  message: string;
+}
+
+interface ActiveConnectionTest {
+  id: number;
+  controller: AbortController;
+  endpoint?: string;
+  usedSavedPassword: boolean;
+  sequence: number;
 }
 
 export class ConnectionFormPanel {
@@ -43,6 +85,9 @@ export class ConnectionFormPanel {
   private completed = false;
   private disposed = false;
   private busy = false;
+  private nextTestId = 1;
+  private activeTest: ActiveConnectionTest | undefined;
+  private testStatus: ConnectionFormTestStatus | undefined;
 
   public constructor(
     private readonly initial: ConnectionFormInitialValues,
@@ -100,18 +145,34 @@ export class ConnectionFormPanel {
         maxTimeoutMs: MAX_TIMEOUT_MS,
       });
       await this.post({ type: 'busy', busy: this.busy });
+      if (this.testStatus) {
+        await this.post(this.testStatus);
+      }
+      return;
+    }
+    if (message.type === 'cancelTest') {
+      const expectedId = typeof message.testId === 'number' && Number.isSafeInteger(message.testId)
+        ? message.testId
+        : undefined;
+      await this.cancelActiveTest(true, expectedId);
       return;
     }
     if (this.busy) {
       return;
     }
+    if (message.type === 'test') {
+      await this.runTest(message.payload);
+      return;
+    }
     if (message.type === 'cancel') {
+      await this.cancelActiveTest(false);
       this.finish('cancelled');
       this.panel.dispose();
       return;
     }
     if (message.type === 'save') {
       await this.runBusy(async () => {
+        await this.cancelActiveTest(true);
         await this.callbacks.onSave(message.payload);
         this.finish('saved');
         if (!this.disposed) {
@@ -122,6 +183,7 @@ export class ConnectionFormPanel {
     }
     if (message.type === 'delete' && this.initial.mode === 'edit' && this.callbacks.onDelete) {
       await this.runBusy(async () => {
+        await this.cancelActiveTest(true);
         const removed = await this.callbacks.onDelete!();
         if (removed) {
           this.finish('deleted');
@@ -131,6 +193,133 @@ export class ConnectionFormPanel {
         }
       });
     }
+  }
+
+  private async runTest(payload: unknown): Promise<void> {
+    await this.cancelActiveTest(false);
+    const test: ActiveConnectionTest = {
+      id: this.nextTestId++,
+      controller: new AbortController(),
+      usedSavedPassword: false,
+      sequence: 0,
+    };
+    this.activeTest = test;
+    await this.setTestStatus({
+      type: 'testStatus',
+      testId: test.id,
+      sequence: ++test.sequence,
+      state: 'running',
+      phase: 'validation',
+      message: 'Validation phase: checking current unsaved form values.',
+    });
+
+    try {
+      if (!this.callbacks.onTest) {
+        throw new ConnectionTestError('validation', undefined);
+      }
+      const result = await this.callbacks.onTest(payload, test.controller.signal, progress => {
+        if (this.activeTest !== test || this.disposed) {
+          return;
+        }
+        test.endpoint = progress.endpoint;
+        test.usedSavedPassword = progress.usedSavedPassword;
+        void this.setTestStatus({
+          type: 'testStatus',
+          testId: test.id,
+          sequence: ++test.sequence,
+          state: 'running',
+          phase: progress.phase,
+          message: this.progressMessage(progress),
+        });
+      });
+      if (this.activeTest !== test || this.disposed) {
+        return;
+      }
+      test.endpoint = result.endpoint;
+      test.usedSavedPassword = result.usedSavedPassword;
+      const namespace = result.namespaceTested ? ' Namespace validity and session restoration passed.' : '';
+      const secret = result.usedSavedPassword
+        ? ' A saved password from VS Code SecretStorage was used.'
+        : ' No saved password was used.';
+      await this.setTestStatus({
+        type: 'testStatus',
+        testId: test.id,
+        sequence: ++test.sequence,
+        state: 'success',
+        phase: 'query',
+        message: `Query phase succeeded for ${result.endpoint}.${namespace} ` +
+          `Effective timeouts: connect/handshake ${result.connectTimeoutMs} ms; query ${result.queryTimeoutMs} ms.${secret}`,
+      });
+    } catch (error) {
+      if (this.activeTest !== test || this.disposed) {
+        return;
+      }
+      if (error instanceof ConnectionFormValidationError) {
+        await this.post({ type: 'error', field: error.field, message: error.message });
+        await this.setTestStatus({
+          type: 'testStatus',
+          testId: test.id,
+          sequence: ++test.sequence,
+          state: 'failure',
+          phase: 'validation',
+          message: `Validation phase failed: ${error.message}`,
+        });
+      } else {
+        const failure = error instanceof ConnectionTestError
+          ? error
+          : new ConnectionTestError('query', test.endpoint);
+        const secret = test.usedSavedPassword
+          ? ' A saved password from VS Code SecretStorage was used.'
+          : '';
+        await this.setTestStatus({
+          type: 'testStatus',
+          testId: test.id,
+          sequence: ++test.sequence,
+          state: failure.phase === 'cancel' ? 'canceled' : 'failure',
+          phase: failure.phase,
+          message: `${failure.message}${secret}`,
+        });
+      }
+    } finally {
+      if (this.activeTest === test) {
+        this.activeTest = undefined;
+      }
+    }
+  }
+
+  private progressMessage(progress: ConnectionFormTestProgress): string {
+    const label = progress.phase.charAt(0).toUpperCase() + progress.phase.slice(1);
+    const secret = progress.usedSavedPassword
+      ? ' A saved password from VS Code SecretStorage is being used.'
+      : ' No saved password is being used.';
+    return `${label} phase: testing ${progress.endpoint}.${secret}`;
+  }
+
+  private async cancelActiveTest(report: boolean, expectedId?: number): Promise<void> {
+    const test = this.activeTest;
+    if (!test || (expectedId !== undefined && expectedId !== test.id)) {
+      return;
+    }
+    this.activeTest = undefined;
+    test.controller.abort();
+    if (report && !this.disposed) {
+      const secret = test.usedSavedPassword
+        ? ' A saved password from VS Code SecretStorage was used.'
+        : '';
+      await this.setTestStatus({
+        type: 'testStatus',
+        testId: test.id,
+        sequence: ++test.sequence,
+        state: 'canceled',
+        phase: 'cancel',
+        message: `${connectionTestFailureMessage('cancel', test.endpoint)}${secret}`,
+      });
+    }
+  }
+
+  private async setTestStatus(status: ConnectionFormTestStatus): Promise<void> {
+    this.testStatus = status;
+    await this.post(status);
   }
 
   private async runBusy(action: () => Promise<void>): Promise<void> {
@@ -173,6 +362,11 @@ export class ConnectionFormPanel {
       return;
     }
     this.disposed = true;
+    if (this.activeTest) {
+      const test = this.activeTest;
+      this.activeTest = undefined;
+      test.controller.abort();
+    }
     this.disposables.splice(0).forEach(disposable => disposable.dispose());
     if (!this.busy) {
       this.finish('cancelled');
@@ -268,6 +462,16 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       color: var(--vscode-inputValidation-errorForeground);
       line-height: 1.4;
     }
+    .test-status {
+      margin: 20px 0 0;
+      padding: 10px 12px;
+      border: 1px solid var(--vscode-widget-border, var(--vscode-input-border));
+      background: var(--vscode-textBlockQuote-background, var(--vscode-sideBar-background));
+      color: var(--vscode-editor-foreground);
+      line-height: 1.4;
+    }
+    .test-status[data-state="success"] { border-color: var(--vscode-testing-iconPassed, var(--vscode-charts-green)); }
+    .test-status[data-state="failure"] { border-color: var(--vscode-inputValidation-errorBorder); }
     .footer {
       position: sticky;
       bottom: 0;
@@ -374,8 +578,11 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       </fieldset>
 
       <div id="formError" class="error-summary" role="alert" aria-live="assertive" tabindex="-1" hidden></div>
+      <div id="testStatus" class="test-status" role="status" aria-live="polite" aria-atomic="true" hidden></div>
       <footer class="footer">
         <button id="save" class="primary" type="submit" disabled>Save Connection</button>
+        <button id="testConnection" class="secondary" type="button" aria-describedby="testStatus">Test Connection</button>
+        <button id="cancelTest" class="secondary" type="button" hidden>Cancel Test</button>
         <button id="cancel" class="secondary" type="button">Cancel</button>
         <button id="delete" class="danger" type="button" hidden>Delete Connection</button>
       </footer>
@@ -390,8 +597,11 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       const fields = document.getElementById('formFields');
       const title = document.getElementById('formTitle');
       const error = document.getElementById('formError');
+      const testStatus = document.getElementById('testStatus');
       const advanced = document.getElementById('advanced');
       const save = document.getElementById('save');
+      const testConnection = document.getElementById('testConnection');
+      const cancelTest = document.getElementById('cancelTest');
       const cancel = document.getElementById('cancel');
       const deleteButton = document.getElementById('delete');
       const clearPasswordRow = document.getElementById('clearPasswordRow');
@@ -408,11 +618,28 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       };
       let reservedNames = [];
       let busy = false;
+      let testing = false;
+      let activeTestId;
+      let activeTestSequence = 0;
       let serverErrorField;
       let serverErrorMessage = '';
 
-      function post(type, payload) {
-        vscode.postMessage({ type, session, payload });
+      function post(type, payload, details) {
+        vscode.postMessage(Object.assign({ type, session, payload }, details || {}));
+      }
+
+      function formPayload() {
+        return {
+          name: controls.name.value,
+          host: controls.host.value,
+          port: controls.port.value,
+          database: controls.database.value,
+          username: controls.username.value,
+          password: controls.password.value,
+          clearPassword: clearPassword.checked,
+          connectTimeoutMs: controls.connectTimeoutMs.value,
+          queryTimeoutMs: controls.queryTimeoutMs.value
+        };
       }
 
       function setError(message, field) {
@@ -446,24 +673,69 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         fields.disabled = busy;
         cancel.disabled = busy;
         deleteButton.disabled = busy;
+        testConnection.disabled = busy;
+        cancelTest.disabled = busy || !testing;
         save.disabled = busy || !form.checkValidity();
         form.setAttribute('aria-busy', String(busy));
+      }
+
+      function setTestStatus(message) {
+        if (!Number.isSafeInteger(message.testId) || !Number.isSafeInteger(message.sequence) ||
+            (Number.isSafeInteger(activeTestId) && message.testId < activeTestId) ||
+            (message.testId === activeTestId && message.sequence <= activeTestSequence)) {
+          return;
+        }
+        if (message.testId !== activeTestId) {
+          activeTestSequence = 0;
+        }
+        activeTestId = message.testId;
+        activeTestSequence = message.sequence;
+        testing = message.state === 'running';
+        testStatus.textContent = typeof message.message === 'string' ? message.message : '';
+        testStatus.hidden = !testStatus.textContent;
+        testStatus.dataset.state = typeof message.state === 'string' ? message.state : '';
+        testStatus.setAttribute('aria-busy', String(testing));
+        cancelTest.hidden = !testing;
+        cancelTest.disabled = busy || !testing;
+        testConnection.disabled = busy;
+        testConnection.textContent = testing ? 'Test Again' : 'Test Connection';
+        testConnection.setAttribute('aria-label', testing
+          ? 'Cancel the current test and test this connection again'
+          : 'Test Connection');
+      }
+
+      function cancelTestForChangedValues() {
+        if (!testing || !Number.isSafeInteger(activeTestId)) {
+          return;
+        }
+        post('cancelTest', undefined, { testId: activeTestId });
       }
 
       function validate(showErrors) {
         controls.name.setCustomValidity('');
         controls.host.setCustomValidity('');
+        controls.port.setCustomValidity('');
         controls.database.setCustomValidity('');
         controls.username.setCustomValidity('');
         controls.password.setCustomValidity('');
+        controls.connectTimeoutMs.setCustomValidity('');
+        controls.queryTimeoutMs.setCustomValidity('');
 
         const normalizedName = controls.name.value.trim().toLocaleLowerCase();
-        if (normalizedName && reservedNames.includes(normalizedName)) {
+        if (!normalizedName) {
+          controls.name.setCustomValidity('Connection name is required.');
+        } else if (reservedNames.includes(normalizedName)) {
           controls.name.setCustomValidity('Connection name must be unique.');
         }
         const host = controls.host.value.trim();
-        if (/\\s/.test(host) || host.includes('/') || host.includes('\\\\')) {
+        if (!host) {
+          controls.host.setCustomValidity('Host is required.');
+        } else if (/\\s/.test(host) || host.includes('/') || host.includes('\\\\')) {
           controls.host.setCustomValidity('Enter a host name or IP address without a URL scheme or path.');
+        }
+        const port = controls.port.value.trim();
+        if (!/^\\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535) {
+          controls.port.setCustomValidity('Port must be an integer from 1 to 65535.');
         }
         const namespace = controls.database.value.trim();
         if (namespace && namespace !== '.' && !/^\\.?[A-Za-z_][A-Za-z0-9_]*(\\.[A-Za-z_][A-Za-z0-9_]*)*$/.test(namespace)) {
@@ -475,6 +747,15 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         if (clearPassword.checked && controls.password.value) {
           controls.password.setCustomValidity('Enter a new password or clear the saved password, not both.');
         }
+        [
+          [controls.connectTimeoutMs, 'Connect / handshake timeout'],
+          [controls.queryTimeoutMs, 'Query timeout']
+        ].forEach(([control, label]) => {
+          const value = control.value.trim();
+          if (value && (!/^\\d+$/.test(value) || Number(value) > Number(control.max))) {
+            control.setCustomValidity(label + ' must be a whole number from 0 to ' + control.max + ', or blank to inherit.');
+          }
+        });
         if (serverErrorField && controls[serverErrorField]) {
           controls[serverErrorField].setCustomValidity(serverErrorMessage);
         }
@@ -523,6 +804,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       }
 
       form.addEventListener('input', event => {
+        cancelTestForChangedValues();
         const changesServerField = serverErrorField && (
           event.target === controls[serverErrorField] ||
           (serverErrorField === 'password' && event.target === clearPassword)
@@ -543,17 +825,18 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         if (busy || !validate(true)) {
           return;
         }
-        post('save', {
-          name: controls.name.value,
-          host: controls.host.value,
-          port: controls.port.value,
-          database: controls.database.value,
-          username: controls.username.value,
-          password: controls.password.value,
-          clearPassword: clearPassword.checked,
-          connectTimeoutMs: controls.connectTimeoutMs.value,
-          queryTimeoutMs: controls.queryTimeoutMs.value
-        });
+        post('save', formPayload());
+      });
+      testConnection.addEventListener('click', () => {
+        if (busy || !validate(true)) {
+          return;
+        }
+        post('test', formPayload());
+      });
+      cancelTest.addEventListener('click', () => {
+        if (!busy && testing && Number.isSafeInteger(activeTestId)) {
+          post('cancelTest', undefined, { testId: activeTestId });
+        }
       });
       cancel.addEventListener('click', () => !busy && post('cancel'));
       deleteButton.addEventListener('click', () => !busy && post('delete'));
@@ -574,6 +857,8 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
           setBusy(message.busy);
         } else if (message.type === 'error') {
           setError(typeof message.message === 'string' ? message.message : 'The connection could not be saved.', message.field);
+        } else if (message.type === 'testStatus') {
+          setTestStatus(message);
         }
       });
       post('ready');
