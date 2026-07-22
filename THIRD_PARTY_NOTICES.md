@@ -1,6 +1,18 @@
 # Third-Party Notices
 
-KX for VS Code includes the following third-party software under the license terms and notices recorded below.
+KX for VS Code includes third-party software and uses third-party trademark material as recorded below.
+
+## KX logo
+
+The Marketplace and Activity Bar icons are recolored, padded derivatives of the official KX logo.
+
+- Source: [Official KX logo PNG](https://kx.com/wp-content/uploads/2024/06/kx-logo-white.png)
+- Retrieved: 2026-07-22
+- Attribution: KX
+
+KX and the KX logo are trademarks of KX. They are used here solely to identify KX/kdb+ integration. This independent project is not affiliated with or endorsed by KX.
+
+The original white source file is not distributed in source control or release artifacts; only the recolored, padded derivative assets are packaged.
 
 ## uPlot
 

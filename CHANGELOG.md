@@ -2,6 +2,12 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## 0.1.1 - 2026-07-22
+
+- Replaced the standalone extension's prior Marketplace and Activity Bar branding with recolored, transparently padded assets derived from the official KX logo.
+- Added KX logo source attribution and an independent-project trademark notice.
+- Made no product functionality changes.
+
 ## 0.1.0 - 2026-07-21
 
 - Added a standalone KX activity-bar container and **KX Connections** view.

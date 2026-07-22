@@ -64,6 +64,9 @@ web_modules/
 *.vsix
 *-vsix.zip
 
+# Local reference and downloaded material
+/tmp/
+
 # Yarn Integrity file
 .yarn-integrity
 

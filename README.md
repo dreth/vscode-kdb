@@ -2,7 +2,7 @@
 
 KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, a KX activity-bar view, and a high-performance native result panel.
 
-Version 0.1.0 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
+Version 0.1.1 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
 
 ## Quick start
 
@@ -74,7 +74,7 @@ Large copy, export, rendering, and chart operations have configurable safety lim
 
 ## Phase 1 scope
 
-Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.0; unreliable metadata placeholders are deliberately omitted.
+Phase 1 supports direct q IPC only. SSH setup, TLS termination, gateway or broker configuration, and remote connection orchestration are intentionally outside this release. There is no object explorer for tables, functions, or namespaces in 0.1.1; unreliable metadata placeholders are deliberately omitted.
 
 ## Development and verification
 
@@ -102,7 +102,7 @@ Package the extension with either the project script or an explicit artifact pat
 
 ```sh
 npm run package
-npx @vscode/vsce package --out vscode-kdb-0.1.0.vsix
+npx @vscode/vsce package --out vscode-kdb-0.1.1.vsix
 ```
 
 The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.
@@ -110,5 +110,7 @@ The VSIX is assembled through `.vscodeignore`; development dependencies, tests, 
 ## License
 
 KX for VS Code is released under the [MIT License](LICENSE). Bundled third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+KX and the KX logo are trademarks of KX. They are used here solely to identify KX/kdb+ integration. This independent project is not affiliated with or endorsed by KX.
 
 kdb+ and q are products of KX. This project is not a SQLTools extension and does not require SQLTools to be installed.
