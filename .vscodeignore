@@ -5,6 +5,8 @@ docs/**
 mkdocs-src/**
 mkdocs.yml
 PARITY.md
+PARITY_RUN.md
+PARITY_RUN.json
 .vscode/**
 .vscode-test/**
 src/**
