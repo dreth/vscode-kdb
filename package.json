@@ -352,7 +352,7 @@
         "vscode-kdb.performance.trace": {
           "type": "boolean",
           "default": false,
-          "description": "Log KX query performance timings to the extension host console."
+          "description": "Log safe KX operation timings to Output > KX and the extension host console. Query text and credentials are omitted."
         },
         "vscode-kdb.results.viewer.initialViewColumn": {
           "type": "string",

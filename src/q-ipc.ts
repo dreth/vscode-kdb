@@ -1,4 +1,5 @@
 import * as net from 'net';
+import type { KxDiagnosticPhase, KxDiagnosticStatus, KxDiagnostics } from './diagnostics';
 import { ColumnarPanelResult, cellValueToText, createColumnarPanelResult } from './kx-results';
 import { endPerfSpan, isPerfTraceEnabled, perfMark, perfSpan } from './perf';
 import type { PerfDetails, PerfSpan } from './perf';
@@ -123,10 +124,15 @@ export interface KdbConnectionOptions {
   password?: string;
   timeoutMs?: number;
   onDidClose?: () => void;
+  diagnostics?: KxDiagnostics;
 }
 
 interface PendingQuery {
+  queryId: number;
   query: string;
+  queuedAtMs: number;
+  startedAtMs?: number;
+  diagnosticEnded: boolean;
   resolve(value: QValue): void;
   reject(error: Error): void;
   timeout?: NodeJS.Timeout;
@@ -352,6 +358,7 @@ export class KdbIpcClient {
   private pending: PendingQuery | null = null;
   private queue: PendingQuery[] = [];
   private protocolVersion = 0;
+  private intentionalClose = false;
 
   constructor(private readonly options: KdbConnectionOptions) {}
 
@@ -363,6 +370,8 @@ export class KdbIpcClient {
       return this.connectPromise;
     }
 
+    const connectStartedMs = Date.now();
+    this.writeDiagnostic('connect', 'start');
     const connectPromise = new Promise<void>((resolve, reject) => {
       const socket = net.createConnection({
         host: this.options.host,
@@ -371,12 +380,14 @@ export class KdbIpcClient {
       this.connectingSocket = socket;
       let settled = false;
       let phase: KdbIpcPhase = 'connect';
+      let phaseStartedMs = connectStartedMs;
 
       const fail = (error: Error, destroy = true) => {
         if (settled) {
           return;
         }
         settled = true;
+        this.writeDiagnostic(phase, 'failed', phaseStartedMs, error, true);
         const wrapped = this.phaseError(phase, error);
         cleanup();
         if (destroy && !socket.destroyed) {
@@ -400,7 +411,10 @@ export class KdbIpcClient {
       };
 
       const onConnect = () => {
+        this.writeDiagnostic('connect', 'success', phaseStartedMs);
         phase = 'handshake';
+        phaseStartedMs = Date.now();
+        this.writeDiagnostic('handshake', 'start');
         socket.write(createHandshake(this.options), error => {
           if (error) {
             fail(error);
@@ -428,6 +442,10 @@ export class KdbIpcClient {
         socket.on('close', this.handleSocketClose);
         this.protocolVersion = version;
         this.socket = socket;
+        this.intentionalClose = false;
+        this.writeDiagnostic('handshake', 'success', phaseStartedMs, undefined, false, {
+          protocolVersion: version,
+        });
 
         if (chunk.length > 1) {
           this.handleData(chunk.slice(1));
@@ -460,24 +478,43 @@ export class KdbIpcClient {
   }
 
   public query(query: string): Promise<QValue> {
+    const queryId = nextQueryId++;
     if (!this.socket || this.socket.destroyed) {
-      return Promise.reject(new KdbIpcError('kdb+ connection is not open'));
+      const error = this.phaseError('query', new KdbIpcError('connection is not open'));
+      this.writeDiagnostic('query', 'failed', undefined, error, false, {
+        queryId,
+        queryChars: query.length,
+        queryBytes: Buffer.byteLength(query, 'utf8'),
+        stage: 'preflight',
+      });
+      return Promise.reject(error);
     }
 
     return new Promise<QValue>((resolve, reject) => {
-      this.queue.push({ query, resolve, reject, perf: createQueryPerf(query) });
+      this.queue.push({
+        queryId,
+        query,
+        queuedAtMs: Date.now(),
+        diagnosticEnded: false,
+        resolve,
+        reject,
+        perf: createQueryPerf(query, queryId),
+      });
       this.flushQueue();
     });
   }
 
   public async close(): Promise<void> {
+    const startedMs = Date.now();
+    this.writeDiagnostic('close', 'start');
     const socket = this.socket;
     const connectingSocket = this.connectingSocket && this.connectingSocket !== socket
       ? this.connectingSocket
       : null;
+    this.intentionalClose = !!(socket || connectingSocket);
     this.socket = null;
     this.receiveBuffer.clear();
-    this.failAll(new KdbIpcError('kdb+ connection closed'));
+    this.failAll(new KdbIpcError('kdb+ connection closed'), 'canceled');
     this.rejectConnecting(new KdbIpcError('kdb+ connection closed'));
 
     if (connectingSocket && !connectingSocket.destroyed) {
@@ -485,22 +522,33 @@ export class KdbIpcClient {
     }
 
     if (!socket || socket.destroyed) {
+      this.intentionalClose = false;
+      this.writeDiagnostic('close', 'success', startedMs);
       return;
     }
 
     await new Promise<void>(resolve => {
-      socket.end(() => resolve());
+      socket.end(() => {
+        this.writeDiagnostic('close', 'success', startedMs);
+        resolve();
+      });
     });
   }
 
   public cancel(error: Error = new KdbIpcError('kdb+ query canceled')): void {
+    const startedMs = Date.now();
+    this.writeDiagnostic('cancellation', 'start', undefined, undefined, false, {
+      scope: 'transport',
+      reasonName: error.name,
+    });
     const socket = this.socket;
     const connectingSocket = this.connectingSocket && this.connectingSocket !== socket
       ? this.connectingSocket
       : null;
+    this.intentionalClose = !!(socket || connectingSocket);
     this.socket = null;
     this.receiveBuffer.clear();
-    this.failAll(error);
+    this.failAll(error, 'canceled');
     this.rejectConnecting(error);
 
     if (socket && !socket.destroyed) {
@@ -509,6 +557,9 @@ export class KdbIpcClient {
     if (connectingSocket && !connectingSocket.destroyed) {
       connectingSocket.destroy(error);
     }
+    this.writeDiagnostic('cancellation', 'success', startedMs, undefined, false, {
+      scope: 'transport',
+    });
   }
 
   public getProtocolVersion(): number {
@@ -530,6 +581,13 @@ export class KdbIpcClient {
     }
 
     this.pending = pending;
+    pending.startedAtMs = Date.now();
+    this.writeDiagnostic('query', 'start', undefined, undefined, false, {
+      queryId: pending.queryId,
+      queryChars: pending.query.length,
+      queryBytes: Buffer.byteLength(pending.query, 'utf8'),
+      queuedMs: pending.startedAtMs - pending.queuedAtMs,
+    });
     if (pending.perf) {
       perfMark('q-ipc.query.start', queryPerfDetails(pending.perf));
     }
@@ -607,7 +665,7 @@ export class KdbIpcClient {
         this.handleMessage(message);
       }
     } catch (error) {
-      this.failAll(toError(error));
+      this.failAll(this.phaseError('query', toError(error)));
       this.socket && this.socket.destroy();
     }
   };
@@ -640,6 +698,7 @@ export class KdbIpcClient {
           copyBytesCopied: pending.perf.copyBytesCopied,
         });
       }
+      this.finishQueryDiagnostic(pending, 'success');
       pending.resolve(value);
     } catch (error) {
       if (pending.perf) {
@@ -653,23 +712,33 @@ export class KdbIpcClient {
           copyBytesCopied: pending.perf.copyBytesCopied,
         });
       }
-      pending.reject(toError(error));
+      const queryError = toError(error);
+      this.finishQueryDiagnostic(pending, 'failed', queryError);
+      pending.reject(queryError);
     } finally {
       this.flushQueue();
     }
   }
 
   private handleSocketError = (error: Error) => {
+    if (!this.intentionalClose) {
+      this.writeDiagnostic('close', 'failed', undefined, error, true);
+    }
     this.failAll(this.phaseError('query', error));
   };
 
   private handleSocketClose = () => {
     this.socket = null;
+    if (this.intentionalClose) {
+      this.intentionalClose = false;
+    } else {
+      this.writeDiagnostic('close', 'disconnected');
+    }
     this.failAll(this.phaseError('query', new KdbIpcError('connection closed')));
     this.options.onDidClose && this.options.onDidClose();
   };
 
-  private rejectPending(error: Error) {
+  private rejectPending(error: Error, status: 'failed' | 'canceled' = 'failed') {
     const pending = this.pending;
     this.pending = null;
     if (!pending) {
@@ -691,16 +760,18 @@ export class KdbIpcClient {
       finishReceivePerf(pending.perf, details);
       finishQueryPerf(pending.perf, details);
     }
+    this.finishQueryDiagnostic(pending, status, error);
     pending.reject(error);
   }
 
-  private failAll(error: Error) {
-    this.rejectPending(error);
+  private failAll(error: Error, status: 'failed' | 'canceled' = 'failed') {
+    this.rejectPending(error, status);
     const queued = this.queue.splice(0);
     queued.forEach(item => {
       if (item.perf) {
         finishQueryPerf(item.perf, { error: true, errorName: error.name, queued: true });
       }
+      this.finishQueryDiagnostic(item, status, error);
       item.reject(error);
     });
   }
@@ -719,8 +790,57 @@ export class KdbIpcClient {
     }
   }
 
+  private finishQueryDiagnostic(
+    pending: PendingQuery,
+    status: 'success' | 'failed' | 'canceled',
+    error?: Error
+  ): void {
+    if (pending.diagnosticEnded) {
+      return;
+    }
+    pending.diagnosticEnded = true;
+    this.writeDiagnostic(
+      'query',
+      status,
+      pending.startedAtMs || pending.queuedAtMs,
+      error,
+      false,
+      {
+        queryId: pending.queryId,
+        queryChars: pending.query.length,
+        queryBytes: Buffer.byteLength(pending.query, 'utf8'),
+        queued: pending.startedAtMs === undefined,
+      }
+    );
+  }
+
+  private writeDiagnostic(
+    phase: KxDiagnosticPhase,
+    status: KxDiagnosticStatus,
+    startedMs?: number,
+    error?: Error,
+    includeErrorMessage = false,
+    details?: PerfDetails
+  ): void {
+    try {
+      this.options.diagnostics?.event({
+        phase,
+        endpoint: this.endpointLabel(),
+        status,
+        durationMs: startedMs === undefined ? undefined : Date.now() - startedMs,
+        details,
+        error,
+        includeErrorMessage,
+        secrets: [this.options.username || '', this.options.password || ''],
+      });
+    } catch {
+      // Diagnostics must never disrupt q IPC operations.
+    }
+  }
+
   private endpointLabel(): string {
-    return `${this.options.host}:${this.options.port}`;
+    const host = this.options.host.includes(':') ? `[${this.options.host}]` : this.options.host;
+    return `${host}:${this.options.port}`;
   }
 
   private phaseError(phase: KdbIpcPhase, error: Error): KdbIpcError {
@@ -1259,12 +1379,11 @@ function qFunctionTypeLabel(value: QFunctionType): string {
   }
 }
 
-function createQueryPerf(query: string): QIpcQueryPerf | undefined {
+function createQueryPerf(query: string, queryId: number): QIpcQueryPerf | undefined {
   if (!isPerfTraceEnabled()) {
     return undefined;
   }
   const queryBytes = Buffer.byteLength(query, 'utf8');
-  const queryId = nextQueryId++;
   const details = { queryId, queryChars: query.length, queryBytes };
   const querySpan = perfSpan('q-ipc.query.total', details);
   if (!querySpan) {

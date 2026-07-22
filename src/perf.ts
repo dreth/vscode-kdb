@@ -1,3 +1,5 @@
+import { sanitizeDiagnosticDetails } from './diagnostics';
+
 export const PERF_PREFIX = '[vscode-kdb:perf]';
 
 export type PerfDetails = { [key: string]: unknown };
@@ -17,11 +19,16 @@ interface VscodeLike {
 }
 
 let configuredTraceEnabled: boolean | undefined;
+let configuredOutput: ((value: string) => void) | undefined;
 let cachedConfigTraceEnabled = false;
 let cachedConfigCheckedMs = 0;
 
 export function configurePerfTrace(enabled: boolean | undefined): void {
   configuredTraceEnabled = enabled;
+}
+
+export function configurePerfOutput(output: ((value: string) => void) | undefined): void {
+  configuredOutput = output;
 }
 
 export function isPerfTraceEnabled(): boolean {
@@ -77,12 +84,20 @@ function writePerfEvent(event: string, details?: PerfDetails, durationMs?: numbe
     event,
     timestamp: new Date().toISOString(),
     memory: process.memoryUsage(),
-    details: details || {},
+    details: sanitizeDiagnosticDetails(details || {}),
   };
   if (durationMs !== undefined) {
     payload.durationMs = Math.round(durationMs * 1000) / 1000;
   }
-  console.log(PERF_PREFIX, JSON.stringify(payload));
+  const serialized = JSON.stringify(payload);
+  console.log(PERF_PREFIX, serialized);
+  if (configuredOutput) {
+    try {
+      configuredOutput(`${PERF_PREFIX} ${serialized}`);
+    } catch {
+      // Diagnostics must never disrupt extension operations.
+    }
+  }
 }
 
 function vscodeTraceEnabled(): boolean {

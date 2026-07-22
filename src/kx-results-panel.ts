@@ -1323,7 +1323,7 @@ export class KxResultsPanel {
         version: requestVersion,
         rows: table.rowCount,
         columns: table.columns.length,
-        columnName,
+        columnIndex,
         direction: nextSort.direction,
       }) : null;
     let sortedRowOrder: number[] | undefined;

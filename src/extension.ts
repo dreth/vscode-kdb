@@ -4,17 +4,21 @@ import { ConnectionCommands } from './connection-commands';
 import { ConnectionManager } from './connection-manager';
 import { ConnectionStore } from './connection-store';
 import { ConnectionsTreeProvider } from './connection-tree';
+import { KX_OUTPUT_CHANNEL_NAME, KxDiagnostics } from './diagnostics';
 import { emptyColumnarPanelResult } from './kx-results';
 import { KxPanelResult, KxResultsPanel, KxResultsPanelRunMode } from './kx-results-panel';
-import { configurePerfTrace, endPerfSpan, perfSpan } from './perf';
+import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 import { qSelectionExecutionKind, selectedTextOrCurrentLine } from './q-text';
 
 let activeConnectionManager: ConnectionManager | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
+  const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
+  const diagnostics = new KxDiagnostics(output);
+  configurePerfOutput(value => output.appendLine(value));
   const store = new ConnectionStore(context);
-  const manager = new ConnectionManager(store);
+  const manager = new ConnectionManager(store, diagnostics);
   const tree = new ConnectionsTreeProvider(store, manager);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
   activeConnectionManager = manager;
@@ -31,12 +35,14 @@ export function activate(context: vscode.ExtensionContext): void {
     manager,
     tree,
     treeView,
+    output,
+    { dispose: () => configurePerfOutput(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
-      runSelectionOrCurrentLine(context, store, manager, 'replace')),
+      runSelectionOrCurrentLine(context, store, manager, diagnostics, 'replace')),
     vscode.commands.registerCommand('vscode-kdb.runScript', () =>
-      runScript(context, store, manager, 'replace')),
+      runScript(context, store, manager, diagnostics, 'replace')),
     vscode.commands.registerCommand('vscode-kdb.runSelectionInNewResult', () =>
-      runSelectionOrCurrentLine(context, store, manager, 'new')),
+      runSelectionOrCurrentLine(context, store, manager, diagnostics, 'new')),
     vscode.commands.registerCommand('vscode-kdb.copyResultSelection', () =>
       KxResultsPanel.copySelectionFromActivePanel()),
     vscode.commands.registerCommand('vscode-kdb.openLocalDataServer', () =>
@@ -69,6 +75,7 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export async function deactivate(): Promise<void> {
+  configurePerfOutput(undefined);
   KxResultsPanel.stopAllLocalDataServers();
   const manager = activeConnectionManager;
   activeConnectionManager = undefined;
@@ -81,19 +88,21 @@ async function runScript(
   context: vscode.ExtensionContext,
   store: ConnectionStore,
   manager: ConnectionManager,
+  diagnostics: KxDiagnostics,
   mode: KxResultsPanelRunMode
 ): Promise<void> {
   const editor = qEditor();
   if (!editor) {
     return;
   }
-  await executeQText(context, store, manager, editor.document.getText(), mode, 'script');
+  await executeQText(context, store, manager, diagnostics, editor.document.getText(), mode, 'script');
 }
 
 async function runSelectionOrCurrentLine(
   context: vscode.ExtensionContext,
   store: ConnectionStore,
   manager: ConnectionManager,
+  diagnostics: KxDiagnostics,
   mode: KxResultsPanelRunMode
 ): Promise<void> {
   const editor = qEditor();
@@ -108,7 +117,7 @@ async function runSelectionOrCurrentLine(
     editor.selection.active.line
   );
   const execution = hasSelection ? qSelectionExecutionKind(selection) : 'query';
-  await executeQText(context, store, manager, text, mode, execution);
+  await executeQText(context, store, manager, diagnostics, text, mode, execution);
 }
 
 function qEditor(): vscode.TextEditor | undefined {
@@ -129,6 +138,7 @@ async function executeQText(
   context: vscode.ExtensionContext,
   store: ConnectionStore,
   manager: ConnectionManager,
+  diagnostics: KxDiagnostics,
   text: string,
   mode: KxResultsPanelRunMode,
   execution: 'query' | 'script'
@@ -176,6 +186,12 @@ async function executeQText(
       return;
     }
     canceled = true;
+    diagnostics.event({
+      phase: 'cancellation',
+      endpoint: connectionEndpoint(connection),
+      status: 'canceled',
+      details: { scope: 'local-result-wait' },
+    });
     rejectCancellation(cancellationError);
     showCanceledResult();
   };
@@ -183,7 +199,7 @@ async function executeQText(
 
   try {
     const span = perfSpan('extension.query', {
-      connectionName: connection.name,
+      endpoint: connectionEndpoint(connection),
       queryChars: text.length,
     });
     let value: QValue | undefined;

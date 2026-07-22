@@ -1,6 +1,10 @@
 .git/**
 .gitignore
 .github/**
+docs/**
+mkdocs-src/**
+mkdocs.yml
+PARITY.md
 .vscode/**
 .vscode-test/**
 src/**
