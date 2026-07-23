@@ -927,7 +927,8 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <span class="n">configure_evaluator</span><span class="p">(</span><span class="k">lambda</span> <span class="n">source</span><span class="p">:</span> <span class="n">my_existing_q_session</span><span class="p">(</span><span class="n">source</span><span class="p">))</span>
 <span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
 </code></pre></div>
-<p>Use <strong>KX: Tag Notebook Cell as q</strong> to add the durable <code>%%q</code> marker and configured output limits. The extension does not install a notebook controller, intercept Microsoft Jupyter, or open a q connection for the helper. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
+<p>Use the q code-cell toolbar action or <strong>KX: Set Notebook Cell Language to q</strong> for actual q highlighting, then <strong>KX: Tag Notebook Cell as q</strong> to retain the durable <code>%%q</code> marker and configured output limits. The normal Python Jupyter controller does not advertise or Run q-language cells: keep the marker, use <strong>KX: Restore Notebook Cell Language</strong>, and then use normal Run so IPython invokes the configured magic. Selecting the Python kernel may perform that normalization itself.</p>
+<p>The extension does not install a NotebookController, intercept Microsoft Jupyter, or open a q connection for the helper. The generic language picker remains controller-filtered; use the KX toolbar/context/Command Palette action as the reliable q-language route. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="verify-a-source-checkout">Verify a source checkout</h2>
 <p>The maintained non-visual checks are:</p>
 <div class="highlight"><pre><span></span><code>npm<span class="w"> </span>ci
@@ -940,7 +941,7 @@ npm<span class="w"> </span>run<span class="w"> </span>test:notebook-cross
 <p>When a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>The migration configuration-provider tests use faithful fakes for VS Code <code>inspect</code>/effective values because the maintained suite does not launch an Extension Host. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.</p>
+<p>The migration configuration-provider and notebook language-setter tests use pure helpers and faithful fakes for VS Code <code>inspect</code>/effective values and document-language results because the maintained suite does not launch an Extension Host. Source/manifest guards cover notebook menus, contexts, grammar, and the no-direct-IPC boundary. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.</p>
 
 
 

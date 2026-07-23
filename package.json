@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Standalone direct q IPC, persistent Jupyter notebook results, and high-performance KX results for VS Code.",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -63,7 +63,10 @@
     "onCommand:vscode-kdb.openLocalDataServer",
     "onCommand:vscode-kdb.stopLocalDataServer",
     "onCommand:vscode-kdb.copyLocalDataServerUrl",
+    "onCommand:vscode-kdb.setNotebookCellLanguageQ",
+    "onCommand:vscode-kdb.restoreNotebookCellLanguage",
     "onCommand:vscode-kdb.tagNotebookCellAsQ",
+    "onCommand:vscode-kdb.prepareNotebookCellForPythonKernel",
     "onCommand:vscode-kdb.openNotebookPreviewInResults"
   ],
   "scripts": {
@@ -80,8 +83,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.1.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.1.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.2.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.2.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -252,9 +255,28 @@
         "icon": "$(link)"
       },
       {
+        "command": "vscode-kdb.setNotebookCellLanguageQ",
+        "title": "KX: Set Notebook Cell Language to q",
+        "icon": "$(symbol-keyword)",
+        "enablement": "notebookType == 'jupyter-notebook'"
+      },
+      {
+        "command": "vscode-kdb.restoreNotebookCellLanguage",
+        "title": "KX: Restore Notebook Cell Language",
+        "icon": "$(discard)",
+        "enablement": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookDefaultLanguageAvailable"
+      },
+      {
         "command": "vscode-kdb.tagNotebookCellAsQ",
         "title": "KX: Tag Notebook Cell as q",
-        "icon": "$(tag)"
+        "icon": "$(tag)",
+        "enablement": "notebookType == 'jupyter-notebook'"
+      },
+      {
+        "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
+        "title": "Prepare this q cell for the active Python kernel",
+        "icon": "$(lightbulb)",
+        "enablement": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookQCellNeedsKernelPreparation"
       },
       {
         "command": "vscode-kdb.openNotebookPreviewInResults",
@@ -268,19 +290,19 @@
         "command": "vscode-kdb.runSelectionOrCurrentLine",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
-        "when": "editorTextFocus && (editorLangId == q || resourceExtname == .q)"
+        "when": "editorTextFocus && !notebookEditorFocused && (editorLangId == q || resourceExtname == .q)"
       },
       {
         "command": "vscode-kdb.runScript",
         "key": "ctrl+alt+enter",
         "mac": "cmd+alt+enter",
-        "when": "editorTextFocus && (editorLangId == q || resourceExtname == .q)"
+        "when": "editorTextFocus && !notebookEditorFocused && (editorLangId == q || resourceExtname == .q)"
       },
       {
         "command": "vscode-kdb.runSelectionInNewResult",
         "key": "ctrl+shift+enter",
         "mac": "cmd+shift+enter",
-        "when": "editorTextFocus && (editorLangId == q || resourceExtname == .q)"
+        "when": "editorTextFocus && !notebookEditorFocused && (editorLangId == q || resourceExtname == .q)"
       }
     ],
     "viewsContainers": {
@@ -405,6 +427,18 @@
       ],
       "commandPalette": [
         {
+          "command": "vscode-kdb.runSelectionOrCurrentLine",
+          "when": "notebookType != 'jupyter-notebook'"
+        },
+        {
+          "command": "vscode-kdb.runScript",
+          "when": "notebookType != 'jupyter-notebook'"
+        },
+        {
+          "command": "vscode-kdb.runSelectionInNewResult",
+          "when": "notebookType != 'jupyter-notebook'"
+        },
+        {
           "command": "vscode-kdb.refreshServerExplorer",
           "when": "config.vscode-kdb.features.serverExplorer && vscode-kdb.serverExplorer.available"
         },
@@ -433,6 +467,22 @@
           "when": "config.vscode-kdb.features.queryHistory"
         },
         {
+          "command": "vscode-kdb.setNotebookCellLanguageQ",
+          "when": "notebookType == 'jupyter-notebook'"
+        },
+        {
+          "command": "vscode-kdb.restoreNotebookCellLanguage",
+          "when": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookDefaultLanguageAvailable"
+        },
+        {
+          "command": "vscode-kdb.tagNotebookCellAsQ",
+          "when": "notebookType == 'jupyter-notebook'"
+        },
+        {
+          "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
+          "when": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookQCellNeedsKernelPreparation"
+        },
+        {
           "command": "vscode-kdb.openNotebookPreviewInResults",
           "when": "vscode-kdb.notebookResultAvailable"
         }
@@ -440,36 +490,51 @@
       "editor/title": [
         {
           "command": "vscode-kdb.runSelectionOrCurrentLine",
-          "when": "editorLangId == q || resourceExtname == .q",
+          "when": "!notebookEditorFocused && (editorLangId == q || resourceExtname == .q)",
           "group": "navigation"
         }
       ],
       "editor/context": [
         {
           "command": "vscode-kdb.runSelectionOrCurrentLine",
-          "when": "editorLangId == q || resourceExtname == .q",
+          "when": "!notebookEditorFocused && (editorLangId == q || resourceExtname == .q)",
           "group": "navigation@1"
         },
         {
           "command": "vscode-kdb.runScript",
-          "when": "editorLangId == q || resourceExtname == .q",
+          "when": "!notebookEditorFocused && (editorLangId == q || resourceExtname == .q)",
           "group": "navigation@2"
         },
         {
           "command": "vscode-kdb.runSelectionInNewResult",
-          "when": "editorLangId == q || resourceExtname == .q",
+          "when": "!notebookEditorFocused && (editorLangId == q || resourceExtname == .q)",
           "group": "navigation@3"
         }
       ],
       "notebook/cell/title": [
         {
+          "command": "vscode-kdb.setNotebookCellLanguageQ",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code'",
+          "group": "inline@19"
+        },
+        {
+          "command": "vscode-kdb.restoreNotebookCellLanguage",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && vscode-kdb.notebookDefaultLanguageAvailable",
+          "group": "1_modification@1"
+        },
+        {
           "command": "vscode-kdb.tagNotebookCellAsQ",
-          "when": "notebookEditorFocused && notebookCellType == 'code' && !vscode-kdb.notebookQCell",
-          "group": "inline@20"
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code'",
+          "group": "1_modification@2"
+        },
+        {
+          "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && vscode-kdb.notebookQCellNeedsKernelPreparation",
+          "group": "1_modification@3"
         },
         {
           "command": "vscode-kdb.openNotebookPreviewInResults",
-          "when": "notebookEditorFocused && vscode-kdb.notebookQCell && vscode-kdb.notebookResultAvailable",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && vscode-kdb.notebookResultAvailable",
           "group": "inline@21"
         }
       ],

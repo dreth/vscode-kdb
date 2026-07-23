@@ -1,6 +1,16 @@
 import * as vscode from 'vscode';
 import { createColumnarPanelResult } from './kx-results';
 import {
+  jupyterNotebookDefaultLanguageId,
+  NotebookCellLanguageProvider,
+  NotebookLanguageResult,
+  selectedNotebookCellIndexes,
+} from './notebook-cell-language';
+import {
+  notebookQMarkerInsertion,
+  preparedNotebookQCellMetadata,
+} from './notebook-cell-preparation';
+import {
   KX_NOTEBOOK_MIME,
   MAX_NOTEBOOK_BYTE_LIMIT,
   PortableKxResult,
@@ -12,17 +22,22 @@ import { notebookRendererSettingsMessage, parseNotebookRendererMessage } from '.
 import {
   NotebookSettings,
   hasNotebookQMarker,
-  notebookQMagicLine,
   safeNotebookByteLimit,
   safeNotebookPresentation,
   safeNotebookRowLimit,
 } from './notebook-settings';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
-export const KX_NOTEBOOK_METADATA_KEY = 'vscode-kdb';
-export const KX_NOTEBOOK_METADATA_VERSION = 1;
+export const SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
+export const RESTORE_NOTEBOOK_CELL_LANGUAGE_COMMAND = 'vscode-kdb.restoreNotebookCellLanguage';
+export const TAG_NOTEBOOK_CELL_AS_Q_COMMAND = 'vscode-kdb.tagNotebookCellAsQ';
+export const PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND =
+  'vscode-kdb.prepareNotebookCellForPythonKernel';
 
 const NOTEBOOK_Q_CELL_CONTEXT = 'vscode-kdb.notebookQCell';
+const NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT =
+  'vscode-kdb.notebookQCellNeedsKernelPreparation';
+const NOTEBOOK_DEFAULT_LANGUAGE_CONTEXT = 'vscode-kdb.notebookDefaultLanguageAvailable';
 const NOTEBOOK_RESULT_CONTEXT = 'vscode-kdb.notebookResultAvailable';
 const MAX_NOTEBOOK_SCAN_CELLS = 10_000;
 const MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL = 2_000;
@@ -31,6 +46,10 @@ export class NotebookIntegration implements vscode.Disposable {
   private readonly context: vscode.ExtensionContext;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly messaging: vscode.NotebookRendererMessaging;
+  private readonly statusBarChanged = new vscode.EventEmitter<void>();
+  private readonly cellLanguageProvider = new NotebookCellLanguageProvider<vscode.TextDocument>(
+    (document, languageId) => vscode.languages.setTextDocumentLanguage(document, languageId)
+  );
 
   public constructor(context: vscode.ExtensionContext) {
     this.context = context;
@@ -42,9 +61,31 @@ export class NotebookIntegration implements vscode.Disposable {
           void vscode.window.showErrorMessage(`KX notebook action failed: ${detail}`);
         });
       }),
-      vscode.commands.registerCommand('vscode-kdb.tagNotebookCellAsQ', () => this.tagSelectedCells()),
+      vscode.commands.registerCommand(
+        'vscode-kdb.setNotebookCellLanguageQ',
+        (cell?: vscode.NotebookCell) => this.setSelectedCellsToQ(cell)
+      ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.restoreNotebookCellLanguage',
+        (cell?: vscode.NotebookCell) => this.restoreSelectedCellLanguages(cell)
+      ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.tagNotebookCellAsQ',
+        (cell?: vscode.NotebookCell) => this.tagSelectedCells(cell)
+      ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.prepareNotebookCellForPythonKernel',
+        (cell?: vscode.NotebookCell) => this.prepareSelectedQCells(cell)
+      ),
       vscode.commands.registerCommand('vscode-kdb.openNotebookPreviewInResults', () =>
         this.openSelectedNotebookPreview()),
+      vscode.notebooks.registerNotebookCellStatusBarItemProvider(
+        'jupyter-notebook',
+        {
+          onDidChangeCellStatusBarItems: this.statusBarChanged.event,
+          provideCellStatusBarItems: cell => this.kernelPreparationStatusBarItem(cell),
+        }
+      ),
       vscode.window.onDidChangeActiveNotebookEditor(() => this.updateContexts()),
       vscode.window.onDidChangeNotebookEditorSelection(() => this.updateContexts()),
       vscode.workspace.onDidChangeNotebookDocument(event => {
@@ -56,7 +97,8 @@ export class NotebookIntegration implements vscode.Disposable {
         if (event.affectsConfiguration('vscode-kdb.notebook')) {
           void this.messaging.postMessage(notebookRendererSettingsMessage(notebookSettings()));
         }
-      })
+      }),
+      this.statusBarChanged
     );
     this.updateContexts();
   }
@@ -64,6 +106,12 @@ export class NotebookIntegration implements vscode.Disposable {
   public dispose(): void {
     this.disposables.splice(0).forEach(disposable => disposable.dispose());
     void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_CONTEXT, false);
+    void vscode.commands.executeCommand(
+      'setContext',
+      NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT,
+      false
+    );
+    void vscode.commands.executeCommand('setContext', NOTEBOOK_DEFAULT_LANGUAGE_CONTEXT, false);
     void vscode.commands.executeCommand('setContext', NOTEBOOK_RESULT_CONTEXT, false);
   }
 
@@ -83,54 +131,204 @@ export class NotebookIntegration implements vscode.Disposable {
     this.showPreview(payload);
   }
 
-  private async tagSelectedCells(): Promise<void> {
-    const editor = vscode.window.activeNotebookEditor;
+  private async setSelectedCellsToQ(commandCell?: vscode.NotebookCell): Promise<void> {
+    const editor = activeJupyterNotebookEditor('setting a notebook cell language');
     if (!editor) {
-      vscode.window.showWarningMessage('Open an IPython/Jupyter notebook before tagging a q cell.');
       return;
     }
-    const indexes = selectedCellIndexes(editor).filter(index =>
-      editor.notebook.cellAt(index).kind === vscode.NotebookCellKind.Code
+    const cells = selectedCells(editor, commandCell);
+    const result = await this.cellLanguageProvider.setLanguage(
+      cells.map(cell => ({
+        index: cell.index,
+        isCode: cell.kind === vscode.NotebookCellKind.Code,
+        document: cell.document,
+      })),
+      'q'
     );
-    if (indexes.length === 0) {
-      vscode.window.showWarningMessage('Select at least one notebook code cell to tag as q.');
+    this.finishLanguageChange('q', result);
+  }
+
+  private async restoreSelectedCellLanguages(commandCell?: vscode.NotebookCell): Promise<void> {
+    const editor = activeJupyterNotebookEditor('restoring a notebook cell language');
+    if (!editor) {
       return;
     }
+    const defaultLanguage = jupyterNotebookDefaultLanguageId(editor.notebook.metadata);
+    if (!defaultLanguage) {
+      void vscode.window.showWarningMessage(
+        'This notebook has no language_info.name or kernelspec.language metadata, so KX cannot safely choose a language to restore.'
+      );
+      return;
+    }
+    const registeredLanguages = await vscode.languages.getLanguages();
+    if (!registeredLanguages.includes(defaultLanguage)) {
+      void vscode.window.showWarningMessage(
+        `The notebook default '${defaultLanguage}' is not a registered VS Code language, so no cells were changed.`
+      );
+      return;
+    }
+    const cells = selectedCells(editor, commandCell);
+    const result = await this.cellLanguageProvider.setLanguage(
+      cells.map(cell => ({
+        index: cell.index,
+        isCode: cell.kind === vscode.NotebookCellKind.Code,
+        document: cell.document,
+      })),
+      defaultLanguage
+    );
+    this.finishLanguageChange(defaultLanguage, result);
+  }
+
+  private async tagSelectedCells(commandCell?: vscode.NotebookCell): Promise<void> {
+    const editor = activeJupyterNotebookEditor('tagging a q cell');
+    if (!editor) {
+      return;
+    }
+    const cells = selectedCells(editor, commandCell);
+    const languageResult = await this.cellLanguageProvider.setLanguage(
+      cells.map(cell => ({
+        index: cell.index,
+        isCode: cell.kind === vscode.NotebookCellKind.Code,
+        document: cell.document,
+      })),
+      'q'
+    );
+    const prepared = await this.ensurePythonKernelMarkers(
+      editor,
+      languageResult.successes.map(success => success.index)
+    );
+    this.updateContexts();
+
+    if (languageResult.codeCells === 0) {
+      void vscode.window.showWarningMessage('Select at least one notebook code cell to tag as q.');
+      return;
+    }
+    if (!prepared.applied) {
+      void vscode.window.showErrorMessage(
+        'VS Code set the q language where possible, but could not add the %%q marker and KX metadata.'
+      );
+      return;
+    }
+    if (prepared.cells === 0) {
+      void vscode.window.showWarningMessage(
+        `No cells were tagged as q; ${languageResult.failures.length} language change${languageResult.failures.length === 1 ? '' : 's'} failed.`
+      );
+      return;
+    }
+    const tagged = prepared.cells;
+    const markerSummary = prepared.insertedMarkers === 0
+      ? 'Existing %%q marker(s) preserved.'
+      : `Added ${prepared.insertedMarkers} durable %%q marker${prepared.insertedMarkers === 1 ? '' : 's'}.`;
+    const failureSummary = languageResult.failures.length === 0
+      ? ''
+      : ` ${languageResult.failures.length} language change${languageResult.failures.length === 1 ? '' : 's'} failed.`;
+    void vscode.window.showInformationMessage(
+      `Tagged ${tagged} notebook code cell${tagged === 1 ? '' : 's'} as q. ` +
+      `${markerSummary} q selects highlighting; %%q is the configured Python-kernel evaluator convention. ` +
+      `The active controller must support q, or restore the notebook language before Run.${failureSummary}`
+    );
+  }
+
+  private async prepareSelectedQCells(commandCell?: vscode.NotebookCell): Promise<void> {
+    const editor = activeJupyterNotebookEditor('preparing a q cell for the Python kernel');
+    if (!editor) {
+      return;
+    }
+    const cells = selectedCells(editor, commandCell).filter(cell =>
+      cell.kind === vscode.NotebookCellKind.Code && cell.document.languageId === 'q'
+    );
+    if (cells.length === 0) {
+      void vscode.window.showWarningMessage(
+        'Select at least one q-language notebook code cell to prepare for the active Python kernel.'
+      );
+      return;
+    }
+    const prepared = await this.ensurePythonKernelMarkers(editor, cells.map(cell => cell.index));
+    this.updateContexts();
+    if (!prepared.applied) {
+      void vscode.window.showErrorMessage(
+        'VS Code could not add the %%q marker and KX metadata to the selected q cell(s).'
+      );
+      return;
+    }
+    void vscode.window.showInformationMessage(
+      prepared.insertedMarkers === 0
+        ? `The selected q cell${prepared.cells === 1 ? '' : 's'} already had a leading %%q marker. ` +
+          'Restore the notebook language before Run if the active Python controller does not support q.'
+        : `Added a leading %%q marker to ${prepared.cells} q cell${prepared.cells === 1 ? '' : 's'}. ` +
+          'The current Python controller does not advertise q; restore the notebook language before Run while keeping the marker.'
+    );
+  }
+
+  private async ensurePythonKernelMarkers(
+    editor: vscode.NotebookEditor,
+    indexes: readonly number[]
+  ): Promise<{ applied: boolean; cells: number; insertedMarkers: number }> {
     const settings = notebookSettings();
     const edit = new vscode.WorkspaceEdit();
     const notebookEdits: vscode.NotebookEdit[] = [];
+    let cells = 0;
     let insertedMarkers = 0;
-    for (const index of indexes) {
+    for (const index of [...new Set(indexes)].sort((left, right) => left - right)) {
+      if (index < 0 || index >= editor.notebook.cellCount) {
+        continue;
+      }
       const cell = editor.notebook.cellAt(index);
-      if (!hasNotebookQMarker(cell.document.getText())) {
+      if (cell.kind !== vscode.NotebookCellKind.Code || cell.document.languageId !== 'q') {
+        continue;
+      }
+      cells += 1;
+      const insertion = notebookQMarkerInsertion(cell.document.getText(), settings);
+      if (insertion) {
         edit.insert(
           cell.document.uri,
-          new vscode.Position(0, 0),
-          `${notebookQMagicLine(settings)}\n`
+          new vscode.Position(0, insertion.character),
+          insertion.text
         );
         insertedMarkers += 1;
       }
-      notebookEdits.push(vscode.NotebookEdit.updateCellMetadata(index, {
-        ...cell.metadata,
-        [KX_NOTEBOOK_METADATA_KEY]: {
-          version: KX_NOTEBOOK_METADATA_VERSION,
-          language: 'q',
-          marker: '%%q',
-          rowLimit: settings.rowLimit,
-          byteLimit: settings.byteLimit,
-        },
-      }));
+      notebookEdits.push(vscode.NotebookEdit.updateCellMetadata(
+        index,
+        preparedNotebookQCellMetadata(cell.metadata, settings)
+      ));
+    }
+    if (cells === 0) {
+      return { applied: true, cells: 0, insertedMarkers: 0 };
     }
     edit.set(editor.notebook.uri, notebookEdits);
-    const applied = await vscode.workspace.applyEdit(edit);
-    if (!applied) {
-      vscode.window.showErrorMessage('VS Code could not tag the selected notebook cell(s) as q.');
+    return {
+      applied: await vscode.workspace.applyEdit(edit),
+      cells,
+      insertedMarkers,
+    };
+  }
+
+  private finishLanguageChange(
+    languageId: string,
+    result: NotebookLanguageResult<vscode.TextDocument>
+  ): void {
+    this.updateContexts();
+    if (result.codeCells === 0) {
+      void vscode.window.showWarningMessage(
+        'No notebook code cells were selected. Markdown cells were not changed.'
+      );
       return;
     }
-    this.updateContexts();
-    const markerSummary = insertedMarkers === 0 ? 'Metadata refreshed.' : 'Added a durable %%q marker.';
-    vscode.window.showInformationMessage(
-      `Tagged ${indexes.length} notebook code cell${indexes.length === 1 ? '' : 's'} as q. ${markerSummary}`
+    const succeeded = result.changed + result.unchanged;
+    const skipped = result.skippedNonCode > 0
+      ? ` Skipped ${result.skippedNonCode} Markdown cell${result.skippedNonCode === 1 ? '' : 's'}.`
+      : '';
+    if (result.failures.length > 0) {
+      void vscode.window.showWarningMessage(
+        `Set ${succeeded} of ${result.codeCells} selected code cells to ${languageId} ` +
+        `(${result.changed} changed, ${result.unchanged} already ${languageId}); ` +
+        `${result.failures.length} failed.${skipped}`
+      );
+      return;
+    }
+    void vscode.window.showInformationMessage(
+      `Set ${succeeded} notebook code cell${succeeded === 1 ? '' : 's'} to ${languageId} ` +
+      `(${result.changed} changed, ${result.unchanged} already ${languageId}).${skipped}`
     );
   }
 
@@ -139,9 +337,20 @@ export class NotebookIntegration implements vscode.Disposable {
     const cell = selectedCell(editor);
     const payload = cell ? firstPortableOutput(cell) : undefined;
     if (!payload) {
-      vscode.window.showWarningMessage(
-        'The selected cell has no valid saved KX preview. Run a %%q cell through kx_notebook first.'
-      );
+      if (cell && isQCell(cell) && !hasNotebookQMarker(cell.document.getText())) {
+        const prepare = 'Prepare this q cell for the active Python kernel';
+        const choice = await vscode.window.showInformationMessage(
+          'This q-language cell has highlighting but no leading %%q marker for the configured Python-kernel evaluator.',
+          prepare
+        );
+        if (choice === prepare) {
+          await this.prepareSelectedQCells(cell);
+        }
+      } else {
+        void vscode.window.showWarningMessage(
+          'The selected cell has no valid saved KX preview. Run a prepared %%q cell through kx_notebook first.'
+        );
+      }
       return;
     }
     this.showPreview(payload);
@@ -168,18 +377,56 @@ export class NotebookIntegration implements vscode.Disposable {
   }
 
   private updateContexts(): void {
-    const cell = selectedCell(vscode.window.activeNotebookEditor);
+    const editor = vscode.window.activeNotebookEditor;
+    const cell = selectedCell(editor);
+    const qCell = !!cell && isQCell(cell);
     void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_CONTEXT, !!cell && isQCell(cell));
+    void vscode.commands.executeCommand(
+      'setContext',
+      NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT,
+      qCell && !hasNotebookQMarker(cell!.document.getText())
+    );
+    void vscode.commands.executeCommand(
+      'setContext',
+      NOTEBOOK_DEFAULT_LANGUAGE_CONTEXT,
+      !!editor && isJupyterNotebook(editor.notebook) &&
+        jupyterNotebookDefaultLanguageId(editor.notebook.metadata) !== undefined
+    );
     void vscode.commands.executeCommand(
       'setContext',
       NOTEBOOK_RESULT_CONTEXT,
       !!cell && firstPortableOutput(cell) !== undefined
     );
+    this.statusBarChanged.fire();
+  }
+
+  private kernelPreparationStatusBarItem(
+    cell: vscode.NotebookCell
+  ): vscode.NotebookCellStatusBarItem | undefined {
+    if (!isQCell(cell) || hasNotebookQMarker(cell.document.getText())) {
+      return undefined;
+    }
+    const item = new vscode.NotebookCellStatusBarItem(
+      '$(lightbulb) Prepare for Python kernel',
+      vscode.NotebookCellStatusBarAlignment.Right
+    );
+    item.command = {
+      command: PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND,
+      title: 'Prepare this q cell for the active Python kernel',
+      arguments: [cell],
+    };
+    item.tooltip =
+      'Add a leading %%q marker for the configured kx_notebook evaluator. The current Python controller may require restoring the notebook language before Run; no q controller or connection is created.';
+    item.accessibilityInformation = {
+      label: 'Prepare this q cell for the active Python kernel',
+    };
+    item.priority = 100;
+    return item;
   }
 }
 
 export function isQCell(cell: Pick<vscode.NotebookCell, 'kind' | 'metadata' | 'document'>): boolean {
-  return cell.kind === vscode.NotebookCellKind.Code && hasNotebookQMarker(cell.document.getText());
+  return cell.kind === vscode.NotebookCellKind.Code && cell.document.languageId === 'q';
 }
 
 export function notebookSettings(): NotebookSettings {
@@ -199,18 +446,30 @@ function selectedCell(editor: vscode.NotebookEditor | undefined): vscode.Noteboo
   return index >= 0 && index < editor.notebook.cellCount ? editor.notebook.cellAt(index) : undefined;
 }
 
-function selectedCellIndexes(editor: vscode.NotebookEditor): number[] {
-  const indexes = new Set<number>();
-  editor.selections.forEach(range => {
-    const end = range.end > range.start ? range.end : range.start + 1;
-    for (let index = range.start; index < end && index < editor.notebook.cellCount; index++) {
-      indexes.add(index);
-    }
-  });
-  if (indexes.size === 0 && editor.notebook.cellCount > 0) {
-    indexes.add(0);
+function selectedCells(
+  editor: vscode.NotebookEditor,
+  commandCell?: vscode.NotebookCell
+): vscode.NotebookCell[] {
+  let indexes = selectedNotebookCellIndexes(editor.notebook.cellCount, editor.selections);
+  if (commandCell?.notebook === editor.notebook && !indexes.includes(commandCell.index)) {
+    indexes = [commandCell.index];
   }
-  return [...indexes].sort((left, right) => left - right);
+  return indexes.map(index => editor.notebook.cellAt(index));
+}
+
+function activeJupyterNotebookEditor(action: string): vscode.NotebookEditor | undefined {
+  const editor = vscode.window.activeNotebookEditor;
+  if (!editor || !isJupyterNotebook(editor.notebook)) {
+    void vscode.window.showWarningMessage(
+      `Open a Jupyter .ipynb notebook before ${action}.`
+    );
+    return undefined;
+  }
+  return editor;
+}
+
+function isJupyterNotebook(notebook: Pick<vscode.NotebookDocument, 'notebookType'>): boolean {
+  return notebook.notebookType === 'jupyter-notebook';
 }
 
 function firstPortableOutput(cell: vscode.NotebookCell): PortableKxResult | undefined {

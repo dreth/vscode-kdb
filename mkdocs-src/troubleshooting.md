@@ -38,11 +38,11 @@ The importer recognizes only normalized `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, an
 
 The review keeps recognized but unsupported candidates visible with a safe reason. Correct malformed source fields or create a KX profile manually when the legacy name, server, port, namespace, username, password type, or timeout cannot pass standalone validation.
 
-**Not importable: requires SQLTools SSH tunnelling** means the source has `ssh: "Enabled"`. KX 0.2.1 supports direct q IPC only and will not copy `sshOptions`, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.
+**Not importable: requires SQLTools SSH tunnelling** means the source has `ssh: "Enabled"`. KX 0.2.2 supports direct q IPC only and will not copy `sshOptions`, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.
 
 ## An imported connection was skipped or renamed
 
-An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose **Skip (recommended)** to preserve it, or **Import as new name** to create a separate validated profile. There is no Replace action in 0.2.1. KX checks again before writing and counts a newly conflicting candidate as skipped.
+An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose **Skip (recommended)** to preserve it, or **Import as new name** to create a separate validated profile. There is no Replace action in 0.2.2. KX checks again before writing and counts a newly conflicting candidate as skipped.
 
 The final message reports imported, skipped, unsupported, and failed counts. Choose **Review Imported Connection** to inspect/test the saved direct profile. The SQLTools source remains unchanged and is not synchronized.
 
@@ -145,13 +145,23 @@ configure_evaluator(lambda source: my_existing_q_session(source))
 
 The helper deliberately has no implicit q connection. If no callback is configured, it raises an actionable error instead of borrowing the extension's active connection. If using the optional PyKX adapter, install/configure/license PyKX separately and explicitly call `kx_notebook.pykx.configure_pykx()`.
 
+## q is missing from the standard cell-language picker
+
+The standard Jupyter cell-language picker is filtered by the selected controller/kernel. VS Code exposes no supported manifest field for advertising q specifically into that list. Use the q action in the code-cell toolbar, the notebook cell context menu, or **KX: Set Notebook Cell Language to q** in the Command Palette.
+
+The KX action uses VS Code's supported document-language API. Successful code cells have actual `TextDocument.languageId === "q"`; when saved as a non-default language, the built-in serializer records raw `metadata.vscode.languageId: "q"`. Markdown is skipped. A controller can still normalize that field when its kernel is selected.
+
 ## Tagging a q cell did not execute it
 
-That is expected. **KX: Tag Notebook Cell as q** inserts or preserves the durable `%%q --max-rows ... --max-bytes ...` marker and refreshes `vscode-kdb` namespaced cell metadata. Run the cell through the notebook's normal Python/IPython execution action. The extension does not contribute a controller or intercept Jupyter keybindings.
+That is expected. **KX: Tag Notebook Cell as q** sets actual q language mode, inserts or preserves the durable `%%q --max-rows ... --max-bytes ...` marker, and merges `vscode-kdb` namespaced cell metadata. It does not execute.
+
+The normal Python Jupyter controller does not advertise q and will not Run a q-language cell. Keep the marker, use **KX: Restore Notebook Cell Language** to return selected code cells to the notebook default/Python language, then use the notebook's normal Run action. IPython invokes the registered `%%q` helper. Kernel selection may perform the language normalization automatically.
+
+If a q-language cell has no marker, use its **Prepare for Python kernel** status action first. KX does not contribute a controller, intercept Jupyter keybindings/Run, or send the notebook cell through its direct q IPC connection.
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.1 `kx_notebook` helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.2 `kx_notebook` helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
 The escaped `text/html` and `text/plain` fallbacks remain useful in viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
 
@@ -173,9 +183,9 @@ Chart type/column/point-cap changes and zoom made only in the VS Code renderer a
 
 ## Notebook q used a different session than the `.q` editor
 
-Notebook execution and `.q` editor execution are deliberately separate in 0.2.0. The helper calls only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not share the extension's direct IPC session, and the extension does not open a second connection for notebook cells.
+Notebook execution and `.q` editor execution remain deliberately separate in 0.2.2. Changing a notebook cell to q affects its document language/highlighting, not its evaluator. The helper calls only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not share the extension's direct IPC session, and the extension does not open a second connection for notebook cells.
 
-Extension-driven same-session routing would require supported execution ownership that the normal Jupyter controller does not expose here. It remains disabled rather than being approximated through unsupported interception.
+Extension-driven same-session routing would require supported execution ownership that the normal Jupyter controller does not expose here. It remains disabled rather than being approximated through unsupported interception. A future persistent q evaluator must bridge the active Python kernel's q session, not create a hidden separate q connection.
 
 ## Query History is missing or incomplete
 
@@ -193,7 +203,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook-contract/renderer-message, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, and source guards. Configuration inspection is faithfully unit-tested without launching a VS Code Extension Host. The Python helper has a separate isolated `uv`/`unittest` suite; neither suite claims visual or real Extension Host end-to-end evidence.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook cell selection/language/default/marker/metadata and renderer-message contracts, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, grammar, source, and manifest guards. Configuration and document-language behavior are tested with pure models and faithful fakes without launching a VS Code Extension Host. The Python helper has a separate isolated `uv`/`unittest` suite; neither suite claims visual or real Extension Host end-to-end evidence.
 
 ## Generated docs drift
 

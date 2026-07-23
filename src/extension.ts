@@ -8,7 +8,10 @@ import { KX_OUTPUT_CHANNEL_NAME, KxDiagnostics } from './diagnostics';
 import { FeatureControls } from './feature-controls';
 import { emptyColumnarPanelResult } from './kx-results';
 import { KxPanelResult, KxResultsPanel, KxResultsPanelRunMode } from './kx-results-panel';
-import { NotebookIntegration } from './notebook-integration';
+import {
+  NotebookIntegration,
+  PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND,
+} from './notebook-integration';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 import {
@@ -201,6 +204,20 @@ function qEditor(): vscode.TextEditor | undefined {
   const editor = vscode.window.activeTextEditor;
   if (!editor) {
     vscode.window.showWarningMessage('Open a q file before running q code.');
+    return undefined;
+  }
+  if (editor.document.uri.scheme === 'vscode-notebook-cell') {
+    const prepare = 'Prepare this q cell for the active Python kernel';
+    void vscode.window.showInformationMessage(
+      'KX editor commands do not execute notebook cells through a separate q IPC connection. Prepare adds %%q; restore the notebook default language before normal Run with the current Python controller.',
+      prepare
+    ).then(choice => choice === prepare
+      ? vscode.commands.executeCommand(PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND)
+      : undefined
+    ).then(undefined, error => {
+      const detail = error instanceof Error ? error.message : String(error);
+      void vscode.window.showErrorMessage(`KX notebook preparation failed: ${detail}`);
+    });
     return undefined;
   }
   const isQ = editor.document.languageId === 'q' || editor.document.uri.path.toLocaleLowerCase().endsWith('.q');
@@ -521,7 +538,10 @@ function sameExecutionTarget(left: KxConnection, right: KxConnection): boolean {
 }
 
 class QRunCodeLensProvider implements vscode.CodeLensProvider {
-  public provideCodeLenses(): vscode.CodeLens[] {
+  public provideCodeLenses(document: vscode.TextDocument): vscode.CodeLens[] {
+    if (document.uri.scheme === 'vscode-notebook-cell') {
+      return [];
+    }
     const top = new vscode.Range(0, 0, 0, 0);
     return [new vscode.CodeLens(top, {
       title: '$(play) Run q Script',

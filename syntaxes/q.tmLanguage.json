@@ -3,6 +3,7 @@
   "name": "q",
   "scopeName": "source.q",
   "patterns": [
+    { "include": "#notebookMagic" },
     { "include": "#comments" },
     { "include": "#systemCommands" },
     { "include": "#strings" },
@@ -15,6 +16,14 @@
     { "include": "#operators" }
   ],
   "repository": {
+    "notebookMagic": {
+      "patterns": [
+        {
+          "name": "meta.preprocessor.notebook.magic.q",
+          "match": "\\A\\uFEFF?%%q(?:[ \\t]+.*)?$"
+        }
+      ]
+    },
     "comments": {
       "patterns": [
         {
