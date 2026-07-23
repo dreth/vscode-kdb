@@ -4,6 +4,18 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.2 - 2026-07-23
+
+- Added **KX: Set Notebook Cell Language to q** for Jupyter/IPython code cells. The cell-toolbar, notebook-cell context, and Command Palette action uses VS Code's supported document-language API across every selected code cell, reports changed/already-q/failed counts, skips Markdown, and provides actual q TextMate highlighting.
+- Preserved non-default q cell language through VS Code's built-in `.ipynb` serializer as raw `metadata.vscode.languageId: "q"` when the active controller permits it. No unsupported notebook-scoping language manifest field was invented; the generic language picker remains kernel/controller-filtered, so the KX action is the reliable route.
+- Added **KX: Restore Notebook Cell Language**, which safely resolves the notebook default from Jupyter `language_info` or `kernelspec` metadata and restores selected code cells without changing Markdown. This supports the normal Python Jupyter controller, which does not advertise or Run q-language cells and may normalize them to Python when a kernel is selected.
+- Improved **KX: Tag Notebook Cell as q** to set actual q language mode first, then preserve or insert one leading `%%q` marker and merge nested KX limit metadata without deleting code or unrelated metadata. q selects highlighting; `%%q` remains the configured Python-kernel evaluator convention.
+- Added the contextual **Prepare this q cell for the active Python kernel** action and cell status item for q-language cells missing `%%q`. After preparation, restore the notebook default/Python language before normal Run when using the standard Python controller; the extension does not intercept Jupyter Run.
+- Recognized a top-line `%%q` as a notebook directive in the q TextMate grammar while retaining normal q highlighting below it. Standalone q editor keybindings and code lenses are excluded from notebook cell documents.
+- Kept the execution boundary explicit: no NotebookController, private Jupyter interception, hidden second q connection, or direct IPC invocation was added for notebook cells. A future persistent q evaluator must bridge the active Python kernel's q session through supported same-kernel ownership.
+- Added pure language-provider/selection/default-language and marker/metadata tests plus faithful fake-provider, grammar, source, and manifest guards for multiple selection, idempotency, Markdown rejection, partial failure, menu discovery, serializer-owned metadata preservation, and the no-direct-IPC boundary. No visual or real VS Code Extension Host E2E is claimed.
+- Packaged for direct VSIX testing only. Marketplace publication remains deferred.
+
 ## 0.2.1 - 2026-07-23
 
 - Added **KX: Import SQLTools KDB Connections**, an explicit one-shot migration bridge that discovers legacy KDB profiles already present in VS Code's `sqltools.connections` setting. Discovery covers user, workspace, and workspace-folder scopes, deduplicates equivalent candidates while retaining source labels, and does not require SQLTools to be installed or activated.
@@ -82,4 +94,4 @@ All notable changes to KX for VS Code are documented here.
 - Added VSIX packaging and release-artifact exclusion rules.
 - Shipped with no SQLTools dependency, API path, command ID, UI integration, or `.session.sql` behavior.
 
-Extension-owned `.q` execution remains direct IPC only. SSH, TLS termination, gateway/broker setup, and remote administration are not included. The notebook helper/renderer path introduced in 0.2.0 and retained in 0.2.1 does not add an extension-owned notebook q connection or execution controller.
+Extension-owned `.q` execution remains direct IPC only. SSH, TLS termination, gateway/broker setup, and remote administration are not included. The notebook helper/renderer path introduced in 0.2.0 and the actual cell-language UX added in 0.2.2 do not add an extension-owned notebook q connection or execution controller.

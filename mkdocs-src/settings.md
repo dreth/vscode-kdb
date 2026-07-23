@@ -4,7 +4,13 @@ Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The ma
 
 Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
 
-## Notebook results
+## Notebook language and results
+
+Notebook cell language is not a `vscode-kdb` setting. In a focused Jupyter `.ipynb`, use the q cell-toolbar action, notebook cell context menu, or **KX: Set Notebook Cell Language to q**. It applies VS Code's supported document-language setter to every selected code cell, skips Markdown, and reports changed/already-q/failure counts. Successful cells have actual `TextDocument.languageId === "q"` and q highlighting.
+
+VS Code's built-in Jupyter serializer stores a non-default q cell as raw `metadata.vscode.languageId: "q"`. The generic notebook language picker remains filtered by the selected controller/kernel; there is no supported manifest contribution for changing that list, so the KX action is the reliable route.
+
+**KX: Restore Notebook Cell Language** resolves the notebook default from `language_info.name` or `kernelspec.language` and applies it only to selected code cells. For an ordinary IPython notebook that is Python. The command is shown only when a default is available and refuses to apply an unregistered language. It preserves cell source, marker, other metadata, and output.
 
 | Setting | Default | Values / range | Behavior and tradeoff |
 | --- | --- | --- | --- |
@@ -12,7 +18,11 @@ Connection records are application-scoped user metadata. Other settings can be s
 | `vscode-kdb.notebook.maxOutputRows` | `1000` | Integer `1`-`10000` | Maximum preview rows written into newly tagged `%%q` markers. The helper validates the explicit marker value. |
 | `vscode-kdb.notebook.maxOutputBytes` | `1000000` | Integer `16384`-`10000000` | Maximum combined portable MIME body bytes requested by newly tagged `%%q` markers. The helper budgets rich JSON plus static HTML/plain fallbacks from the same preview. |
 
-The tag command persists the current row/byte values in the cell's durable marker and `vscode-kdb` namespaced metadata. These are output-serialization limits, not server-side q limits. The helper/payload excludes credentials, passwords, tokens, IPC handles, and unbounded data. Full omitted data remains only in the originating evaluator/session while it is retained there.
+**KX: Tag Notebook Cell as q** first sets actual q language mode, then persists the current row/byte values in one durable `%%q` marker and nested `vscode-kdb` metadata. It preserves an existing marker, cell code, and unrelated metadata. A q-language cell without the marker exposes **Prepare this q cell for the active Python kernel**, which performs only the marker/metadata preparation.
+
+These are output-serialization limits, not server-side q limits. The helper/payload excludes credentials, passwords, tokens, IPC handles, and unbounded data. Full omitted data remains only in the originating evaluator/session while it is retained there.
+
+A normal Python Jupyter controller does not advertise or Run q-language cells. Keep `%%q`, restore the notebook default/Python language, and then use normal Run so IPython invokes the configured helper magic. The extension does not intercept Run, contribute a controller, or open a notebook q connection.
 
 `inline` is the default notebook experience. `panel` opens the saved bounded preview in the existing KX Results panel instead of displaying the inline table/chart. `both` keeps the inline renderer and its explicit saved-preview panel handoff. Renderer-only chart control changes are session state; only the chart specification emitted in the MIME payload persists.
 

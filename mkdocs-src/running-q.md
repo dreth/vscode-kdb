@@ -18,10 +18,13 @@ These keybindings are gated to normal q text editors. KX for VS Code does not bi
 
 | Command | Behavior |
 | --- | --- |
-| **KX: Tag Notebook Cell as q** | Adds a durable `%%q --max-rows ... --max-bytes ...` marker when absent and refreshes versioned `vscode-kdb` cell metadata. It does not execute the cell. |
+| **KX: Set Notebook Cell Language to q** | Sets actual `TextDocument.languageId` to q through VS Code's supported API for every selected code cell, skips Markdown, and reports changed/already-q/failure counts. Available from the q cell toolbar, notebook cell context, and Command Palette. |
+| **KX: Restore Notebook Cell Language** | Restores selected code cells to the registered notebook default resolved from Jupyter metadata. It preserves source, `%%q`, KX metadata, and output. |
+| **KX: Tag Notebook Cell as q** | Sets actual q language first, then preserves/inserts one durable `%%q --max-rows ... --max-bytes ...` marker and merges versioned `vscode-kdb` metadata without wiping unrelated metadata. It does not execute the cell. |
+| **Prepare this q cell for the active Python kernel** | Contextual action for a q-language cell without `%%q`; adds only the marker/KX metadata. It does not restore or execute the cell. |
 | **KX: Open Saved Notebook Preview in Results Panel** | Opens only a valid bounded KX MIME preview already saved on the selected cell. It never reruns q or recovers omitted rows. |
 
-Run tagged cells through the notebook's normal Python/IPython controller after installing and configuring `kx_notebook`. The extension does not contribute a controller, monkey-patch Jupyter, or route notebook selections through its direct IPC connection.
+The normal Python/IPython Jupyter controller does not advertise q and will not Run a q-language cell. Keep or prepare `%%q`, restore the notebook default/Python language, then use normal Run after installing and configuring `kx_notebook`. Kernel selection may normalize the language automatically. The extension does not contribute a controller, monkey-patch Jupyter, intercept Run, or route notebook selections through its direct IPC connection.
 
 ## Exact execution semantics
 
@@ -37,9 +40,9 @@ Whitespace, q indentation, and script termination rules still belong to q. Selec
 
 ## Syntax scope
 
-The extension owns its first-party TextMate q grammar. It was audited for 0.1.4 and left unchanged because no reliable token-coverage defect was found. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
+The extension owns its first-party TextMate q grammar. Version 0.2.2 recognizes a top-line `%%q` as a notebook directive while retaining the ordinary q rules and highlighting below it. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
 
-This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. The notebook contribution is a bounded result renderer/helper, not a NotebookController.
+This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. Notebook cell language affects highlighting only. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents, and the notebook contribution is still not a NotebookController.
 
 ## Active connection and namespace
 

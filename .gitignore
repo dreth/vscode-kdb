@@ -85,6 +85,7 @@ out
 /renderer/kx-notebook-renderer.js
 __pycache__/
 *.py[cod]
+*.egg-info/
 .venv/
 
 # Nuxt.js build / generate output

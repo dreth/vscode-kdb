@@ -428,6 +428,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#set-the-actual-q-cell-language" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Set the actual q cell language
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#install-the-companion-helper" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -467,10 +478,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#tag-and-run-a-q-cell" class="md-nav__link">
+  <a href="#tag-prepare-and-run-a-q-cell" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Tag and run a q cell
+        Tag, prepare, and run a q cell
 
     </span>
   </a>
@@ -827,6 +838,17 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
+  <a href="#set-the-actual-q-cell-language" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Set the actual q cell language
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#install-the-companion-helper" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -866,10 +888,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#tag-and-run-a-q-cell" class="md-nav__link">
+  <a href="#tag-prepare-and-run-a-q-cell" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Tag and run a q cell
+        Tag, prepare, and run a q cell
 
     </span>
   </a>
@@ -969,8 +991,28 @@
 
 
 <h1 id="jupyteripython-notebooks">Jupyter/IPython Notebooks</h1>
-<p>KX for VS Code 0.2.1 renders persistent, bounded KX/q results inside ordinary Jupyter/IPython <code>.ipynb</code> code-cell outputs. The notebook stays an ordinary notebook: Python cells use the normal selected Python kernel, Markdown cells use normal notebook Markdown, and q cells execute only through an explicitly configured IPython helper callback.</p>
+<p>KX for VS Code 0.2.2 gives ordinary Jupyter/IPython <code>.ipynb</code> code cells an actual q document language for syntax highlighting and renders persistent, bounded KX/q results in their outputs. The notebook stays ordinary: Markdown remains notebook Markdown, the selected controller remains in charge of execution, and q reaches the current Python kernel only through an explicitly configured IPython helper callback.</p>
 <p>The implementation does not contribute or intercept a Jupyter controller, patch Microsoft Jupyter, use private APIs, reinterpret <code>.q</code> documents as notebooks, or create a second direct q connection. Normal <code>.q</code> editor execution and the full KX Results panel remain unchanged.</p>
+<h2 id="set-the-actual-q-cell-language">Set the actual q cell language</h2>
+<p>Select one or more notebook cells, then use any of these equivalent surfaces:</p>
+<ul>
+<li>the q action in the code-cell toolbar;</li>
+<li>the notebook cell context menu; or</li>
+<li><strong>KX: Set Notebook Cell Language to q</strong> in the Command Palette.</li>
+</ul>
+<p>The command calls VS Code's supported <code>vscode.languages.setTextDocumentLanguage</code> API for every selected code cell. A successful cell has <code>TextDocument.languageId === "q"</code> and uses the extension's q TextMate grammar. Already-q cells are idempotent, Markdown cells are skipped, later cells are still attempted after a failure, and the confirmation reports changed, unchanged, skipped, and failed counts.</p>
+<p>When VS Code saves an <code>.ipynb</code>, its built-in Jupyter serializer persists a non-default cell language in the raw cell metadata:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;vscode&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;languageId&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;q&quot;</span>
+<span class="w">    </span><span class="p">}</span>
+<span class="w">  </span><span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>That <code>metadata.vscode.languageId</code> field belongs to the serializer; it is distinct from the extension's nested <code>vscode-kdb</code> marker metadata. A selected controller can still constrain or normalize languages. In particular, the normal Python Jupyter controller does not advertise <code>q</code>, will not Run a q-language cell, and may change it to Python when a kernel is selected.</p>
+<p>Jupyter's standard cell-language picker is filtered by the selected controller/kernel. VS Code exposes no supported <code>contributes.languages</code> field for advertising a language specifically to that picker, so KX does not add a fictional manifest switch. The KX toolbar/context/Command Palette action is the reliable q-selection route.</p>
+<p><strong>KX: Restore Notebook Cell Language</strong> changes all selected code cells to the registered default resolved from Jupyter <code>language_info.name</code>, falling back to <code>kernelspec.language</code>. For an ordinary IPython notebook this is <code>python</code>. It refuses to guess when the notebook has no usable registered default and never changes Markdown. Restoring the language does not delete cell source, <code>%%q</code>, KX metadata, or output.</p>
 <h2 id="install-the-companion-helper">Install the companion helper</h2>
 <p><code>python/kx_notebook</code> is a focused Python package that depends on IPython but bundles no q runtime, PyKX binary, credential, IPC connection, or remote bridge. Install it into the same Python environment selected as the notebook kernel. For source development with an isolated <code>uv</code> environment:</p>
 <div class="highlight"><pre><span></span><code>uv<span class="w"> </span>venv<span class="w"> </span>/tmp/vscode-kdb-kx-notebook
@@ -1006,24 +1048,35 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
 </code></pre></div>
 <p>The adapter uses that kernel's existing <code>pykx.q</code> object and takes a bounded prefix before converting a table-like value to Python. <code>kx_notebook</code> never installs PyKX and never shares the VS Code extension's direct q IPC connection.</p>
-<h2 id="tag-and-run-a-q-cell">Tag and run a q cell</h2>
-<p>Select one or more notebook code cells and use <strong>KX: Tag Notebook Cell as q</strong>. The command inserts a durable marker when one is absent:</p>
+<h2 id="tag-prepare-and-run-a-q-cell">Tag, prepare, and run a q cell</h2>
+<p>Select one or more notebook code cells and use <strong>KX: Tag Notebook Cell as q</strong>. For every successful code cell, the command first sets the actual document language to q, then inserts a durable marker when one is absent:</p>
 <div class="highlight"><pre><span></span><code><span class="o">%%</span><span class="n">q</span><span class="w"> </span><span class="o">--</span><span class="ow">max</span><span class="o">-</span><span class="n">rows</span><span class="w"> </span><span class="il">1000</span><span class="w"> </span><span class="o">--</span><span class="ow">max</span><span class="o">-</span><span class="n">bytes</span><span class="w"> </span><span class="il">1000000</span>
 <span class="ow">select</span><span class="w"> </span><span class="ow">from</span><span class="w"> </span><span class="n">trade</span><span class="w"> </span><span class="nb">where</span><span class="w"> </span><span class="n">date</span><span class="o">=.</span><span class="n">z.D</span>
 </code></pre></div>
-<p>It also writes namespaced cell metadata equivalent to:</p>
+<p>It also merges namespaced cell metadata equivalent to:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;vscode-kdb&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;language&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;q&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;marker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;%%q&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;rowLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;byteLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span>
+<span class="w">  </span><span class="nt">&quot;metadata&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">&quot;vscode-kdb&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">&quot;version&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;language&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;q&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;marker&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;%%q&quot;</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;rowLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">&quot;byteLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span>
+<span class="w">    </span><span class="p">}</span>
 <span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
-<p>The <code>%%q</code> marker is the durable portable convention; the metadata helps VS Code present q-specific actions. The implementation does not rely on a Python notebook controller preserving a <code>q</code> cell language ID.</p>
-<p>The command only tags cells. Run the cell with the notebook's normal execution action. IPython invokes the registered helper magic; ordinary Python cells are unaffected. KX for VS Code adds no notebook execution keybinding and does not steal <code>Ctrl+Enter</code> or <code>Ctrl+Shift+Enter</code>.</p>
+<p>An existing leading <code>%%q</code> marker is preserved without duplication. Tagging does not delete user code or replace unrelated top-level or nested cell metadata; existing unknown KX metadata fields are also retained. While the cell is non-default q, a saved raw <code>.ipynb</code> normally contains both serializer-owned <code>metadata.vscode.languageId: "q"</code> and the sibling <code>metadata.vscode-kdb</code> object shown above.</p>
+<p>The q language selects syntax highlighting. <code>%%q</code> is the durable portable convention that invokes the configured IPython evaluator. The q grammar scopes only a top-line <code>%%q</code> as a notebook directive and continues normal q highlighting below it.</p>
+<p>If a q-language cell has no leading marker, KX shows a contextual <strong>Prepare for Python kernel</strong> status item and exposes <strong>Prepare this q cell for the active Python kernel</strong> in the cell menu and Command Palette. The same action is offered when a preview action finds an unprepared q cell. It inserts the marker and merges KX metadata safely; it does not execute, restore the language, or create a connection.</p>
+<p>For the normal Python Jupyter controller, use this sequence:</p>
+<ol>
+<li>Set or tag the cell as q while editing so q highlighting is active.</li>
+<li>Keep or prepare the leading <code>%%q</code> marker.</li>
+<li>Run <strong>KX: Restore Notebook Cell Language</strong>; the cell becomes the notebook default/Python while the marker remains.</li>
+<li>Use the notebook's normal Run action. IPython recognizes <code>%%q</code> and invokes the configured helper callback.</li>
+</ol>
+<p>Selecting a Python kernel may perform step 3 automatically. Reapply q mode after execution when q highlighting is wanted again. KX for VS Code adds no notebook execution keybinding, does not steal <code>Ctrl+Enter</code> or <code>Ctrl+Shift+Enter</code>, and its standalone q editor commands/code lens are suppressed for notebook-cell documents.</p>
 <p>The marker may also accept a quoted safe label:</p>
 <div class="highlight"><pre><span></span><code><span class="o">%%</span><span class="n">q</span><span class="w"> </span><span class="o">--</span><span class="ow">max</span><span class="o">-</span><span class="n">rows</span><span class="w"> </span><span class="il">250</span><span class="w"> </span><span class="o">--</span><span class="ow">max</span><span class="o">-</span><span class="n">bytes</span><span class="w"> </span><span class="il">524288</span><span class="w"> </span><span class="o">--</span><span class="n">label</span><span class="w"> </span><span class="s2">&quot;trades preview&quot;</span>
 <span class="ow">select</span><span class="w"> </span><span class="ow">from</span><span class="w"> </span><span class="n">trade</span><span class="w"> </span><span class="nb">where</span><span class="w"> </span><span class="n">sym</span><span class="o">=</span><span class="ss">`AAPL</span>
@@ -1060,7 +1113,7 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 </tr>
 </tbody>
 </table>
-<p>The tag command writes the current defaults into new <code>%%q</code> markers. The helper enforces the explicit marker values and removes preview rows as needed to satisfy the byte budget. The output preserves schema, total row count where supplied by the evaluator, preview count, and truncation reasons.</p>
+<p>The tag and preparation commands write the current defaults into new <code>%%q</code> markers. The helper enforces the explicit marker values and removes preview rows as needed to satisfy the byte budget. The output preserves schema, total row count where supplied by the evaluator, preview count, and truncation reasons.</p>
 <p>Omitted data is not placed elsewhere in notebook metadata. It remains only in the originating evaluator/session while that system retains it. Saving, reopening, copying, exporting, or opening the saved preview in the KX panel cannot recover omitted rows.</p>
 <h2 id="inline-renderer">Inline renderer</h2>
 <p>The VS Code NotebookRenderer provides:</p>
@@ -1087,8 +1140,9 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 </ul>
 <p>The panel handoff is deliberately a saved-preview view. It does not find a live q result, share an IPC handle, rerun q, or recover omitted rows. <strong>KX: Open Saved Notebook Preview in Results Panel</strong> is enabled only when the selected cell contains a valid saved KX MIME output. A reopened notebook can render and hand off its saved preview without the originating session.</p>
 <h2 id="same-session-boundary">Same-session boundary</h2>
-<p>The conceptual source of a notebook result is the evaluator explicitly configured in that Python kernel. Version 0.2.1 does not have a supported way to route a normal Jupyter cell through the extension's existing direct q IPC session without intercepting the controller. Rather than create a misleading second connection, extension-driven notebook selection execution is disabled and deferred.</p>
-<p>Use the callback or optional PyKX adapter when the Python kernel already owns the intended q session. Use normal <code>.q</code> editor commands when the extension-owned direct IPC session and its live full-result KX panel are required.</p>
+<p>The conceptual source of a notebook result is the evaluator explicitly configured in that Python kernel. Version 0.2.2 changes cell language and prepares source through supported APIs, but it does not have supported ownership for rerouting normal Jupyter Run through the extension's existing direct q IPC session. Rather than create a misleading second connection, extension-driven notebook execution remains disabled.</p>
+<p>Use the callback or optional PyKX adapter when the Python kernel already owns the intended q session. A future persistent q NotebookController/evaluator must bridge that active Python kernel's q session through supported same-kernel ownership; it must not silently open a separate direct q connection. Use normal <code>.q</code> editor commands when the extension-owned direct IPC session and its live full-result KX panel are required.</p>
+<p>The selected-cell filtering, language-setter arguments/results, already-q behavior, Markdown rejection, partial failure, default resolution, marker/metadata preservation, grammar, menus, contexts, and no-direct-IPC boundary are covered by pure helpers, faithful fake providers, and source/manifest tests. There is no visual or real VS Code Extension Host E2E claim for this release.</p>
 
 
 

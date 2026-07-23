@@ -45,23 +45,23 @@ VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 
 Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default location.
 
-The 0.2.1 release uses the standalone parity self-tests above. Do not run the separate cross-extension gate when the pinned reference checkout must remain completely unmodified: that gate compiles both checkouts even though it guards tracked reference state.
+The 0.2.2 release uses the standalone parity self-tests above. Do not run the separate cross-extension gate when the pinned reference checkout must remain completely unmodified: that gate compiles both checkouts even though it guards tracked reference state.
 
-The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, notebook, complete functional, or visual parity evidence. Migration configuration inspection is covered with faithful fake providers because the maintained tests do not launch a real VS Code Extension Host.
+The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, notebook-language, complete functional, or visual parity evidence. Migration inspection and notebook cell-language mutation are covered by pure models, faithful fake providers/adapters, and source/manifest contracts because the maintained tests do not launch a real VS Code Extension Host.
 
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.2.1.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.2.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.1.vsix")
-with ZipFile("vscode-kdb-0.2.1-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.2.vsix")
+with ZipFile("vscode-kdb-0.2.2-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.1.vsix vscode-kdb-0.2.1-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.2.vsix vscode-kdb-0.2.2-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.

@@ -115,6 +115,17 @@ const {
   safeNotebookRowLimit,
 } = requireOut('notebook-settings');
 const {
+  NotebookCellLanguageProvider,
+  jupyterNotebookDefaultLanguageId,
+  selectedNotebookCellIndexes,
+} = requireOut('notebook-cell-language');
+const {
+  KX_NOTEBOOK_METADATA_KEY,
+  KX_NOTEBOOK_METADATA_VERSION,
+  notebookQMarkerInsertion,
+  preparedNotebookQCellMetadata,
+} = requireOut('notebook-cell-preparation');
+const {
   notebookRendererSettingsMessage,
   parseNotebookRendererMessage,
 } = requireOut('notebook-message');
@@ -170,6 +181,7 @@ const tests = [
   ['connection manager lifecycle races', testConnectionManagerLifecycle],
   ['chart zoom baseline and reset lifecycle', testChartZoomLifecycle],
   ['columnar result windows and exports', testColumnarResults],
+  ['actual notebook cell language provider and q preparation', testNotebookCellLanguage],
   ['portable notebook MIME contract and static fallbacks', testNotebookContract],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
@@ -4303,6 +4315,150 @@ async function testLocalDataServerConcurrency() {
   }
 }
 
+async function testNotebookCellLanguage() {
+  assert.deepStrictEqual(
+    selectedNotebookCellIndexes(6, [
+      { start: 1, end: 4 },
+      { start: 3, end: 6 },
+      { start: 1, end: 1 },
+    ]),
+    [1, 2, 3, 4, 5],
+    'all selected notebook ranges must be flattened, de-duplicated, and sorted'
+  );
+  assert.deepStrictEqual(selectedNotebookCellIndexes(3, []), []);
+
+  const python0 = { id: 'python-0', languageId: 'python' };
+  const q1 = { id: 'q-1', languageId: 'q' };
+  const markdown2 = { id: 'markdown-2', languageId: 'markdown' };
+  const failing3 = { id: 'failing-3', languageId: 'python' };
+  const python4 = { id: 'python-4', languageId: 'python' };
+  const setterCalls = [];
+  const provider = new NotebookCellLanguageProvider(async (document, languageId) => {
+    setterCalls.push([document, languageId]);
+    if (document === failing3) {
+      throw new Error('simulated language failure');
+    }
+    return { ...document, languageId };
+  });
+  const languageResult = await provider.setLanguage([
+    { index: 4, isCode: true, document: python4 },
+    { index: 0, isCode: true, document: python0 },
+    { index: 1, isCode: true, document: q1 },
+    { index: 2, isCode: false, document: markdown2 },
+    { index: 3, isCode: true, document: failing3 },
+    { index: 0, isCode: true, document: python0 },
+  ], 'q');
+  assert.deepStrictEqual(setterCalls, [
+    [python0, 'q'],
+    [failing3, 'q'],
+    [python4, 'q'],
+  ], 'the provider must call the actual language setter once per non-q code cell with q');
+  assert.strictEqual(languageResult.selected, 5);
+  assert.strictEqual(languageResult.codeCells, 4);
+  assert.strictEqual(languageResult.skippedNonCode, 1, 'Markdown must be rejected without mutation');
+  assert.strictEqual(languageResult.changed, 2);
+  assert.strictEqual(languageResult.unchanged, 1, 'an already-q cell must be idempotent');
+  assert.deepStrictEqual(languageResult.successes.map(item => [item.index, item.changed]), [
+    [0, true],
+    [1, false],
+    [4, true],
+  ]);
+  assert.deepStrictEqual(languageResult.failures, [
+    { index: 3, message: 'simulated language failure' },
+  ], 'one failure must not prevent later selected cells from changing');
+
+  let markdownSetterCalled = false;
+  const markdownOnly = new NotebookCellLanguageProvider(async document => {
+    markdownSetterCalled = true;
+    return document;
+  });
+  const markdownResult = await markdownOnly.setLanguage([
+    { index: 0, isCode: false, document: markdown2 },
+  ], 'q');
+  assert.strictEqual(markdownSetterCalled, false);
+  assert.strictEqual(markdownResult.codeCells, 0);
+  assert.strictEqual(markdownResult.skippedNonCode, 1);
+
+  const badSetter = new NotebookCellLanguageProvider(async document => document);
+  const wrongLanguage = await badSetter.setLanguage([
+    { index: 0, isCode: true, document: python0 },
+  ], 'q');
+  assert.strictEqual(wrongLanguage.changed, 0);
+  assert.match(wrongLanguage.failures[0].message, /returned language 'python'/);
+
+  assert.strictEqual(jupyterNotebookDefaultLanguageId({
+    metadata: {
+      language_info: { name: 'Python3' },
+      kernelspec: { language: 'julia' },
+    },
+  }), 'python');
+  assert.strictEqual(jupyterNotebookDefaultLanguageId({
+    metadata: { kernelspec: { language: 'bash' } },
+  }), 'shellscript');
+  assert.strictEqual(jupyterNotebookDefaultLanguageId({ metadata: {} }), undefined);
+
+  const settings = { rowLimit: 25, byteLimit: 20_000 };
+  const userSource = 'select from trade';
+  const markerInsertion = notebookQMarkerInsertion(userSource, settings);
+  assert.deepStrictEqual(markerInsertion, {
+    character: 0,
+    text: '%%q --max-rows 25 --max-bytes 20000\n',
+  });
+  assert.strictEqual(
+    userSource.slice(0, markerInsertion.character) +
+      markerInsertion.text +
+      userSource.slice(markerInsertion.character),
+    '%%q --max-rows 25 --max-bytes 20000\nselect from trade',
+    'marker preparation must only insert a prefix and retain all user q source'
+  );
+  assert.deepStrictEqual(notebookQMarkerInsertion('\uFEFFselect from trade', settings), {
+    character: 1,
+    text: '%%q --max-rows 25 --max-bytes 20000\n',
+  }, 'a UTF-8 BOM must stay at the beginning of the cell');
+  assert.strictEqual(
+    notebookQMarkerInsertion('%%q --max-rows 5\nselect from trade', settings),
+    undefined,
+    'an existing marker must be preserved without duplication'
+  );
+
+  const originalMetadata = {
+    id: 'cell-id',
+    execution_count: 7,
+    foreignTopLevel: { keep: true },
+    metadata: {
+      collapsed: true,
+      foreign: { keep: 'nested' },
+      vscode: { languageId: 'q', future: true },
+      [KX_NOTEBOOK_METADATA_KEY]: { futureKxField: 'keep', rowLimit: 1 },
+    },
+  };
+  const metadataSnapshot = cloneJson(originalMetadata);
+  const preparedMetadata = preparedNotebookQCellMetadata(originalMetadata, settings);
+  assert.deepStrictEqual(originalMetadata, metadataSnapshot, 'metadata input must not be mutated');
+  assert.strictEqual(preparedMetadata.id, 'cell-id');
+  assert.deepStrictEqual(preparedMetadata.foreignTopLevel, { keep: true });
+  assert.deepStrictEqual(preparedMetadata.metadata.foreign, { keep: 'nested' });
+  assert.deepStrictEqual(preparedMetadata.metadata.vscode, {
+    languageId: 'q',
+    future: true,
+  }, 'the ipynb serializer-owned vscode language metadata must be preserved');
+  assert.deepStrictEqual(preparedMetadata.metadata[KX_NOTEBOOK_METADATA_KEY], {
+    futureKxField: 'keep',
+    rowLimit: 25,
+    version: KX_NOTEBOOK_METADATA_VERSION,
+    language: 'q',
+    marker: '%%q',
+    byteLimit: 20_000,
+  });
+
+  const languageSource = fs.readFileSync(
+    path.join(ROOT, 'src', 'notebook-cell-language.ts'),
+    'utf8'
+  );
+  assert.ok(!/from ['"]vscode['"]|q-ipc|ConnectionManager|executeQText|createNotebookController/.test(languageSource),
+    'the notebook language provider must remain a pure setter boundary with no direct q IPC/controller path');
+}
+
 function testNotebookContract() {
   assert.strictEqual(KX_NOTEBOOK_MIME, 'application/vnd.kx.result+json');
   assert.strictEqual(safeNotebookPresentation(undefined), 'inline');
@@ -4451,10 +4607,15 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.1');
+  assert.strictEqual(manifest.version, '0.2.2');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.1');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.1');
+  assert.strictEqual(packageLock.version, '0.2.2');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.2');
+  const pythonNotebookPyproject = fs.readFileSync(
+    path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
+    'utf8'
+  );
+  assert.match(pythonNotebookPyproject, /^version = "0\.2\.2"$/m);
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -4489,7 +4650,10 @@ function testManifestAndSources() {
     'KX: Run Selection / Current Line',
     'KX: Run q Script',
     'KX: Run Selection in New Result',
+    'KX: Set Notebook Cell Language to q',
+    'KX: Restore Notebook Cell Language',
     'KX: Tag Notebook Cell as q',
+    'Prepare this q cell for the active Python kernel',
     'KX: Open Saved Notebook Preview in Results Panel',
   ].forEach(title => assert.ok(commandTitles.has(title), `missing command contribution: ${title}`));
 
@@ -4523,12 +4687,33 @@ function testManifestAndSources() {
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection / Current Line'], 'ctrl+enter', 'cmd+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run q Script'], 'ctrl+alt+enter', 'cmd+alt+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection in New Result'], 'ctrl+shift+enter', 'cmd+shift+enter');
-  assert.strictEqual(
-    keybindings.some(binding => /notebook/i.test(String(binding.when || '')) ||
-      binding.command === commandByTitle['KX: Tag Notebook Cell as q']),
-    false,
-    'notebook q support must not steal Jupyter execution keybindings'
-  );
+  keybindings.forEach(binding => {
+    assert.match(
+      String(binding.when || ''),
+      /!notebookEditorFocused/,
+      `${binding.command} must not steal a Jupyter notebook execution keybinding`
+    );
+  });
+  assert.strictEqual(keybindings.some(binding =>
+    [
+      'vscode-kdb.setNotebookCellLanguageQ',
+      'vscode-kdb.restoreNotebookCellLanguage',
+      'vscode-kdb.tagNotebookCellAsQ',
+      'vscode-kdb.prepareNotebookCellForPythonKernel',
+    ].includes(binding.command)
+  ), false, 'notebook language/preparation commands must remain keyboard-discoverable without stealing Run');
+  for (const commandId of [
+    commandByTitle['KX: Run Selection / Current Line'],
+    commandByTitle['KX: Run q Script'],
+    commandByTitle['KX: Run Selection in New Result'],
+  ]) {
+    assert.ok(
+      (((manifest.contributes || {}).menus || {}).commandPalette || []).some(item =>
+        item.command === commandId && item.when === "notebookType != 'jupyter-notebook'"
+      ),
+      `${commandId} must be hidden from Command Palette while a notebook editor is focused`
+    );
+  }
 
   const contributions = manifest.contributes || {};
   const notebookRenderers = contributions.notebookRenderer || [];
@@ -4541,6 +4726,31 @@ function testManifestAndSources() {
     requiresMessaging: 'optional',
   });
   assert.ok(fs.existsSync(path.join(ROOT, notebookRenderers[0].entrypoint)));
+  const qLanguage = (contributions.languages || []).find(language => language.id === 'q');
+  assert.ok(qLanguage, 'q must remain a registered VS Code language');
+  assert.deepStrictEqual(
+    Object.keys(qLanguage).sort(),
+    ['aliases', 'configuration', 'extensions', 'id'],
+    'do not invent a notebook-scoping language contribution unsupported by VS Code'
+  );
+  const qGrammarContribution = (contributions.grammars || [])
+    .find(grammar => grammar.language === 'q');
+  assert.ok(qGrammarContribution, 'q TextMate grammar contribution is missing');
+  const qGrammar = JSON.parse(fs.readFileSync(
+    path.join(ROOT, qGrammarContribution.path),
+    'utf8'
+  ));
+  assert.strictEqual(qGrammar.patterns[0].include, '#notebookMagic');
+  assert.strictEqual(
+    qGrammar.repository.notebookMagic.patterns[0].name,
+    'meta.preprocessor.notebook.magic.q'
+  );
+  assert.match(qGrammar.repository.notebookMagic.patterns[0].match, /^\\A/);
+  assert.ok(
+    qGrammar.patterns.some(pattern => pattern.include === '#keywords') &&
+      qGrammar.patterns.some(pattern => pattern.include === '#builtins'),
+    'the one-line %%q directive must retain normal q highlighting below it'
+  );
   const activityContainers = (((contributions.viewsContainers || {}).activitybar) || []);
   assert.ok(activityContainers.some(container => container.title === 'KX' && container.icon === 'icons/kx-activity.png'));
   const viewGroups = Object.values(contributions.views || {}).flat();
@@ -4556,6 +4766,20 @@ function testManifestAndSources() {
   assert.match(queryHistoryView.when, /config\.vscode-kdb\.features\.queryHistory/);
 
   const commandById = Object.fromEntries(commands.map(command => [command.command, command]));
+  assert.deepStrictEqual(commandById['vscode-kdb.setNotebookCellLanguageQ'], {
+    command: 'vscode-kdb.setNotebookCellLanguageQ',
+    title: 'KX: Set Notebook Cell Language to q',
+    icon: '$(symbol-keyword)',
+    enablement: "notebookType == 'jupyter-notebook'",
+  });
+  assert.strictEqual(
+    commandById['vscode-kdb.restoreNotebookCellLanguage'].title,
+    'KX: Restore Notebook Cell Language'
+  );
+  assert.strictEqual(
+    commandById['vscode-kdb.prepareNotebookCellForPythonKernel'].title,
+    'Prepare this q cell for the active Python kernel'
+  );
   const serverCommandIds = [
     'vscode-kdb.refreshServerExplorer',
     'vscode-kdb.previewServerObject',
@@ -4576,6 +4800,50 @@ function testManifestAndSources() {
   });
   const menus = contributions.menus || {};
   const allMenuItems = Object.values(menus).flat();
+  const notebookCellTitleItems = menus['notebook/cell/title'] || [];
+  const setQCellItems = notebookCellTitleItems.filter(item =>
+    item.command === 'vscode-kdb.setNotebookCellLanguageQ'
+  );
+  assert.strictEqual(
+    setQCellItems.length,
+    1,
+    'one notebook/cell/title entry must serve both the q toolbar button and cell context menu'
+  );
+  assert.match(setQCellItems[0].group, /^inline@/);
+  assert.match(setQCellItems[0].when, /notebookType == 'jupyter-notebook'/);
+  assert.match(setQCellItems[0].when, /notebookCellType == 'code'/);
+  for (const id of [
+    'vscode-kdb.restoreNotebookCellLanguage',
+    'vscode-kdb.tagNotebookCellAsQ',
+    'vscode-kdb.prepareNotebookCellForPythonKernel',
+  ]) {
+    const item = notebookCellTitleItems.find(candidate => candidate.command === id);
+    assert.ok(item, `${id} must be available from the contextual notebook cell title menu`);
+    assert.match(item.when, /notebookType == 'jupyter-notebook'/);
+    assert.match(item.when, /notebookCellType == 'code'/);
+  }
+  const notebookPaletteCommandIds = new Set((menus.commandPalette || [])
+    .filter(item => /NotebookCell|notebookCell/.test(String(item.command)))
+    .map(item => item.command));
+  for (const id of [
+    'vscode-kdb.setNotebookCellLanguageQ',
+    'vscode-kdb.restoreNotebookCellLanguage',
+    'vscode-kdb.tagNotebookCellAsQ',
+    'vscode-kdb.prepareNotebookCellForPythonKernel',
+  ]) {
+    assert.ok(notebookPaletteCommandIds.has(id), `${id} must be explicitly discoverable in Command Palette`);
+    const command = commandById[id];
+    const paletteItem = (menus.commandPalette || []).find(item => item.command === id);
+    assert.ok(!String(command.enablement || '').includes('notebookEditorFocused'),
+      `${id} enablement must survive Command Palette focus`);
+    assert.ok(!String(paletteItem.when || '').includes('notebookEditorFocused'),
+      `${id} palette visibility must survive Command Palette focus`);
+  }
+  assert.strictEqual(
+    Object.keys(menus).some(menuId => menuId === 'notebook/cell/context'),
+    false,
+    'VS Code exposes notebook/cell/title for both toolbar and cell context; do not invent a menu id'
+  );
   const importCommand = commandById['vscode-kdb.importSqlToolsConnections'];
   assert.ok(importCommand, 'SQLTools KDB migration command contribution is missing');
   assert.strictEqual(importCommand.title, 'KX: Import SQLTools KDB Connections');
@@ -4763,6 +5031,11 @@ function testManifestAndSources() {
   const sourceFiles = walkFiles(path.join(ROOT, 'src')).filter(file => file.endsWith('.ts'));
   assert.ok(sourceFiles.length >= 5, 'expected standalone TypeScript implementation files');
   const sources = sourceFiles.map(file => [file, fs.readFileSync(file, 'utf8')]);
+  assert.strictEqual(
+    sources.some(([, source]) => /createNotebookController|ms-toolsai\.jupyter|vscode-jupyter/.test(source)),
+    false,
+    '0.2.2 must not add a NotebookController or private Jupyter integration'
+  );
   sources.forEach(([file, source]) => {
     const label = path.relative(ROOT, file);
     if (path.basename(file) === 'connection-migration.ts') {
@@ -4823,6 +5096,7 @@ function testManifestAndSources() {
   const serverExplorerSource = readSource('server-explorer.ts');
   const historySource = readSource('query-history.ts');
   const historyModelSource = readSource('query-history-model.ts');
+  const notebookIntegrationSource = readSource('notebook-integration.ts');
   assert.match(featureControlsSource, /context\.workspaceState/);
   assert.ok(
     !/context\.globalState/.test(`${featureControlsSource}\n${historySource}`),
@@ -4870,6 +5144,28 @@ function testManifestAndSources() {
   assert.match(extensionSource, /historyKind: hasSelection \? 'selection' : 'line'/);
   assert.match(extensionSource, /historyKind: 'script'/);
   assert.match(extensionSource, /manager\.executeInConfiguredNamespace\(connection, text, onIssued\)/);
+  assert.match(extensionSource, /uri\.scheme === 'vscode-notebook-cell'/);
+  assert.match(
+    extensionSource,
+    /Prepare this q cell for the active Python kernel[\s\S]*?showInformationMessage\([\s\S]*?PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND/
+  );
+  assert.match(
+    extensionSource,
+    /provideCodeLenses\(document: vscode\.TextDocument\)[\s\S]*?document\.uri\.scheme === 'vscode-notebook-cell'[\s\S]*?return \[\]/
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /vscode\.languages\.setTextDocumentLanguage\(document, languageId\)/
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /registerNotebookCellStatusBarItemProvider\([\s\S]*?'jupyter-notebook'/
+  );
+  assert.match(notebookIntegrationSource, /cell\.document\.languageId === 'q'/);
+  assert.ok(
+    !/ConnectionManager|executeQText|createNotebookController|q-ipc/.test(notebookIntegrationSource),
+    'notebook language/preparation integration must not invoke direct q IPC or create a controller'
+  );
   assert.match(extensionSource, /KxResultsPanel\.configurationChanged\(event\)/);
   assert.match(resultsPanelSource, /event\.affectsConfiguration\('vscode-kdb\.results\.qText'\)/);
   assert.match(resultsPanelSource, /qTextRenderModel\(this\.result\.text, qTextRenderOptions\(settings\)\)/);

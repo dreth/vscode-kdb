@@ -78,7 +78,9 @@ configure_evaluator(lambda source: my_existing_q_session(source))
 %load_ext kx_notebook
 ```
 
-Use **KX: Tag Notebook Cell as q** to add the durable `%%q` marker and configured output limits. The extension does not install a notebook controller, intercept Microsoft Jupyter, or open a q connection for the helper. See [Jupyter/IPython Notebooks](notebooks.md).
+Use the q code-cell toolbar action or **KX: Set Notebook Cell Language to q** for actual q highlighting, then **KX: Tag Notebook Cell as q** to retain the durable `%%q` marker and configured output limits. The normal Python Jupyter controller does not advertise or Run q-language cells: keep the marker, use **KX: Restore Notebook Cell Language**, and then use normal Run so IPython invokes the configured magic. Selecting the Python kernel may perform that normalization itself.
+
+The extension does not install a NotebookController, intercept Microsoft Jupyter, or open a q connection for the helper. The generic language picker remains controller-filtered; use the KX toolbar/context/Command Palette action as the reliable q-language route. See [Jupyter/IPython Notebooks](notebooks.md).
 
 ## Verify a source checkout
 
@@ -99,4 +101,4 @@ When a local q executable is available:
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-The migration configuration-provider tests use faithful fakes for VS Code `inspect`/effective values because the maintained suite does not launch an Extension Host. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.
+The migration configuration-provider and notebook language-setter tests use pure helpers and faithful fakes for VS Code `inspect`/effective values and document-language results because the maintained suite does not launch an Extension Host. Source/manifest guards cover notebook menus, contexts, grammar, and the no-direct-IPC boundary. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.
