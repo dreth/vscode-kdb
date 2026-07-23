@@ -391,6 +391,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#optional-one-time-connection-import" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Optional one-time connection import
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#install-the-notebook-helper" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -815,6 +826,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#optional-one-time-connection-import" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Optional one-time connection import
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#install-the-notebook-helper" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -860,7 +882,7 @@
 <h2 id="requirements">Requirements</h2>
 <p>KX for VS Code requires VS Code <code>1.96.0</code> or newer and a kdb+/q process reachable over q IPC for normal <code>.q</code> editor execution. The extension does not bundle q or a kdb+ license.</p>
 <p>Notebook publishing additionally requires Python 3.9 or newer, IPython, and the focused <code>kx_notebook</code> helper installed in the selected notebook kernel. The helper bundles no q runtime or PyKX binary. Optional PyKX use must be installed, configured, licensed, and enabled separately in that kernel.</p>
-<p>SQLTools is neither installed nor activated by this extension.</p>
+<p>SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's <code>sqltools.connections</code> setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.</p>
 <h2 id="install-the-extension">Install the extension</h2>
 <p>Use a project-approved distribution of <strong>KX for VS Code</strong>. When installing a locally supplied VSIX, use VS Code's <strong>Extensions: Install from VSIX...</strong> command and confirm the extension name, publisher, and version before installation.</p>
 <p>This documentation build does not publish a Marketplace package and does not establish that an unverified development VSIX is ready for Marketplace publication.</p>
@@ -888,6 +910,10 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 <li>Press <code>Ctrl+Enter</code> on Windows/Linux or <code>Cmd+Enter</code> on macOS.</li>
 </ol>
 <p>The result should open in a KX-owned result panel. If it does not, see <a href="../troubleshooting/">Troubleshooting</a> and inspect <strong>View &gt; Output &gt; KX</strong>.</p>
+<h2 id="optional-one-time-connection-import">Optional one-time connection import</h2>
+<p>If you previously used the <code>DanielAlonso.kdb-sqltools</code> driver, run <strong>KX: Import SQLTools KDB Connections</strong> from the Command Palette or KX Connections toolbar. SQLTools may already be uninstalled. KX inspects existing user, workspace, and workspace-folder settings and reviews only profiles whose normalized driver is <code>KDB</code>, <code>kdb+</code>, <code>kdb</code>, <code>kdb-sqltools</code>, or <code>DanielAlonso.kdb-sqltools</code>.</p>
+<p>The review never displays password values. SSH-enabled and malformed profiles are explained but cannot be selected. Existing KX profiles are skipped unless you explicitly import the candidate under a new unique name; this release has no replace or overwrite action. If selected settings contain passwords, choose whether to copy them once into VS Code SecretStorage, import without passwords, or cancel. Source settings remain unchanged and are never synchronized.</p>
+<p>The imported legacy connection timeout applies only to KX connect/handshake. Query timeout continues to inherit the KX global query default until you edit it. After import, use <strong>Review Imported Connection</strong> or the KX sidebar to inspect and test the saved direct profile.</p>
 <h2 id="install-the-notebook-helper">Install the notebook helper</h2>
 <p>Install <code>python/kx_notebook</code> into the same Python environment used by the Jupyter/IPython kernel. For an editable source install without modifying system Python:</p>
 <div class="highlight"><pre><span></span><code>uv<span class="w"> </span>venv<span class="w"> </span>/tmp/vscode-kdb-kx-notebook
@@ -906,15 +932,15 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <p>The maintained non-visual checks are:</p>
 <div class="highlight"><pre><span></span><code>npm<span class="w"> </span>ci
 npm<span class="w"> </span>run<span class="w"> </span>compile
-node<span class="w"> </span>test/run.js
 npm<span class="w"> </span><span class="nb">test</span>
-uv<span class="w"> </span>run<span class="w"> </span>--no-project<span class="w"> </span>--with-editable<span class="w"> </span>./python/kx_notebook<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>python<span class="w"> </span>-m<span class="w"> </span>unittest<span class="w"> </span>discover<span class="w"> </span>-s<span class="w"> </span>python/kx_notebook/tests<span class="w"> </span>-v
+npm<span class="w"> </span>run<span class="w"> </span>test:parity:self
+npm<span class="w"> </span>run<span class="w"> </span>test:notebook-python
+npm<span class="w"> </span>run<span class="w"> </span>test:notebook-cross
 </code></pre></div>
 <p>When a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>These commands do not claim visual VS Code Extension Host end-to-end coverage.</p>
+<p>The migration configuration-provider tests use faithful fakes for VS Code <code>inspect</code>/effective values because the maintained suite does not launch an Extension Host. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.</p>
 
 
 

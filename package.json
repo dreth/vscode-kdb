@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Standalone direct q IPC, persistent Jupyter notebook results, and high-performance KX results for VS Code.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -47,6 +47,7 @@
     "onCommand:vscode-kdb.connect",
     "onCommand:vscode-kdb.disconnect",
     "onCommand:vscode-kdb.testConnection",
+    "onCommand:vscode-kdb.importSqlToolsConnections",
     "onCommand:vscode-kdb.refreshConnections",
     "onCommand:vscode-kdb.refreshServerExplorer",
     "onCommand:vscode-kdb.previewServerObject",
@@ -79,8 +80,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.0.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.0.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.1.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.1.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -162,6 +163,11 @@
         "command": "vscode-kdb.testConnection",
         "title": "KX: Test Connection",
         "icon": "$(beaker)"
+      },
+      {
+        "command": "vscode-kdb.importSqlToolsConnections",
+        "title": "KX: Import SQLTools KDB Connections",
+        "icon": "$(cloud-download)"
       },
       {
         "command": "vscode-kdb.refreshConnections",
@@ -315,9 +321,14 @@
           "group": "navigation@1"
         },
         {
-          "command": "vscode-kdb.refreshConnections",
+          "command": "vscode-kdb.importSqlToolsConnections",
           "when": "view == vscode-kdb.connections",
           "group": "navigation@2"
+        },
+        {
+          "command": "vscode-kdb.refreshConnections",
+          "when": "view == vscode-kdb.connections",
+          "group": "navigation@3"
         },
         {
           "command": "vscode-kdb.refreshServerExplorer",
@@ -331,6 +342,11 @@
         }
       ],
       "view/item/context": [
+        {
+          "command": "vscode-kdb.importSqlToolsConnections",
+          "when": "view == vscode-kdb.connections && viewItem == vscode-kdb.connections.empty",
+          "group": "navigation@1"
+        },
         {
           "command": "vscode-kdb.connect",
           "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\.disconnected\\./",

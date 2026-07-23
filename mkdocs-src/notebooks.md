@@ -1,6 +1,6 @@
 # Jupyter/IPython Notebooks
 
-KX for VS Code 0.2.0 renders persistent, bounded KX/q results inside ordinary Jupyter/IPython `.ipynb` code-cell outputs. The notebook stays an ordinary notebook: Python cells use the normal selected Python kernel, Markdown cells use normal notebook Markdown, and q cells execute only through an explicitly configured IPython helper callback.
+KX for VS Code 0.2.1 renders persistent, bounded KX/q results inside ordinary Jupyter/IPython `.ipynb` code-cell outputs. The notebook stays an ordinary notebook: Python cells use the normal selected Python kernel, Markdown cells use normal notebook Markdown, and q cells execute only through an explicitly configured IPython helper callback.
 
 The implementation does not contribute or intercept a Jupyter controller, patch Microsoft Jupyter, use private APIs, reinterpret `.q` documents as notebooks, or create a second direct q connection. Normal `.q` editor execution and the full KX Results panel remain unchanged.
 
@@ -150,6 +150,6 @@ The panel handoff is deliberately a saved-preview view. It does not find a live 
 
 ## Same-session boundary
 
-The conceptual source of a notebook result is the evaluator explicitly configured in that Python kernel. Version 0.2.0 does not have a supported way to route a normal Jupyter cell through the extension's existing direct q IPC session without intercepting the controller. Rather than create a misleading second connection, extension-driven notebook selection execution is disabled and deferred.
+The conceptual source of a notebook result is the evaluator explicitly configured in that Python kernel. Version 0.2.1 does not have a supported way to route a normal Jupyter cell through the extension's existing direct q IPC session without intercepting the controller. Rather than create a misleading second connection, extension-driven notebook selection execution is disabled and deferred.
 
 Use the callback or optional PyKX adapter when the Python kernel already owns the intended q session. Use normal `.q` editor commands when the extension-owned direct IPC session and its live full-result KX panel are required.

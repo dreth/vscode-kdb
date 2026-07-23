@@ -969,7 +969,7 @@
 
 
 <h1 id="jupyteripython-notebooks">Jupyter/IPython Notebooks</h1>
-<p>KX for VS Code 0.2.0 renders persistent, bounded KX/q results inside ordinary Jupyter/IPython <code>.ipynb</code> code-cell outputs. The notebook stays an ordinary notebook: Python cells use the normal selected Python kernel, Markdown cells use normal notebook Markdown, and q cells execute only through an explicitly configured IPython helper callback.</p>
+<p>KX for VS Code 0.2.1 renders persistent, bounded KX/q results inside ordinary Jupyter/IPython <code>.ipynb</code> code-cell outputs. The notebook stays an ordinary notebook: Python cells use the normal selected Python kernel, Markdown cells use normal notebook Markdown, and q cells execute only through an explicitly configured IPython helper callback.</p>
 <p>The implementation does not contribute or intercept a Jupyter controller, patch Microsoft Jupyter, use private APIs, reinterpret <code>.q</code> documents as notebooks, or create a second direct q connection. Normal <code>.q</code> editor execution and the full KX Results panel remain unchanged.</p>
 <h2 id="install-the-companion-helper">Install the companion helper</h2>
 <p><code>python/kx_notebook</code> is a focused Python package that depends on IPython but bundles no q runtime, PyKX binary, credential, IPC connection, or remote bridge. Install it into the same Python environment selected as the notebook kernel. For source development with an isolated <code>uv</code> environment:</p>
@@ -1087,7 +1087,7 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 </ul>
 <p>The panel handoff is deliberately a saved-preview view. It does not find a live q result, share an IPC handle, rerun q, or recover omitted rows. <strong>KX: Open Saved Notebook Preview in Results Panel</strong> is enabled only when the selected cell contains a valid saved KX MIME output. A reopened notebook can render and hand off its saved preview without the originating session.</p>
 <h2 id="same-session-boundary">Same-session boundary</h2>
-<p>The conceptual source of a notebook result is the evaluator explicitly configured in that Python kernel. Version 0.2.0 does not have a supported way to route a normal Jupyter cell through the extension's existing direct q IPC session without intercepting the controller. Rather than create a misleading second connection, extension-driven notebook selection execution is disabled and deferred.</p>
+<p>The conceptual source of a notebook result is the evaluator explicitly configured in that Python kernel. Version 0.2.1 does not have a supported way to route a normal Jupyter cell through the extension's existing direct q IPC session without intercepting the controller. Rather than create a misleading second connection, extension-driven notebook selection execution is disabled and deferred.</p>
 <p>Use the callback or optional PyKX adapter when the Python kernel already owns the intended q session. Use normal <code>.q</code> editor commands when the extension-owned direct IPC session and its live full-result KX panel are required.</p>
 
 

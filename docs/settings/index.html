@@ -566,6 +566,23 @@
     </span>
   </a>
 
+    <nav class="md-nav" aria-label="Connections and diagnostics">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#legacy-import-input" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Legacy import input
+
+    </span>
+  </a>
+
+</li>
+
+      </ul>
+    </nav>
+
 </li>
 
         <li class="md-nav__item">
@@ -823,6 +840,23 @@
     </span>
   </a>
 
+    <nav class="md-nav" aria-label="Connections and diagnostics">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#legacy-import-input" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Legacy import input
+
+    </span>
+  </a>
+
+</li>
+
+      </ul>
+    </nav>
+
 </li>
 
         <li class="md-nav__item">
@@ -977,6 +1011,10 @@
 <p>Server Explorer applies the active connection's configured namespace and never auto-refreshes or installs persistent server code. Preview accepts only standard q identifiers and warns before materialization. Local cancellation stops waiting but does not interrupt q work already sent.</p>
 <p>Query History uses VS Code workspace <code>Memento</code>, not a syncable/global setting. It is not registered for Settings Sync and is not transmitted as telemetry. Stored fields are exact query text, stable connection ID and recorded label, timestamp, editor execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. Passwords and results are excluded. Query text can be commercially or personally sensitive, so enable the feature only in workspaces where local persistence is acceptable.</p>
 <h2 id="connections-and-diagnostics">Connections and diagnostics</h2>
+<h3 id="legacy-import-input">Legacy import input</h3>
+<p><code>sqltools.connections</code> is not a KX setting and is not contributed, written, watched, or synchronized by this extension. <strong>KX: Import SQLTools KDB Connections</strong> may inspect an already-existing value through VS Code's configuration API only when the user invokes the command. It reviews matching legacy KDB candidates from user, workspace, and workspace-folder scopes; SQLTools itself can be absent.</p>
+<p>Only normalized <code>KDB</code>, <code>kdb+</code>, <code>kdb</code>, <code>kdb-sqltools</code>, and <code>DanielAlonso.kdb-sqltools</code> driver values are eligible. Other drivers are ignored before their profile fields or passwords are inspected. Treat workspace settings as untrusted: every mapped field is validated against the standalone bounds, SSH-enabled profiles are not importable, and no <code>sshOptions</code> value is copied.</p>
+<p>The imported <code>connectionTimeout</code> is interpreted as seconds and maps to the new profile's <code>connectTimeoutMs</code> only. <code>queryTimeoutMs</code> remains omitted, so it inherits the resolved global KX query default described below. Passwords are copied only after selected candidates receive an explicit modal one-time SecretStorage confirmation; users may choose the labelled import-without-passwords path or cancel. The source value remains unchanged and no ongoing sync exists.</p>
 <table>
 <thead>
 <tr>

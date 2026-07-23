@@ -3,6 +3,7 @@ import {
   KxConnection,
   parseOptionalTimeout,
   validateConnection,
+  validatePassword,
 } from './connection';
 
 export type ConnectionFormField =
@@ -50,7 +51,6 @@ const FORM_FIELDS = new Set([
   'connectTimeoutMs',
   'queryTimeoutMs',
 ]);
-const MAX_PASSWORD_LENGTH = 65535;
 
 export function parseConnectionFormPayload(
   payload: unknown,
@@ -134,14 +134,10 @@ export function passwordUpdateForForm(
   clearPassword: boolean,
   hasStoredPassword: boolean
 ): string | null | undefined {
-  if (password.includes('\0')) {
-    throw new ConnectionFormValidationError('Password cannot contain null characters.', 'password');
-  }
-  if (password.length > MAX_PASSWORD_LENGTH) {
-    throw new ConnectionFormValidationError(
-      `Password must be ${MAX_PASSWORD_LENGTH} characters or fewer.`,
-      'password'
-    );
+  try {
+    validatePassword(password);
+  } catch (error) {
+    throw formError(error, 'password');
   }
   if (password && clearPassword) {
     throw new ConnectionFormValidationError('Enter a new password or clear the saved password, not both.', 'password');

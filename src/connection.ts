@@ -5,6 +5,7 @@ export const DEFAULT_PORT = 5000;
 export const DEFAULT_NAMESPACE = '.';
 export const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
 export const MAX_TIMEOUT_MS = 2147483647;
+export const MAX_PASSWORD_LENGTH = 65535;
 
 export interface KxConnection {
   id: string;
@@ -138,6 +139,17 @@ export function validateOptionalTimeout(timeout: number | undefined, label: stri
   }
   if (!Number.isInteger(timeout) || timeout < 0 || timeout > MAX_TIMEOUT_MS) {
     throw new ConnectionValidationError(`${label} must be a whole number from 0 to ${MAX_TIMEOUT_MS}, or blank to inherit.`);
+  }
+}
+
+export function validatePassword(password: string): void {
+  if (password.includes('\0')) {
+    throw new ConnectionValidationError('Password cannot contain null characters.');
+  }
+  if (password.length > MAX_PASSWORD_LENGTH) {
+    throw new ConnectionValidationError(
+      `Password must be ${MAX_PASSWORD_LENGTH} characters or fewer.`
+    );
   }
 }
 

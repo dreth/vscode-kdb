@@ -17,6 +17,56 @@ KX for VS Code owns its direct q IPC connections. They appear in the **KX Connec
 
 Namespaces are normalized to a leading dot. Invalid hosts, ports, namespaces, duplicate names, unsupported username characters, and timeout values are rejected before storage. Timeout overrides must be whole numbers from `0` through `2147483647`; `0` disables the corresponding deadline.
 
+## One-time legacy SQLTools import
+
+**KX: Import SQLTools KDB Connections** is a KX-owned migration bridge for users who already have KDB profiles in VS Code's `sqltools.connections` setting. Invoke it from the Command Palette or KX Connections toolbar. It reads settings only when invoked, creates standalone KX direct IPC profiles, and then stops. SQLTools need not be installed or activated; its setting is never changed, and there is no background, startup, or ongoing synchronization.
+
+Discovery treats every setting value as untrusted. It inspects explicit user, workspace, and workspace-folder values and uses the effective value only when explicit scope values are unavailable. Equivalent candidates across scopes are deduplicated, but all contributing source labels remain visible in the review. Only these normalized legacy driver aliases are recognized:
+
+- `KDB`
+- `kdb+`
+- `kdb`
+- `kdb-sqltools`
+- `DanielAlonso.kdb-sqltools`
+
+All other SQLTools drivers are ignored before their endpoint, authentication, password, or other fields are inspected. Candidate identity uses the sanitized connection label plus direct endpoint, namespace, and username; no source ID or raw HTML is trusted.
+
+The multi-select review shows:
+
+- sanitized source profile name;
+- direct `host:port`;
+- validated/defaulted q namespace;
+- every source scope;
+- password presence as **present (value hidden)**, **not present**, or **not inspected**; and
+- legacy timeout seconds mapped to milliseconds for KX connect/handshake only, with an explicit reminder that query timeout is not migrated.
+
+Malformed legacy KDB candidates remain visible with a safe reason and cannot be selected. This includes missing or invalid names/servers, ports outside `1`-`65535`, invalid namespaces/usernames, passwords containing a null character or exceeding 65,535 characters, unsafe field access, and timeouts that cannot convert to a whole number from `0` through `2147483647` milliseconds. A profile with `ssh: "Enabled"` is shown as **Not importable: requires SQLTools SSH tunnelling**. KX never copies `sshOptions` or SSH credentials and never turns such a profile into a non-working direct connection.
+
+For an importable candidate, KX maps:
+
+| Legacy SQLTools field | Standalone KX field |
+| --- | --- |
+| connection `name` | unique KX connection name |
+| `server` | `host` |
+| `port` | `port` |
+| `database` | validated q namespace; missing/blank defaults to `.` |
+| `username` | `username` |
+| `connectionTimeout` seconds | `connectTimeoutMs` only, after checked multiplication by 1,000 |
+| `password` | new profile's VS Code SecretStorage key, only after explicit confirmation |
+
+`connectionTimeout: 0` becomes `connectTimeoutMs: 0`. A missing legacy timeout uses the old 30-second schema default. Import never sets `queryTimeoutMs`; the profile continues to inherit the resolved global KX query default until the user edits it. In particular, a per-profile imported connect timeout is not silently reused as that profile's query timeout.
+
+Before any selected plaintext password is copied, a modal prompt explains that KX will re-read it once, write it to SecretStorage, leave the SQLTools setting unchanged, and establish no sync. Choose **Copy Passwords and Import**, explicitly choose **Import Without Passwords**, or cancel without changing KX profiles or secrets. Password values never appear in QuickPick items, notifications, logs, diagnostics, telemetry, Query History, errors, snapshots, webview messages, or `vscode-kdb.connections`; references are discarded after each attempt.
+
+Existing KX data is protected. A conflict by case-insensitive name or equivalent host/port/namespace/username offers only:
+
+- **Skip (recommended)** — keep the saved KX profile unchanged; or
+- **Import as new name** — create a separate profile after standalone name validation.
+
+Version 0.2.1 has no replace action and never overwrites a saved profile or secret. Conflicts are checked again before each add, so a profile that becomes conflicting is skipped. Successful adds use the normal ConnectionStore settings/SecretStorage transaction. The first standalone connection follows the normal active-profile rule; existing connected clients are not recycled because no existing profile is edited.
+
+The final notification reports imported, skipped, unsupported, and failed counts, states that the source settings remain unchanged with no ongoing sync, and offers **Review Imported Connection** for review and testing. A no-candidate invocation shows one quiet informational message and does not require SQLTools.
+
 ## Add, edit, and remove
 
 Use the sidebar toolbar, item context menus, or Command Palette:
@@ -28,6 +78,7 @@ Use the sidebar toolbar, item context menus, or Command Palette:
 - **KX: Connect**
 - **KX: Disconnect**
 - **KX: Test Connection**
+- **KX: Import SQLTools KDB Connections**
 - **KX: Refresh Connections**
 
 Add and Edit open the same dedicated, single-screen **KX Connection** webview. All normal fields are visible together; the two implemented timeout overrides are in a clearly labelled collapsible **Advanced direct q IPC** section. The form is responsive, uses VS Code theme colors, and does not present unsupported SSH, TLS, gateway, broker, keep-alive, or reconnect-policy controls.
@@ -72,7 +123,7 @@ All global values and profile overrides accept only integers from `0` through `2
 
 Both the form button and the saved-profile **KX: Test Connection** command use temporary connections and a deliberately minimal safe response request; neither keeps the test socket as the active client.
 
-Notebook `%%q` execution does not use this connection manager. The `kx_notebook` helper calls only the evaluator explicitly configured in that Python kernel; optional PyKX uses that kernel's existing PyKX object. Version 0.2.0 deliberately does not intercept Jupyter to route a cell through the extension session and does not create a second extension direct-q connection. Opening a saved notebook preview in KX Results transfers only the bounded stored rows and cannot recover a full live result.
+Notebook `%%q` execution does not use this connection manager. The `kx_notebook` helper calls only the evaluator explicitly configured in that Python kernel; optional PyKX uses that kernel's existing PyKX object. The extension deliberately does not intercept Jupyter to route a cell through the extension session and does not create a second extension direct-q connection. Opening a saved notebook preview in KX Results transfers only the bounded stored rows and cannot recover a full live result.
 
 Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.
 
@@ -90,6 +141,8 @@ Safe metadata is stored in the application-scoped user setting `vscode-kdb.conne
 Passwords and authentication secrets are not written into that setting. Each connection's secret is stored under an extension-specific key in VS Code `SecretStorage`, which delegates at-rest protection to VS Code and the operating system.
 
 Do not add a password field to `settings.json`. Do not paste credentials into logs, issue reports, or example queries.
+
+During discovery, the importer inspects the password field of a matching legacy KDB profile only to classify it as absent, present, or invalid; the value is not returned in the candidate model or retained through review. After that profile is selected and the modal copy choice is confirmed, KX re-reads only its exact scoped source entry, validates the password, immediately hands it to the normal SecretStorage transaction, and releases the source snapshot. It is never retained as a KX setting. Workspace-scoped source data receives the same validation as every other untrusted configuration value.
 
 ## Network security
 

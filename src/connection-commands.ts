@@ -7,6 +7,7 @@ import {
   KxConnection,
 } from './connection';
 import { ConnectionManager } from './connection-manager';
+import { ConnectionMigrationCommand } from './connection-migration';
 import { ConnectionStore } from './connection-store';
 import { ConnectionTreeItem, ConnectionsTreeProvider } from './connection-tree';
 import { parseConnectionFormPayload } from './connection-form-model';
@@ -26,12 +27,15 @@ interface ConnectionPick extends vscode.QuickPickItem {
 export class ConnectionCommands {
   private activeForm: ConnectionFormPanel | undefined;
   private formSession: Promise<void> | undefined;
+  private readonly migration: ConnectionMigrationCommand;
 
   public constructor(
     private readonly store: ConnectionStore,
     private readonly manager: ConnectionManager,
     private readonly tree: ConnectionsTreeProvider
-  ) {}
+  ) {
+    this.migration = new ConnectionMigrationCommand(vscode, store, tree);
+  }
 
   public register(context: vscode.ExtensionContext): void {
     context.subscriptions.push(
@@ -42,6 +46,10 @@ export class ConnectionCommands {
       vscode.commands.registerCommand('vscode-kdb.connect', argument => this.connect(argument)),
       vscode.commands.registerCommand('vscode-kdb.disconnect', argument => this.disconnect(argument)),
       vscode.commands.registerCommand('vscode-kdb.testConnection', argument => this.test(argument)),
+      vscode.commands.registerCommand(
+        'vscode-kdb.importSqlToolsConnections',
+        () => this.migration.run()
+      ),
       vscode.commands.registerCommand('vscode-kdb.refreshConnections', () => this.tree.refresh())
     );
   }

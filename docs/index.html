@@ -818,10 +818,11 @@
 <span class="nb">tables</span><span class="w"> </span><span class="ss">`</span><span class="o">.</span><span class="n">analytics</span>
 </code></pre></div>
 <h2 id="standalone-status">Standalone status</h2>
-<p>The current <code>0.2.0</code> release keeps <code>.q</code> editor execution focused and direct-q-IPC-only, and adds persistent bounded KX/q results to ordinary Jupyter/IPython notebooks. It has no SQLTools runtime/UI dependency and does not create or interpret SQLTools session files.</p>
+<p>The current <code>0.2.1</code> release keeps <code>.q</code> editor execution focused and direct-q-IPC-only and adds an explicit one-shot bridge for importing legacy KDB profiles already saved in VS Code settings. The bridge reads only import candidates, creates KX-owned direct IPC profiles, and does not require SQLTools to be installed. There is no SQLTools runtime/UI dependency, session-file behavior, or ongoing synchronization.</p>
 <p>Implemented foundations include:</p>
 <ul>
 <li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value <strong>Test Connection</strong> path;</li>
+<li>a KX-owned <strong>Import SQLTools KDB Connections</strong> review for exact legacy driver aliases, scoped configuration discovery, safe skip/rename conflicts, explicit one-time password transfer, and no overwrite or sync;</li>
 <li>optional per-profile connect/handshake and query timeout overrides with bounded global defaults;</li>
 <li>exact current-line, selection, and whole-document q execution;</li>
 <li>a real VS Code NotebookRenderer for <code>application/vnd.kx.result+json</code> v1 plus the focused <code>kx_notebook</code> IPython helper, durable <code>%%q</code> tagging, bounded persistent previews, static HTML/text export fallbacks, and optional saved-preview panel handoff;</li>
@@ -832,7 +833,7 @@
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>
-<p>This is not a full KDB-X or q Professional compatibility claim. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, Jupyter controller interception, extension-driven same-session notebook routing, or full omitted-result recovery. Deterministic model/host/renderer/source guards are not visual Extension Host E2E or screenshot evidence. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
+<p>This is not a full KDB-X or q Professional compatibility claim. Standalone owns its TextMate q grammar, opt-in qText result highlighting/display formatting, focused Server Explorer, local Query History, and NotebookRenderer, but it does not claim a q LSP, lint engine, source-document formatter, notebook controller, or complete editor/notebook parity. Server exploration is deliberately limited to the active direct profile and configured namespace, with metadata requests only while connected; the extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, Jupyter controller interception, extension-driven same-session notebook routing, or full omitted-result recovery. Deterministic model/host/renderer/source guards—including faithful fake configuration providers for migration discovery—are not visual or real Extension Host E2E. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a> and the source-backed repository parity matrix before treating a capability as equivalent.</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>VS Code <code>1.96.0</code> or newer.</li>
@@ -844,7 +845,7 @@
 <h2 id="common-workflow">Common workflow</h2>
 <ol>
 <li>Start q on a loopback port for local development.</li>
-<li>Add a direct connection from the <strong>KX Connections</strong> sidebar. Complete the single-screen endpoint, namespace, and optional authentication fields; use <strong>Advanced direct q IPC</strong> only when this profile needs timeout overrides.</li>
+<li>Add a direct connection from the <strong>KX Connections</strong> sidebar, or run <strong>KX: Import SQLTools KDB Connections</strong> to review eligible legacy profiles already in VS Code settings. Import is optional, one-time, and does not require SQLTools.</li>
 <li>Test it, set it active, and connect; a run can also connect on demand.</li>
 <li>Open a <code>.q</code> file and run the current line, an exact selection, or the whole document.</li>
 <li>Inspect, chart, copy, or export the result in <strong>KX Results</strong>.</li>
