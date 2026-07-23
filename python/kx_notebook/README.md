@@ -9,6 +9,16 @@ bridge.
 The KX for VS Code VSIX carries this installable source tree for offline handoff,
 but the extension never changes a selected kernel environment automatically.
 
+This package is the separate **Python-controller route**. Keep the normal
+Python/IPython controller selected and use `%%q` only when Python and q must
+coexist in that kernel. KX for VS Code 0.2.3 also provides a native
+**KX q (Direct IPC)** notebook controller; that direct route needs no Python
+package or `%%q` marker and executes through the active profile in the
+first-party KX Connections view. No extension-managed variables, namespace
+state, session identity, or live-result identity are shared between the routes.
+A user-supplied Python evaluator may independently target the same external
+process, but helper output never receives a Direct IPC live-result identity.
+
 ## Development install and tests
 
 From the `vscode-kdb` repository root, run the tests in an isolated `uv`
@@ -84,6 +94,11 @@ select from trades where sym=`AAPL
 The helper validates these marker options before calling the evaluator. They
 affect only the persisted preview; they do not change or cap the evaluator's q
 execution unless the configured evaluator applies its own server-side limit.
+
+Normal Run is owned by the selected Python controller. KX for VS Code does not
+intercept it or silently substitute the direct IPC controller. Conversely,
+selecting **KX q (Direct IPC)** makes the native controller the execution owner;
+ordinary q cells then run without this magic.
 
 For local tests and examples, `FixtureEvaluator` maps exact source strings to
 fixed table-like values. It is deliberately not a q parser:

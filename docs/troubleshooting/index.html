@@ -837,10 +837,21 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#q-is-missing-from-the-standard-cell-language-picker" class="md-nav__link">
+  <a href="#kx-q-is-missing-from-the-notebook-kernelcontroller-selector" class="md-nav__link">
     <span class="md-ellipsis">
 
-        q is missing from the standard cell-language picker
+        KX q is missing from the notebook kernel/controller selector
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#an-existing-cell-is-not-q" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        An existing cell is not q
 
     </span>
   </a>
@@ -1255,10 +1266,21 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#q-is-missing-from-the-standard-cell-language-picker" class="md-nav__link">
+  <a href="#kx-q-is-missing-from-the-notebook-kernelcontroller-selector" class="md-nav__link">
     <span class="md-ellipsis">
 
-        q is missing from the standard cell-language picker
+        KX q is missing from the notebook kernel/controller selector
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#an-existing-cell-is-not-q" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        An existing cell is not q
 
     </span>
   </a>
@@ -1404,9 +1426,9 @@
 <p>The importer recognizes only normalized <code>KDB</code>, <code>kdb+</code>, <code>kdb</code>, <code>kdb-sqltools</code>, and <code>DanielAlonso.kdb-sqltools</code> driver aliases. It deliberately ignores other SQLTools drivers before reading their endpoint or password fields. It also does not search <code>.session.sql</code>, SQLTools storage internals, extension APIs, or another machine. Settings Sync and source-setting lifecycle remain outside KX; there is no automatic discovery/import at startup.</p>
 <h2 id="a-sqltools-kdb-profile-is-not-importable">A SQLTools KDB profile is not importable</h2>
 <p>The review keeps recognized but unsupported candidates visible with a safe reason. Correct malformed source fields or create a KX profile manually when the legacy name, server, port, namespace, username, password type, or timeout cannot pass standalone validation.</p>
-<p><strong>Not importable: requires SQLTools SSH tunnelling</strong> means the source has <code>ssh: "Enabled"</code>. KX 0.2.2 supports direct q IPC only and will not copy <code>sshOptions</code>, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.</p>
+<p><strong>Not importable: requires SQLTools SSH tunnelling</strong> means the source has <code>ssh: "Enabled"</code>. KX supports direct q IPC only and will not copy <code>sshOptions</code>, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.</p>
 <h2 id="an-imported-connection-was-skipped-or-renamed">An imported connection was skipped or renamed</h2>
-<p>An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose <strong>Skip (recommended)</strong> to preserve it, or <strong>Import as new name</strong> to create a separate validated profile. There is no Replace action in 0.2.2. KX checks again before writing and counts a newly conflicting candidate as skipped.</p>
+<p>An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose <strong>Skip (recommended)</strong> to preserve it, or <strong>Import as new name</strong> to create a separate validated profile. There is no Replace action. KX checks again before writing and counts a newly conflicting candidate as skipped.</p>
 <p>The final message reports imported, skipped, unsupported, and failed counts. Choose <strong>Review Imported Connection</strong> to inspect/test the saved direct profile. The SQLTools source remains unchanged and is not synchronized.</p>
 <h2 id="an-imported-connection-has-no-password-or-a-different-query-timeout">An imported connection has no password or a different query timeout</h2>
 <p>When selected source profiles contain plaintext passwords, KX asks whether to copy them once into SecretStorage, import explicitly without passwords, or cancel. Choosing <strong>Import Without Passwords</strong> is intentional; edit the new KX profile to enter a password later. If the exact indexed source candidate is absent, no longer matches, or has an unavailable/invalid password during the confirmed re-read, that candidate fails safely.</p>
@@ -1425,8 +1447,8 @@
 <p>A genuine q evaluation error does not by itself discard an otherwise healthy IPC client. Transport/protocol failures do drop the uncertain client.</p>
 <p>Reduce the expression in a q console when possible. Do not include sensitive production query text in a public report.</p>
 <h2 id="script-requires-newer-q">Script requires newer q</h2>
-<p>Whole documents and selections containing line breaks use <code>.Q.ld</code> grouping and require q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer.</p>
-<p>Upgrade q, or execute a valid single-line expression using <strong>Run Selection / Current Line</strong>. The extension does not replace q script grouping with a SQL parser.</p>
+<p>Whole documents, selections containing line breaks, and every <strong>KX q (Direct IPC)</strong> notebook cell use <code>.Q.ld</code> grouping and require q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer.</p>
+<p>Upgrade q, or execute a valid single-line expression from a normal <code>.q</code> editor using <strong>Run Selection / Current Line</strong>. Direct notebook cells always use complete-cell script semantics. The extension does not replace q script grouping with a SQL parser.</p>
 <h2 id="namespace-behavior-looks-wrong">Namespace behavior looks wrong</h2>
 <p>Open the connection and confirm <strong>Database / Namespace</strong> is <code>.</code> or a dot-qualified namespace such as <code>.analytics</code>. Editor paths temporarily switch to that namespace and restore the prior value. Errors are rethrown after restoration.</p>
 <p>If code depends on a different namespace midway through a script, make that q behavior explicit in the script rather than relying on hidden editor state.</p>
@@ -1467,27 +1489,34 @@
 <span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
 </code></pre></div>
 <p>The helper deliberately has no implicit q connection. If no callback is configured, it raises an actionable error instead of borrowing the extension's active connection. If using the optional PyKX adapter, install/configure/license PyKX separately and explicitly call <code>kx_notebook.pykx.configure_pykx()</code>.</p>
-<h2 id="q-is-missing-from-the-standard-cell-language-picker">q is missing from the standard cell-language picker</h2>
-<p>The standard Jupyter cell-language picker is filtered by the selected controller/kernel. VS Code exposes no supported manifest field for advertising q specifically into that list. Use the q action in the code-cell toolbar, the notebook cell context menu, or <strong>KX: Set Notebook Cell Language to q</strong> in the Command Palette.</p>
+<h2 id="kx-q-is-missing-from-the-notebook-kernelcontroller-selector">KX q is missing from the notebook kernel/controller selector</h2>
+<p>Open an ordinary Jupyter <code>.ipynb</code>, then use its top-right kernel selector or <strong>Notebook: Select Notebook Kernel</strong>. The native entry is <strong>KX q (Direct IPC)</strong>. It is a controller/kernel choice, not an entry in the Python controller's per-cell language picker.</p>
+<p>Confirm KX for VS Code 0.2.3 is enabled and VS Code is 1.96 or newer. The extension activates through <code>onNotebook:jupyter-notebook</code> and registers the controller dynamically through the public NotebookController API.</p>
+<h2 id="an-existing-cell-is-not-q">An existing cell is not q</h2>
+<p>With <strong>KX q (Direct IPC)</strong> selected, use the q action in the code-cell toolbar, notebook cell context menu, or <strong>KX: Set Notebook Cell Language to q</strong>. The controller supports q only; it does not silently rewrite or dispatch Python code.</p>
 <p>The KX action uses VS Code's supported document-language API. Successful code cells have actual <code>TextDocument.languageId === "q"</code>; when saved as a non-default language, the built-in serializer records raw <code>metadata.vscode.languageId: "q"</code>. Markdown is skipped. A controller can still normalize that field when its kernel is selected.</p>
 <h2 id="tagging-a-q-cell-did-not-execute-it">Tagging a q cell did not execute it</h2>
 <p>That is expected. <strong>KX: Tag Notebook Cell as q</strong> sets actual q language mode, inserts or preserves the durable <code>%%q --max-rows ... --max-bytes ...</code> marker, and merges <code>vscode-kdb</code> namespaced cell metadata. It does not execute.</p>
 <p>The normal Python Jupyter controller does not advertise q and will not Run a q-language cell. Keep the marker, use <strong>KX: Restore Notebook Cell Language</strong> to return selected code cells to the notebook default/Python language, then use the notebook's normal Run action. IPython invokes the registered <code>%%q</code> helper. Kernel selection may perform the language normalization automatically.</p>
-<p>If a q-language cell has no marker, use its <strong>Prepare for Python kernel</strong> status action first. KX does not contribute a controller, intercept Jupyter keybindings/Run, or send the notebook cell through its direct q IPC connection.</p>
+<p>If a q-language cell has no marker, use its <strong>Prepare for Python kernel</strong> status action first. This action is for a selected Python controller and is hidden under <strong>KX q (Direct IPC)</strong>. The direct controller rejects a leading <code>%%q</code>; remove it and run the complete ordinary q cell, or select the Python controller.</p>
 <h2 id="notebook-kx-output-is-invalid-or-shows-the-static-fallback">Notebook KX output is invalid or shows the static fallback</h2>
-<p>The renderer accepts only <code>application/vnd.kx.result+json</code> version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.2 <code>kx_notebook</code> helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.</p>
-<p>The escaped <code>text/html</code> and <code>text/plain</code> fallbacks remain useful in viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.</p>
+<p>The renderer accepts only <code>application/vnd.kx.result+json</code> version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.3 or the matching <code>kx_notebook</code> 0.2.3 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.</p>
+<p>Direct-controller output includes <code>text/plain</code>, not <code>text/html</code>. The Python helper includes escaped <code>text/html</code> and <code>text/plain</code> fallbacks for viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.</p>
 <h2 id="notebook-preview-is-truncated">Notebook preview is truncated</h2>
-<p><code>vscode-kdb.notebook.maxOutputRows</code> defaults to <code>1000</code> and accepts <code>1</code> through <code>10000</code>. <code>vscode-kdb.notebook.maxOutputBytes</code> defaults to <code>1000000</code> and accepts <code>16384</code> through <code>10000000</code>. The tag command writes those values into the cell marker; the helper may retain fewer rows to honor the complete byte budget.</p>
-<p>These settings bound persisted output only. They do not change the q expression or add a server-side limit. Apply a q-side limit or aggregation in the evaluator when necessary. Omitted rows are not in the notebook, hidden metadata, or an extension cache.</p>
+<p><code>vscode-kdb.notebook.maxOutputRows</code> defaults to <code>1000</code> and accepts <code>1</code> through <code>10000</code>. <code>vscode-kdb.notebook.maxOutputBytes</code> defaults to <code>1000000</code> and accepts <code>16384</code> through <code>10000000</code>. The portable contract additionally caps schema at 256 columns and cell text at 32,768 characters. The tag command writes the configurable values into the cell marker; either route may retain fewer rows/columns/cell characters and reports the truncation reason.</p>
+<p>These settings bound persisted output only. They do not change the q expression or add a server-side limit. Apply a q-side limit or aggregation when necessary. A current direct result can retain omitted rows only in its transient live record; the notebook and hidden metadata contain no recoverable full value.</p>
 <h2 id="open-in-kx-results-has-only-the-preview">Open in KX Results has only the preview</h2>
-<p>This is the intended 0.2.0 contract. <strong>KX: Open Saved Notebook Preview in Results Panel</strong> transfers only the validated rows already stored in the selected cell. It does not rerun q, locate a live result, share an IPC handle, or recover omitted rows. A reopened notebook can still hand off its saved preview precisely because that bounded data is portable.</p>
-<p>Full large data remains only in the originating evaluator/session while it is available. Use normal <code>.q</code> editor execution when the extension's direct q session and live full-result panel are required.</p>
+<p>For a newly run direct q cell, <strong>Open in KX Results</strong> can use the full decoded value while its bound live record exists. If only the preview opens, the record is absent: rerunning replaces it, removing the cell removes it, notebook close removes it, deactivation clears it, the 512-record cap evicts oldest entries, and reopening starts with snapshot output only.</p>
+<p><strong>KX: Open Saved Notebook Preview in Results Panel</strong> transfers only the validated rows stored in the cell. The opaque ID is not an IPC handle and omitted rows cannot be recovered from a reopened notebook.</p>
 <h2 id="notebook-chart-changes-did-not-persist">Notebook chart changes did not persist</h2>
-<p>Chart type/column/point-cap changes and zoom made only in the VS Code renderer are session state. Persist a <code>kx_notebook.Chart</code> specification when emitting the output, then rerun the cell. The static HTML/PDF fallback uses that emitted specification to draw a network-free SVG; it cannot preserve interactive uPlot state.</p>
+<p>Chart type/column/point-cap changes and zoom made only in the VS Code renderer are session state. Direct-controller output does not persist a chart specification or HTML fallback. On the separate Python-helper route, persist a <code>kx_notebook.Chart</code> specification when emitting the output, then rerun the cell; its static HTML/PDF fallback uses that specification to draw a network-free SVG. Neither route preserves interactive uPlot state.</p>
 <h2 id="notebook-q-used-a-different-session-than-the-q-editor">Notebook q used a different session than the <code>.q</code> editor</h2>
-<p>Notebook execution and <code>.q</code> editor execution remain deliberately separate in 0.2.2. Changing a notebook cell to q affects its document language/highlighting, not its evaluator. The helper calls only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not share the extension's direct IPC session, and the extension does not open a second connection for notebook cells.</p>
-<p>Extension-driven same-session routing would require supported execution ownership that the normal Jupyter controller does not expose here. It remains disabled rather than being approximated through unsupported interception. A future persistent q evaluator must bridge the active Python kernel's q session, not create a hidden separate q connection.</p>
+<p>Check the selected notebook controller.</p>
+<ul>
+<li><strong>KX q (Direct IPC)</strong> uses the active profile's existing extension client and namespace, exactly like <code>.q</code> editor runs. It creates no per-cell/per-notebook connection.</li>
+<li>A Python controller plus <code>%%q</code> uses only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not borrow the extension client, and helper output never receives a Direct IPC live-result identity. A user callback may independently target the same server, but that is not extension-managed state sharing.</li>
+</ul>
+<p>Choose the intended route explicitly. KX never intercepts Python-controller Run.</p>
 <h2 id="query-history-is-missing-or-incomplete">Query History is missing or incomplete</h2>
 <p><code>vscode-kdb.features.queryHistory</code> defaults to <code>false</code>. Enable it for the current window/workspace to show the view. Only editor line, selection, and script executions actually issued while the feature is enabled are recorded; rejected pre-issue runs and result payloads are not.</p>
 <p>Disabling the feature stops future writes and hides history commands, but does not silently erase sensitive retained text. Re-enable it and run <strong>KX: Clear Query History</strong> to confirm deletion. Storage is local workspace extension <code>Memento</code>, not Settings or Settings Sync. Lowering <code>vscode-kdb.queryHistory.maxEntries</code> prunes oldest entries beyond the new limit.</p>

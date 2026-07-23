@@ -4,7 +4,11 @@ import { ConnectionCommands } from './connection-commands';
 import { ConnectionManager } from './connection-manager';
 import { ConnectionStore } from './connection-store';
 import { ConnectionsTreeProvider } from './connection-tree';
-import { KX_OUTPUT_CHANNEL_NAME, KxDiagnostics } from './diagnostics';
+import {
+  KX_OUTPUT_CHANNEL_NAME,
+  KxDiagnostics,
+  redactDiagnosticText,
+} from './diagnostics';
 import { FeatureControls } from './feature-controls';
 import { emptyColumnarPanelResult } from './kx-results';
 import { KxPanelResult, KxResultsPanel, KxResultsPanelRunMode } from './kx-results-panel';
@@ -12,6 +16,11 @@ import {
   NotebookIntegration,
   PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND,
 } from './notebook-integration';
+import {
+  DirectQNotebookBridge,
+  KxQNotebookController,
+} from './notebook-controller';
+import { LiveNotebookResultStore } from './notebook-live-results';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 import {
@@ -33,7 +42,15 @@ export function activate(context: vscode.ExtensionContext): void {
   const manager = new ConnectionManager(store, diagnostics);
   const tree = new ConnectionsTreeProvider(store, manager);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
-  const notebookIntegration = new NotebookIntegration(context);
+  const liveNotebookResults = new LiveNotebookResultStore();
+  const notebookController = new KxQNotebookController(
+    directQNotebookBridge(store, manager, tree),
+    liveNotebookResults
+  );
+  const notebookIntegration = new NotebookIntegration(context, {
+    directController: notebookController,
+    liveResults: liveNotebookResults,
+  });
   activeConnectionManager = manager;
 
   const treeView = vscode.window.createTreeView('vscode-kdb.connections', {
@@ -89,7 +106,19 @@ export function activate(context: vscode.ExtensionContext): void {
     tree,
     treeView,
     output,
+    notebookController,
     notebookIntegration,
+    { dispose: () => liveNotebookResults.clear() },
+    vscode.workspace.onDidCloseNotebookDocument(notebook =>
+      liveNotebookResults.closeNotebook(notebook.uri.toString())),
+    vscode.workspace.onDidChangeNotebookDocument(event => {
+      const notebookUri = event.notebook.uri.toString();
+      for (const change of event.contentChanges) {
+        for (const cell of change.removedCells) {
+          liveNotebookResults.removeCell(notebookUri, cell.document.uri.toString());
+        }
+      }
+    }),
     { dispose: () => configurePerfOutput(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
       runSelectionOrCurrentLine(context, store, manager, diagnostics, features, 'replace')),
@@ -535,6 +564,49 @@ function sameExecutionTarget(left: KxConnection, right: KxConnection): boolean {
   return left.id === right.id && left.host === right.host && left.port === right.port &&
     left.database === right.database && left.username === right.username &&
     left.connectTimeoutMs === right.connectTimeoutMs && left.queryTimeoutMs === right.queryTimeoutMs;
+}
+
+function directQNotebookBridge(
+  store: ConnectionStore,
+  manager: ConnectionManager,
+  tree: ConnectionsTreeProvider
+): DirectQNotebookBridge {
+  return {
+    activeConnection: () => store.activeConnection(),
+    isConnected: connectionId => manager.isConnected(connectionId),
+    executeScript: (connection, source, onIssued, signal) =>
+      manager.executeScript(connection, source, onIssued, signal),
+    errorMessage: async (error, connection) => {
+      const secrets: string[] = [];
+      let secretLookupFailed = false;
+      if (connection?.username) {
+        secrets.push(connection.username);
+      }
+      if (connection) {
+        try {
+          const password = await store.password(connection.id);
+          if (password) {
+            secrets.push(password);
+          }
+        } catch {
+          secretLookupFailed = true;
+        }
+      }
+      if (secretLookupFailed) {
+        return 'Direct IPC failed; details were withheld because SecretStorage was unavailable';
+      }
+      const message = error instanceof Error ? error.message : String(error);
+      return redactDiagnosticText(message, secrets).replace(/\0/g, '');
+    },
+    onDidChangeState: listener => {
+      const managerSubscription = manager.onDidChangeState(listener);
+      const treeSubscription = tree.onDidChangeTreeData(listener);
+      return new vscode.Disposable(() => {
+        managerSubscription.dispose();
+        treeSubscription.dispose();
+      });
+    },
+  };
 }
 
 class QRunCodeLensProvider implements vscode.CodeLensProvider {

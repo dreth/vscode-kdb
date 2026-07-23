@@ -1,6 +1,6 @@
 # Results Viewer
 
-Every normal `.q` editor run targets the extension-owned **KX Results** viewer. There is no SQLTools result target or session-file fallback. An ordinary notebook can also hand a valid saved KX MIME preview to this viewer, but only the bounded rows stored in the `.ipynb` are transferred.
+Every normal `.q` editor run targets the extension-owned **KX Results** viewer. There is no SQLTools result target or session-file fallback. A live **KX q (Direct IPC)** notebook result can hand the same in-memory decoded value to this viewer while its bound live record exists. Python-helper, reopened, and expired direct results can transfer only their bounded saved snapshot.
 
 ## Grid and q-text modes
 
@@ -35,11 +35,13 @@ Normal selection/current-line and script runs reuse an existing KX panel. **Run 
 
 Panels preserve editor focus on creation. Replacing a loading result locally cancels the previous panel wait so its late response cannot overwrite newer output.
 
-### Notebook saved previews
+### Notebook live results and saved snapshots
 
-**KX: Open Saved Notebook Preview in Results Panel** and the inline renderer action open the selected cell's validated `application/vnd.kx.result+json` v1 payload. The panel identifies the saved preview and reports persisted versus total row count. If output is truncated, omitted rows are not in the notebook or panel and cannot be recovered.
+For a current direct-controller result, **Open in KX Results** can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The inline live renderer is intentionally narrower: bounded virtual slices, capped search, sort below 250,000 rows, mouse selection/TSV copy within the loaded slice, and sampled charts. The direct notebook renderer and panel share durable `vscode-kdb.results.*` settings.
 
-This is a presentation handoff, not extension-driven notebook execution or a live-result handle. The panel does not rerun the cell, open another q connection, or claim the helper used the extension's IPC session. Normal panel richness remains available for the stored preview; large live data remains available only when its originating evaluator/session separately retains it.
+Every direct output also includes a validated bounded `application/vnd.kx.result+json` v1 snapshot. Each opaque live record is bound to notebook URI/cell URI for the current extension-host session, removed on cell rerun, cell removal, or notebook close, cleared on deactivation, and subject to a 512-record oldest-first cap. If the record is absent, **KX: Open Saved Notebook Preview in Results Panel** opens only the snapshot and reports persisted versus total row count.
+
+Panel handoff never reruns the cell or opens another q connection. If snapshot output is truncated, omitted rows are not in the notebook and cannot be recovered after reopening. Python `%%q` helper output never receives a Direct IPC live record. A user evaluator may independently target the same server, but the extension does not claim or manage shared session state between the routes.
 
 ## Selection and navigation
 

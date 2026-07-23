@@ -6,11 +6,13 @@ The standalone extension does not currently contribute a run-and-auto-chart `.q`
 
 ## Notebook charts
 
-The notebook helper can persist a chart specification for line, scatter, step, or bar using eligible columns from the bounded saved preview. The VS Code NotebookRenderer uses the bundled local uPlot implementation and provides show/hide, type, X column, Y series, point-cap, and Reset zoom controls.
+A live **KX q (Direct IPC)** result can issue bounded chart requests against its full in-memory value and can open that value in the standard KX Results panel for the panel's supported line, scatter, step, bar, box, candlestick, refinement, and export behavior. It uses the common durable `vscode-kdb.results.*` chart settings.
 
-The emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the result with the desired `kx_notebook.Chart` specification to persist a changed selection. The escaped `text/html` fallback renders a network-free static SVG from the emitted specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
+The separate Python helper can persist a chart specification for line, scatter, step, or bar using eligible bounded rows. Direct-controller output does not write a chart specification to the saved snapshot. The VS Code NotebookRenderer uses the bundled local uPlot implementation and provides show/hide, type, X column, Y series, point-cap, and Reset zoom controls for both live/direct and saved bounded data.
 
-Notebook charting never fetches omitted rows. It uses only the bounded rows saved in the MIME payload. Opening that preview in the full KX Results panel does not restore missing data.
+On the Python-helper route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the helper result with the desired `kx_notebook.Chart` specification to persist a changed selection. Its escaped `text/html` fallback renders a network-free static SVG from the emitted specification. Direct-controller output has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
+
+Once a direct result's bound live record is absent, notebook charting uses only the bounded rows saved in the MIME payload. Opening that snapshot in the full KX Results panel does not restore missing data.
 
 ## Open and render
 

@@ -1,0 +1,518 @@
+import * as crypto from 'crypto';
+import {
+  CHART_MAX_SOURCE_ROWS,
+  ChartType,
+  LineChartData,
+  buildChartData,
+  normalizeChartType,
+} from './charting';
+import {
+  ArrayDisplayFormat,
+  CellTextOptions,
+  ColumnarPanelResult,
+  applyColumnarRowOrder,
+  sortedColumnarRowOrder,
+} from './kx-results';
+import {
+  QPanelResult,
+  QResultDisplayOptions,
+  QValue,
+  qValueToColumnarPanel,
+} from './q-ipc';
+
+export const MAX_LIVE_NOTEBOOK_RESULTS = 512;
+export const MAX_LIVE_NOTEBOOK_SLICE_ROWS = 500;
+export const MAX_LIVE_NOTEBOOK_SLICE_COLUMNS = 128;
+export const MAX_LIVE_NOTEBOOK_SLICE_CELLS = 20_000;
+export const MAX_LIVE_NOTEBOOK_SLICE_TEXT_CHARS = 2_000_000;
+export const MAX_LIVE_NOTEBOOK_SEARCH_MATCHES = 1_000;
+export const MAX_LIVE_NOTEBOOK_SEARCH_CELLS = 2_000_000;
+export const MAX_LIVE_NOTEBOOK_SEARCH_MS = 1_500;
+export const MAX_LIVE_NOTEBOOK_INLINE_SORT_ROWS = 250_000;
+export const MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS = 65_536;
+export const MAX_LIVE_NOTEBOOK_SORT_CACHE_ENTRIES = 4;
+
+export interface LiveNotebookResultRegistration {
+  notebookUri: string;
+  cellUri: string;
+  query: string;
+  connectionName: string;
+  elapsedMs: number;
+  value: QValue;
+}
+
+export interface LiveNotebookDisplayOptions extends QResultDisplayOptions {
+  arrayDisplayFormat?: ArrayDisplayFormat;
+}
+
+export interface LiveNotebookResultView {
+  id: string;
+  mode: 'table' | 'text';
+  kind: string;
+  query: string;
+  connectionName: string;
+  elapsedMs: number;
+  columns: string[];
+  rowCount: number;
+  text?: string;
+  table?: ColumnarPanelResult;
+}
+
+export interface LiveNotebookSliceRequest {
+  startRow: number;
+  endRow: number;
+  startColumn: number;
+  endColumn: number;
+  sortColumn?: string;
+  sortDirection?: 'asc' | 'desc';
+}
+
+export interface LiveNotebookSlice {
+  startRow: number;
+  endRow: number;
+  startColumn: number;
+  endColumn: number;
+  cells: string[][];
+}
+
+export interface LiveNotebookSearchResult {
+  matches: number[];
+  totalScanned: number;
+  scannedCells: number;
+  capped: boolean;
+  partial: boolean;
+}
+
+export interface LiveNotebookChartRequest {
+  requestId: number;
+  chartType: ChartType | string;
+  xColumn: string;
+  yColumns: string[];
+  maxPoints: number;
+  maxSourceRows?: number;
+}
+
+interface LiveNotebookRecord extends LiveNotebookResultRegistration {
+  id: string;
+  createdAt: number;
+  viewKey?: string;
+  converted?: QPanelResult;
+  sortOrders: Map<string, number[]>;
+}
+
+export class LiveNotebookResultStore {
+  private readonly records = new Map<string, LiveNotebookRecord>();
+  private readonly cellResults = new Map<string, string>();
+
+  public constructor(
+    private readonly maxEntries = MAX_LIVE_NOTEBOOK_RESULTS,
+    private readonly idFactory: () => string = () => crypto.randomBytes(24).toString('hex')
+  ) {}
+
+  public register(registration: LiveNotebookResultRegistration): string {
+    this.removeCell(registration.notebookUri, registration.cellUri);
+    const id = this.uniqueId();
+    this.records.set(id, {
+      ...registration,
+      id,
+      createdAt: Date.now(),
+      sortOrders: new Map<string, number[]>(),
+    });
+    this.cellResults.set(cellKey(registration.notebookUri, registration.cellUri), id);
+    this.evictOldest();
+    return id;
+  }
+
+  public removeCell(notebookUri: string, cellUri: string): void {
+    const key = cellKey(notebookUri, cellUri);
+    const id = this.cellResults.get(key);
+    if (!id) {
+      return;
+    }
+    this.cellResults.delete(key);
+    this.records.delete(id);
+  }
+
+  public closeNotebook(notebookUri: string): void {
+    for (const [id, record] of this.records) {
+      if (record.notebookUri === notebookUri) {
+        this.records.delete(id);
+        this.cellResults.delete(cellKey(record.notebookUri, record.cellUri));
+      }
+    }
+  }
+
+  public clear(): void {
+    this.records.clear();
+    this.cellResults.clear();
+  }
+
+  public has(id: string, notebookUri: string): boolean {
+    return this.record(id, notebookUri) !== undefined;
+  }
+
+  public view(
+    id: string,
+    notebookUri: string,
+    options: LiveNotebookDisplayOptions = {}
+  ): LiveNotebookResultView | undefined {
+    const record = this.record(id, notebookUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    if (converted.mode === 'text') {
+      return {
+        id,
+        mode: 'text',
+        kind: converted.kind,
+        query: record.query,
+        connectionName: record.connectionName,
+        elapsedMs: record.elapsedMs,
+        columns: [],
+        rowCount: 0,
+        text: converted.text,
+      };
+    }
+    return {
+      id,
+      mode: 'table',
+      kind: converted.kind,
+      query: record.query,
+      connectionName: record.connectionName,
+      elapsedMs: record.elapsedMs,
+      columns: converted.result.columns.slice(),
+      rowCount: converted.result.rowCount,
+      table: converted.result,
+    };
+  }
+
+  public slice(
+    id: string,
+    notebookUri: string,
+    request: LiveNotebookSliceRequest,
+    options: LiveNotebookDisplayOptions = {}
+  ): LiveNotebookSlice | undefined {
+    const record = this.record(id, notebookUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    if (converted.mode !== 'grid') {
+      return undefined;
+    }
+    const table = sortedTable(record, converted.result, request, options);
+    if (table.rowCount === 0 || table.columns.length === 0) {
+      return {
+        startRow: 0,
+        endRow: -1,
+        startColumn: 0,
+        endColumn: -1,
+        cells: [],
+      };
+    }
+
+    const startRow = boundedIndex(request.startRow, table.rowCount - 1);
+    const requestedEndRow = boundedIndex(request.endRow, table.rowCount - 1);
+    const startColumn = boundedIndex(request.startColumn, table.columns.length - 1);
+    const requestedEndColumn = boundedIndex(request.endColumn, table.columns.length - 1);
+    const rowCount = Math.min(
+      MAX_LIVE_NOTEBOOK_SLICE_ROWS,
+      Math.max(1, requestedEndRow - startRow + 1)
+    );
+    const columnCount = Math.min(
+      MAX_LIVE_NOTEBOOK_SLICE_COLUMNS,
+      Math.max(
+        1,
+        Math.min(
+          requestedEndColumn - startColumn + 1,
+          Math.floor(MAX_LIVE_NOTEBOOK_SLICE_CELLS / rowCount)
+        )
+      )
+    );
+    const endRow = Math.min(table.rowCount - 1, startRow + rowCount - 1);
+    const endColumn = Math.min(table.columns.length - 1, startColumn + columnCount - 1);
+    const textOptions = cellTextOptions(options);
+    let cells = liveSliceCells(
+      table,
+      startRow,
+      endRow,
+      startColumn,
+      endColumn,
+      textOptions,
+      MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS,
+      MAX_LIVE_NOTEBOOK_SLICE_TEXT_CHARS
+    );
+    if (!cells) {
+      const cellCount = rowCount * columnCount;
+      const fairCellLimit = Math.max(
+        1,
+        Math.min(
+          MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS,
+          Math.floor(MAX_LIVE_NOTEBOOK_SLICE_TEXT_CHARS / cellCount)
+        )
+      );
+      cells = liveSliceCells(
+        table,
+        startRow,
+        endRow,
+        startColumn,
+        endColumn,
+        textOptions,
+        fairCellLimit
+      )!;
+    }
+    return { startRow, endRow, startColumn, endColumn, cells };
+  }
+
+  public search(
+    id: string,
+    notebookUri: string,
+    query: string,
+    options: LiveNotebookDisplayOptions = {},
+    sort?: Pick<LiveNotebookSliceRequest, 'sortColumn' | 'sortDirection'>
+  ): LiveNotebookSearchResult | undefined {
+    const record = this.record(id, notebookUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    if (converted.mode !== 'grid') {
+      return undefined;
+    }
+    const table = sortedTable(record, converted.result, {
+      ...sort,
+    }, options);
+    const needle = boundedSearchText(query).toLocaleLowerCase();
+    if (!needle) {
+      return { matches: [], totalScanned: 0, scannedCells: 0, capped: false, partial: false };
+    }
+
+    const startedAt = Date.now();
+    const matches: number[] = [];
+    let totalScanned = 0;
+    let scannedCells = 0;
+    let partial = false;
+    const textOptions = cellTextOptions(options);
+    outer: for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex++) {
+      totalScanned += 1;
+      for (let columnIndex = 0; columnIndex < table.columns.length; columnIndex++) {
+        scannedCells += 1;
+        if (table.cellText(rowIndex, columnIndex, textOptions).toLocaleLowerCase().includes(needle)) {
+          matches.push(rowIndex);
+          if (matches.length >= MAX_LIVE_NOTEBOOK_SEARCH_MATCHES) {
+            partial = rowIndex + 1 < table.rowCount;
+            break outer;
+          }
+          break;
+        }
+        if (scannedCells >= MAX_LIVE_NOTEBOOK_SEARCH_CELLS ||
+          Date.now() - startedAt >= MAX_LIVE_NOTEBOOK_SEARCH_MS) {
+          partial = rowIndex + 1 < table.rowCount || columnIndex + 1 < table.columns.length;
+          break outer;
+        }
+      }
+    }
+    return {
+      matches,
+      totalScanned,
+      scannedCells,
+      capped: matches.length >= MAX_LIVE_NOTEBOOK_SEARCH_MATCHES,
+      partial,
+    };
+  }
+
+  public chart(
+    id: string,
+    notebookUri: string,
+    request: LiveNotebookChartRequest,
+    options: LiveNotebookDisplayOptions = {}
+  ): LineChartData | undefined {
+    const view = this.view(id, notebookUri, options);
+    if (!view?.table) {
+      return undefined;
+    }
+    const chartType = normalizeChartType(request.chartType);
+    return buildChartData(view.table, {
+      version: 1,
+      requestId: safeRequestId(request.requestId),
+      chartType,
+      xColumn: boundedColumnName(request.xColumn),
+      yColumns: request.yColumns.slice(0, 16).map(boundedColumnName),
+      width: 720,
+      maxSourceRows: safePositiveInteger(request.maxSourceRows, CHART_MAX_SOURCE_ROWS),
+      maxSampledPoints: safePositiveInteger(request.maxPoints, 2_500),
+    });
+  }
+
+  private record(id: string, notebookUri: string): LiveNotebookRecord | undefined {
+    const record = this.records.get(id);
+    return record?.notebookUri === notebookUri ? record : undefined;
+  }
+
+  private converted(
+    record: LiveNotebookRecord,
+    options: LiveNotebookDisplayOptions
+  ): QPanelResult {
+    const key = JSON.stringify([
+      options.functionDisplayStrategy,
+      options.dictionaryDisplayStrategy,
+      options.listDisplayStrategy,
+      options.objectDisplayStrategy,
+    ]);
+    if (!record.converted || record.viewKey !== key) {
+      record.converted = qValueToColumnarPanel(record.value, options);
+      record.viewKey = key;
+      record.sortOrders.clear();
+    }
+    return record.converted;
+  }
+
+  private uniqueId(): string {
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const candidate = String(this.idFactory());
+      if (/^[A-Za-z0-9_-]{32,128}$/.test(candidate) && !this.records.has(candidate)) {
+        return candidate;
+      }
+    }
+    throw new Error('Could not allocate a safe live notebook result identifier.');
+  }
+
+  private evictOldest(): void {
+    const limit = Math.max(1, Math.floor(this.maxEntries));
+    while (this.records.size > limit) {
+      let oldest: LiveNotebookRecord | undefined;
+      for (const record of this.records.values()) {
+        if (!oldest || record.createdAt < oldest.createdAt) {
+          oldest = record;
+        }
+      }
+      if (!oldest) {
+        return;
+      }
+      this.records.delete(oldest.id);
+      this.cellResults.delete(cellKey(oldest.notebookUri, oldest.cellUri));
+    }
+  }
+}
+
+function sortedTable(
+  record: LiveNotebookRecord,
+  table: ColumnarPanelResult,
+  request: Pick<LiveNotebookSliceRequest, 'sortColumn' | 'sortDirection'>,
+  options: LiveNotebookDisplayOptions
+): ColumnarPanelResult {
+  const columnName = typeof request.sortColumn === 'string' ? request.sortColumn : '';
+  const direction = request.sortDirection;
+  if (!columnName || (direction !== 'asc' && direction !== 'desc')) {
+    return table;
+  }
+  const columnIndex = table.columns.indexOf(columnName);
+  if (columnIndex < 0) {
+    return table;
+  }
+  if (table.rowCount >= MAX_LIVE_NOTEBOOK_INLINE_SORT_ROWS) {
+    throw new Error(
+      `Inline notebook sort is limited to fewer than ${MAX_LIVE_NOTEBOOK_INLINE_SORT_ROWS} rows. ` +
+      'Open the full KX Results panel for the large-sort confirmation flow.'
+    );
+  }
+  const key = `${record.viewKey || ''}\0${options.arrayDisplayFormat || ''}\0${columnName}\0${direction}`;
+  let order = record.sortOrders.get(key);
+  if (order) {
+    record.sortOrders.delete(key);
+    record.sortOrders.set(key, order);
+  } else {
+    order = sortedColumnarRowOrder(table, columnIndex, direction, cellTextOptions(options));
+    while (record.sortOrders.size >= MAX_LIVE_NOTEBOOK_SORT_CACHE_ENTRIES) {
+      const oldest = record.sortOrders.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      record.sortOrders.delete(oldest);
+    }
+    record.sortOrders.set(key, order);
+  }
+  return applyColumnarRowOrder(table, order);
+}
+
+function cellTextOptions(options: LiveNotebookDisplayOptions): CellTextOptions {
+  return {
+    arrayDisplayFormat: options.arrayDisplayFormat === 'space' || options.arrayDisplayFormat === 'raw'
+      ? options.arrayDisplayFormat
+      : 'commaSpace',
+  };
+}
+
+function cellKey(notebookUri: string, cellUri: string): string {
+  return `${notebookUri}\0${cellUri}`;
+}
+
+function boundedIndex(value: number, maximum: number): number {
+  const number = Number(value);
+  return Number.isFinite(number)
+    ? Math.min(maximum, Math.max(0, Math.floor(number)))
+    : 0;
+}
+
+function boundedSearchText(value: string): string {
+  return String(value || '').replace(/\0/g, '').slice(0, 512);
+}
+
+function boundedColumnName(value: string): string {
+  return String(value || '').replace(/[\0\r\n]/g, '').slice(0, 256);
+}
+
+function liveSliceCells(
+  table: ColumnarPanelResult,
+  startRow: number,
+  endRow: number,
+  startColumn: number,
+  endColumn: number,
+  textOptions: CellTextOptions,
+  cellLimit: number,
+  aggregateLimit?: number
+): string[][] | undefined {
+  const cells: string[][] = [];
+  let textChars = 0;
+  for (let rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
+    const row: string[] = [];
+    for (let columnIndex = startColumn; columnIndex <= endColumn; columnIndex++) {
+      const value = boundedLiveCellText(
+        table.cellText(rowIndex, columnIndex, textOptions),
+        cellLimit
+      );
+      textChars += value.length;
+      if (aggregateLimit !== undefined && textChars > aggregateLimit) {
+        return undefined;
+      }
+      row.push(value);
+    }
+    cells.push(row);
+  }
+  return cells;
+}
+
+function boundedLiveCellText(value: string, maxChars: number): string {
+  const limit = Math.max(1, Math.min(MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS, Math.floor(maxChars)));
+  if (value.length <= limit) {
+    return value;
+  }
+  const suffix = '\u2026 [cell truncated for live slice response; open full KX Results]';
+  if (limit <= suffix.length) {
+    return suffix.slice(0, limit);
+  }
+  return `${value.slice(0, limit - suffix.length)}${suffix}`;
+}
+
+function safePositiveInteger(value: unknown, fallback: number): number {
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 1
+    ? Math.floor(number)
+    : fallback;
+}
+
+function safeRequestId(value: unknown): number {
+  const number = Number(value);
+  return Number.isSafeInteger(number) && number >= 0 ? number : 0;
+}

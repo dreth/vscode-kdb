@@ -44,6 +44,8 @@ REQUIRED_MEMBERS = {
     "extension/changelog.md",
     "extension/icons/kx-activity.png",
     "extension/icons/kx-marketplace.png",
+    "extension/out/notebook-controller.js",
+    "extension/out/notebook-live-results.js",
     "extension/renderer/kx-notebook-renderer.js",
     "extension/python/kx_notebook/LICENSE",
     "extension/python/kx_notebook/README.md",
@@ -172,6 +174,10 @@ FORBIDDEN_RUNTIME_INDICATORS = (
         ),
     ),
     ("SQLTools session file behavior", re.compile(rb"\.session\.sql", re.IGNORECASE)),
+    (
+        "private Microsoft Jupyter extension integration",
+        re.compile(rb"(?:ms-toolsai\.jupyter|vscode-jupyter)", re.IGNORECASE),
+    ),
     ("vscode-q source/reference", re.compile(rb"(?:jshinonome/)?vscode-q", re.IGNORECASE)),
 )
 LEGACY_MIGRATION_ALIASES = (
@@ -457,7 +463,12 @@ def validate_package_assets(package: dict[str, Any], members: dict[str, bytes]) 
         raise AuditError("VSIX: package.json dependencies must be an object")
     for dependency in dependencies:
         dependency_lower = dependency.casefold()
-        if "sqltools" in dependency_lower or "vscode-q" in dependency_lower:
+        if (
+            "sqltools" in dependency_lower
+            or "vscode-q" in dependency_lower
+            or "ms-toolsai.jupyter" in dependency_lower
+            or "vscode-jupyter" in dependency_lower
+        ):
             raise AuditError(f"VSIX: forbidden runtime dependency: {dependency!r}")
         dependency_manifest = f"extension/node_modules/{dependency}/package.json"
         if dependency_manifest not in members:
@@ -471,7 +482,12 @@ def validate_package_assets(package: dict[str, Any], members: dict[str, bytes]) 
             raise AuditError(f"VSIX: package.json {field} must be an array")
         for dependency in extension_dependencies:
             lowered = str(dependency).casefold()
-            if "sqltools" in lowered or "vscode-q" in lowered:
+            if (
+                "sqltools" in lowered
+                or "vscode-q" in lowered
+                or "ms-toolsai.jupyter" in lowered
+                or "vscode-jupyter" in lowered
+            ):
                 raise AuditError(f"VSIX: forbidden {field} entry: {dependency!r}")
 
 
@@ -630,6 +646,9 @@ def audit_vsix(path: Path) -> VsixInventory:
     version = package.get("version")
     if not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", version):
         raise AuditError(f"VSIX: invalid package version {version!r}")
+    activation_events = package.get("activationEvents", [])
+    if not isinstance(activation_events, list) or "onNotebook:jupyter-notebook" not in activation_events:
+        raise AuditError("VSIX: native q controller requires activation event 'onNotebook:jupyter-notebook'")
     expected_filename = f"{EXPECTED_EXTENSION_NAME}-{version}.vsix"
     if path.name != expected_filename:
         raise AuditError(f"VSIX: filename is {path.name!r}, expected {expected_filename!r}")

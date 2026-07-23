@@ -137,9 +137,12 @@ interface PendingQuery {
   onIssued?: () => void;
   queuedAtMs: number;
   startedAtMs?: number;
+  callerSettled: boolean;
   diagnosticEnded: boolean;
   resolve(value: QValue): void;
   reject(error: Error): void;
+  signal?: AbortSignal;
+  abortListener?: () => void;
   timeout?: NodeJS.Timeout;
   perf?: QIpcQueryPerf;
 }
@@ -184,6 +187,13 @@ export class KdbIpcError extends Error {
   ) {
     super(message);
     this.name = 'KdbIpcError';
+  }
+}
+
+export class KdbQueryCanceledError extends Error {
+  constructor(message = 'KX query canceled locally. If already sent, q server work may continue.') {
+    super(message);
+    this.name = 'KdbQueryCanceledError';
   }
 }
 
@@ -500,8 +510,18 @@ export class KdbIpcClient {
     }
   }
 
-  public query(query: string, onIssued?: () => void): Promise<QValue> {
+  public query(query: string, onIssued?: () => void, signal?: AbortSignal): Promise<QValue> {
     const queryId = nextQueryId++;
+    if (signal?.aborted) {
+      const error = new KdbQueryCanceledError();
+      this.writeDiagnostic('query', 'canceled', undefined, error, false, {
+        queryId,
+        queryChars: query.length,
+        queryBytes: Buffer.byteLength(query, 'utf8'),
+        stage: 'preflight',
+      });
+      return Promise.reject(error);
+    }
     if (!this.socket || this.socket.destroyed) {
       const error = this.phaseError('query', new KdbIpcError('connection is not open'));
       this.writeDiagnostic('query', 'failed', undefined, error, false, {
@@ -514,16 +534,27 @@ export class KdbIpcClient {
     }
 
     return new Promise<QValue>((resolve, reject) => {
-      this.queue.push({
+      const pending: PendingQuery = {
         queryId,
         query,
         onIssued,
         queuedAtMs: Date.now(),
+        callerSettled: false,
         diagnosticEnded: false,
         resolve,
         reject,
+        signal,
         perf: createQueryPerf(query, queryId),
-      });
+      };
+      if (signal) {
+        pending.abortListener = () => this.abortQuery(pending);
+        signal.addEventListener('abort', pending.abortListener, { once: true });
+      }
+      this.queue.push(pending);
+      if (signal?.aborted) {
+        this.abortQuery(pending);
+        return;
+      }
       this.flushQueue();
     });
   }
@@ -736,8 +767,7 @@ export class KdbIpcClient {
           copyBytesCopied: pending.perf.copyBytesCopied,
         });
       }
-      this.finishQueryDiagnostic(pending, 'success');
-      pending.resolve(value);
+      this.resolveQuery(pending, value);
     } catch (error) {
       if (pending.perf) {
         finishQueryPerf(pending.perf, {
@@ -751,8 +781,7 @@ export class KdbIpcClient {
         });
       }
       const queryError = toError(error);
-      this.finishQueryDiagnostic(pending, 'failed', queryError);
-      pending.reject(queryError);
+      this.rejectQuery(pending, queryError);
     } finally {
       this.flushQueue();
     }
@@ -798,8 +827,7 @@ export class KdbIpcClient {
       finishReceivePerf(pending.perf, details);
       finishQueryPerf(pending.perf, details);
     }
-    this.finishQueryDiagnostic(pending, status, error);
-    pending.reject(error);
+    this.rejectQuery(pending, error, status);
   }
 
   private failAll(error: Error, status: 'failed' | 'canceled' = 'failed') {
@@ -809,9 +837,76 @@ export class KdbIpcClient {
       if (item.perf) {
         finishQueryPerf(item.perf, { error: true, errorName: error.name, queued: true });
       }
-      this.finishQueryDiagnostic(item, status, error);
-      item.reject(error);
+      this.rejectQuery(item, error, status);
     });
+  }
+
+  private abortQuery(pending: PendingQuery): void {
+    if (pending.callerSettled) {
+      return;
+    }
+
+    const queuedIndex = this.queue.indexOf(pending);
+    const dispatched = this.pending === pending;
+    if (!dispatched && queuedIndex < 0) {
+      return;
+    }
+    if (queuedIndex >= 0) {
+      this.queue.splice(queuedIndex, 1);
+    }
+
+    const error = new KdbQueryCanceledError();
+    if (pending.perf) {
+      const details = {
+        error: true,
+        errorName: error.name,
+        canceled: true,
+        queued: !dispatched,
+      };
+      finishSendPerf(pending.perf, details);
+      finishReceivePerf(pending.perf, details);
+      finishQueryPerf(pending.perf, details);
+    }
+    this.rejectQuery(pending, error, 'canceled');
+
+    // A dispatched synchronous q IPC request must retain its protocol slot until
+    // its response arrives. Removing it here would associate that response with
+    // the next queued query. Server-side work is not interrupted by this signal.
+    if (!dispatched) {
+      this.flushQueue();
+    }
+  }
+
+  private resolveQuery(pending: PendingQuery, value: QValue): void {
+    if (pending.callerSettled) {
+      return;
+    }
+    pending.callerSettled = true;
+    this.removeQueryAbortListener(pending);
+    this.finishQueryDiagnostic(pending, 'success');
+    pending.resolve(value);
+  }
+
+  private rejectQuery(
+    pending: PendingQuery,
+    error: Error,
+    status: 'failed' | 'canceled' = 'failed'
+  ): void {
+    if (pending.callerSettled) {
+      return;
+    }
+    pending.callerSettled = true;
+    this.removeQueryAbortListener(pending);
+    this.finishQueryDiagnostic(pending, status, error);
+    pending.reject(error);
+  }
+
+  private removeQueryAbortListener(pending: PendingQuery): void {
+    if (!pending.signal || !pending.abortListener) {
+      return;
+    }
+    pending.signal.removeEventListener('abort', pending.abortListener);
+    pending.abortListener = undefined;
   }
 
   private rejectConnecting(error: Error): void {

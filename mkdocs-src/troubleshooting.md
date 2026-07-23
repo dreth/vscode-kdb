@@ -38,11 +38,11 @@ The importer recognizes only normalized `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, an
 
 The review keeps recognized but unsupported candidates visible with a safe reason. Correct malformed source fields or create a KX profile manually when the legacy name, server, port, namespace, username, password type, or timeout cannot pass standalone validation.
 
-**Not importable: requires SQLTools SSH tunnelling** means the source has `ssh: "Enabled"`. KX 0.2.2 supports direct q IPC only and will not copy `sshOptions`, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.
+**Not importable: requires SQLTools SSH tunnelling** means the source has `ssh: "Enabled"`. KX supports direct q IPC only and will not copy `sshOptions`, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.
 
 ## An imported connection was skipped or renamed
 
-An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose **Skip (recommended)** to preserve it, or **Import as new name** to create a separate validated profile. There is no Replace action in 0.2.2. KX checks again before writing and counts a newly conflicting candidate as skipped.
+An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose **Skip (recommended)** to preserve it, or **Import as new name** to create a separate validated profile. There is no Replace action. KX checks again before writing and counts a newly conflicting candidate as skipped.
 
 The final message reports imported, skipped, unsupported, and failed counts. Choose **Review Imported Connection** to inspect/test the saved direct profile. The SQLTools source remains unchanged and is not synchronized.
 
@@ -80,9 +80,9 @@ Reduce the expression in a q console when possible. Do not include sensitive pro
 
 ## Script requires newer q
 
-Whole documents and selections containing line breaks use `.Q.ld` grouping and require q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer.
+Whole documents, selections containing line breaks, and every **KX q (Direct IPC)** notebook cell use `.Q.ld` grouping and require q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer.
 
-Upgrade q, or execute a valid single-line expression using **Run Selection / Current Line**. The extension does not replace q script grouping with a SQL parser.
+Upgrade q, or execute a valid single-line expression from a normal `.q` editor using **Run Selection / Current Line**. Direct notebook cells always use complete-cell script semantics. The extension does not replace q script grouping with a SQL parser.
 
 ## Namespace behavior looks wrong
 
@@ -145,9 +145,15 @@ configure_evaluator(lambda source: my_existing_q_session(source))
 
 The helper deliberately has no implicit q connection. If no callback is configured, it raises an actionable error instead of borrowing the extension's active connection. If using the optional PyKX adapter, install/configure/license PyKX separately and explicitly call `kx_notebook.pykx.configure_pykx()`.
 
-## q is missing from the standard cell-language picker
+## KX q is missing from the notebook kernel/controller selector
 
-The standard Jupyter cell-language picker is filtered by the selected controller/kernel. VS Code exposes no supported manifest field for advertising q specifically into that list. Use the q action in the code-cell toolbar, the notebook cell context menu, or **KX: Set Notebook Cell Language to q** in the Command Palette.
+Open an ordinary Jupyter `.ipynb`, then use its top-right kernel selector or **Notebook: Select Notebook Kernel**. The native entry is **KX q (Direct IPC)**. It is a controller/kernel choice, not an entry in the Python controller's per-cell language picker.
+
+Confirm KX for VS Code 0.2.3 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
+
+## An existing cell is not q
+
+With **KX q (Direct IPC)** selected, use the q action in the code-cell toolbar, notebook cell context menu, or **KX: Set Notebook Cell Language to q**. The controller supports q only; it does not silently rewrite or dispatch Python code.
 
 The KX action uses VS Code's supported document-language API. Successful code cells have actual `TextDocument.languageId === "q"`; when saved as a non-default language, the built-in serializer records raw `metadata.vscode.languageId: "q"`. Markdown is skipped. A controller can still normalize that field when its kernel is selected.
 
@@ -157,35 +163,38 @@ That is expected. **KX: Tag Notebook Cell as q** sets actual q language mode, in
 
 The normal Python Jupyter controller does not advertise q and will not Run a q-language cell. Keep the marker, use **KX: Restore Notebook Cell Language** to return selected code cells to the notebook default/Python language, then use the notebook's normal Run action. IPython invokes the registered `%%q` helper. Kernel selection may perform the language normalization automatically.
 
-If a q-language cell has no marker, use its **Prepare for Python kernel** status action first. KX does not contribute a controller, intercept Jupyter keybindings/Run, or send the notebook cell through its direct q IPC connection.
+If a q-language cell has no marker, use its **Prepare for Python kernel** status action first. This action is for a selected Python controller and is hidden under **KX q (Direct IPC)**. The direct controller rejects a leading `%%q`; remove it and run the complete ordinary q cell, or select the Python controller.
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.2 `kx_notebook` helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.3 or the matching `kx_notebook` 0.2.3 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
-The escaped `text/html` and `text/plain` fallbacks remain useful in viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
+Direct-controller output includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
 
 ## Notebook preview is truncated
 
-`vscode-kdb.notebook.maxOutputRows` defaults to `1000` and accepts `1` through `10000`. `vscode-kdb.notebook.maxOutputBytes` defaults to `1000000` and accepts `16384` through `10000000`. The tag command writes those values into the cell marker; the helper may retain fewer rows to honor the complete byte budget.
+`vscode-kdb.notebook.maxOutputRows` defaults to `1000` and accepts `1` through `10000`. `vscode-kdb.notebook.maxOutputBytes` defaults to `1000000` and accepts `16384` through `10000000`. The portable contract additionally caps schema at 256 columns and cell text at 32,768 characters. The tag command writes the configurable values into the cell marker; either route may retain fewer rows/columns/cell characters and reports the truncation reason.
 
-These settings bound persisted output only. They do not change the q expression or add a server-side limit. Apply a q-side limit or aggregation in the evaluator when necessary. Omitted rows are not in the notebook, hidden metadata, or an extension cache.
+These settings bound persisted output only. They do not change the q expression or add a server-side limit. Apply a q-side limit or aggregation when necessary. A current direct result can retain omitted rows only in its transient live record; the notebook and hidden metadata contain no recoverable full value.
 
 ## Open in KX Results has only the preview
 
-This is the intended 0.2.0 contract. **KX: Open Saved Notebook Preview in Results Panel** transfers only the validated rows already stored in the selected cell. It does not rerun q, locate a live result, share an IPC handle, or recover omitted rows. A reopened notebook can still hand off its saved preview precisely because that bounded data is portable.
+For a newly run direct q cell, **Open in KX Results** can use the full decoded value while its bound live record exists. If only the preview opens, the record is absent: rerunning replaces it, removing the cell removes it, notebook close removes it, deactivation clears it, the 512-record cap evicts oldest entries, and reopening starts with snapshot output only.
 
-Full large data remains only in the originating evaluator/session while it is available. Use normal `.q` editor execution when the extension's direct q session and live full-result panel are required.
+**KX: Open Saved Notebook Preview in Results Panel** transfers only the validated rows stored in the cell. The opaque ID is not an IPC handle and omitted rows cannot be recovered from a reopened notebook.
 
 ## Notebook chart changes did not persist
 
-Chart type/column/point-cap changes and zoom made only in the VS Code renderer are session state. Persist a `kx_notebook.Chart` specification when emitting the output, then rerun the cell. The static HTML/PDF fallback uses that emitted specification to draw a network-free SVG; it cannot preserve interactive uPlot state.
+Chart type/column/point-cap changes and zoom made only in the VS Code renderer are session state. Direct-controller output does not persist a chart specification or HTML fallback. On the separate Python-helper route, persist a `kx_notebook.Chart` specification when emitting the output, then rerun the cell; its static HTML/PDF fallback uses that specification to draw a network-free SVG. Neither route preserves interactive uPlot state.
 
 ## Notebook q used a different session than the `.q` editor
 
-Notebook execution and `.q` editor execution remain deliberately separate in 0.2.2. Changing a notebook cell to q affects its document language/highlighting, not its evaluator. The helper calls only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not share the extension's direct IPC session, and the extension does not open a second connection for notebook cells.
+Check the selected notebook controller.
 
-Extension-driven same-session routing would require supported execution ownership that the normal Jupyter controller does not expose here. It remains disabled rather than being approximated through unsupported interception. A future persistent q evaluator must bridge the active Python kernel's q session, not create a hidden separate q connection.
+- **KX q (Direct IPC)** uses the active profile's existing extension client and namespace, exactly like `.q` editor runs. It creates no per-cell/per-notebook connection.
+- A Python controller plus `%%q` uses only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not borrow the extension client, and helper output never receives a Direct IPC live-result identity. A user callback may independently target the same server, but that is not extension-managed state sharing.
+
+Choose the intended route explicitly. KX never intercepts Python-controller Run.
 
 ## Query History is missing or incomplete
 

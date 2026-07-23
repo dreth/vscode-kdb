@@ -99,9 +99,9 @@ interface KxPanelMetadata {
   chartAutoOpen?: boolean;
 }
 
-type KxPanelDensity = 'compact' | 'standard' | 'comfortable';
-type KxPanelElapsedTimeDisplay = 'auto' | 'milliseconds';
-type KxPanelQResultDisplayStrategy = 'grid' | 'qText';
+export type KxPanelDensity = 'compact' | 'standard' | 'comfortable';
+export type KxPanelElapsedTimeDisplay = 'auto' | 'milliseconds';
+export type KxPanelQResultDisplayStrategy = 'grid' | 'qText';
 type KxPanelSortDirection = 'asc' | 'desc';
 export type KxResultsPanelRunMode = 'replace' | 'new';
 
@@ -126,6 +126,24 @@ interface KxPanelSettings {
   chartDecimalPlaces: number;
   chartZoomMinSampledPoints: number;
   chartZoomMaxSampledPoints: number;
+  qTextSyntaxHighlighting: boolean;
+  qTextDisplayFormatting: boolean;
+  arrayDisplayFormat: ArrayDisplayFormat;
+  functionDisplayStrategy: KxPanelQResultDisplayStrategy;
+  dictionaryDisplayStrategy: KxPanelQResultDisplayStrategy;
+  listDisplayStrategy: KxPanelQResultDisplayStrategy;
+  objectDisplayStrategy: KxPanelQResultDisplayStrategy;
+}
+
+export interface SharedKxResultSettings {
+  cellWidth: number;
+  rowHeight: number;
+  fontSize: number;
+  density: KxPanelDensity;
+  showRowIndex: boolean;
+  elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
+  chartDecimalPlaces: number;
+  chartMaxSourceRows: number;
   qTextSyntaxHighlighting: boolean;
   qTextDisplayFormatting: boolean;
   arrayDisplayFormat: ArrayDisplayFormat;
@@ -421,9 +439,13 @@ export class KxResultsPanel {
   }
 
   public static configurationChanged(event: vscode.ConfigurationChangeEvent): void {
-    if (event.affectsConfiguration('vscode-kdb.results.qText')) {
+    if (event.affectsConfiguration('vscode-kdb.results')) {
       KxResultsPanel.postSettingsToOpenPanels();
     }
+  }
+
+  public static resultSettingsChanged(): void {
+    KxResultsPanel.postSettingsToOpenPanels();
   }
 
   private static postSettingsToOpenPanels(): void {
@@ -1716,18 +1738,11 @@ export class KxResultsPanel {
   }
 
   private async updateSetting(message: any): Promise<void> {
-    const normalized = normalizePanelSettingUpdate(message && message.key, message && message.value);
-    if (!normalized) {
-      return;
-    }
-
-    const config = vscode.workspace.getConfiguration('vscode-kdb.results');
-    const settingKey = panelSettingConfigKey(
-      normalized.key,
-      panelDensity(message && message.density ? message.density : config.get<string>('density'))
+    await updateSharedKxResultSetting(
+      message && message.key,
+      message && message.value,
+      message && message.density
     );
-    await config.update(settingKey, normalized.value, vscode.ConfigurationTarget.Global);
-    KxResultsPanel.postSettingsToOpenPanels();
   }
 
   private isCurrentVersion(version: number): boolean {
@@ -6766,6 +6781,46 @@ function panelSettings(): KxPanelSettings {
   };
 }
 
+export function sharedKxResultSettings(): SharedKxResultSettings {
+  const settings = panelSettings();
+  return {
+    cellWidth: settings.cellWidth,
+    rowHeight: settings.rowHeight,
+    fontSize: settings.fontSize,
+    density: settings.density,
+    showRowIndex: settings.showRowIndex,
+    elapsedTimeDisplay: settings.elapsedTimeDisplay,
+    chartDecimalPlaces: settings.chartDecimalPlaces,
+    chartMaxSourceRows: chartMaxSourceRowsSetting(),
+    qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
+    qTextDisplayFormatting: settings.qTextDisplayFormatting,
+    arrayDisplayFormat: settings.arrayDisplayFormat,
+    functionDisplayStrategy: settings.functionDisplayStrategy,
+    dictionaryDisplayStrategy: settings.dictionaryDisplayStrategy,
+    listDisplayStrategy: settings.listDisplayStrategy,
+    objectDisplayStrategy: settings.objectDisplayStrategy,
+  };
+}
+
+export async function updateSharedKxResultSetting(
+  key: unknown,
+  value: unknown,
+  density?: unknown
+): Promise<boolean> {
+  const normalized = normalizePanelSettingUpdate(key, value);
+  if (!normalized) {
+    return false;
+  }
+  const config = vscode.workspace.getConfiguration('vscode-kdb.results');
+  const settingKey = panelSettingConfigKey(
+    normalized.key,
+    panelDensity(density === undefined ? config.get<string>('density') : density)
+  );
+  await config.update(settingKey, normalized.value, vscode.ConfigurationTarget.Global);
+  KxResultsPanel.resultSettingsChanged();
+  return true;
+}
+
 function qTextRenderOptions(settings: KxPanelSettings): { syntaxHighlighting: boolean; displayFormatting: boolean } {
   return {
     syntaxHighlighting: settings.qTextSyntaxHighlighting,
@@ -6851,6 +6906,7 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
   }
   if (
     key === 'arrayDisplayFormat' ||
+    key === 'chartMaxSourceRows' ||
     key === 'chartDecimalPlaces' ||
     key === 'functionDisplayStrategy' ||
     key === 'dictionaryDisplayStrategy' ||
@@ -6906,6 +6962,7 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   localDataServerFullExportCellLimit: positiveIntegerSettingUpdate,
   elapsedTimeDisplay: elapsedTimeDisplaySettingUpdate,
   chartDecimalPlaces: value => numberSettingUpdate(value, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX),
+  chartMaxSourceRows: positiveIntegerSettingUpdate,
   arrayDisplayFormat: arrayDisplayFormatSettingUpdate,
   functionDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'qText'),
   dictionaryDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),

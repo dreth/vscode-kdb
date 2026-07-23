@@ -19,6 +19,8 @@ export const MAX_NOTEBOOK_Q_SOURCE_CHARS = 4000;
 export const STATIC_NOTEBOOK_TABLE_ROW_LIMIT = 100;
 export const STATIC_NOTEBOOK_CHART_POINT_LIMIT = 240;
 
+export type NotebookResultMarker = '%%q' | 'direct-ipc';
+
 export type PortableCellKind =
   | 'null'
   | 'boolean'
@@ -91,7 +93,7 @@ export interface PortableKxResult {
     byteLimit: number;
   };
   provenance: {
-    marker: '%%q';
+    marker: NotebookResultMarker;
     label?: string;
     elapsedMs?: number;
     qSource?: string;
@@ -102,12 +104,14 @@ export interface PortableKxResult {
 export interface NotebookResultInput {
   columns: Array<string | PortableColumn>;
   rows: unknown[][];
+  cellValue?: (rowIndex: number, columnIndex: number) => unknown;
   rowCount?: number;
   rowLimit?: number;
   byteLimit?: number;
   label?: string;
   elapsedMs?: number;
   qSource?: string;
+  marker?: NotebookResultMarker;
   chart?: Partial<NotebookChartSpec>;
 }
 
@@ -155,6 +159,17 @@ export function createPortableKxResult(input: NotebookResultInput): PortableKxRe
   const columns = rawColumns.map((column, index) => normalizeColumn(column, index, usedColumnNames));
   const suppliedRowCount = nonNegativeSafeInteger(input.rowCount, input.rows.length);
   const rowCount = Math.max(suppliedRowCount, input.rows.length);
+  const usesCellAccessor = typeof input.cellValue === 'function';
+  const availableRowCount = Math.min(
+    rowLimit,
+    usesCellAccessor ? rowCount : input.rows.length
+  );
+  if (rowCount > rowLimit) {
+    reasons.add('rowLimit');
+  }
+  if (!usesCellAccessor && input.rows.length < Math.min(rowCount, rowLimit)) {
+    reasons.add('sourcePreview');
+  }
   const payload: PortableKxResult = {
     version: KX_NOTEBOOK_CONTRACT_VERSION,
     kind: 'table',
@@ -169,48 +184,85 @@ export function createPortableKxResult(input: NotebookResultInput): PortableKxRe
       byteLimit,
     },
     provenance: {
-      marker: '%%q',
+      marker: input.marker === 'direct-ipc' ? 'direct-ipc' : '%%q',
       ...optionalBoundedString('label', input.label, MAX_NOTEBOOK_LABEL_CHARS),
       ...(finiteNonNegative(input.elapsedMs) ? { elapsedMs: input.elapsedMs } : {}),
       ...optionalBoundedString('qSource', input.qSource, MAX_NOTEBOOK_Q_SOURCE_CHARS),
     },
   };
-  while (columns.length > 0 && portableKxResultBytes(payload) > byteLimit) {
-    columns.pop();
-    reasons.add('columnLimit');
-    updateResultSummary(payload, reasons);
-  }
-  const chart = normalizeChart(input.chart, columns);
-  if (chart) {
-    payload.chart = chart;
-    if (portableKxResultBytes(payload) > byteLimit) {
-      delete payload.chart;
-      reasons.add('byteLimit');
-      updateResultSummary(payload, reasons);
-    }
-  }
+  trimNotebookColumnsToMetadataBudget(
+    payload,
+    reasons,
+    byteLimit,
+    availableRowCount
+  );
 
-  const availableRows = input.rows.slice(0, rowLimit);
-  if (rowCount > availableRows.length || input.rows.length > rowLimit) {
-    reasons.add('rowLimit');
-  }
-  for (const rawRow of availableRows) {
-    const row = columns.map((_column, index) => portableCell(rawRow[index], reasons));
-    payload.data.rows.push(row);
-    updateResultSummary(payload, reasons);
-    if (portableKxResultBytes(payload) > byteLimit) {
-      payload.data.rows.pop();
+  const convertedRows: PortableCell[][] = [];
+  const encoder = new TextEncoder();
+  let convertedRowBytes = 0;
+  for (let rowIndex = 0; rowIndex < availableRowCount; rowIndex++) {
+    const row = columns.map((_column, columnIndex) => portableCell(
+      usesCellAccessor
+        ? input.cellValue!(rowIndex, columnIndex)
+        : input.rows[rowIndex]?.[columnIndex],
+      reasons
+    ));
+    convertedRows.push(row);
+    convertedRowBytes += encoder.encode(JSON.stringify(row)).byteLength;
+    if (convertedRowBytes + Math.max(0, convertedRows.length - 1) > byteLimit) {
       reasons.add('byteLimit');
-      updateResultSummary(payload, reasons);
       break;
     }
   }
-  updateResultSummary(payload, reasons);
-  while (payload.data.rows.length > 0 && portableKxResultBytes(payload) > byteLimit) {
-    payload.data.rows.pop();
-    reasons.add('byteLimit');
-    updateResultSummary(payload, reasons);
+  trimNotebookColumnsToMetadataBudget(
+    payload,
+    reasons,
+    byteLimit,
+    convertedRows.length
+  );
+
+  const chart = normalizeChart(input.chart, columns);
+  if (chart) {
+    payload.chart = chart;
+    updateResultSummary(payload, reasons, convertedRows.length);
+    if (portableKxResultMetadataBytes(payload) > byteLimit) {
+      delete payload.chart;
+      reasons.add('byteLimit');
+      updateResultSummary(payload, reasons, convertedRows.length);
+    }
   }
+
+  let rows = convertedRows.map(row => row.slice(0, columns.length));
+  let prefixBytes = portableRowPrefixBytes(rows);
+  if (portableKxResultBytesForRowCount(payload, reasons, prefixBytes, rows.length) > byteLimit) {
+    reasons.add('byteLimit');
+    const previousColumnCount = columns.length;
+    trimNotebookColumnsToMetadataBudget(payload, reasons, byteLimit, 0);
+    if (columns.length !== previousColumnCount) {
+      if (payload.chart && !validateChart(payload.chart, columns)) {
+        delete payload.chart;
+      }
+      rows = rows.map(row => row.slice(0, columns.length));
+      prefixBytes = portableRowPrefixBytes(rows);
+    }
+
+    let lower = 0;
+    let upper = rows.length;
+    let accepted = 0;
+    while (lower <= upper) {
+      const candidate = Math.floor((lower + upper) / 2);
+      if (portableKxResultBytesForRowCount(payload, reasons, prefixBytes, candidate) <= byteLimit) {
+        accepted = candidate;
+        lower = candidate + 1;
+      } else {
+        upper = candidate - 1;
+      }
+    }
+    rows = rows.slice(0, accepted);
+  }
+
+  payload.data.rows = rows;
+  updateResultSummary(payload, reasons);
   return payload;
 }
 
@@ -296,7 +348,7 @@ export function validatePortableKxResult(raw: unknown): NotebookValidationResult
       rows.push(row);
     }
     if (!isRecord(raw.provenance) || !hasOnlyKeys(raw.provenance, ['marker', 'label', 'elapsedMs', 'qSource']) ||
-      raw.provenance.marker !== '%%q') {
+      (raw.provenance.marker !== '%%q' && raw.provenance.marker !== 'direct-ipc')) {
       return invalid('KX notebook output provenance is invalid.');
     }
     if (raw.provenance.label !== undefined &&
@@ -329,7 +381,7 @@ export function validatePortableKxResult(raw: unknown): NotebookValidationResult
         byteLimit: result.byteLimit,
       },
       provenance: {
-        marker: '%%q',
+        marker: raw.provenance.marker,
         ...(raw.provenance.label === undefined ? {} : { label: raw.provenance.label }),
         ...(raw.provenance.elapsedMs === undefined ? {} : { elapsedMs: raw.provenance.elapsedMs }),
         ...(raw.provenance.qSource === undefined ? {} : { qSource: raw.provenance.qSource }),
@@ -736,13 +788,65 @@ function evenlySample<T>(values: T[], limit: number): T[] {
   return sampled;
 }
 
-function updateResultSummary(payload: PortableKxResult, reasons: Set<NotebookTruncationReason>): void {
-  payload.result.previewRowCount = payload.data.rows.length;
-  if (payload.result.previewRowCount < payload.result.rowCount && reasons.size === 0) {
-    reasons.add('rowLimit');
-  }
+function updateResultSummary(
+  payload: PortableKxResult,
+  reasons: Set<NotebookTruncationReason>,
+  previewRowCount = payload.data.rows.length
+): void {
+  payload.result.previewRowCount = previewRowCount;
   payload.result.truncationReasons = [...reasons];
   payload.result.truncated = reasons.size > 0 || payload.result.previewRowCount < payload.result.rowCount;
+}
+
+function trimNotebookColumnsToMetadataBudget(
+  payload: PortableKxResult,
+  reasons: Set<NotebookTruncationReason>,
+  byteLimit: number,
+  previewRowCount: number
+): void {
+  const savedRows = payload.data.rows;
+  payload.data.rows = [];
+  updateResultSummary(payload, reasons, previewRowCount);
+  while (payload.schema.columns.length > 0 && portableKxResultBytes(payload) > byteLimit) {
+    payload.schema.columns.pop();
+    reasons.add('columnLimit');
+    if (payload.chart && !validateChart(payload.chart, payload.schema.columns)) {
+      delete payload.chart;
+    }
+    updateResultSummary(payload, reasons, previewRowCount);
+  }
+  payload.data.rows = savedRows;
+}
+
+function portableKxResultMetadataBytes(payload: PortableKxResult): number {
+  const savedRows = payload.data.rows;
+  payload.data.rows = [];
+  const bytes = portableKxResultBytes(payload);
+  payload.data.rows = savedRows;
+  return bytes;
+}
+
+function portableRowPrefixBytes(rows: readonly PortableCell[][]): number[] {
+  const encoder = new TextEncoder();
+  const prefixes = [0];
+  let total = 0;
+  for (const row of rows) {
+    total += encoder.encode(JSON.stringify(row)).byteLength;
+    prefixes.push(total);
+  }
+  return prefixes;
+}
+
+function portableKxResultBytesForRowCount(
+  payload: PortableKxResult,
+  reasons: Set<NotebookTruncationReason>,
+  prefixBytes: readonly number[],
+  rowCount: number
+): number {
+  updateResultSummary(payload, reasons, rowCount);
+  return portableKxResultMetadataBytes(payload) +
+    prefixBytes[rowCount] +
+    Math.max(0, rowCount - 1);
 }
 
 function optionalBoundedString<Key extends 'label' | 'qSource'>(
