@@ -159,13 +159,26 @@ RUNTIME_CODE_MEMBERS = {
     PACKAGE_MANIFEST,
     "extension/language-configuration.json",
 }
+CONNECTION_MIGRATION_RUNTIME_MEMBER = "extension/out/connection-migration.js"
 
 FORBIDDEN_RUNTIME_INDICATORS = (
     ("SQLTools package import", re.compile(rb"@sqltools/", re.IGNORECASE)),
     ("SQLTools command/configuration", re.compile(rb"(?:^|[^a-z0-9_-])sqltools\.", re.IGNORECASE)),
-    ("kdb-sqltools runtime/source", re.compile(rb"kdb-sqltools", re.IGNORECASE)),
+    (
+        "SQLTools module import",
+        re.compile(
+            rb"(?:(?:require|import)\s*\(\s*|from\s+)[\"'][^\"']*sqltools",
+            re.IGNORECASE,
+        ),
+    ),
+    ("SQLTools session file behavior", re.compile(rb"\.session\.sql", re.IGNORECASE)),
     ("vscode-q source/reference", re.compile(rb"(?:jshinonome/)?vscode-q", re.IGNORECASE)),
 )
+LEGACY_MIGRATION_ALIASES = (
+    b"kdb-sqltools",
+    b"DanielAlonso.kdb-sqltools",
+)
+KDB_SQLTOOLS_INDICATOR = re.compile(rb"kdb-sqltools", re.IGNORECASE)
 
 CREDENTIAL_CONTENT_INDICATORS = (
     ("private key", re.compile(rb"-----BEGIN (?:[A-Z0-9 ]+ )?PRIVATE KEY-----")),
@@ -568,6 +581,30 @@ def validate_runtime_indicators(members: dict[str, bytes]) -> None:
         for description, pattern in FORBIDDEN_RUNTIME_INDICATORS:
             if pattern.search(payload):
                 raise AuditError(f"VSIX: forbidden {description} indicator found in {name!r}")
+
+        if KDB_SQLTOOLS_INDICATOR.search(payload):
+            if name != CONNECTION_MIGRATION_RUNTIME_MEMBER:
+                raise AuditError(
+                    f"VSIX: kdb-sqltools reference is permitted only in the one-shot migration bridge, found in {name!r}"
+                )
+            scrubbed = payload
+            for alias in sorted(LEGACY_MIGRATION_ALIASES, key=len, reverse=True):
+                scrubbed = scrubbed.replace(alias, b"")
+            if KDB_SQLTOOLS_INDICATOR.search(scrubbed):
+                raise AuditError(
+                    f"VSIX: migration bridge contains a non-schema kdb-sqltools reference in {name!r}"
+                )
+
+    bridge = members.get(CONNECTION_MIGRATION_RUNTIME_MEMBER)
+    if bridge is None:
+        raise AuditError("VSIX: compiled one-shot connection migration bridge is missing")
+    for required in (*LEGACY_MIGRATION_ALIASES, b"'sqltools'", b"'connections'"):
+        if required not in bridge:
+            raise AuditError(
+                f"VSIX: migration bridge is missing required schema marker {required.decode('ascii')!r}"
+            )
+    if b"onDidChangeConfiguration" in bridge:
+        raise AuditError("VSIX: migration bridge must not register permanent configuration synchronization")
 
 
 def audit_vsix(path: Path) -> VsixInventory:

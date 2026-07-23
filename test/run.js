@@ -48,6 +48,23 @@ const {
   validateConnection,
 } = requireOut('connection');
 const {
+  ConnectionMigrationCommand,
+  LEGACY_CONNECTION_TIMEOUT_SECONDS,
+  LEGACY_KDB_DRIVER_ALIASES,
+  SQLTOOLS_SSH_UNSUPPORTED_REASON,
+  discoverSqlToolsConnections,
+  findImportConflicts,
+  mapSqlToolsCandidate,
+  migrationCandidateReviewDetail,
+  normalizeLegacyDriverAlias,
+  parseSqlToolsConnection,
+  readConfirmedCandidatePassword,
+  readSqlToolsConfigurationScopes,
+  sanitizeConnectionLabel,
+  sqlToolsCandidateIdentity,
+  suggestImportedConnectionName,
+} = requireOut('connection-migration');
+const {
   ConnectionFormValidationError,
   parseConnectionFormPayload,
   passwordUpdateForForm,
@@ -138,6 +155,9 @@ const tests = [
   ['exact q selection/current-line text', testQText],
   ['qText result settings and live panel updates', testQTextResultPanelSettings],
   ['connection validation and namespace wrapping', testConnections],
+  ['SQLTools migration parsing and mapping', testSqlToolsMigrationParsing],
+  ['SQLTools migration configuration discovery', testSqlToolsMigrationDiscovery],
+  ['SQLTools migration consent, conflicts, and persistence', testSqlToolsMigrationCommand],
   ['server explorer request and metadata model', testServerExplorerModel],
   ['query history privacy and persistence model', testQueryHistoryModel],
   ['webview-free server and history tree providers', testTreeProviders],
@@ -1173,6 +1193,844 @@ function testConnections() {
   assert.ok(scriptWrapper.includes('q 4.0 2023.03.28 or newer'));
   assert.ok(scriptWrapper.includes(qString(script)));
   assert.ok(scriptWrapper.includes(qString('.analytics')));
+}
+
+function testSqlToolsMigrationParsing() {
+  assert.deepStrictEqual([...LEGACY_KDB_DRIVER_ALIASES], [
+    'KDB',
+    'kdb+',
+    'kdb',
+    'kdb-sqltools',
+    'DanielAlonso.kdb-sqltools',
+  ]);
+  assert.strictEqual(LEGACY_CONNECTION_TIMEOUT_SECONDS, 30);
+  for (const alias of LEGACY_KDB_DRIVER_ALIASES) {
+    assert.strictEqual(
+      normalizeLegacyDriverAlias(`  ${alias.toLocaleUpperCase()}  `),
+      alias.trim().toLocaleLowerCase()
+    );
+    const parsed = parseSqlToolsConnection(legacySqlToolsProfile({ driver: alias }));
+    assert.strictEqual(parsed.status, 'candidate');
+    assert.strictEqual(parsed.candidate.status, 'importable');
+  }
+  for (const rejected of [
+    '',
+    'postgres',
+    'KDB2',
+    'foo.kdb',
+    'DanielAlonso.kdb-sqltools.extra',
+    42,
+    new String('KDB'),
+    { toString() { throw new Error('must not coerce driver aliases'); } },
+  ]) {
+    assert.strictEqual(normalizeLegacyDriverAlias(rejected), undefined);
+  }
+
+  let nonKdbSensitiveReads = 0;
+  const nonKdb = { driver: 'PostgreSQL' };
+  for (const field of ['name', 'server', 'port', 'password']) {
+    Object.defineProperty(nonKdb, field, {
+      enumerable: true,
+      get() {
+        nonKdbSensitiveReads++;
+        throw new Error(`non-KDB ${field} must not be read`);
+      },
+    });
+  }
+  assert.deepStrictEqual(parseSqlToolsConnection(nonKdb), { status: 'ignored' });
+  assert.strictEqual(nonKdbSensitiveReads, 0, 'non-KDB fields, especially passwords, must remain untouched');
+
+  let sourceIdReads = 0;
+  const sourceIdIgnored = legacySqlToolsProfile();
+  Object.defineProperty(sourceIdIgnored, 'id', {
+    enumerable: true,
+    get() {
+      sourceIdReads++;
+      throw new Error('unsafe source IDs must not participate in migration');
+    },
+  });
+  const rootParsed = parseSqlToolsConnection(sourceIdIgnored);
+  assert.strictEqual(rootParsed.status, 'candidate');
+  assert.strictEqual(rootParsed.candidate.status, 'importable');
+  assert.strictEqual(sourceIdReads, 0);
+  assert.strictEqual(rootParsed.candidate.database, '.');
+  assert.strictEqual(rootParsed.candidate.username, '');
+  assert.strictEqual(rootParsed.candidate.connectTimeoutMs, 30000);
+  assert.strictEqual(rootParsed.candidate.connectionTimeoutSeconds, 30);
+  assert.strictEqual(rootParsed.candidate.timeoutUsesSchemaDefault, true);
+  assert.strictEqual(rootParsed.candidate.passwordState, 'absent');
+  assert.ok(!Object.prototype.hasOwnProperty.call(rootParsed.candidate, 'queryTimeoutMs'));
+  assert.ok(!Object.prototype.hasOwnProperty.call(rootParsed.candidate, 'password'));
+
+  const explicitRoot = parseSqlToolsConnection(legacySqlToolsProfile({ database: '   ' }));
+  assert.strictEqual(explicitRoot.candidate.database, '.');
+  const namespace = parseSqlToolsConnection(legacySqlToolsProfile({ database: 'analytics.market' }));
+  assert.strictEqual(namespace.candidate.database, '.analytics.market');
+
+  const zeroTimeout = parseSqlToolsConnection(legacySqlToolsProfile({ connectionTimeout: 0 }));
+  assert.strictEqual(zeroTimeout.candidate.status, 'importable');
+  assert.strictEqual(zeroTimeout.candidate.connectTimeoutMs, 0);
+  assert.strictEqual(zeroTimeout.candidate.timeoutUsesSchemaDefault, false);
+  const fractionalTimeout = parseSqlToolsConnection(legacySqlToolsProfile({ connectionTimeout: 1.25 }));
+  assert.strictEqual(fractionalTimeout.candidate.connectTimeoutMs, 1250);
+  for (const invalidTimeout of [
+    -1,
+    Infinity,
+    NaN,
+    '30',
+    0.0001,
+    (MAX_TIMEOUT_MS + 1) / 1000,
+  ]) {
+    const parsed = parseSqlToolsConnection(legacySqlToolsProfile({ connectionTimeout: invalidTimeout }));
+    assert.strictEqual(parsed.status, 'candidate');
+    assert.strictEqual(parsed.candidate.status, 'unsupported');
+    assert.match(parsed.candidate.reason, /connection timeout/i);
+  }
+
+  const mapped = mapSqlToolsCandidate(
+    zeroTimeout.candidate,
+    'kx-sqltools-zero',
+    zeroTimeout.candidate.name
+  );
+  assert.deepStrictEqual(mapped, {
+    id: 'kx-sqltools-zero',
+    name: 'Legacy q',
+    host: 'localhost',
+    port: 5000,
+    database: '.',
+    username: '',
+    connectTimeoutMs: 0,
+  });
+  assert.deepStrictEqual(
+    resolveConnectionTimeouts(mapped, { connectTimeoutMs: 5000, queryTimeoutMs: 9000 }),
+    { connectTimeoutMs: 0, queryTimeoutMs: 9000 },
+    'legacy connectionTimeout must map to connect only; query remains inherited independently'
+  );
+
+  let sshOptionsReads = 0;
+  const sshProfile = legacySqlToolsProfile({
+    ssh: 'Enabled',
+    password: ['direct', 'profile', 'secret'].join('-'),
+  });
+  Object.defineProperty(sshProfile, 'sshOptions', {
+    enumerable: true,
+    get() {
+      sshOptionsReads++;
+      throw new Error('SSH options and credentials must never be inspected');
+    },
+  });
+  const ssh = parseSqlToolsConnection(sshProfile);
+  assert.strictEqual(ssh.status, 'candidate');
+  assert.strictEqual(ssh.candidate.status, 'unsupported');
+  assert.strictEqual(ssh.candidate.reason, SQLTOOLS_SSH_UNSUPPORTED_REASON);
+  assert.strictEqual(sshOptionsReads, 0);
+  assert.ok(!Object.prototype.hasOwnProperty.call(ssh.candidate, 'sshOptions'));
+
+  const malformedCases = [
+    [legacySqlToolsProfile({ server: '' }), /missing server/i],
+    [legacySqlToolsProfile({ port: 0 }), /port must be an integer/i],
+    [legacySqlToolsProfile({ port: '5000' }), /port must be an integer/i],
+    [legacySqlToolsProfile({ database: '.bad-name' }), /namespace/i],
+    [legacySqlToolsProfile({ username: 'bad:user' }), /username/i],
+    [legacySqlToolsProfile({ password: { unsafe: true } }), /password must be text/i],
+    [legacySqlToolsProfile({ password: 'bad\0password' }), /password cannot contain null/i],
+    [legacySqlToolsProfile({ password: 'x'.repeat(65536) }), /password must be 65535 characters/i],
+    [legacySqlToolsProfile({ ssh: 'Unexpected' }), /unsupported SSH mode/i],
+    [legacySqlToolsProfile({ name: '' }), /missing connection name/i],
+  ];
+  for (const [profile, reason] of malformedCases) {
+    const parsed = parseSqlToolsConnection(profile);
+    assert.strictEqual(parsed.status, 'candidate');
+    assert.strictEqual(parsed.candidate.status, 'unsupported');
+    assert.match(parsed.candidate.reason, reason);
+  }
+  for (const untrusted of [
+    undefined,
+    null,
+    1,
+    'KDB',
+    [],
+    new Proxy({ driver: 'KDB' }, {
+      getOwnPropertyDescriptor() {
+        throw new Error('hostile configuration proxy');
+      },
+    }),
+  ]) {
+    assert.doesNotThrow(() => parseSqlToolsConnection(untrusted));
+  }
+
+  const sanitized = sanitizeConnectionLabel('  $(zap)\u0000 Legacy\n q \u202e ');
+  assert.strictEqual(sanitized, '$ (zap) Legacy q');
+  assert.strictEqual(Array.from(sanitizeConnectionLabel('x'.repeat(120))).length, 100);
+  const identity = sqlToolsCandidateIdentity('Legacy q', 'LOCALHOST', 5000, '.', 'runner');
+  assert.strictEqual(
+    identity,
+    sqlToolsCandidateIdentity('legacy Q', 'localhost', 5000, '.', 'runner')
+  );
+  assert.ok(!identity.includes('source-id'));
+  assert.ok(!identity.includes('secret'));
+
+  const existing = validateConnection({
+    id: 'kx-existing',
+    name: 'Legacy q',
+    host: 'localhost',
+    port: 5000,
+    database: '.',
+    username: '',
+  });
+  assert.deepStrictEqual(findImportConflicts(rootParsed.candidate, 'Legacy q', [existing]), [existing]);
+  assert.deepStrictEqual(findImportConflicts(rootParsed.candidate, 'Renamed import', [existing]), [existing]);
+  assert.strictEqual(suggestImportedConnectionName('Legacy q', [existing]), 'Legacy q (imported)');
+}
+
+function testSqlToolsMigrationDiscovery() {
+  const lowerSecret = ['lower', 'scope', 'secret'].join('-');
+  const preferredSecret = ['preferred', 'scope', 'secret'].join('-');
+  const globalProfile = legacySqlToolsProfile({
+    id: 'unsafe-global-id',
+    password: preferredSecret,
+    connectionTimeout: 4,
+  });
+  const workspaceProfile = legacySqlToolsProfile({
+    id: 'different-workspace-id',
+    password: preferredSecret,
+    connectionTimeout: 4,
+  });
+  const scopes = [
+    {
+      key: 'global',
+      kind: 'global',
+      label: 'User settings',
+      priority: 10,
+      value: [globalProfile, { driver: 'PostgreSQL', password: 'must-not-appear' }],
+    },
+    {
+      key: 'workspace',
+      kind: 'workspace',
+      label: 'Workspace\nsettings',
+      priority: 20,
+      value: [workspaceProfile],
+    },
+    {
+      key: 'folder',
+      kind: 'workspaceFolder',
+      label: 'Workspace folder: prices',
+      priority: 30,
+      value: [legacySqlToolsProfile({ password: preferredSecret, connectionTimeout: 4 })],
+    },
+    {
+      key: 'malformed',
+      kind: 'effective',
+      label: 'Malformed effective',
+      priority: 40,
+      value: { connections: [] },
+    },
+  ];
+  const discovery = discoverSqlToolsConnections(scopes);
+  assert.strictEqual(discovery.candidates.length, 1, 'equivalent scope candidates must deduplicate');
+  assert.strictEqual(discovery.issues.length, 1);
+  const candidate = discovery.candidates[0];
+  assert.strictEqual(candidate.status, 'importable');
+  assert.strictEqual(candidate.preferredSourceKey, 'folder');
+  assert.deepStrictEqual(candidate.sources.map(source => source.label), [
+    'User settings',
+    'Workspace settings',
+    'Workspace folder: prices',
+  ]);
+  assert.strictEqual(candidate.connectTimeoutMs, 4000);
+  assert.strictEqual(candidate.passwordState, 'present');
+  assert.deepStrictEqual(readConfirmedCandidatePassword(scopes, candidate), {
+    status: 'available',
+    password: preferredSecret,
+  });
+  assert.ok(!JSON.stringify(candidate).includes(lowerSecret));
+  assert.ok(!JSON.stringify(candidate).includes(preferredSecret));
+  assert.ok(!migrationCandidateReviewDetail(candidate).includes(lowerSecret));
+  assert.ok(!migrationCandidateReviewDetail(candidate).includes(preferredSecret));
+  assert.match(migrationCandidateReviewDetail(candidate), /Password: present \(value hidden\)/);
+  assert.match(migrationCandidateReviewDetail(candidate), /4000 ms connect only/);
+  assert.match(migrationCandidateReviewDetail(candidate), /Query timeout: inherits the KX default/);
+  assert.match(migrationCandidateReviewDetail(candidate), /Selected source entry: 1/);
+
+  const credentialVariants = discoverSqlToolsConnections([
+    {
+      key: 'global-variants',
+      kind: 'global',
+      label: 'User variants',
+      priority: 10,
+      value: [
+        legacySqlToolsProfile({ password: lowerSecret, connectionTimeout: 4 }),
+        legacySqlToolsProfile({ password: preferredSecret, connectionTimeout: 4 }),
+      ],
+    },
+  ]);
+  assert.strictEqual(
+    credentialVariants.candidates.length,
+    2,
+    'same-scope entries remain independently reviewable even when candidate identity matches'
+  );
+  assert.deepStrictEqual(
+    credentialVariants.candidates.map(item =>
+      readConfirmedCandidatePassword([
+        {
+          key: 'global-variants',
+          kind: 'global',
+          label: 'User variants',
+          priority: 10,
+          value: [
+            legacySqlToolsProfile({ password: lowerSecret, connectionTimeout: 4 }),
+            legacySqlToolsProfile({ password: preferredSecret, connectionTimeout: 4 }),
+          ],
+        },
+      ], item).password
+    ).sort(),
+    [lowerSecret, preferredSecret].sort()
+  );
+  assert.ok(!JSON.stringify(credentialVariants.candidates).includes(lowerSecret));
+  assert.ok(!JSON.stringify(credentialVariants.candidates).includes(preferredSecret));
+
+  const credentialReadCounts = [0, 0];
+  const indexedProfiles = [lowerSecret, preferredSecret].map((secret, index) => {
+    const profile = legacySqlToolsProfile({
+      name: `Indexed q ${index + 1}`,
+      connectionTimeout: 4,
+    });
+    Object.defineProperty(profile, 'password', {
+      enumerable: true,
+      get() {
+        credentialReadCounts[index]++;
+        return secret;
+      },
+    });
+    return profile;
+  });
+  const indexedDiscovery = discoverSqlToolsConnections([{
+    key: 'indexed',
+    kind: 'global',
+    label: 'Indexed source',
+    priority: 10,
+    value: indexedProfiles,
+  }]);
+  credentialReadCounts.fill(0);
+  const indexedCandidate = indexedDiscovery.candidates.find(item => item.preferredEntryIndex === 1);
+  assert.ok(indexedCandidate && indexedCandidate.status === 'importable');
+  assert.deepStrictEqual(
+    readConfirmedCandidatePassword([{
+      key: 'indexed',
+      kind: 'global',
+      label: 'Indexed source',
+      priority: 10,
+      value: indexedProfiles,
+    }], indexedCandidate),
+    { status: 'available', password: preferredSecret }
+  );
+  assert.deepStrictEqual(
+    credentialReadCounts,
+    [0, 1],
+    'confirmed migration must read only the selected exact source entry password once'
+  );
+
+  const unreadablePasswordProfile = () => {
+    const profile = legacySqlToolsProfile({ connectionTimeout: 4 });
+    Object.defineProperty(profile, 'password', {
+      enumerable: true,
+      get() {
+        throw new Error('unreadable credential');
+      },
+    });
+    return profile;
+  };
+  const unreadableDiscovery = discoverSqlToolsConnections([
+    {
+      key: 'unreadable-global',
+      kind: 'global',
+      label: 'Unreadable user profile',
+      priority: 10,
+      value: [unreadablePasswordProfile()],
+    },
+    {
+      key: 'unreadable-workspace',
+      kind: 'workspace',
+      label: 'Unreadable workspace profile',
+      priority: 20,
+      value: [unreadablePasswordProfile()],
+    },
+  ]);
+  assert.strictEqual(
+    unreadableDiscovery.candidates.length,
+    1,
+    'equivalent unreadable credentials must deduplicate without retaining a password value'
+  );
+  assert.strictEqual(unreadableDiscovery.candidates[0].status, 'unsupported');
+  assert.strictEqual(unreadableDiscovery.candidates[0].passwordState, 'unavailable');
+  assert.deepStrictEqual(
+    unreadableDiscovery.candidates[0].sources.map(source => source.label),
+    ['Unreadable user profile', 'Unreadable workspace profile']
+  );
+
+  const directAndSsh = discoverSqlToolsConnections([{
+    key: 'same-scope-security-boundary',
+    kind: 'global',
+    label: 'Same scope',
+    priority: 10,
+    value: [
+      legacySqlToolsProfile(),
+      legacySqlToolsProfile({ ssh: 'Enabled' }),
+    ],
+  }]);
+  assert.strictEqual(
+    directAndSsh.candidates.length,
+    2,
+    'identity deduplication must never hide an SSH-dependent candidate in the same scope'
+  );
+  assert.strictEqual(
+    directAndSsh.candidates.filter(item => item.status === 'importable').length,
+    1
+  );
+  assert.strictEqual(
+    directAndSsh.candidates.find(item => item.status === 'unsupported').reason,
+    SQLTOOLS_SSH_UNSUPPORTED_REASON
+  );
+
+  const changedScopes = scopes.map(scope => scope.key === 'folder'
+    ? { ...scope, value: [legacySqlToolsProfile({ password: '', connectionTimeout: 4 })] }
+    : scope);
+  assert.deepStrictEqual(readConfirmedCandidatePassword(changedScopes, candidate), { status: 'changed' });
+  const noPasswordDiscovery = discoverSqlToolsConnections([{
+    key: 'global',
+    kind: 'global',
+    label: 'User',
+    priority: 10,
+    value: [legacySqlToolsProfile()],
+  }]);
+  assert.deepStrictEqual(
+    readConfirmedCandidatePassword([{
+      key: 'global',
+      kind: 'global',
+      label: 'User',
+      priority: 10,
+      value: [legacySqlToolsProfile()],
+    }], noPasswordDiscovery.candidates[0]),
+    { status: 'not-present' }
+  );
+
+  const folderAUri = {
+    key: 'a',
+    toString() {
+      return 'file:///workspace/a';
+    },
+  };
+  const folderBUri = {
+    key: 'b',
+    toString() {
+      return 'file:///workspace/b';
+    },
+  };
+  const inspectedApi = createSqlToolsConfigurationApi({
+    rootInspection: {
+      key: 'sqltools.connections',
+      defaultValue: [legacySqlToolsProfile({ name: 'Default must not import' })],
+      globalValue: [globalProfile],
+      workspaceValue: [workspaceProfile],
+    },
+    folders: [
+      {
+        name: 'Folder\nA',
+        uri: folderAUri,
+        inspection: {
+          key: 'sqltools.connections',
+          globalValue: [globalProfile],
+          workspaceValue: [workspaceProfile],
+          workspaceFolderValue: [legacySqlToolsProfile({ name: 'Folder A q' })],
+        },
+        effective: [legacySqlToolsProfile({ name: 'Effective A must not duplicate' })],
+      },
+      {
+        name: 'Folder B',
+        uri: folderBUri,
+        inspection: {
+          key: 'sqltools.connections',
+          globalValue: [globalProfile],
+          workspaceValue: [workspaceProfile],
+          workspaceFolderValue: [legacySqlToolsProfile({
+            name: 'Folder B q',
+            password: preferredSecret,
+          })],
+        },
+        effective: [legacySqlToolsProfile({ name: 'Effective B must not duplicate' })],
+      },
+    ],
+  });
+  const inspectedScopes = readSqlToolsConfigurationScopes(inspectedApi);
+  assert.deepStrictEqual(inspectedScopes.map(scope => [scope.kind, scope.label]), [
+    ['global', 'User settings'],
+    ['workspace', 'Workspace settings'],
+    ['workspaceFolder', 'Workspace folder: Folder A'],
+    ['workspaceFolder', 'Workspace folder: Folder B'],
+  ]);
+  const folderKeys = new Map(
+    inspectedScopes
+      .filter(scope => scope.kind === 'workspaceFolder')
+      .map(scope => [scope.label, scope.key])
+  );
+  assert.ok([...folderKeys.values()].every(key =>
+    /^workspace-folder-[a-f0-9]{64}$/.test(key) &&
+    !key.includes('/workspace/')
+  ));
+  const reorderedApi = createSqlToolsConfigurationApi({
+    rootInspection: inspectedApi.workspace.getConfiguration('sqltools').inspect('connections'),
+    folders: [
+      {
+        name: 'Folder B',
+        uri: folderBUri,
+        inspection: inspectedApi.workspace
+          .getConfiguration('sqltools', folderBUri)
+          .inspect('connections'),
+      },
+      {
+        name: 'Folder A',
+        uri: folderAUri,
+        inspection: inspectedApi.workspace
+          .getConfiguration('sqltools', folderAUri)
+          .inspect('connections'),
+      },
+    ],
+  });
+  const reorderedScopes = readSqlToolsConfigurationScopes(reorderedApi);
+  const reorderedFolderKeys = new Map(
+    reorderedScopes
+      .filter(scope => scope.kind === 'workspaceFolder')
+      .map(scope => [scope.label, scope.key])
+  );
+  assert.deepStrictEqual(
+    [...reorderedFolderKeys].sort(),
+    [...folderKeys].sort(),
+    'workspace-folder source keys must remain stable when folder order changes'
+  );
+  assert.strictEqual(inspectedApi.extensions, undefined, 'discovery must not require an installed SQLTools extension');
+  const inspectedDiscovery = discoverSqlToolsConnections(inspectedScopes);
+  const inspectedNames = inspectedDiscovery.candidates.map(item => item.name);
+  assert.ok(inspectedNames.includes('Legacy q'));
+  assert.ok(inspectedNames.includes('Folder A q'));
+  assert.ok(inspectedNames.includes('Folder B q'));
+  assert.ok(!inspectedNames.some(name => /Default|Effective/.test(name)));
+  const folderBCandidate = inspectedDiscovery.candidates.find(item => item.name === 'Folder B q');
+  assert.ok(folderBCandidate && folderBCandidate.status === 'importable');
+  assert.deepStrictEqual(
+    readConfirmedCandidatePassword(reorderedScopes, folderBCandidate),
+    { status: 'available', password: preferredSecret },
+    'fresh confirmed reads must resolve the same folder after workspace-folder reordering'
+  );
+
+  const effectiveApi = createSqlToolsConfigurationApi({
+    rootInspection: undefined,
+    folders: [{
+      name: 'Only folder',
+      uri: {
+        key: 'only',
+        toString() {
+          return 'file:///workspace/only';
+        },
+      },
+      inspection: undefined,
+      effective: [legacySqlToolsProfile({ name: 'Effective q' })],
+    }],
+  });
+  const effectiveScopes = readSqlToolsConfigurationScopes(effectiveApi);
+  assert.deepStrictEqual(effectiveScopes.map(scope => [scope.kind, scope.label]), [
+    ['effective', 'Effective settings for workspace folder: Only folder'],
+  ]);
+  assert.deepStrictEqual(
+    discoverSqlToolsConnections(effectiveScopes).candidates.map(item => item.name),
+    ['Effective q']
+  );
+
+  const rootEffectiveApi = createSqlToolsConfigurationApi({
+    rootInspection: undefined,
+    rootEffective: [legacySqlToolsProfile({ name: 'Root effective q' })],
+    folders: [],
+  });
+  assert.deepStrictEqual(
+    readSqlToolsConfigurationScopes(rootEffectiveApi).map(scope => [scope.key, scope.kind]),
+    [['effective', 'effective']]
+  );
+  const brokenApi = {
+    workspace: {
+      get workspaceFolders() {
+        throw new Error('hostile workspace folders');
+      },
+      getConfiguration() {
+        throw new Error('configuration unavailable');
+      },
+    },
+  };
+  assert.doesNotThrow(() => readSqlToolsConfigurationScopes({
+    workspace: {
+      workspaceFolders: undefined,
+      getConfiguration() {
+        throw new Error('configuration unavailable');
+      },
+    },
+  }));
+  assert.deepStrictEqual(readSqlToolsConfigurationScopes({
+    workspace: {
+      workspaceFolders: undefined,
+      getConfiguration() {
+        throw new Error('configuration unavailable');
+      },
+    },
+  }), []);
+  assert.deepStrictEqual(readSqlToolsConfigurationScopes(brokenApi), []);
+}
+
+async function testSqlToolsMigrationCommand() {
+  const sourceSecret = ['migration', 'source', 'secret'].join('-');
+  const sshSecret = ['ssh', 'must', 'remain', 'hidden'].join('-');
+
+  const noCandidates = createMigrationCommandHarness({ sqlToolsGlobal: [] });
+  await noCandidates.command.run();
+  assert.strictEqual(noCandidates.quickPicks.length, 0);
+  assert.strictEqual(noCandidates.treeRefreshes, 0);
+  assert.strictEqual(noCandidates.information.length, 1);
+  assert.match(noCandidates.information[0].message, /No legacy SQLTools KDB connection candidates/i);
+  assert.match(noCandidates.information[0].message, /does not need to be installed/i);
+  assert.deepStrictEqual(noCandidates.connections, []);
+
+  const declined = createMigrationCommandHarness({
+    sqlToolsGlobal: [legacySqlToolsProfile({ password: sourceSecret })],
+    passwordDecision: undefined,
+  });
+  await declined.command.run();
+  assert.deepStrictEqual(declined.connections, []);
+  assert.strictEqual(declined.treeRefreshes, 0);
+  assert.strictEqual(declined.warnings.length, 1);
+  assert.deepStrictEqual(declined.warnings[0].actions, [
+    'Copy Passwords and Import',
+    'Import Without Passwords',
+  ]);
+  assert.match(declined.warnings[0].message, /one time into VS Code SecretStorage/i);
+  assert.match(declined.warnings[0].message, /existing SQLTools setting will remain unchanged/i);
+  assert.strictEqual(declined.sqlToolsUpdates, 0);
+  assert.ok(!JSON.stringify({
+    quickPicks: declined.quickPicks,
+    warnings: declined.warnings,
+    information: declined.information,
+  }).includes(sourceSecret));
+  assert.match(declined.information.at(-1).message, /import canceled/i);
+
+  const imported = createMigrationCommandHarness({
+    sqlToolsGlobal: [
+      legacySqlToolsProfile({
+        name: 'Imported q',
+        server: 'q.example.test',
+        database: 'analytics',
+        username: 'runner',
+        password: sourceSecret,
+        connectionTimeout: 0,
+      }),
+      legacySqlToolsProfile({
+        name: 'SSH q',
+        server: 'ssh-target.example.test',
+        password: 'direct-profile-secret',
+        ssh: 'Enabled',
+        sshOptions: {
+          host: 'bastion.example.test',
+          username: 'ssh-user',
+          password: sshSecret,
+        },
+      }),
+    ],
+    passwordDecision: 'Copy Passwords and Import',
+    reviewAfterImport: true,
+    selectUnsupported: true,
+  });
+  await imported.command.run();
+  assert.strictEqual(imported.quickPicks.length, 1);
+  const reviewItems = imported.quickPicks[0].items;
+  assert.strictEqual(reviewItems.length, 2);
+  assert.strictEqual(reviewItems.filter(item => item.selectable).length, 1);
+  assert.strictEqual(reviewItems.find(item => !item.selectable).candidate.reason, SQLTOOLS_SSH_UNSUPPORTED_REASON);
+  assert.ok(!JSON.stringify(reviewItems).includes(sourceSecret));
+  assert.ok(!JSON.stringify(reviewItems).includes(sshSecret));
+  assert.deepStrictEqual(imported.connections, [{
+    id: 'kx-import-1',
+    name: 'Imported q',
+    host: 'q.example.test',
+    port: 5000,
+    database: '.analytics',
+    username: 'runner',
+    connectTimeoutMs: 0,
+  }]);
+  assert.strictEqual(imported.secretFor('kx-import-1'), sourceSecret);
+  assert.strictEqual(imported.sourcePassword(), sourceSecret, 'source SQLTools settings must remain unchanged');
+  assert.strictEqual(imported.sqlToolsUpdates, 0);
+  assert.strictEqual(imported.treeRefreshes, 1);
+  assert.strictEqual(imported.activeId, 'kx-import-1');
+  assert.match(imported.information.at(-1).message, /1 imported, 0 skipped, 1 unsupported, 0 failed/);
+  assert.match(imported.information.at(-1).message, /no automatic ongoing sync/i);
+  assert.deepStrictEqual(imported.executedCommands, [{
+    command: 'vscode-kdb.editConnection',
+    args: ['kx-import-1'],
+  }]);
+
+  const withoutPassword = createMigrationCommandHarness({
+    sqlToolsGlobal: [legacySqlToolsProfile({ name: 'No copied password', password: sourceSecret })],
+    passwordDecision: 'Import Without Passwords',
+  });
+  await withoutPassword.command.run();
+  assert.strictEqual(withoutPassword.connections.length, 1);
+  assert.strictEqual(withoutPassword.secretFor('kx-import-1'), undefined);
+  assert.strictEqual(withoutPassword.sourcePassword(), sourceSecret);
+  assert.strictEqual(withoutPassword.sqlToolsUpdates, 0);
+  assert.match(withoutPassword.information.at(-1).message, /1 imported/);
+
+  const existing = validateConnection({
+    id: 'kx-existing-import',
+    name: 'Legacy q',
+    host: 'localhost',
+    port: 5000,
+    database: '.',
+    username: '',
+  });
+  const existingSecret = ['existing', 'saved', 'secret'].join('-');
+  const skipped = createMigrationCommandHarness({
+    sqlToolsGlobal: [legacySqlToolsProfile({ password: sourceSecret })],
+    initialConnections: [existing],
+    initialActiveId: existing.id,
+    initialSecrets: { [existing.id]: existingSecret },
+    conflictDecision: 'skip',
+    passwordDecision: 'Copy Passwords and Import',
+  });
+  await skipped.command.run();
+  assert.deepStrictEqual(skipped.connections, [existing]);
+  assert.strictEqual(skipped.activeId, existing.id);
+  assert.strictEqual(skipped.secretFor(existing.id), existingSecret);
+  assert.strictEqual(skipped.treeRefreshes, 0);
+  assert.strictEqual(skipped.conflictPicks.length, 1);
+  assert.deepStrictEqual(
+    skipped.conflictPicks[0].items.map(item => item.action),
+    ['skip', 'rename'],
+    'replace must not be offered; existing profiles are never overwritten'
+  );
+  assert.strictEqual(
+    skipped.conflictPicks[0].items.some(item => /replace/i.test(`${item.label} ${item.description}`)),
+    false
+  );
+  assert.match(skipped.information.at(-1).message, /0 imported, 1 skipped/);
+  assert.strictEqual(skipped.warnings.length, 0, 'skipped conflicts must not prompt to copy an unused password');
+
+  const renamed = createMigrationCommandHarness({
+    sqlToolsGlobal: [legacySqlToolsProfile({ password: sourceSecret })],
+    initialConnections: [existing],
+    initialActiveId: existing.id,
+    initialSecrets: { [existing.id]: existingSecret },
+    conflictDecision: 'rename',
+    renameValue: 'Legacy q migrated',
+    passwordDecision: 'Copy Passwords and Import',
+  });
+  await renamed.command.run();
+  assert.deepStrictEqual(renamed.connections.map(connection => connection.name), [
+    'Legacy q',
+    'Legacy q migrated',
+  ]);
+  assert.strictEqual(renamed.connections[1].id, 'kx-import-1');
+  assert.strictEqual(renamed.activeId, existing.id, 'rename import must not replace or reactivate an existing profile');
+  assert.strictEqual(renamed.secretFor(existing.id), existingSecret);
+  assert.strictEqual(renamed.secretFor('kx-import-1'), sourceSecret);
+  assert.strictEqual(renamed.treeRefreshes, 1);
+  assert.deepStrictEqual(renamed.conflictPicks[0].items.map(item => item.action), ['skip', 'rename']);
+  assert.strictEqual(renamed.inputBoxes.length, 1);
+  assert.match(renamed.inputBoxes[0].prompt, /saved profile will not be replaced/i);
+
+  const lateConflict = validateConnection({
+    id: 'kx-late-conflict',
+    name: 'Late conflict q',
+    host: 'other.example.test',
+    port: 5100,
+    database: '.',
+    username: '',
+  });
+  const raced = createMigrationCommandHarness({
+    sqlToolsGlobal: [legacySqlToolsProfile({
+      name: 'Late conflict q',
+      server: 'candidate.example.test',
+      password: sourceSecret,
+    })],
+    kxConnectionsAfterPasswordDecision: [lateConflict],
+    passwordDecision: 'Copy Passwords and Import',
+  });
+  await raced.command.run();
+  assert.deepStrictEqual(raced.connections, [lateConflict]);
+  assert.strictEqual(raced.secretFor('kx-import-1'), undefined);
+  assert.strictEqual(raced.treeRefreshes, 0);
+  assert.match(
+    raced.information.at(-1).message,
+    /0 imported, 1 skipped, 0 unsupported, 0 failed/,
+    'a conflict introduced after planning must be rechecked and safely skipped'
+  );
+
+  const failed = createMigrationCommandHarness({
+    sqlToolsGlobal: [legacySqlToolsProfile({ name: 'Failure q', password: sourceSecret })],
+    passwordDecision: 'Copy Passwords and Import',
+    failSecretStore: true,
+  });
+  await failed.command.run();
+  assert.deepStrictEqual(failed.connections, []);
+  assert.strictEqual(failed.treeRefreshes, 0);
+  assert.match(failed.information.at(-1).message, /0 imported, 0 skipped, 0 unsupported, 1 failed/);
+  assert.ok(!JSON.stringify({
+    quickPicks: failed.quickPicks,
+    warnings: failed.warnings,
+    information: failed.information,
+  }).includes(sourceSecret), 'SecretStorage failures must not expose the selected password');
+
+  const mixedExisting = validateConnection({
+    id: 'kx-mixed-existing',
+    name: 'Conflict q',
+    host: 'saved.example.test',
+    port: 5100,
+    database: '.',
+    username: '',
+  });
+  const mixedSource = [
+    legacySqlToolsProfile({ name: 'Good q', server: 'good.example.test' }),
+    legacySqlToolsProfile({
+      name: 'Failure q',
+      server: 'failure.example.test',
+      password: sourceSecret,
+    }),
+    legacySqlToolsProfile({ name: 'Conflict q', server: 'new.example.test' }),
+    legacySqlToolsProfile({ name: 'Unselected q', server: 'unselected.example.test' }),
+    legacySqlToolsProfile({ name: 'SSH q', server: 'ssh.example.test', ssh: 'Enabled' }),
+  ];
+  const mixedAfterConsent = mixedSource.map(profile => profile.name === 'Failure q'
+    ? { ...profile, password: '' }
+    : profile);
+  const mixed = createMigrationCommandHarness({
+    sqlToolsGlobal: mixedSource,
+    sqlToolsAfterPasswordDecision: mixedAfterConsent,
+    initialConnections: [mixedExisting],
+    initialActiveId: mixedExisting.id,
+    conflictDecision: 'skip',
+    passwordDecision: 'Copy Passwords and Import',
+    selectCandidate: candidate => candidate.name !== 'Unselected q',
+  });
+  await mixed.command.run();
+  assert.deepStrictEqual(
+    mixed.connections.map(connection => connection.name),
+    ['Conflict q', 'Good q'],
+    'only the non-conflicting candidate with an available confirmed credential state is imported'
+  );
+  assert.strictEqual(mixed.activeId, mixedExisting.id);
+  assert.strictEqual(mixed.secretFor('kx-import-1'), undefined);
+  assert.strictEqual(mixed.treeRefreshes, 1, 'a partial success refreshes the KX trees exactly once');
+  assert.strictEqual(mixed.conflictPicks.length, 1, 'same-name/different-endpoint conflicts require a choice');
+  assert.match(
+    mixed.information.at(-1).message,
+    /1 imported, 2 skipped, 1 unsupported, 1 failed/,
+    'mixed summary counts must include selection, conflict, unsupported, and changed-source outcomes'
+  );
+  assert.strictEqual(mixed.sqlToolsUpdates, 0);
 }
 
 function testServerExplorerModel() {
@@ -2703,6 +3561,26 @@ async function testConnectionStoreTransactions() {
   assert.strictEqual(harness.activeId, undefined);
   assert.strictEqual(harness.secretFor(connection.id), undefined);
 
+  harness.failActiveUpdate = 1;
+  await assert.rejects(() => store.add(connection, firstAuthValue), /injected active-state update failure/);
+  assert.deepStrictEqual(harness.connections, []);
+  assert.strictEqual(harness.activeId, undefined);
+  assert.strictEqual(
+    harness.secretFor(connection.id),
+    undefined,
+    'first-profile activation failure must roll back the newly written secret'
+  );
+
+  harness.failConfigurationUpdate = 1;
+  await assert.rejects(() => store.add(connection, firstAuthValue), /injected configuration update failure/);
+  assert.deepStrictEqual(harness.connections, []);
+  assert.strictEqual(harness.activeId, undefined);
+  assert.strictEqual(
+    harness.secretFor(connection.id),
+    undefined,
+    'add settings failure must roll back both activation and the newly written secret'
+  );
+
   await store.add(connection, firstAuthValue);
   assert.strictEqual(harness.connections.length, 1);
   assert.deepStrictEqual(
@@ -3213,7 +4091,16 @@ async function testConnectionManagerLifecycle() {
     'a delayed close callback from the old client must not drop its replacement'
   );
   await timeoutManager.disconnectIfConfigurationChanged(connection.id, changedRuntime);
-  assert.strictEqual(timeoutManager.isConnected(connection.id), true, 'matching settings must keep the session');
+  assert.strictEqual(
+    timeoutManager.isConnected(connection.id),
+    true,
+    'an unrelated profile add/configuration event must keep the matching active session'
+  );
+  assert.strictEqual(
+    replacementClient.closed,
+    false,
+    'the matching connected client must not be closed or recycled after an unrelated profile add'
+  );
 
   const globallyConfigured = validateConnection({
     ...connection,
@@ -3564,10 +4451,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.0');
+  assert.strictEqual(manifest.version, '0.2.1');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.0');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.0');
+  assert.strictEqual(packageLock.version, '0.2.1');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.1');
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -3591,6 +4478,7 @@ function testManifestAndSources() {
     'KX: Connect',
     'KX: Disconnect',
     'KX: Test Connection',
+    'KX: Import SQLTools KDB Connections',
     'KX: Refresh Server Explorer',
     'KX: Preview Server Object',
     'KX Query History: Rerun Query',
@@ -3688,6 +4576,27 @@ function testManifestAndSources() {
   });
   const menus = contributions.menus || {};
   const allMenuItems = Object.values(menus).flat();
+  const importCommand = commandById['vscode-kdb.importSqlToolsConnections'];
+  assert.ok(importCommand, 'SQLTools KDB migration command contribution is missing');
+  assert.strictEqual(importCommand.title, 'KX: Import SQLTools KDB Connections');
+  assert.ok(
+    (menus['view/title'] || []).some(item =>
+      item.command === 'vscode-kdb.importSqlToolsConnections' &&
+      item.when === 'view == vscode-kdb.connections'),
+    'migration command must be available from the KX Connections toolbar'
+  );
+  assert.ok(
+    (menus['view/item/context'] || []).some(item =>
+      item.command === 'vscode-kdb.importSqlToolsConnections' &&
+      /vscode-kdb\.connections\.empty/.test(String(item.when || ''))),
+    'migration command must be available from the empty KX Connections context'
+  );
+  assert.strictEqual(
+    (menus.commandPalette || []).some(item =>
+      item.command === 'vscode-kdb.importSqlToolsConnections' && item.when === 'false'),
+    false,
+    'migration command must remain discoverable in the Command Palette'
+  );
   for (const id of [...serverCommandIds, ...historyCommandIds]) {
     const items = allMenuItems.filter(item => item.command === id);
     assert.ok(items.length > 0, `${id} must have an explicitly gated menu contribution`);
@@ -3856,7 +4765,11 @@ function testManifestAndSources() {
   const sources = sourceFiles.map(file => [file, fs.readFileSync(file, 'utf8')]);
   sources.forEach(([file, source]) => {
     const label = path.relative(ROOT, file);
-    assertNoSqlToolsRuntimeReference(source, label);
+    if (path.basename(file) === 'connection-migration.ts') {
+      assertSqlToolsMigrationBridgeSource(source, label);
+    } else {
+      assertNoSqlToolsRuntimeReference(source, label);
+    }
     assertNoVscodeQRuntimeReference(source, label);
   });
 
@@ -3876,6 +4789,16 @@ function testManifestAndSources() {
 
   const storeSource = readSource('connection-store.ts');
   assert.ok(/context\.secrets\.(store|get|delete)/.test(storeSource), 'passwords must use VS Code SecretStorage');
+  const migrationSource = readSource('connection-migration.ts');
+  const commandsSourceForMigration = readSource('connection-commands.ts');
+  assert.match(
+    commandsSourceForMigration,
+    /registerCommand\(\s*'vscode-kdb\.importSqlToolsConnections'[\s\S]*?this\.migration\.run\(\)/
+  );
+  assert.ok(
+    !/ConnectionManager/.test(migrationSource),
+    'the one-shot settings bridge must not own SQLTools sessions or KX client lifecycle'
+  );
   assert.ok(storeSource.includes('ConfigurationTarget.Global'), 'connections must use global settings');
   const safeBlock = sourceSection(storeSource, 'const safeConnections', 'await vscode.workspace');
   assert.ok(safeBlock.includes('username: connection.username'));
@@ -4697,6 +5620,7 @@ function createVscodeStoreHarness() {
     failSecretStore: 0,
     failSecretDelete: 0,
     failConfigurationUpdate: 0,
+    failActiveUpdate: 0,
   };
   const configuration = {
     inspect(key) {
@@ -4719,6 +5643,10 @@ function createVscodeStoreHarness() {
         return state.activeId;
       },
       async update(_key, value) {
+        if (state.failActiveUpdate > 0) {
+          state.failActiveUpdate--;
+          throw new Error('injected active-state update failure');
+        }
         state.activeId = value;
       },
     },
@@ -4763,11 +5691,289 @@ function createVscodeStoreHarness() {
     set failConfigurationUpdate(value) {
       state.failConfigurationUpdate = value;
     },
+    set failActiveUpdate(value) {
+      state.failActiveUpdate = value;
+    },
     secretFor(id) {
       return state.secrets.get(`vscode-kdb.connectionPassword.${id}`);
     },
   };
   return harness;
+}
+
+function legacySqlToolsProfile(overrides = {}) {
+  return {
+    driver: 'KDB',
+    name: 'Legacy q',
+    server: 'localhost',
+    port: 5000,
+    ...overrides,
+  };
+}
+
+function createSqlToolsConfigurationApi(options = {}) {
+  const folders = options.folders || [];
+  const rootConfiguration = {
+    inspect(key) {
+      assert.strictEqual(key, 'connections');
+      return options.rootInspection;
+    },
+    get(key) {
+      assert.strictEqual(key, 'connections');
+      return options.rootEffective;
+    },
+  };
+  const folderConfigurations = new Map(folders.map(folder => [
+    folder.uri,
+    {
+      inspect(key) {
+        assert.strictEqual(key, 'connections');
+        return folder.inspection;
+      },
+      get(key) {
+        assert.strictEqual(key, 'connections');
+        return folder.effective;
+      },
+    },
+  ]));
+  return {
+    workspace: {
+      workspaceFolders: folders.map(folder => ({
+        name: folder.name,
+        uri: folder.uri,
+      })),
+      getConfiguration(section, resource) {
+        assert.strictEqual(section, 'sqltools');
+        if (resource === undefined) {
+          return rootConfiguration;
+        }
+        const configuration = folderConfigurations.get(resource);
+        assert.ok(configuration, 'unexpected workspace-folder configuration resource');
+        return configuration;
+      },
+    },
+  };
+}
+
+function createMigrationCommandHarness(options = {}) {
+  const state = {
+    activeId: options.initialActiveId,
+    connections: cloneJson(options.initialConnections || []),
+    secrets: new Map(),
+    sqlToolsGlobal: options.sqlToolsGlobal || [],
+    sqlToolsUpdates: 0,
+    failSecretStore: !!options.failSecretStore,
+    nextConnectionId: 1,
+    treeRefreshes: 0,
+  };
+  for (const [id, password] of Object.entries(options.initialSecrets || {})) {
+    state.secrets.set(`vscode-kdb.connectionPassword.${id}`, password);
+  }
+
+  const quickPicks = [];
+  const conflictPicks = [];
+  const inputBoxes = [];
+  const warnings = [];
+  const information = [];
+  const executedCommands = [];
+
+  const sqlToolsConfiguration = {
+    inspect(key) {
+      assert.strictEqual(key, 'connections');
+      return {
+        key: 'sqltools.connections',
+        globalValue: state.sqlToolsGlobal,
+      };
+    },
+    get(key) {
+      assert.strictEqual(key, 'connections');
+      return state.sqlToolsGlobal;
+    },
+    async update() {
+      state.sqlToolsUpdates++;
+      throw new Error('the SQLTools source setting must remain read-only');
+    },
+  };
+  const kxConfiguration = {
+    inspect(key) {
+      assert.strictEqual(key, 'connections');
+      return { globalValue: cloneJson(state.connections) };
+    },
+    async update(key, value, target) {
+      assert.strictEqual(key, 'connections');
+      assert.strictEqual(target, 'global');
+      state.connections = cloneJson(value);
+    },
+  };
+
+  const vscode = {
+    ConfigurationTarget: { Global: 'global' },
+    workspace: {
+      workspaceFolders: undefined,
+      getConfiguration(section) {
+        if (section === 'sqltools') {
+          return sqlToolsConfiguration;
+        }
+        assert.strictEqual(section, 'vscode-kdb');
+        return kxConfiguration;
+      },
+    },
+    window: {
+      createQuickPick() {
+        const selectionListeners = new Set();
+        const acceptListeners = new Set();
+        const hideListeners = new Set();
+        let selectedItems = [];
+        let hidden = false;
+        const quickPick = {
+          title: '',
+          placeholder: '',
+          canSelectMany: false,
+          ignoreFocusOut: false,
+          matchOnDescription: false,
+          matchOnDetail: false,
+          items: [],
+          get selectedItems() {
+            return selectedItems;
+          },
+          set selectedItems(items) {
+            selectedItems = items;
+            [...selectionListeners].forEach(listener => listener(items));
+          },
+          onDidChangeSelection(listener) {
+            selectionListeners.add(listener);
+            return { dispose: () => selectionListeners.delete(listener) };
+          },
+          onDidAccept(listener) {
+            acceptListeners.add(listener);
+            return { dispose: () => acceptListeners.delete(listener) };
+          },
+          onDidHide(listener) {
+            hideListeners.add(listener);
+            return { dispose: () => hideListeners.delete(listener) };
+          },
+          show() {
+            quickPick.selectedItems = options.selectUnsupported
+              ? [...quickPick.items]
+              : quickPick.items.filter(item =>
+                item.selectable &&
+                (!options.selectCandidate || options.selectCandidate(item.candidate))
+              );
+            [...acceptListeners].forEach(listener => listener());
+          },
+          hide() {
+            if (hidden) {
+              return;
+            }
+            hidden = true;
+            [...hideListeners].forEach(listener => listener());
+          },
+          dispose() {
+            selectionListeners.clear();
+            acceptListeners.clear();
+            hideListeners.clear();
+          },
+        };
+        quickPicks.push(quickPick);
+        return quickPick;
+      },
+      async showQuickPick(items, pickerOptions) {
+        conflictPicks.push({ items, options: pickerOptions });
+        return items.find(item => item.action === options.conflictDecision);
+      },
+      async showInputBox(inputOptions) {
+        inputBoxes.push(inputOptions);
+        return options.renameValue;
+      },
+      async showWarningMessage(message, modal, ...actions) {
+        warnings.push({ message, modal, actions });
+        if (actions.includes('Copy Passwords and Import')) {
+          if (options.sqlToolsAfterPasswordDecision) {
+            state.sqlToolsGlobal = options.sqlToolsAfterPasswordDecision;
+          }
+          if (options.kxConnectionsAfterPasswordDecision) {
+            state.connections = cloneJson(options.kxConnectionsAfterPasswordDecision);
+          }
+          return options.passwordDecision;
+        }
+        return undefined;
+      },
+      async showInformationMessage(message, ...actions) {
+        information.push({ message, actions });
+        return options.reviewAfterImport && actions.includes('Review Imported Connection')
+          ? 'Review Imported Connection'
+          : undefined;
+      },
+    },
+    commands: {
+      async executeCommand(command, ...args) {
+        executedCommands.push({ command, args });
+      },
+    },
+  };
+  const context = {
+    globalState: {
+      get() {
+        return state.activeId;
+      },
+      async update(_key, value) {
+        state.activeId = value;
+      },
+    },
+    secrets: {
+      async get(key) {
+        return state.secrets.get(key);
+      },
+      async store(key, value) {
+        if (state.failSecretStore) {
+          throw new Error('injected SecretStorage store failure');
+        }
+        state.secrets.set(key, value);
+      },
+      async delete(key) {
+        state.secrets.delete(key);
+      },
+    },
+  };
+  const { ConnectionStore } = requireOutWithVscode('connection-store', vscode);
+  const store = new ConnectionStore(context);
+  store.newConnectionId = () => `kx-import-${state.nextConnectionId++}`;
+  const tree = {
+    refresh() {
+      state.treeRefreshes++;
+    },
+  };
+  const command = new ConnectionMigrationCommand(vscode, store, tree);
+
+  return {
+    command,
+    quickPicks,
+    conflictPicks,
+    inputBoxes,
+    warnings,
+    information,
+    executedCommands,
+    get connections() {
+      return cloneJson(state.connections);
+    },
+    get activeId() {
+      return state.activeId;
+    },
+    get treeRefreshes() {
+      return state.treeRefreshes;
+    },
+    secretFor(id) {
+      return state.secrets.get(`vscode-kdb.connectionPassword.${id}`);
+    },
+    sourcePassword() {
+      const source = state.sqlToolsGlobal.find(profile =>
+        profile && typeof profile === 'object' && typeof profile.password === 'string');
+      return source && source.password;
+    },
+    get sqlToolsUpdates() {
+      return state.sqlToolsUpdates;
+    },
+  };
 }
 
 function cloneJson(value) {
@@ -4894,6 +6100,38 @@ function assertNoSqlToolsRuntimeReference(source, label) {
     /kdb-sqltools/i,
   ];
   forbidden.forEach(pattern => assert.ok(!pattern.test(source), `${label} contains forbidden standalone dependency/path ${pattern}`));
+}
+
+function assertSqlToolsMigrationBridgeSource(source, label) {
+  for (const alias of [
+    'KDB',
+    'kdb+',
+    'kdb',
+    'kdb-sqltools',
+    'DanielAlonso.kdb-sqltools',
+  ]) {
+    assert.ok(source.includes(`'${alias}'`), `${label} is missing the exact legacy alias ${alias}`);
+  }
+  assert.match(source, /const SQLTOOLS_CONFIGURATION_SECTION = 'sqltools'/);
+  assert.match(source, /const SQLTOOLS_CONNECTIONS_SETTING = 'connections'/);
+  assert.match(
+    source,
+    /getConfiguration\(SQLTOOLS_CONFIGURATION_SECTION(?:,\s*folder\.uri)?\)/
+  );
+  assert.ok(!/sshOptions/.test(source), `${label} must not inspect or copy SQLTools SSH options`);
+  const forbidden = [
+    /@sqltools\//i,
+    /\.session\.sql/i,
+    /extensions\.getExtension/i,
+    /(?:registerCommand|executeCommand)\(\s*['"]sqltools\./i,
+    /onDidChangeConfiguration/i,
+    /setInterval\s*\(/i,
+    /\b(?:console|logger)\s*\./i,
+  ];
+  forbidden.forEach(pattern => assert.ok(
+    !pattern.test(source),
+    `${label} exceeds the read-only migration bridge boundary ${pattern}`
+  ));
 }
 
 function assertNoVscodeQRuntimeReference(source, label) {

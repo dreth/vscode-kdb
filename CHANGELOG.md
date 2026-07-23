@@ -4,6 +4,17 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.1 - 2026-07-23
+
+- Added **KX: Import SQLTools KDB Connections**, an explicit one-shot migration bridge that discovers legacy KDB profiles already present in VS Code's `sqltools.connections` setting. Discovery covers user, workspace, and workspace-folder scopes, deduplicates equivalent candidates while retaining source labels, and does not require SQLTools to be installed or activated.
+- Limited discovery to the normalized legacy aliases `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, and `DanielAlonso.kdb-sqltools`. Other SQLTools drivers are ignored before their connection fields or passwords are inspected.
+- Added a KX-owned multi-select review showing sanitized profile name, direct endpoint, namespace, source scope, password presence without its value, and timeout behavior. Malformed profiles and SSH-enabled profiles remain visible with safe non-importable reasons; SSH options and credentials are never copied.
+- Mapped the legacy name, server, port, database namespace, username, and connection timeout into validated KX-owned direct IPC profiles. The legacy timeout is converted from seconds to the KX connect/handshake timeout only, including `0`; the KX query timeout remains unset and continues to inherit its global KX default.
+- Added an explicit modal choice before selected plaintext passwords are re-read and copied once into VS Code SecretStorage. Users can instead import without passwords or cancel. The original SQLTools setting remains unchanged, and passwords are excluded from labels, logs, diagnostics, history, telemetry, errors, snapshots, and saved KX settings.
+- Made conflicts safe by default: an existing KX name or equivalent direct endpoint is skipped unless the user explicitly chooses **Import as new name**. This release never overwrites or replaces a saved KX profile. Import summaries report imported, skipped, unsupported, and failed counts, explain that there is no ongoing sync, and offer review in the KX connection editor.
+- Added deterministic parsing, configuration-provider, conflict, SecretStorage, lifecycle, tree-refresh, and no-leakage coverage. Configuration inspection is exercised with faithful fakes because no VS Code Extension Host is available; this is not visual or real Extension Host end-to-end evidence.
+- Kept the extension standalone: no SQLTools package, extension dependency, API, command, view, result target, runtime session behavior, `.session.sql` support, or Marketplace publication was added.
+
 ## 0.2.0 - 2026-07-22
 
 - Added a real VS Code NotebookRenderer for the versioned `application/vnd.kx.result+json` v1 MIME contract. Ordinary Jupyter/IPython `.ipynb` files can now retain bounded KX/q table data, schema, row counts, safe provenance, elapsed time, truncation state, and an optional chart specification directly in code-cell output.
@@ -71,4 +82,4 @@ All notable changes to KX for VS Code are documented here.
 - Added VSIX packaging and release-artifact exclusion rules.
 - Shipped with no SQLTools dependency, API path, command ID, UI integration, or `.session.sql` behavior.
 
-Extension-owned `.q` execution remains direct IPC only. SSH, TLS termination, gateway/broker setup, and remote administration are not included. The 0.2.0 notebook helper/renderer path does not add an extension-owned notebook q connection or execution controller.
+Extension-owned `.q` execution remains direct IPC only. SSH, TLS termination, gateway/broker setup, and remote administration are not included. The notebook helper/renderer path introduced in 0.2.0 and retained in 0.2.1 does not add an extension-owned notebook q connection or execution controller.

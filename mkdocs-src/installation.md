@@ -6,7 +6,7 @@ KX for VS Code requires VS Code `1.96.0` or newer and a kdb+/q process reachable
 
 Notebook publishing additionally requires Python 3.9 or newer, IPython, and the focused `kx_notebook` helper installed in the selected notebook kernel. The helper bundles no q runtime or PyKX binary. Optional PyKX use must be installed, configured, licensed, and enabled separately in that kernel.
 
-SQLTools is neither installed nor activated by this extension.
+SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's `sqltools.connections` setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.
 
 ## Install the extension
 
@@ -49,6 +49,14 @@ The common `q -p 5000` form can listen beyond loopback. Use it only on a trusted
 
 The result should open in a KX-owned result panel. If it does not, see [Troubleshooting](troubleshooting.md) and inspect **View > Output > KX**.
 
+## Optional one-time connection import
+
+If you previously used the `DanielAlonso.kdb-sqltools` driver, run **KX: Import SQLTools KDB Connections** from the Command Palette or KX Connections toolbar. SQLTools may already be uninstalled. KX inspects existing user, workspace, and workspace-folder settings and reviews only profiles whose normalized driver is `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, or `DanielAlonso.kdb-sqltools`.
+
+The review never displays password values. SSH-enabled and malformed profiles are explained but cannot be selected. Existing KX profiles are skipped unless you explicitly import the candidate under a new unique name; this release has no replace or overwrite action. If selected settings contain passwords, choose whether to copy them once into VS Code SecretStorage, import without passwords, or cancel. Source settings remain unchanged and are never synchronized.
+
+The imported legacy connection timeout applies only to KX connect/handshake. Query timeout continues to inherit the KX global query default until you edit it. After import, use **Review Imported Connection** or the KX sidebar to inspect and test the saved direct profile.
+
 ## Install the notebook helper
 
 Install `python/kx_notebook` into the same Python environment used by the Jupyter/IPython kernel. For an editable source install without modifying system Python:
@@ -79,10 +87,10 @@ The maintained non-visual checks are:
 ```sh
 npm ci
 npm run compile
-node test/run.js
 npm test
-uv run --no-project --with-editable ./python/kx_notebook \
-  python -m unittest discover -s python/kx_notebook/tests -v
+npm run test:parity:self
+npm run test:notebook-python
+npm run test:notebook-cross
 ```
 
 When a local q executable is available:
@@ -91,4 +99,4 @@ When a local q executable is available:
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-These commands do not claim visual VS Code Extension Host end-to-end coverage.
+The migration configuration-provider tests use faithful fakes for VS Code `inspect`/effective values because the maintained suite does not launch an Extension Host. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.

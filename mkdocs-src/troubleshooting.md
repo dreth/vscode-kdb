@@ -28,6 +28,30 @@ A `connect`-phase error generally indicates endpoint, routing, refusal, or timeo
 
 Use **KX: Test Connection** to open a temporary client and perform the minimal safe response check. If authentication changed, use **Edit Connection**: leave the empty password input blank to keep its existing SecretStorage value, enter a replacement, or select **Clear saved password**. KX never sends the saved password back into the form.
 
+## No SQLTools KDB import candidates were found
+
+This is a normal low-noise result when no eligible legacy value exists. SQLTools does not need to be installed, but its old KDB profiles must still be present in VS Code's `sqltools.connections` setting at user, workspace, workspace-folder, or effective scope.
+
+The importer recognizes only normalized `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, and `DanielAlonso.kdb-sqltools` driver aliases. It deliberately ignores other SQLTools drivers before reading their endpoint or password fields. It also does not search `.session.sql`, SQLTools storage internals, extension APIs, or another machine. Settings Sync and source-setting lifecycle remain outside KX; there is no automatic discovery/import at startup.
+
+## A SQLTools KDB profile is not importable
+
+The review keeps recognized but unsupported candidates visible with a safe reason. Correct malformed source fields or create a KX profile manually when the legacy name, server, port, namespace, username, password type, or timeout cannot pass standalone validation.
+
+**Not importable: requires SQLTools SSH tunnelling** means the source has `ssh: "Enabled"`. KX 0.2.1 supports direct q IPC only and will not copy `sshOptions`, SSH credentials, or silently create a connection that bypasses the tunnel. Establish a separately managed secure tunnel and create an appropriate direct KX endpoint only if that matches your security policy.
+
+## An imported connection was skipped or renamed
+
+An existing KX profile with the same case-insensitive name or equivalent host/port/namespace/username is never overwritten. Choose **Skip (recommended)** to preserve it, or **Import as new name** to create a separate validated profile. There is no Replace action in 0.2.1. KX checks again before writing and counts a newly conflicting candidate as skipped.
+
+The final message reports imported, skipped, unsupported, and failed counts. Choose **Review Imported Connection** to inspect/test the saved direct profile. The SQLTools source remains unchanged and is not synchronized.
+
+## An imported connection has no password or a different query timeout
+
+When selected source profiles contain plaintext passwords, KX asks whether to copy them once into SecretStorage, import explicitly without passwords, or cancel. Choosing **Import Without Passwords** is intentional; edit the new KX profile to enter a password later. If the exact indexed source candidate is absent, no longer matches, or has an unavailable/invalid password during the confirmed re-read, that candidate fails safely.
+
+Legacy `connectionTimeout` seconds map only to the imported profile's connect/handshake timeout. `0` remains disabled and an omitted value uses the old 30-second schema default. The per-profile query timeout remains blank and inherits the resolved global KX query default; it does not inherit the newly imported per-profile connect timeout. Edit the KX profile if it needs a separate query override.
+
 ## Sidebar says disconnected after failure
 
 That is expected after a failed open, transport error, remote close, or explicit disconnect. Partial clients and stale opening promises are dropped, and the tree refreshes to the disconnected state. A subsequent run can connect again on demand.
@@ -127,7 +151,7 @@ That is expected. **KX: Tag Notebook Cell as q** inserts or preserves the durabl
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.0 `kx_notebook` helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun the cell with the matching 0.2.1 `kx_notebook` helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
 The escaped `text/html` and `text/plain` fallbacks remain useful in viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
 
@@ -169,7 +193,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook-contract/renderer-message, connection-test, qText, chart-reset, tree/history, and source guards but does not claim visual/manual VS Code Extension Host end-to-end coverage. The Python helper has a separate isolated `uv`/`unittest` suite; neither suite presents a screenshot as substitute evidence.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook-contract/renderer-message, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, and source guards. Configuration inspection is faithfully unit-tested without launching a VS Code Extension Host. The Python helper has a separate isolated `uv`/`unittest` suite; neither suite claims visual or real Extension Host end-to-end evidence.
 
 ## Generated docs drift
 

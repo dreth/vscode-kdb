@@ -33,6 +33,14 @@ Query History uses VS Code workspace `Memento`, not a syncable/global setting. I
 
 ## Connections and diagnostics
 
+### Legacy import input
+
+`sqltools.connections` is not a KX setting and is not contributed, written, watched, or synchronized by this extension. **KX: Import SQLTools KDB Connections** may inspect an already-existing value through VS Code's configuration API only when the user invokes the command. It reviews matching legacy KDB candidates from user, workspace, and workspace-folder scopes; SQLTools itself can be absent.
+
+Only normalized `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, and `DanielAlonso.kdb-sqltools` driver values are eligible. Other drivers are ignored before their profile fields or passwords are inspected. Treat workspace settings as untrusted: every mapped field is validated against the standalone bounds, SSH-enabled profiles are not importable, and no `sshOptions` value is copied.
+
+The imported `connectionTimeout` is interpreted as seconds and maps to the new profile's `connectTimeoutMs` only. `queryTimeoutMs` remains omitted, so it inherits the resolved global KX query default described below. Passwords are copied only after selected candidates receive an explicit modal one-time SecretStorage confirmation; users may choose the labelled import-without-passwords path or cancel. The source value remains unchanged and no ongoing sync exists.
+
 | Setting | Default | Use |
 | --- | --- | --- |
 | `vscode-kdb.connections` | `[]` | Safe standalone connection metadata. Manage it through the **KX Connection** form; passwords are stored separately in SecretStorage. |

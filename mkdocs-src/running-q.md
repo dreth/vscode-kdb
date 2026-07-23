@@ -37,7 +37,9 @@ Whitespace, q indentation, and script termination rules still belong to q. Selec
 
 ## Syntax scope
 
-The existing first-party TextMate grammar was audited for 0.1.4 and left unchanged because no reliable token-coverage defect was found. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
+The extension owns its first-party TextMate q grammar. It was audited for 0.1.4 and left unchanged because no reliable token-coverage defect was found. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
+
+This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. The notebook contribution is a bounded result renderer/helper, not a NotebookController.
 
 ## Active connection and namespace
 

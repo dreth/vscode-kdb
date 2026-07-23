@@ -4,26 +4,27 @@ KX for VS Code is being developed as the future first-party KX product. During t
 
 The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) and [machine-readable JSON](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.json) record 63 classified cases / 381 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. The result is valid executable evidence with known gaps, not source-of-truth sign-off or a claim that the products are functionally or visually identical.
 
-The repository manifest is at `0.2.0` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
+The repository manifest is at `0.2.1` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
 
 ## Current standalone architecture
 
-The extension has eight deliberate layers:
+The extension has nine deliberate layers:
 
 1. **VS Code surface:** q language contribution, editor commands, KX activity-bar views, the KX-owned single-screen connection form and unsaved-value test path, notifications, and `KX` Output channel.
-2. **Connection ownership:** application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.
-3. **Direct q IPC:** handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.
-4. **Optional server metadata:** disabled-by-default manual `tables[]`, conservative name/type categories, on-demand `meta`, and confirmed bounded previews for one active configured namespace.
-5. **Optional local history:** disabled-by-default workspace `Memento` records for actually issued editor queries, with no results, sync, settings, telemetry, or passwords.
-6. **Portable notebook results:** a versioned bounded KX MIME contract, real VS Code NotebookRenderer, explicit callback-backed IPython helper, static HTML/text fallbacks, durable `%%q` marker, and saved-preview panel handoff without controller interception.
-7. **Result capabilities:** columnar storage, virtual grid/q-text presentation, opt-in safe qText readability, search/sort/selection, copy/export, safe chart transformations, and immutable original-domain zoom reset.
-8. **Optional local access:** per-panel tokenized HTTP endpoints bound to loopback.
+2. **Migration ingress:** an explicitly invoked, read-only inspection of existing legacy KDB settings, followed by KX-owned review, validation, optional one-time SecretStorage transfer, and standalone profile creation without replacement or sync.
+3. **Connection ownership:** application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.
+4. **Direct q IPC:** handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.
+5. **Optional server metadata:** disabled-by-default manual `tables[]`, conservative name/type categories, on-demand `meta`, and confirmed bounded previews for one active configured namespace.
+6. **Optional local history:** disabled-by-default workspace `Memento` records for actually issued editor queries, with no results, sync, settings, telemetry, or passwords.
+7. **Portable notebook results:** a versioned bounded KX MIME contract, real VS Code NotebookRenderer, explicit callback-backed IPython helper, static HTML/text fallbacks, durable `%%q` marker, and saved-preview panel handoff without controller interception.
+8. **Result capabilities:** columnar storage, virtual grid/q-text presentation, opt-in safe qText readability, search/sort/selection, copy/export, safe chart transformations, and immutable original-domain zoom reset.
+9. **Optional local access:** per-panel tokenized HTTP endpoints bound to loopback.
 
-There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, or session-file hooks in this graph. The **KX Connection** form, focused Server Explorer, Query History, and their storage/lifecycle behavior are owned entirely by this extension.
+There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, or session-file hooks in this graph. The migration ingress uses VS Code's configuration API to read matching candidates; SQLTools need not exist, source settings are unchanged, and no runtime/session relationship follows. The **KX Connection** form, migration review, focused Server Explorer, Query History, and their storage/lifecycle behavior are owned entirely by this extension.
 
 ## Focused standalone boundary
 
-Present foundations include a responsive single-screen direct-connection form, extension-host validation, temporary unsaved-value connection testing, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, a bounded versioned notebook renderer/helper protocol with static export fallbacks, opt-in focused server metadata and previews, opt-in privacy-aware local history, result viewing with optional safe qText readability, charting including candlesticks and original-domain reset, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path and visual verification remain partial as recorded in `PARITY.md`.
+Present foundations include a responsive single-screen direct-connection form, extension-host validation, temporary unsaved-value connection testing, a one-shot settings migration bridge, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, a bounded versioned notebook renderer/helper protocol with static export fallbacks, opt-in focused server metadata and previews, opt-in privacy-aware local history, result viewing with optional safe qText readability, charting including candlesticks and original-domain reset, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Migration configuration inspection is tested through faithful provider fakes, not a real Extension Host. Authenticated live-path and visual verification remain partial as recorded in `PARITY.md`.
 
 Known gaps and partial areas remain. The three ranked executable gaps in the checked pre-0.2.0 parity run are standalone Extension Host automation, a compatible reference multiline script-grouping adapter, and an explicit standalone q-block product decision. Its six recorded external boundaries remain historical evidence rather than notebook sign-off. The Server Explorer is deliberately limited to the active direct profile and configured namespace; it is not broad namespace navigation, Insights/gateway integration, server administration, or a write surface. The notebook path does not intercept Jupyter, share the extension's direct IPC session, recover omitted rows, or prove arbitrary interactive export. Deterministic model/host/renderer/source guards are not visual E2E. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.
 
@@ -35,6 +36,8 @@ Some SQLTools behaviors are deliberately omitted rather than missing:
 - `.session.sql` creation or interpretation; and
 - compatibility commands whose only purpose is to reproduce SQLTools ownership.
 
+The one-shot importer is not one of those omitted runtime behaviors. It accepts only the five documented legacy KDB driver aliases as data classification, ignores other drivers before inspecting their fields/passwords, and creates only validated KX-owned profiles. SSH-enabled profiles are non-importable. Existing profiles are skipped or explicitly renamed, never replaced.
+
 ## Planned milestones
 
 1. **Foundation:** maintain the standalone docs, diagnostics/redaction, connection-state reliability, execution semantics, and source-backed parity matrix.
@@ -45,13 +48,21 @@ Some SQLTools behaviors are deliberately omitted rather than missing:
 
 ## Competitive capability audit
 
-Server Explorer, Query History, and portable notebook previews move useful standalone capability forward without reproducing the breadth of KDB-X or q Professional. The product remains intentionally strongest at direct q execution and table/result visualization, with bounded first-party surfaces instead of bundled gateway, administration, broad notebook execution, or compatibility subsystems.
+The TextMate q grammar, optional qText result highlighting/display formatting, Server Explorer, Query History, migration review, and portable notebook previews move useful standalone capability forward without reproducing the breadth of KDB-X or q Professional. The product remains intentionally strongest at direct q execution and table/result visualization, with bounded first-party surfaces instead of a q LSP, lint engine, source-document formatter, notebook controller, bundled gateway, administration, broad notebook execution, or compatibility subsystem.
 
 - [q Professional / `jshinonome/vscode-k-pro` at `fc9afacaeaf5e90eb013eb34426488841cc24f2a`](https://github.com/jshinonome/vscode-k-pro/tree/fc9afacaeaf5e90eb013eb34426488841cc24f2a) documents a formatter and supplied product-level readability inspiration only. Its public repository is all-rights-reserved; no code, logic, or assets were copied.
-- [KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected under Apache-2.0. Its qlint command is linting, not a general qText result pretty-printer. No source code, logic, or assets were adapted for 0.2.0.
-- SQLTools remains absent as a runtime or UI dependency. The new views and local storage do not depend on SQLTools connection, result, or session abstractions.
+- [KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected under Apache-2.0. Its qlint command is linting, not a general qText result pretty-printer. No source code, logic, or assets were adapted for 0.2.1.
+- SQLTools remains absent as a runtime or UI dependency. The importer, views, and local storage do not depend on SQLTools connection, result, or session abstractions.
 
-The native q grammar was also audited and left unchanged because no reliable token-coverage defect was found. `.k` remains unassociated until a demonstrated, testable need justifies the compatibility risk.
+The native TextMate q grammar was also audited and left unchanged because no reliable token-coverage defect was found. `.k` remains unassociated until a demonstrated, testable need justifies the compatibility risk. Optional qText formatting is display-only, not a source formatter.
+
+## One-shot migration bridge
+
+Version 0.2.1 can inspect existing `sqltools.connections` values as untrusted import candidates when the user invokes **KX: Import SQLTools KDB Connections**. It recognizes only `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, and `DanielAlonso.kdb-sqltools`, discovers user/workspace/workspace-folder scopes, retains scope labels after deduplication, and maps validated direct fields into KX storage. Legacy seconds become connect timeout milliseconds only; query timeout keeps the KX default.
+
+Unsupported and SSH-tunnel-dependent candidates remain visible but disabled. Password presence is visible but its value is not; selected plaintext passwords require a modal copy-once choice before SecretStorage. Conflicts default to skip and may only be imported under a new validated name. The bridge has no Replace action, does not alter source settings, and creates no sync, SQLTools activation, API call, view, result target, or session behavior.
+
+Unit tests exercise pure parsing and faithful fake configuration/provider/store adapters. Without an actual Extension Host run, those tests do not prove visual QuickPick behavior or real configuration-scope integration.
 
 ## Bounded notebook milestone
 

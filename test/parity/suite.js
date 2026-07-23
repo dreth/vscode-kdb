@@ -747,7 +747,7 @@ async function boundaryCases(ctx) {
     'standalone manifest/package boundary',
     'boundary',
     'PASS',
-    'The standalone manifest/lock version stayed aligned and no SQLTools runtime, extension dependency, command, configuration, or source import entered the KX package.'
+    'The standalone manifest/lock version stayed aligned. Its only SQLTools boundary is an explicit, one-shot read of legacy KDB settings for migration; no SQLTools runtime, extension dependency, contributed setting, SQLTools-owned command, session behavior, or source import entered the KX package.'
   ), t => {
     const packageLock = JSON.parse(fs.readFileSync(path.join(standalone.root, 'package-lock.json'), 'utf8'));
     t.equal(standalone.packageJson.version, packageLock.version);
@@ -757,12 +757,28 @@ async function boundaryCases(ctx) {
     t.equal(Array.isArray(standalone.packageJson.extensionDependencies), false);
     const manifestText = JSON.stringify(standalone.packageJson);
     t.equal(/@sqltools|sqltools\./i.test(manifestText), false);
+    t.ok(standalone.packageJson.contributes.commands.some(item =>
+      item.command === 'vscode-kdb.importSqlToolsConnections' &&
+      item.title === 'KX: Import SQLTools KDB Connections'));
     const sources = readFilesRecursively(path.join(standalone.root, 'src'), '.ts');
     t.ok(sources.length > 0);
     for (const filename of sources) {
       const source = fs.readFileSync(filename, 'utf8');
       t.equal(/@sqltools|sqltools\./i.test(source), false);
     }
+    const migrationSource = fs.readFileSync(
+      path.join(standalone.root, 'src', 'connection-migration.ts'),
+      'utf8'
+    );
+    t.match(migrationSource, /getConfiguration\(SQLTOOLS_CONFIGURATION_SECTION/);
+    for (const alias of ['KDB', 'kdb+', 'kdb', 'kdb-sqltools', 'DanielAlonso.kdb-sqltools']) {
+      t.ok(migrationSource.includes(`'${alias}'`));
+    }
+    t.equal(
+      /@sqltools\/|\.session\.sql|extensions\.getExtension|sshOptions|(?:registerCommand|executeCommand)\(\s*['"]sqltools\./i
+        .test(migrationSource),
+      false
+    );
   });
 
   await ctx.case({
@@ -770,7 +786,7 @@ async function boundaryCases(ctx) {
     area: 'KX versus SQLTools product ownership',
     mode: 'boundary',
     expectedStatus: 'DIFFERENT_BY_DESIGN',
-    rationale: 'Standalone owns the KX sidebar/form, SecretStorage, focused Server Explorer, Query History, and one KX result target. Reference owns SQLTools driver/session/UI targets and its extension dependency.',
+    rationale: 'Standalone owns the KX sidebar/form, SecretStorage, focused Server Explorer, Query History, one KX result target, and a one-shot legacy-settings migration review. Reference owns SQLTools driver/session/UI targets and its extension dependency.',
   }, t => {
     t.ok(standalone.packageJson.contributes.viewsContainers.activitybar.some(item => item.id === 'vscode-kdb'));
     t.ok(standalone.packageJson.contributes.commands.some(item => item.command === 'vscode-kdb.addConnection'));
@@ -843,10 +859,10 @@ async function boundaryCases(ctx) {
     area: 'VSIX install and Marketplace publication',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.0 archive inventory and hashes must be verified separately by the release gate.',
+    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.1 archive inventory and hashes must be verified separately by the release gate.',
     signoff: 'Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.',
   }, t => {
-    t.equal(standalone.packageJson.version, '0.2.0');
+    t.equal(standalone.packageJson.version, '0.2.1');
     t.equal(reference.packageJson.version, '0.3.17');
   });
 

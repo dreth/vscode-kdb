@@ -2,7 +2,7 @@
 
 KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, portable Jupyter/IPython result output, optional first-party server exploration and local query history, and a high-performance native result panel.
 
-Version 0.2.0 has no SQLTools dependency. It does not call SQLTools APIs, contribute SQLTools commands, or create or interpret `.session.sql` files.
+Version 0.2.1 remains standalone. Its only legacy bridge is an explicit, one-shot read of existing `sqltools.connections` values through VS Code's configuration API so users can create KX-owned profiles. It does not call SQLTools APIs, contribute SQLTools commands or views, depend on SQLTools at runtime, or create or interpret `.session.sql` files.
 
 Documentation: [standalone user guide](mkdocs-src/index.md), [source-backed parity matrix](PARITY.md), [checked pre-0.2.0 cross-extension evidence](PARITY_RUN.md), and [parity rerun instructions](test/parity/README.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
 
@@ -37,8 +37,25 @@ Connections belong to this extension and appear in the **KX Connections** sideba
 - **KX: Connect**
 - **KX: Disconnect**
 - **KX: Test Connection**
+- **KX: Import SQLTools KDB Connections**
 
 Connection errors identify the failed `connect`, `handshake`, or `query` phase and direct host/port so endpoint, network, authentication, and q-listener problems can be distinguished. They do not include credentials or query contents.
+
+### One-time SQLTools KDB migration
+
+Run **KX: Import SQLTools KDB Connections** from the Command Palette or KX Connections toolbar to review legacy KDB profiles already saved in VS Code's `sqltools.connections` setting. This is a one-shot import into KX-owned direct IPC profiles, not a SQLTools integration. SQLTools does not need to be installed or activated, the source setting is never changed, and there is no automatic or permanent synchronization.
+
+Discovery inspects user, workspace, and workspace-folder configuration values as untrusted input. Equivalent candidates are deduplicated while every contributing source scope remains visible. Only these normalized legacy driver aliases are candidates: `KDB`, `kdb+`, `kdb`, `kdb-sqltools`, and `DanielAlonso.kdb-sqltools`. Connections for every other SQLTools driver are ignored before their endpoint, username, password, or other fields are inspected.
+
+The KX-owned multi-select review shows the sanitized source name, direct `host:port`, namespace, source scope, whether a password is present, and timeout mapping. It never shows a password value. Malformed legacy KDB profiles remain visible with a safe non-importable reason. A profile whose `ssh` value is `Enabled` is shown as **Not importable: requires SQLTools SSH tunnelling**; KX does not copy `sshOptions`, SSH credentials, or create a direct profile that would bypass the required tunnel.
+
+Import maps the SQLTools connection name to the KX name, `server` to host, `port` to port, `database` to the validated q namespace (default `.`), and `username` to username. The legacy `connectionTimeout` is seconds and maps only to KX `connectTimeoutMs` after checked multiplication by 1,000; `0` remains `0`, and an omitted value uses the old 30-second schema default. It never sets the profile's `queryTimeoutMs`: query timeout continues to inherit the global KX query default until the user explicitly edits it.
+
+Existing KX profiles are safe by default. A conflict by name or equivalent direct endpoint offers only **Skip (recommended)** or **Import as new name**. Version 0.2.1 never replaces or overwrites a saved KX profile. The final name is validated again, and conflicts that appear before commit are skipped.
+
+If a selected profile contains a plaintext password in VS Code settings, a modal prompt explains that KX can re-read it once and write it under the new connection's key in VS Code SecretStorage while leaving the SQLTools setting unchanged. Choose **Copy Passwords and Import**, explicitly choose **Import Without Passwords**, or cancel the entire import. KX never silently copies a password. Password values are not included in review labels, logs, diagnostics, telemetry, Query History, errors, result messages, snapshots, or `vscode-kdb.connections`, and temporary references are discarded after each attempt.
+
+The completion message reports imported, skipped, unsupported, and failed counts, repeats that no ongoing sync exists, and offers **Review Imported Connection** to open the KX editor for review and testing.
 
 ### KX Connection form
 
@@ -103,7 +120,7 @@ The extension contributes minimal q language support for `.q` files and these ed
 
 Multiline selections are preserved as selected and evaluated using q's own script-line grouping. There is no SQL parser, extension-owned statement splitter, current-block inference, or hidden session-file behavior.
 
-The native TextMate grammar remains unchanged after its 0.1.4 review because no reliable token-coverage defect was found. `.k` is not associated with q: broadening that file association without a demonstrated, testable need could conflict with other VS Code language support.
+The extension owns its `.q` language contribution and TextMate grammar. The grammar remains unchanged after its 0.1.4 review because no reliable token-coverage defect was found. `.k` is not associated with q: broadening that file association without a demonstrated, testable need could conflict with other VS Code language support. This basic language support is not a claim of a q language server, lint engine, source-document formatter, or full editor parity.
 
 Whole-document runs and multiline selections use [q's own documented script-line grouping](https://code.kx.com/q/ref/dotq/#ld-load-and-group), including q indentation and script termination rules; they require q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer). Single-line selections and current-line execution remain raw q queries and do not use this grouping helper.
 
@@ -151,7 +168,7 @@ The inline renderer provides a compact table, bounded preview CSV copy, and uPlo
 
 `vscode-kdb.notebook.presentation` accepts `inline`, `panel`, or `both` and defaults to `inline`. Panel display is only a handoff of the saved bounded preview to the existing KX Results panel. It is not a live-result locator, cannot recover omitted rows, and remains available after reopening only because the bounded preview itself is in the notebook. Full omitted data exists only in the originating evaluator/session while that session retains it.
 
-There is deliberately no extension-driven same-session notebook routing in 0.2.0. KX for VS Code does not intercept the Jupyter controller, does not secretly use its editor IPC connection for a `%%q` cell, and does not create a misleading second direct q connection. The configured helper callback is the sole notebook evaluator. Normal `.q` editor execution and its live full-result panel remain unchanged. See the complete [notebook guide](mkdocs-src/notebooks.md).
+There remains deliberately no extension-driven same-session notebook routing. KX for VS Code does not intercept the Jupyter controller, does not secretly use its editor IPC connection for a `%%q` cell, and does not create a misleading second direct q connection. The configured helper callback is the sole notebook evaluator. Normal `.q` editor execution and its live full-result panel remain unchanged. See the complete [notebook guide](mkdocs-src/notebooks.md).
 
 ## Query History
 
@@ -192,7 +209,7 @@ The setting is opt-in and is never changed automatically. Performance tracing ad
 
 ## Focused standalone scope
 
-Version 0.2.0 keeps extension-owned `.q` execution direct-q-IPC-only and adds a bounded notebook MIME renderer/helper path without a controller or remote bridge. Its Server Explorer is intentionally limited to read-only metadata and confirmed previews in the current configured namespace; it is not a KDB-X, q Professional, Insights, gateway, or remote-administration replacement. SSH setup, TLS termination, gateway or broker configuration, broad namespace browsing, remote connection orchestration, extension-driven notebook execution routing, full notebook-result recovery, and server-side interruption remain outside this release.
+Version 0.2.1 keeps extension-owned `.q` execution direct-q-IPC-only and retains the bounded notebook MIME renderer/helper path without a controller or remote bridge. Standalone owns its TextMate q grammar, opt-in qText result highlighting and display-only formatting, focused Server Explorer, local Query History, and NotebookRenderer. These are bounded features, not full LSP, lint, source-formatter, notebook-controller, KDB-X, or q Professional parity. The Server Explorer remains limited to read-only metadata and confirmed previews in the current configured namespace. SSH setup, TLS termination, gateway or broker configuration, broad namespace browsing, remote connection orchestration, extension-driven notebook execution routing, full notebook-result recovery, and server-side interruption remain outside this release. The SQLTools settings reader described above is an intentional migration ingress only, not a runtime/session dependency.
 
 ## Development and verification
 
@@ -201,16 +218,18 @@ Requirements: a current Node.js/npm installation and a supported VS Code install
 ```sh
 npm ci
 npm run compile
-node test/run.js
-npm run test:unit
 npm test
-uv run --no-project --with-editable ./python/kx_notebook \
-  python -m unittest discover -s python/kx_notebook/tests -v
+npm run test:parity:self
+npm run test:notebook-python
+npm run test:notebook-cross
+VSCODE_KDB_LIVE_REQUIRED=1 \
+  VSCODE_KDB_Q_BIN=/absolute/path/to/q \
+  npm run test:live-q
 ```
 
-`node test/run.js` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, notebook MIME validation/bounds/fallbacks/renderer messages, qText result lexing/safe rendering/conservative formatting/live settings, connection-form validation and temporary-test lifecycle, SecretStorage keep/replace/clear behavior, persisted-first connection lifecycle, namespace wrapping, chart zoom baseline/reset/refinement contracts, Server Explorer request/identifier/stale/preview contracts, Query History privacy/storage/order/rerun contracts, diagnostics/redaction, result conversion, and manifest/source/webview guards. The isolated Python suite verifies the companion serializer, MIME fallbacks, static chart, escaping, callback magic, and optional PyKX boundary. `npm run test:unit` and `npm test` compile and run the JavaScript harness. These checks are not labelled as visual Extension Host E2E, and no screenshot is presented as substitute evidence.
+`npm test` is the focused harness for q IPC serialization/deserialization, q-text selection/current-line extraction, notebook MIME validation/bounds/fallbacks/renderer messages, qText result lexing/safe rendering/conservative formatting/live settings, connection-form validation and temporary-test lifecycle, migration parsing and faithful configuration-provider fakes, SecretStorage keep/replace/clear/import behavior, persisted-first connection lifecycle, namespace wrapping, chart zoom baseline/reset/refinement contracts, Server Explorer request/identifier/stale/preview contracts, Query History privacy/storage/order/rerun contracts, diagnostics/redaction, result conversion, and manifest/source/webview guards. The isolated Python suite verifies the companion serializer, MIME fallbacks, static chart, escaping, callback magic, and optional PyKX boundary. The configuration adapter tests do not run inside a real VS Code Extension Host, and none of these checks is labelled as visual Extension Host E2E.
 
-Run the pinned cross-extension evidence gate from this standalone checkout with `npm run test:parity`. The checked report predates 0.2.0 and contains 63 classified cases and 381 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. It compares q decode/display semantics, editor/namespace contracts, all six pure chart engines, text/XLSX export structure, direct IPC lifecycle/errors, local HTTP behavior, package boundaries, and an anonymous loopback q fixture; it is not notebook evidence. `PASS` is case-scoped and is not complete functional or visual parity. See [the evidence report](PARITY_RUN.md) and [exact paths, overrides, strict mode, and report commands](test/parity/README.md). The default reference is pinned to `kdb-sqltools` commit `af2c7c9` at `/opt/data/home/projects/kdb-sqltools`, and q is required at `/opt/data/home/.kx/bin/q` unless explicitly overridden. The strict sign-off command remains blocked by the three recorded gaps.
+For the 0.2.1 release, run `npm run test:parity:self`; do not run the full cross-repository gate when the pinned reference checkout must remain untouched. The checked report predates 0.2.0 and contains 63 classified cases and 381 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. It remains historical evidence, is not migration or notebook evidence, and does not establish complete functional or visual parity. See [the evidence report](PARITY_RUN.md) and [parity runner documentation](test/parity/README.md).
 
 If a local q executable is available at `~/.kx/bin/q`, run the optional live IPC test:
 
@@ -238,16 +257,16 @@ Package the extension with either the project script or an explicit artifact pat
 
 ```sh
 npm run package
-npx @vscode/vsce package --out vscode-kdb-0.2.0.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.1.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.0.vsix")
-with ZipFile("vscode-kdb-0.2.0-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.1.vsix")
+with ZipFile("vscode-kdb-0.2.1-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.0.vsix vscode-kdb-0.2.0-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.1.vsix vscode-kdb-0.2.1-vsix.zip
 ```
 
 The wrapper contains exactly one file: the byte-identical VSIX. The release auditor checks both archives' paths, duplicates, encryption flags, symlinks, CRCs, manifest/assets, compiled/runtime inventory, nested archives, credential indicators, forbidden sources, raw embedded bytes, names, versions, and SHA-256 hashes. The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.
@@ -256,7 +275,7 @@ The wrapper contains exactly one file: the byte-identical VSIX. The release audi
 
 [q Professional / `jshinonome/vscode-k-pro` at `fc9afacaeaf5e90eb013eb34426488841cc24f2a`](https://github.com/jshinonome/vscode-k-pro/tree/fc9afacaeaf5e90eb013eb34426488841cc24f2a) documents a formatter and informed product-level readability research only. Its public repository license is all-rights-reserved, so no source code, logic, or assets were copied.
 
-[KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected as an Apache-2.0 reference. Its `kdb.ls.q.lint` command is qlint integration—linting, not a general qText result pretty-printer. Version 0.2.0 adapts no source code, logic, or assets from it or q Professional, so `THIRD_PARTY_NOTICES.md` needs no new entry. SQLTools remains absent as a runtime or UI dependency. See [PARITY.md](PARITY.md) for the bounded competitive audit; these references do not imply full KDB-X or q Professional parity.
+[KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected as an Apache-2.0 reference. Its `kdb.ls.q.lint` command is qlint integration—linting, not a general qText result pretty-printer. Version 0.2.1 adapts no source code, logic, or assets from it or q Professional, so `THIRD_PARTY_NOTICES.md` needs no new entry. SQLTools remains absent as a runtime or UI dependency; the one-time configuration importer is KX-owned. See [PARITY.md](PARITY.md) for the bounded competitive audit; these references do not imply full KDB-X or q Professional parity.
 
 ## License
 
