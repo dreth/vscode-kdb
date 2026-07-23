@@ -20,7 +20,13 @@ import {
 } from './connection-test';
 import { ConnectionStore } from './connection-store';
 import type { KxDiagnostics } from './diagnostics';
-import { KdbIpcClient, KdbIpcError, KdbQError, QValue } from './q-ipc';
+import {
+  KdbIpcClient,
+  KdbIpcError,
+  KdbQError,
+  KdbQueryCanceledError,
+  QValue,
+} from './q-ipc';
 
 export interface TemporaryConnectionTestOptions {
   password?: string;
@@ -75,18 +81,20 @@ export class ConnectionManager implements vscode.Disposable {
     }
   }
 
-  public async connect(connection: KxConnection): Promise<KdbIpcClient> {
+  public async connect(connection: KxConnection, signal?: AbortSignal): Promise<KdbIpcClient> {
+    throwIfQueryCanceled(signal);
     const timeouts = this.timeoutsFor(connection);
     const signature = connectionRuntimeSignature(connection, timeouts);
     let pending = this.opening.get(connection.id);
     let existing = this.clients.get(connection.id);
     if ((pending || existing) && this.sessionSignatures.get(connection.id) !== signature) {
       await this.disconnect(connection.id);
+      throwIfQueryCanceled(signal);
       pending = this.opening.get(connection.id);
       existing = this.clients.get(connection.id);
     }
     if (pending) {
-      return pending;
+      return waitForQueryCancellation(pending, signal);
     }
     if (existing) {
       return existing;
@@ -137,7 +145,7 @@ export class ConnectionManager implements vscode.Disposable {
     })();
     this.opening.set(connection.id, opening);
     this.sessionSignatures.set(connection.id, signature);
-    return opening;
+    return waitForQueryCancellation(opening, signal);
   }
 
   public async disconnect(connectionId: string): Promise<void> {
@@ -163,37 +171,46 @@ export class ConnectionManager implements vscode.Disposable {
   public async execute(
     connection: KxConnection,
     query: string,
-    onIssued?: () => void
+    onIssued?: () => void,
+    signal?: AbortSignal
   ): Promise<QValue> {
-    return this.executePrepared(connection, queryInNamespace(query, connection.database), onIssued);
+    return this.executePrepared(connection, queryInNamespace(query, connection.database), onIssued, signal);
   }
 
   public async executeScript(
     connection: KxConnection,
     script: string,
-    onIssued?: () => void
+    onIssued?: () => void,
+    signal?: AbortSignal
   ): Promise<QValue> {
-    return this.executePrepared(connection, qScriptInNamespace(script, connection.database), onIssued);
+    return this.executePrepared(connection, qScriptInNamespace(script, connection.database), onIssued, signal);
   }
 
   public async executeInConfiguredNamespace(
     connection: KxConnection,
     query: string,
-    onIssued?: () => void
+    onIssued?: () => void,
+    signal?: AbortSignal
   ): Promise<QValue> {
-    return this.executePrepared(connection, queryInNamespaceStrict(query, connection.database), onIssued);
+    return this.executePrepared(
+      connection,
+      queryInNamespaceStrict(query, connection.database),
+      onIssued,
+      signal
+    );
   }
 
   private async executePrepared(
     connection: KxConnection,
     query: string,
-    onIssued?: () => void
+    onIssued?: () => void,
+    signal?: AbortSignal
   ): Promise<QValue> {
-    const client = await this.connect(connection);
+    const client = await this.connect(connection, signal);
     try {
-      return await client.query(query, onIssued);
+      return await client.query(query, onIssued, signal);
     } catch (error) {
-      if (!(error instanceof KdbQError)) {
+      if (!(error instanceof KdbQError) && !(error instanceof KdbQueryCanceledError)) {
         const shouldCancel = this.clients.get(connection.id) === client;
         this.dropClient(connection.id, client);
         if (shouldCancel) {
@@ -349,5 +366,48 @@ function connectionRuntimeSignature(connection: KxConnection, timeouts: Connecti
     username: connection.username,
     connectTimeoutMs: timeouts.connectTimeoutMs,
     queryTimeoutMs: timeouts.queryTimeoutMs,
+  });
+}
+
+function throwIfQueryCanceled(signal?: AbortSignal): void {
+  if (signal?.aborted) {
+    throw new KdbQueryCanceledError();
+  }
+}
+
+function waitForQueryCancellation<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) {
+    return operation;
+  }
+  if (signal.aborted) {
+    void operation.catch(() => undefined);
+    return Promise.reject(new KdbQueryCanceledError());
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = (): void => {
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (action: () => void): void => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      action();
+    };
+    const onAbort = (): void => {
+      finish(() => reject(new KdbQueryCanceledError()));
+    };
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+    }
+    operation.then(
+      value => finish(() => resolve(value)),
+      error => finish(() => reject(error))
+    );
   });
 }

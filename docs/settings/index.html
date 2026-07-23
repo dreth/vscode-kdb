@@ -938,8 +938,8 @@
 <p>Open VS Code Settings and search for <code>vscode-kdb</code>, or edit settings JSON. The manifest is the source of truth for accepted values.</p>
 <p>Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.</p>
 <h2 id="notebook-language-and-results">Notebook language and results</h2>
-<p>Notebook cell language is not a <code>vscode-kdb</code> setting. In a focused Jupyter <code>.ipynb</code>, use the q cell-toolbar action, notebook cell context menu, or <strong>KX: Set Notebook Cell Language to q</strong>. It applies VS Code's supported document-language setter to every selected code cell, skips Markdown, and reports changed/already-q/failure counts. Successful cells have actual <code>TextDocument.languageId === "q"</code> and q highlighting.</p>
-<p>VS Code's built-in Jupyter serializer stores a non-default q cell as raw <code>metadata.vscode.languageId: "q"</code>. The generic notebook language picker remains filtered by the selected controller/kernel; there is no supported manifest contribution for changing that list, so the KX action is the reliable route.</p>
+<p>Notebook cell language is not a <code>vscode-kdb</code> setting. Select <strong>KX q (Direct IPC)</strong> from VS Code's normal notebook kernel/controller selector; it advertises q and owns normal Run for q cells. For existing mixed-language cells, use the q cell-toolbar action, notebook cell context menu, or <strong>KX: Set Notebook Cell Language to q</strong>. It applies VS Code's supported document-language setter to every selected code cell, skips Markdown, and reports changed/already-q/failure counts.</p>
+<p>VS Code's built-in Jupyter serializer stores a non-default q cell as raw <code>metadata.vscode.languageId: "q"</code>. The controller appears in the kernel/controller selector, not the Python controller's per-cell language picker.</p>
 <p><strong>KX: Restore Notebook Cell Language</strong> resolves the notebook default from <code>language_info.name</code> or <code>kernelspec.language</code> and applies it only to selected code cells. For an ordinary IPython notebook that is Python. The command is shown only when a default is available and refuses to apply an unregistered language. It preserves cell source, marker, other metadata, and output.</p>
 <table>
 <thead>
@@ -955,26 +955,26 @@
 <td><code>vscode-kdb.notebook.presentation</code></td>
 <td><code>inline</code></td>
 <td><code>inline</code>, <code>panel</code>, <code>both</code></td>
-<td>Presentation for validated KX MIME output in ordinary Jupyter/IPython notebooks. <code>panel</code> hands off only the saved bounded preview; no mode reruns q or recovers omitted rows.</td>
+<td>Automatic presentation for Python-helper output. Direct-controller results always remain inline and use an explicit live/saved KX Results handoff button. No mode reruns q or recovers omitted rows.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputRows</code></td>
 <td><code>1000</code></td>
 <td>Integer <code>1</code>-<code>10000</code></td>
-<td>Maximum preview rows written into newly tagged <code>%%q</code> markers. The helper validates the explicit marker value.</td>
+<td>Maximum rows persisted in a new direct-controller snapshot or newly tagged Python <code>%%q</code> marker.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputBytes</code></td>
 <td><code>1000000</code></td>
 <td>Integer <code>16384</code>-<code>10000000</code></td>
-<td>Maximum combined portable MIME body bytes requested by newly tagged <code>%%q</code> markers. The helper budgets rich JSON plus static HTML/plain fallbacks from the same preview.</td>
+<td>Maximum portable MIME bytes for new direct snapshots and newly tagged Python-helper output.</td>
 </tr>
 </tbody>
 </table>
 <p><strong>KX: Tag Notebook Cell as q</strong> first sets actual q language mode, then persists the current row/byte values in one durable <code>%%q</code> marker and nested <code>vscode-kdb</code> metadata. It preserves an existing marker, cell code, and unrelated metadata. A q-language cell without the marker exposes <strong>Prepare this q cell for the active Python kernel</strong>, which performs only the marker/metadata preparation.</p>
-<p>These are output-serialization limits, not server-side q limits. The helper/payload excludes credentials, passwords, tokens, IPC handles, and unbounded data. Full omitted data remains only in the originating evaluator/session while it is retained there.</p>
-<p>A normal Python Jupyter controller does not advertise or Run q-language cells. Keep <code>%%q</code>, restore the notebook default/Python language, and then use normal Run so IPython invokes the configured helper magic. The extension does not intercept Run, contribute a controller, or open a notebook q connection.</p>
-<p><code>inline</code> is the default notebook experience. <code>panel</code> opens the saved bounded preview in the existing KX Results panel instead of displaying the inline table/chart. <code>both</code> keeps the inline renderer and its explicit saved-preview panel handoff. Renderer-only chart control changes are session state; only the chart specification emitted in the MIME payload persists.</p>
+<p>These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, tokens, connection objects, recoverable IPC handles, and unbounded data. A direct result's full value is transient extension-host state only: bound to notebook/cell URI, removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.</p>
+<p>The direct controller rejects a leading <code>%%q</code>; remove it and run ordinary q. A normal Python Jupyter controller instead requires the separate configured helper: keep <code>%%q</code>, restore the notebook default/Python language, and then use normal Run. The extension does not intercept Python-controller Run or claim the routes share state.</p>
+<p><code>inline</code> is the default Python-helper experience. For helper output, <code>panel</code> uses the saved-preview KX Results panel and <code>both</code> retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its explicit KX Results button. Renderer-only per-result sort/search/selection and chart type/X/Y/point cap/zoom state is transient. Supported density/sizing, display strategies, qText/array formatting, elapsed-time, chart decimal, and chart source-row preferences use the same durable <code>vscode-kdb.results.*</code> configuration as the panel, and settings messages update/broadcast that common source of truth.</p>
 <h2 id="feature-controls">Feature Controls</h2>
 <p>Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.</p>
 <table>
@@ -1186,7 +1186,7 @@
 </tr>
 </tbody>
 </table>
-<p>True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels.</p>
+<p>True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels and live direct notebook results.</p>
 <p>Array display examples:</p>
 <table>
 <thead>

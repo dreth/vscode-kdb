@@ -1,8 +1,8 @@
 {
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
-  "description": "Standalone direct q IPC, persistent Jupyter notebook results, and high-performance KX results for VS Code.",
-  "version": "0.2.2",
+  "description": "Native direct q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
+  "version": "0.2.3",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -31,11 +31,14 @@
     "q ipc",
     "time series",
     "jupyter",
-    "notebooks"
+    "notebooks",
+    "notebook controller",
+    "jupyter kernel"
   ],
   "main": "./out/extension.js",
   "activationEvents": [
     "onLanguage:q",
+    "onNotebook:jupyter-notebook",
     "onRenderer:vscode-kdb.kx-notebook-renderer",
     "onView:vscode-kdb.connections",
     "onView:vscode-kdb.serverExplorer",
@@ -83,8 +86,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.2.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.2.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.3.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.3.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -270,13 +273,13 @@
         "command": "vscode-kdb.tagNotebookCellAsQ",
         "title": "KX: Tag Notebook Cell as q",
         "icon": "$(tag)",
-        "enablement": "notebookType == 'jupyter-notebook'"
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
         "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
         "title": "Prepare this q cell for the active Python kernel",
         "icon": "$(lightbulb)",
-        "enablement": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookQCellNeedsKernelPreparation"
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected && vscode-kdb.notebookQCellNeedsKernelPreparation"
       },
       {
         "command": "vscode-kdb.openNotebookPreviewInResults",
@@ -476,11 +479,11 @@
         },
         {
           "command": "vscode-kdb.tagNotebookCellAsQ",
-          "when": "notebookType == 'jupyter-notebook'"
+          "when": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
         },
         {
           "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
-          "when": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookQCellNeedsKernelPreparation"
+          "when": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected && vscode-kdb.notebookQCellNeedsKernelPreparation"
         },
         {
           "command": "vscode-kdb.openNotebookPreviewInResults",
@@ -514,7 +517,7 @@
       "notebook/cell/title": [
         {
           "command": "vscode-kdb.setNotebookCellLanguageQ",
-          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code'",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && !vscode-kdb.notebookQCell",
           "group": "inline@19"
         },
         {
@@ -524,12 +527,12 @@
         },
         {
           "command": "vscode-kdb.tagNotebookCellAsQ",
-          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code'",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && !vscode-kdb.notebookDirectQControllerSelected",
           "group": "1_modification@2"
         },
         {
           "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
-          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && vscode-kdb.notebookQCellNeedsKernelPreparation",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && !vscode-kdb.notebookDirectQControllerSelected && vscode-kdb.notebookQCellNeedsKernelPreparation",
           "group": "1_modification@3"
         },
         {
@@ -558,7 +561,7 @@
             "panel",
             "both"
           ],
-          "description": "Presentation for KX MIME results in ordinary Jupyter/IPython notebooks. Inline is the default; panel opens only the saved bounded preview in the KX Results panel; both keeps inline output and also opens that saved preview in the panel. This does not intercept Jupyter execution or recover omitted rows."
+          "description": "Automatic presentation for Python-helper KX MIME output: inline, saved-preview panel, or both. Direct-controller results always stay inline beneath the cell; use Open full result in KX Results for an explicit live handoff. Saved or reopened output is the bounded portable snapshot only and cannot recover omitted rows."
         },
         "vscode-kdb.notebook.maxOutputRows": {
           "type": "integer",
@@ -566,7 +569,7 @@
           "default": 1000,
           "minimum": 1,
           "maximum": 10000,
-          "description": "Maximum preview rows written by newly tagged %%q cells. The tag command persists this limit in the cell magic; kx_notebook also validates its own explicit limits. Full large results remain only in the originating live q session or a live KX panel."
+          "description": "Maximum rows persisted in a new KX notebook snapshot. Direct IPC controller output and newly tagged %%q cells use this bound; the tag command writes it into the magic and kx_notebook validates its explicit limit. A live direct result can expose more rows only while its in-memory result record exists."
         },
         "vscode-kdb.notebook.maxOutputBytes": {
           "type": "integer",
@@ -574,7 +577,7 @@
           "default": 1000000,
           "minimum": 16384,
           "maximum": 10000000,
-          "description": "Maximum combined portable MIME body bytes requested by newly tagged %%q cells. The helper applies this budget across rich JSON and static HTML/plain fallbacks from the same preview; no credentials or IPC handles are stored."
+          "description": "Maximum portable MIME snapshot bytes for new direct-controller output and newly tagged %%q cells. Direct output also carries a bounded text/plain fallback; the Python helper applies its explicit budget across rich JSON and static HTML/plain fallbacks. No credentials, connection objects, or recoverable IPC handles are stored."
         },
         "vscode-kdb.features.serverExplorer": {
           "type": "boolean",

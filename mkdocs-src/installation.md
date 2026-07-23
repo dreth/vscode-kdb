@@ -4,7 +4,7 @@
 
 KX for VS Code requires VS Code `1.96.0` or newer and a kdb+/q process reachable over q IPC for normal `.q` editor execution. The extension does not bundle q or a kdb+ license.
 
-Notebook publishing additionally requires Python 3.9 or newer, IPython, and the focused `kx_notebook` helper installed in the selected notebook kernel. The helper bundles no q runtime or PyKX binary. Optional PyKX use must be installed, configured, licensed, and enabled separately in that kernel.
+The native **KX q (Direct IPC)** notebook controller uses the same reachable q process and active KX profile as editor execution; it requires no Python package. Because every direct cell uses q script grouping, it requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer). The separate Python-kernel `%%q` route requires Python 3.9 or newer, IPython, and `kx_notebook` in that kernel. The helper bundles no q runtime or PyKX binary.
 
 SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's `sqltools.connections` setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.
 
@@ -57,7 +57,17 @@ The review never displays password values. SSH-enabled and malformed profiles ar
 
 The imported legacy connection timeout applies only to KX connect/handshake. Query timeout continues to inherit the KX global query default until you edit it. After import, use **Review Imported Connection** or the KX sidebar to inspect and test the saved direct profile.
 
-## Install the notebook helper
+## Use the native direct q notebook controller
+
+1. Add or select a profile in **KX Connections**.
+2. Open an ordinary `.ipynb`.
+3. Choose **KX q (Direct IPC)** from the notebook's top-right kernel/controller selector or **Notebook: Select Notebook Kernel**.
+4. Set the intended code cells to q if needed.
+5. Use normal **Run Cell** or `Ctrl+Enter`.
+
+The controller executes the complete q cell through the active profile's existing direct q client and namespace. It can connect a saved disconnected profile on demand because selecting the controller was explicit. Use ordinary q source: a leading `%%q` is rejected and belongs to the separate Python route. The controller does not install a q kernel, intercept a Python kernel, or create a notebook-specific connection. See [Jupyter/IPython Notebooks](notebooks.md).
+
+## Optional: install the Python notebook helper
 
 Install `python/kx_notebook` into the same Python environment used by the Jupyter/IPython kernel. For an editable source install without modifying system Python:
 
@@ -80,7 +90,7 @@ configure_evaluator(lambda source: my_existing_q_session(source))
 
 Use the q code-cell toolbar action or **KX: Set Notebook Cell Language to q** for actual q highlighting, then **KX: Tag Notebook Cell as q** to retain the durable `%%q` marker and configured output limits. The normal Python Jupyter controller does not advertise or Run q-language cells: keep the marker, use **KX: Restore Notebook Cell Language**, and then use normal Run so IPython invokes the configured magic. Selecting the Python kernel may perform that normalization itself.
 
-The extension does not install a NotebookController, intercept Microsoft Jupyter, or open a q connection for the helper. The generic language picker remains controller-filtered; use the KX toolbar/context/Command Palette action as the reliable q-language route. See [Jupyter/IPython Notebooks](notebooks.md).
+This helper path is separate from **KX q (Direct IPC)**. It never opens or borrows the extension's direct connection and does not share q variables/session state with the direct controller by implication. KX does not intercept Microsoft Jupyter or reroute Python-controller Run. See [Jupyter/IPython Notebooks](notebooks.md).
 
 ## Verify a source checkout
 
@@ -101,4 +111,4 @@ When a local q executable is available:
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-The migration configuration-provider and notebook language-setter tests use pure helpers and faithful fakes for VS Code `inspect`/effective values and document-language results because the maintained suite does not launch an Extension Host. Source/manifest guards cover notebook menus, contexts, grammar, and the no-direct-IPC boundary. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.
+The migration configuration-provider, NotebookController, active-session routing, live-result, and language-setter tests use pure helpers and faithful VS Code providers/fakes because the maintained suite does not launch an Extension Host. Source/manifest guards cover controller activation, menus, contexts, grammar, and private-Jupyter/runtime boundaries. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.

@@ -1,6 +1,6 @@
 # Running q
 
-The `.q` editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. Notebook `%%q` cells use the separate explicit helper path described in [Jupyter/IPython Notebooks](notebooks.md).
+The `.q` editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. The native **KX q (Direct IPC)** notebook controller executes complete q cells through the same active connection. Python `%%q` cells use a separate explicit helper path described in [Jupyter/IPython Notebooks](notebooks.md).
 
 ## Commands and keybindings
 
@@ -12,19 +12,20 @@ The `.q` editor commands execute q text; they do not parse SQL, split SQL statem
 
 A code lens at the top of a q document also runs the whole script.
 
-These keybindings are gated to normal q text editors. KX for VS Code does not bind or intercept notebook `Ctrl+Enter` / `Ctrl+Shift+Enter`; ordinary Jupyter and Python execution remain in control.
+These keybindings are gated to normal q text editors. KX for VS Code does not add or intercept notebook `Ctrl+Enter` / `Ctrl+Shift+Enter`. VS Code delegates normal notebook Run to the selected controller: direct q when **KX q (Direct IPC)** is selected, or Python when a Python controller is selected.
 
 ## Notebook commands
 
 | Command | Behavior |
 | --- | --- |
+| **Notebook: Select Notebook Kernel** | VS Code's native selector includes **KX q (Direct IPC)**. With it selected, normal Run sends the complete q cell through the active KX profile/session and namespace. |
 | **KX: Set Notebook Cell Language to q** | Sets actual `TextDocument.languageId` to q through VS Code's supported API for every selected code cell, skips Markdown, and reports changed/already-q/failure counts. Available from the q cell toolbar, notebook cell context, and Command Palette. |
 | **KX: Restore Notebook Cell Language** | Restores selected code cells to the registered notebook default resolved from Jupyter metadata. It preserves source, `%%q`, KX metadata, and output. |
 | **KX: Tag Notebook Cell as q** | Sets actual q language first, then preserves/inserts one durable `%%q --max-rows ... --max-bytes ...` marker and merges versioned `vscode-kdb` metadata without wiping unrelated metadata. It does not execute the cell. |
 | **Prepare this q cell for the active Python kernel** | Contextual action for a q-language cell without `%%q`; adds only the marker/KX metadata. It does not restore or execute the cell. |
 | **KX: Open Saved Notebook Preview in Results Panel** | Opens only a valid bounded KX MIME preview already saved on the selected cell. It never reruns q or recovers omitted rows. |
 
-The normal Python/IPython Jupyter controller does not advertise q and will not Run a q-language cell. Keep or prepare `%%q`, restore the notebook default/Python language, then use normal Run after installing and configuring `kx_notebook`. Kernel selection may normalize the language automatically. The extension does not contribute a controller, monkey-patch Jupyter, intercept Run, or route notebook selections through its direct IPC connection.
+For direct q, select **KX q (Direct IPC)**, use q-language cells, and Run normally. A leading `%%q` is rejected; remove it or select the Python controller. Every direct notebook cell uses complete-cell `.Q.ld` script grouping and therefore has the newer-q requirement below. For a normal Python/IPython controller, keep or prepare `%%q`, restore the notebook default/Python language, then use normal Run after installing and configuring `kx_notebook`. Tag/Prepare actions are hidden while the direct controller is selected to keep the two routes distinct. The extension does not monkey-patch Jupyter or intercept Python-controller Run.
 
 ## Exact execution semantics
 
@@ -42,7 +43,7 @@ Whitespace, q indentation, and script termination rules still belong to q. Selec
 
 The extension owns its first-party TextMate q grammar. Version 0.2.2 recognizes a top-line `%%q` as a notebook directive while retaining the ordinary q rules and highlighting below it. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
 
-This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. Notebook cell language affects highlighting only. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents, and the notebook contribution is still not a NotebookController.
+This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. In notebooks, the cell language selects highlighting and the selected controller owns execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents; the native notebook controller uses VS Code's normal Run UI.
 
 ## Active connection and namespace
 
@@ -60,7 +61,7 @@ The wrapper restores the server's previous namespace after success or failure. A
 
 The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.
 
-**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files. Notebook panel handoff is separate and contains only the saved bounded preview.
+**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files. A direct-controller notebook result can hand off its live in-memory value while the bound live record exists; reopened/Python-helper output contains only the saved bounded preview.
 
 ## Query History
 
