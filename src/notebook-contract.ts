@@ -3,7 +3,7 @@ import { allCellsRange, createColumnarPanelResult } from './kx-results';
 export const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
 export const KX_NOTEBOOK_CONTRACT_VERSION = 1;
 
-export const DEFAULT_NOTEBOOK_ROW_LIMIT = 1000;
+export const DEFAULT_NOTEBOOK_ROW_LIMIT = 20;
 export const MIN_NOTEBOOK_ROW_LIMIT = 1;
 export const MAX_NOTEBOOK_ROW_LIMIT = 10000;
 export const DEFAULT_NOTEBOOK_BYTE_LIMIT = 1000000;

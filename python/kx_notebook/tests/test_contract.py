@@ -15,6 +15,55 @@ from kx_notebook.contract import MAX_STRING_CHARS, canonical_payload_bytes
 
 
 class ContractTests(unittest.TestCase):
+    def test_default_preview_persists_twenty_rows_and_not_the_full_table(self) -> None:
+        consumed: list[int] = []
+
+        def rows():
+            for index in range(50_000):
+                consumed.append(index)
+                yield [index, f"row-{index}"]
+
+        output = build_mime_bundle(
+            rows(),
+            columns=["id", "label"],
+            row_count=50_000,
+        )
+        payload = output.bundle[MIME_TYPE]
+        self.assertEqual(consumed, list(range(20)))
+        self.assertEqual(payload["result"]["rowLimit"], 20)
+        self.assertEqual(payload["result"]["rowCount"], 50_000)
+        self.assertEqual(payload["result"]["previewRowCount"], 20)
+        self.assertEqual(len(payload["data"]["rows"]), 20)
+        self.assertEqual(
+            payload["schema"]["columns"],
+            [
+                {"name": "id", "type": "number"},
+                {"name": "label", "type": "string"},
+            ],
+        )
+        self.assertTrue(payload["result"]["truncated"])
+        self.assertIn("rowLimit", payload["result"]["truncationReasons"])
+        self.assertIn("<th>id</th><th>label</th>", output.bundle["text/html"])
+        self.assertIn(
+            "full result is not embedded in this notebook",
+            output.bundle["text/html"],
+        )
+
+    def test_default_preview_keeps_every_row_when_table_has_at_most_twenty(self) -> None:
+        for row_count in (0, 1, 20):
+            with self.subTest(row_count=row_count):
+                output = build_mime_bundle(
+                    [{"id": index} for index in range(row_count)],
+                    columns=["id"] if row_count == 0 else None,
+                )
+                payload = output.bundle[MIME_TYPE]
+                self.assertEqual(payload["result"]["rowLimit"], 20)
+                self.assertEqual(payload["result"]["rowCount"], row_count)
+                self.assertEqual(payload["result"]["previewRowCount"], row_count)
+                self.assertEqual(len(payload["data"]["rows"]), row_count)
+                self.assertFalse(payload["result"]["truncated"])
+                self.assertEqual(payload["result"]["truncationReasons"], [])
+
     def test_exact_v1_shape_and_typed_cells(self) -> None:
         output = build_mime_bundle(
             [

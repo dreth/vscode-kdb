@@ -11,11 +11,11 @@ but the extension never changes a selected kernel environment automatically.
 
 This package is the separate **Python-controller route**. Keep the normal
 Python/IPython controller selected and use `%%q` only when Python must own the q
-evaluator inside that kernel. KX for VS Code 0.2.5 also provides a native
+evaluator inside that kernel. KX for VS Code 0.2.6 also provides a native
 **KX q (Direct IPC)** controller for q-only notebooks and **Run q Cell (KX)**
 for direct q execution while a Python controller remains selected. Both direct
-paths need no Python package or `%%q` marker and execute through the active
-profile in the first-party KX Connections view. No extension-managed variables,
+paths need no Python package or `%%q` marker. The native controller uses the
+active profile; mixed mode uses the notebook's explicit q target. No extension-managed variables,
 namespace state, session identity, or live-result identity are shared between
 this helper and either direct route.
 A user-supplied Python evaluator may independently target the same external
@@ -70,12 +70,12 @@ Chart(
 
 The VS Code renderer supports all six interactive modes. The network-free HTML fallback draws only ungrouped line/scatter/step/bar selections; it reports box, candlestick, and grouped charts as interactive-only instead of drawing a misleading substitute.
 
-The default portable limits are 1,000 preview rows and 1,000,000 bytes across the three
+The default portable limits are 20 preview rows and 1,000,000 bytes across the three
 MIME representations. `row_limit` and `byte_limit` can be lowered per call.
-Results exceeding either limit retain schema and total row count, and clearly
-record why the preview was truncated. Actual q source is not copied into output
-unless `q_source=` is explicitly supplied; the notebook cell already preserves
-the source.
+Tables with 20 rows or fewer persist fully at the default. Larger results retain
+schema, 20 preview rows, total row count, and a clear truncation notice. Actual q
+source is not copied into output unless `q_source=` is explicitly supplied; the
+notebook cell already preserves the source.
 
 ## `%%q` with an explicit evaluator
 

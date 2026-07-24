@@ -1,6 +1,11 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
-import { KxConnection, safeStoredConnections, validateConnection } from './connection';
+import {
+  KxConnection,
+  safeStoredConnections,
+  validateConnection,
+  validatePassword,
+} from './connection';
 
 const CONFIGURATION_SECTION = 'vscode-kdb';
 const CONNECTIONS_SETTING = 'connections';
@@ -39,7 +44,14 @@ export class ConnectionStore {
       if (id && !this.connection(id)) {
         throw new Error(`Cannot activate unknown KX connection ${id}.`);
       }
-      await this.context.globalState.update(ACTIVE_CONNECTION_KEY, id);
+      const previousActiveId = this.context.globalState.get<string>(ACTIVE_CONNECTION_KEY);
+      try {
+        await this.writeActiveConnectionId(id);
+      } catch (error) {
+        await this.rethrowAfterRollback(error, [
+          () => this.writeActiveConnectionId(previousActiveId),
+        ]);
+      }
     });
   }
 
@@ -51,18 +63,24 @@ export class ConnectionStore {
     return this.mutate(async () => {
       const connections = this.connections();
       const validated = validateConnection(connection, connections);
-      const previousPassword = await this.password(validated.id);
+      if (password !== undefined) {
+        validatePassword(password);
+      }
+      const passwordChanges = password !== undefined;
+      const previousPassword = passwordChanges ? await this.password(validated.id) : undefined;
       const previousActiveId = this.context.globalState.get<string>(ACTIVE_CONNECTION_KEY);
       const shouldActivate = !this.activeConnectionId();
       let secretAttempted = false;
       let activeAttempted = false;
       let connectionsAttempted = false;
       try {
-        secretAttempted = true;
-        await this.writePassword(validated.id, password);
+        if (passwordChanges) {
+          secretAttempted = true;
+          await this.writePassword(validated.id, password);
+        }
         if (shouldActivate) {
           activeAttempted = true;
-          await this.context.globalState.update(ACTIVE_CONNECTION_KEY, validated.id);
+          await this.writeActiveConnectionId(validated.id);
         }
         connectionsAttempted = true;
         await this.writeConnections([...connections, validated]);
@@ -73,7 +91,7 @@ export class ConnectionStore {
             await this.writeConnections(connections);
             connectionsRestored = true;
           } : undefined,
-          activeAttempted ? () => this.context.globalState.update(ACTIVE_CONNECTION_KEY, previousActiveId) : undefined,
+          activeAttempted ? () => this.writeActiveConnectionId(previousActiveId) : undefined,
           secretAttempted ? () => this.writePassword(
             validated.id,
             connectionsRestored ? previousPassword : undefined
@@ -98,6 +116,9 @@ export class ConnectionStore {
         throw new Error(`KX connection "${connection.name}" changed after this form was opened. Reopen it and try again.`);
       }
       const validated = validateConnection(connection, connections, connection.id);
+      if (typeof password === 'string') {
+        validatePassword(password);
+      }
       const updated = connections.slice();
       updated[index] = validated;
       const passwordChanges = password !== undefined;
@@ -149,7 +170,7 @@ export class ConnectionStore {
         await this.writePassword(id, undefined);
         if (removedActiveConnection) {
           activeAttempted = true;
-          await this.context.globalState.update(ACTIVE_CONNECTION_KEY, updated.length ? updated[0].id : undefined);
+          await this.writeActiveConnectionId(undefined);
         }
         connectionsAttempted = true;
         await this.writeConnections(updated);
@@ -160,7 +181,7 @@ export class ConnectionStore {
             await this.writeConnections(connections);
             connectionsRestored = true;
           } : undefined,
-          activeAttempted ? () => this.context.globalState.update(ACTIVE_CONNECTION_KEY, previousActiveId) : undefined,
+          activeAttempted ? () => this.writeActiveConnectionId(previousActiveId) : undefined,
           secretAttempted ? () => this.writePassword(
             id,
             connectionsRestored ? previousPassword : undefined
@@ -197,6 +218,13 @@ export class ConnectionStore {
       await this.context.secrets.store(this.passwordKey(id), password);
     } else {
       await this.context.secrets.delete(this.passwordKey(id));
+    }
+  }
+
+  private async writeActiveConnectionId(id: string | undefined): Promise<void> {
+    await this.context.globalState.update(ACTIVE_CONNECTION_KEY, id);
+    if (this.context.globalState.get<string>(ACTIVE_CONNECTION_KEY) !== id) {
+      throw new Error('VS Code did not persist the selected active KX connection.');
     }
   }
 
@@ -240,6 +268,13 @@ export class ConnectionStore {
     await vscode.workspace
       .getConfiguration(CONFIGURATION_SECTION)
       .update(CONNECTIONS_SETTING, safeConnections, vscode.ConfigurationTarget.Global);
+    const persisted = this.connections();
+    if (!sameConnectionLists(persisted, safeConnections)) {
+      throw new Error(
+        `VS Code did not persist all ${safeConnections.length} KX connection ` +
+        `${safeConnections.length === 1 ? 'profile' : 'profiles'}.`
+      );
+    }
   }
 
   private passwordKey(id: string): string {
@@ -251,4 +286,12 @@ function sameConnection(left: KxConnection, right: KxConnection): boolean {
   return left.id === right.id && left.name === right.name && left.host === right.host &&
     left.port === right.port && left.database === right.database && left.username === right.username &&
     left.connectTimeoutMs === right.connectTimeoutMs && left.queryTimeoutMs === right.queryTimeoutMs;
+}
+
+function sameConnectionLists(
+  left: readonly KxConnection[],
+  right: readonly KxConnection[]
+): boolean {
+  return left.length === right.length && left.every((connection, index) =>
+    sameConnection(connection, right[index]));
 }

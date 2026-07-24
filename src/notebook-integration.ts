@@ -45,6 +45,13 @@ import {
   safeNotebookPresentation,
   safeNotebookRowLimit,
 } from './notebook-settings';
+import {
+  NotebookQTargetProfile,
+  NotebookQTargetResolution,
+  resolveNotebookQTarget,
+  safeConnectionName,
+  withNotebookQTarget,
+} from './notebook-q-target';
 import type { DirectQCellRunResult } from './notebook-controller';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
@@ -54,8 +61,8 @@ export const TAG_NOTEBOOK_CELL_AS_Q_COMMAND = 'vscode-kdb.tagNotebookCellAsQ';
 export const PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND =
   'vscode-kdb.prepareNotebookCellForPythonKernel';
 export const RUN_Q_NOTEBOOK_CELL_COMMAND = 'vscode-kdb.runQNotebookCell';
+export const SELECT_NOTEBOOK_Q_TARGET_COMMAND = 'vscode-kdb.selectNotebookQTarget';
 
-const NOTEBOOK_Q_CELL_CONTEXT = 'vscode-kdb.notebookQCell';
 const NOTEBOOK_Q_CELL_RESOURCES_CONTEXT = 'vscode-kdb.qNotebookCellResources';
 const NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT =
   'vscode-kdb.notebookQCellNeedsKernelPreparation';
@@ -67,11 +74,10 @@ const MAX_NOTEBOOK_SCAN_CELLS = 10_000;
 const MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL = 2_000;
 
 export interface DirectQControllerSelection {
-  readonly onDidChangeSelection: vscode.Event<void>;
-  readonly controller: Pick<vscode.NotebookController, 'detail' | 'description'>;
+  readonly onDidChangeState: vscode.Event<void>;
   isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean;
-  routeLabel(): string;
-  runCell(cell: vscode.NotebookCell): Promise<DirectQCellRunResult>;
+  connectionProfiles(): NotebookQTargetProfile[];
+  runCell(cell: vscode.NotebookCell, connectionId: string): Promise<DirectQCellRunResult>;
 }
 
 export interface NotebookIntegrationOptions {
@@ -121,13 +127,17 @@ export class NotebookIntegration implements vscode.Disposable {
         'vscode-kdb.runQNotebookCell',
         (cell?: vscode.NotebookCell) => this.runQCellWithKx(cell)
       ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.selectNotebookQTarget',
+        (cell?: vscode.NotebookCell) => this.selectNotebookQTarget(cell)
+      ),
       vscode.commands.registerCommand('vscode-kdb.openNotebookPreviewInResults', () =>
         this.openSelectedNotebookPreview()),
       vscode.notebooks.registerNotebookCellStatusBarItemProvider(
         'jupyter-notebook',
         {
           onDidChangeCellStatusBarItems: this.statusBarChanged.event,
-          provideCellStatusBarItems: cell => this.kxRouteStatusBarItem(cell),
+          provideCellStatusBarItems: cell => this.kxRouteStatusBarItems(cell),
         }
       ),
       vscode.window.onDidChangeActiveNotebookEditor(() => this.updateContexts()),
@@ -144,7 +154,7 @@ export class NotebookIntegration implements vscode.Disposable {
         }
       }),
       ...(this.options.directController
-        ? [this.options.directController.onDidChangeSelection(() => {
+        ? [this.options.directController.onDidChangeState(() => {
           this.updateContexts();
         })]
         : []),
@@ -155,7 +165,6 @@ export class NotebookIntegration implements vscode.Disposable {
 
   public dispose(): void {
     this.disposables.splice(0).forEach(disposable => disposable.dispose());
-    void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_CONTEXT, false);
     void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_RESOURCES_CONTEXT, []);
     void vscode.commands.executeCommand(
       'setContext',
@@ -329,7 +338,17 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return;
     }
-    const result = await runner.runCell(cell);
+    const resolution = resolveNotebookQTarget(
+      editor.notebook.metadata,
+      runner.connectionProfiles()
+    );
+    const target = resolution.kind === 'resolved'
+      ? resolution.profile
+      : await this.selectNotebookQTarget(cell, resolution);
+    if (!target) {
+      return;
+    }
+    const result = await runner.runCell(cell, target.id);
     if (result === 'busy') {
       void vscode.window.showWarningMessage(
         'This notebook cell is already running. Wait for it to finish or cancel it before retrying.'
@@ -353,6 +372,120 @@ export class NotebookIntegration implements vscode.Disposable {
     }
   }
 
+  private async selectNotebookQTarget(
+    commandCell?: vscode.NotebookCell,
+    knownResolution?: NotebookQTargetResolution
+  ): Promise<NotebookQTargetProfile | undefined> {
+    const editor = activeJupyterNotebookEditor('choosing a KX target for q cells');
+    if (!editor) {
+      return undefined;
+    }
+    if (this.directControllerSelected(editor.notebook)) {
+      void vscode.window.showInformationMessage(
+        'KX q (Direct IPC) is selected. Its normal Run action uses the active profile from KX Connections.'
+      );
+      return undefined;
+    }
+    const cell = commandCell?.notebook === editor.notebook
+      ? commandCell
+      : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    if (!cell || !isQCell(cell)) {
+      void vscode.window.showWarningMessage(
+        'Choose q Target applies only to a q-language code cell in the active Jupyter notebook.'
+      );
+      return undefined;
+    }
+    const runner = this.options.directController;
+    if (!runner) {
+      void vscode.window.showErrorMessage(
+        'KX target selection is unavailable because the direct IPC controller did not start.'
+      );
+      return undefined;
+    }
+
+    let profiles = runner.connectionProfiles();
+    if (profiles.length === 0) {
+      const action = await vscode.window.showWarningMessage(
+        'No saved KX connections are available for this notebook.',
+        'Add Connection'
+      );
+      if (action !== 'Add Connection') {
+        return undefined;
+      }
+      await vscode.commands.executeCommand('vscode-kdb.addConnection');
+      profiles = runner.connectionProfiles();
+      if (profiles.length === 0) {
+        void vscode.window.showWarningMessage(
+          'No KX connection was saved. Add a valid profile, then choose the notebook q target.'
+        );
+        return undefined;
+      }
+    }
+
+    const resolution = knownResolution ??
+      resolveNotebookQTarget(editor.notebook.metadata, profiles);
+    const currentId = resolution.kind === 'resolved'
+      ? resolution.profile.id
+      : resolution.kind === 'missing'
+        ? resolution.reference.id
+        : undefined;
+    const missingName = resolution.kind === 'missing'
+      ? resolution.reference.name
+      : undefined;
+    const picks = [...profiles]
+      .sort((left, right) =>
+        Number(right.id === currentId) - Number(left.id === currentId) ||
+        Number(right.active) - Number(left.active) ||
+        left.name.localeCompare(right.name))
+      .map(profile => ({
+        label: profile.name,
+        description: [
+          profile.id === currentId ? 'Notebook q target' : undefined,
+          profile.active ? 'Active KX profile' : undefined,
+        ].filter(Boolean).join(' · '),
+        detail: profile.connected
+          ? 'Connected direct q session'
+          : 'Direct q session connects on first run',
+        profile,
+      }));
+    const picked = await vscode.window.showQuickPick(picks, {
+      title: 'KX: Choose Notebook q Target',
+      placeHolder: missingName
+        ? `Saved target "${missingName}" is unavailable; choose a replacement`
+        : 'Choose the saved profile used by Run q Cell (KX)',
+      ignoreFocusOut: true,
+    });
+    if (!picked) {
+      return undefined;
+    }
+    const updatedMetadata = withNotebookQTarget(
+      editor.notebook.metadata,
+      picked.profile
+    );
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(editor.notebook.uri, [
+      vscode.NotebookEdit.updateNotebookMetadata(updatedMetadata),
+    ]);
+    let applied = false;
+    try {
+      applied = await vscode.workspace.applyEdit(edit);
+    } catch {
+      // The actionable error below is safe for closed/read-only notebooks.
+    }
+    if (!applied) {
+      void vscode.window.showErrorMessage(
+        `Could not save "${picked.profile.name}" as this notebook’s q target. ` +
+        'Make the notebook writable and try again.'
+      );
+      return undefined;
+    }
+    this.updateContexts();
+    void vscode.window.showInformationMessage(
+      `Notebook q target: ${picked.profile.name}. Python remains the selected notebook kernel.`
+    );
+    return picked.profile;
+  }
+
   private rendererSettingsMessage() {
     return notebookRendererSettingsMessage(notebookSettings(), sharedKxResultSettings());
   }
@@ -371,7 +504,11 @@ export class NotebookIntegration implements vscode.Disposable {
       })),
       'q'
     );
-    this.finishLanguageChange('q', result);
+    this.finishLanguageChange(
+      'q',
+      result,
+      ' The selected notebook kernel was not changed; use Run q Cell (KX) for this complete cell.'
+    );
   }
 
   private async restoreSelectedCellLanguages(commandCell?: vscode.NotebookCell): Promise<void> {
@@ -694,7 +831,6 @@ export class NotebookIntegration implements vscode.Disposable {
     const cell = selectedCell(editor);
     const qCell = !!cell && isQCell(cell);
     const directSelected = !!editor && this.directControllerSelected(editor.notebook);
-    void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_CONTEXT, !!cell && isQCell(cell));
     void vscode.commands.executeCommand(
       'setContext',
       NOTEBOOK_Q_CELL_RESOURCES_CONTEXT,
@@ -724,39 +860,69 @@ export class NotebookIntegration implements vscode.Disposable {
     this.statusBarChanged.fire();
   }
 
-  private kxRouteStatusBarItem(
+  private kxRouteStatusBarItems(
     cell: vscode.NotebookCell
-  ): vscode.NotebookCellStatusBarItem | undefined {
-    if (!isQCell(cell)) {
+  ): vscode.NotebookCellStatusBarItem[] | undefined {
+    if (!isQCell(cell) || this.directControllerSelected(cell.notebook)) {
       return undefined;
     }
-    const directSelected = this.directControllerSelected(cell.notebook);
-    const routeLabel = this.options.directController?.routeLabel() ||
-      'KX • No active connection';
-    const item = new vscode.NotebookCellStatusBarItem(
-      `$(database) ${routeLabel}`,
+    const profiles = this.options.directController?.connectionProfiles() ?? [];
+    const resolution = resolveNotebookQTarget(cell.notebook.metadata, profiles);
+    const profile = resolution.kind === 'resolved' ? resolution.profile : undefined;
+    const route = safeConnectionName(profile?.name) || 'Select connection';
+    const shortcut = notebookRunShortcutLabel();
+    const runItem = new vscode.NotebookCellStatusBarItem(
+      `$(play) KX: ${route} · ${shortcut}`,
       vscode.NotebookCellStatusBarAlignment.Right
     );
-    if (directSelected) {
-      item.tooltip =
-        `${routeLabel}. KX q (Direct IPC) is selected; normal Run Cell and Ctrl+Enter execute this q cell through KX.`;
-    } else {
-      item.command = {
-        command: RUN_Q_NOTEBOOK_CELL_COMMAND,
-        title: 'Run q Cell (KX)',
-        arguments: [cell],
-      };
-      item.tooltip = routeLabel === 'KX • No active connection'
-        ? 'No active KX connection. Select one in the KX Connections view; Run q Cell (KX) will also show an actionable inline error.'
-        : `${routeLabel}. Run the complete q cell through this KX session without changing the selected notebook controller.`;
-    }
-    item.accessibilityInformation = {
-      label: directSelected
-        ? `${routeLabel}; direct KX controller selected`
-        : `${routeLabel}; Run q Cell with KX`,
+    runItem.command = {
+      command: RUN_Q_NOTEBOOK_CELL_COMMAND,
+      title: 'Run q Cell (KX)',
+      arguments: [cell],
     };
-    item.priority = 100;
-    return item;
+    runItem.tooltip = profile
+      ? `Run the complete q cell through notebook q target "${route}". ` +
+        'Normal notebook Run still follows the kernel selected at the top right.'
+      : profiles.length === 0
+        ? 'No saved KX profiles are available. Click to add or select a connection before running this complete q cell.'
+      : resolution.kind === 'missing'
+        ? `Saved notebook q target "${resolution.reference.name}" is unavailable. ` +
+          'Click to choose a replacement before running this complete q cell.'
+        : 'Click to choose a saved KX profile, then run the complete q cell. ' +
+          'Normal notebook Run still follows the kernel selected at the top right.';
+    runItem.accessibilityInformation = {
+      label: profile
+        ? `KX connection ${route}; Run q Cell with KX; ${shortcut}`
+        : `Select KX connection; Run q Cell with KX; ${shortcut}`,
+    };
+    runItem.priority = 101;
+
+    const targetItem = new vscode.NotebookCellStatusBarItem(
+      `$(server-process) q default: ${route}`,
+      vscode.NotebookCellStatusBarAlignment.Right
+    );
+    targetItem.command = {
+      command: SELECT_NOTEBOOK_Q_TARGET_COMMAND,
+      title: 'Choose Notebook q Target (KX)',
+      arguments: [cell],
+    };
+    targetItem.tooltip = profile
+      ? `Notebook q default: "${route}"${profile.active ? ' (active KX profile)' : ''}. ` +
+        'Click to choose another saved profile without changing the Python kernel.'
+      : profiles.length === 0
+        ? 'No saved KX profiles are available. Click to add a connection, then choose the notebook q default.'
+      : resolution.kind === 'missing'
+        ? `Notebook q default "${resolution.reference.name}" no longer resolves. ` +
+          'Choose another saved KX profile.'
+        : 'Choose the notebook-level default KX profile for q cells. ' +
+          'Only its safe profile ID and display name are saved in the notebook.';
+    targetItem.accessibilityInformation = {
+      label: profile
+        ? `Notebook q default ${route}; choose another KX profile`
+        : 'Select notebook q default KX profile',
+    };
+    targetItem.priority = 100;
+    return [runItem, targetItem];
   }
 
   private directControllerSelected(
@@ -793,8 +959,7 @@ function activeTextNotebookCell(editor: vscode.NotebookEditor): vscode.NotebookC
     return undefined;
   }
   const targetUri = document.uri.toString();
-  const cellCount = Math.min(editor.notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
-  for (let index = 0; index < cellCount; index++) {
+  for (let index = 0; index < editor.notebook.cellCount; index++) {
     const cell = editor.notebook.cellAt(index);
     if (cell.document.uri.toString() === targetUri) {
       return cell;
@@ -808,14 +973,19 @@ function qCellResources(editor: vscode.NotebookEditor | undefined): string[] {
     return [];
   }
   const resources: string[] = [];
-  const cellCount = Math.min(editor.notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
-  for (let index = 0; index < cellCount; index++) {
+  for (let index = 0; index < editor.notebook.cellCount; index++) {
     const cell = editor.notebook.cellAt(index);
     if (isQCell(cell)) {
       resources.push(cell.document.uri.toString());
     }
   }
   return resources;
+}
+
+export function notebookRunShortcutLabel(
+  platform: NodeJS.Platform = process.platform
+): 'Cmd+Enter' | 'Ctrl+Enter' {
+  return platform === 'darwin' ? 'Cmd+Enter' : 'Ctrl+Enter';
 }
 
 function selectedCells(

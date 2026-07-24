@@ -12,11 +12,12 @@ export class ConnectionTreeItem extends vscode.TreeItem {
     connected: boolean
   ) {
     super(connection.name, vscode.TreeItemCollapsibleState.None);
+    this.id = connection.id;
     const state = connected ? 'connected' : 'disconnected';
     const activity = active ? 'active' : 'inactive';
     this.contextValue = `vscode-kdb.connection.${state}.${activity}`;
     this.description = [
-      active ? 'active' : undefined,
+      active ? 'ACTIVE' : undefined,
       connected ? 'connected' : 'disconnected',
       connectionEndpoint(connection),
       connection.database,
@@ -25,6 +26,9 @@ export class ConnectionTreeItem extends vscode.TreeItem {
       active ? 'star-full' : 'database',
       connected ? new vscode.ThemeColor('testing.iconPassed') : undefined
     );
+    this.accessibilityInformation = {
+      label: `${connection.name}, ${active ? 'active, ' : ''}${connected ? 'connected' : 'disconnected'}`,
+    };
     this.tooltip = new vscode.MarkdownString([
       `**${escapeMarkdown(connection.name)}**`,
       '',
@@ -34,7 +38,7 @@ export class ConnectionTreeItem extends vscode.TreeItem {
       '',
       `User: ${connection.username ? `\`${escapeMarkdown(connection.username)}\`` : '_anonymous_'}`,
       '',
-      `State: ${connected ? 'connected' : 'disconnected'}${active ? ', active' : ''}`,
+      `State: ${active ? '**ACTIVE**; ' : ''}${connected ? 'connected' : 'disconnected'}`,
     ].join('\n'));
     this.command = {
       command: 'vscode-kdb.setActiveConnection',

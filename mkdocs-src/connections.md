@@ -2,6 +2,8 @@
 
 KX for VS Code owns its direct q IPC connections. They appear in the **KX Connections** sidebar and are independent of SQLTools.
 
+Every valid distinct profile is persisted and shown immediately. The active profile has a star and uppercase `ACTIVE` label. Click a connection item, use its inline/context **Set Active Connection** action, or run **KX: Set Active Connection** from the Command Palette. Removing the active profile leaves no active selection; KX never silently promotes the first remaining row. Save failures stay in the form, also produce a visible VS Code error, and refresh the tree without reporting success. Passwordless profiles do not depend on SecretStorage; profiles with passwords retain transactional SecretStorage safety.
+
 ## Connection fields
 
 | Field | Use |
@@ -19,7 +21,7 @@ Namespaces are normalized to a leading dot. Invalid hosts, ports, namespaces, du
 
 ## One-time legacy SQLTools import
 
-**KX: Import SQLTools KDB Connections** is a KX-owned migration bridge for users who already have KDB profiles in VS Code's `sqltools.connections` setting. Invoke it from the Command Palette or KX Connections toolbar. It reads settings only when invoked, creates standalone KX direct IPC profiles, and then stops. SQLTools need not be installed or activated; its setting is never changed, and there is no background, startup, or ongoing synchronization.
+**KX: Import SQLTools KDB Connections** is a KX-owned migration bridge for users who already have KDB profiles in VS Code's `sqltools.connections` setting. Invoke it from the Command Palette. It is intentionally absent from the routine KX Connections title and item toolbars, whose primary actions are Add and Refresh. It reads settings only when invoked, creates standalone KX direct IPC profiles, and then stops. SQLTools need not be installed or activated; its setting is never changed, and there is no background, startup, or ongoing synchronization.
 
 Discovery treats every setting value as untrusted. It inspects explicit user, workspace, and workspace-folder values and uses the effective value only when explicit scope values are unavailable. Equivalent candidates across scopes are deduplicated, but all contributing source labels remain visible in the review. Only these normalized legacy driver aliases are recognized:
 
@@ -69,7 +71,7 @@ The final notification reports imported, skipped, unsupported, and failed counts
 
 ## Add, edit, and remove
 
-Use the sidebar toolbar, item context menus, or Command Palette:
+Use the sidebar toolbar, item context menus, or Command Palette for normal connection management:
 
 - **KX: Add Connection**
 - **KX: Edit Connection**
@@ -78,8 +80,9 @@ Use the sidebar toolbar, item context menus, or Command Palette:
 - **KX: Connect**
 - **KX: Disconnect**
 - **KX: Test Connection**
-- **KX: Import SQLTools KDB Connections**
 - **KX: Refresh Connections**
+
+The one-time **KX: Import SQLTools KDB Connections** migration remains available from the Command Palette only.
 
 Add and Edit open the same dedicated, single-screen **KX Connection** webview. All normal fields are visible together; the two implemented timeout overrides are in a clearly labelled collapsible **Advanced direct q IPC** section. The form is responsive, uses VS Code theme colors, and does not present unsupported SSH, TLS, gateway, broker, keep-alive, or reconnect-policy controls.
 
@@ -125,7 +128,7 @@ Both the form button and the saved-profile **KX: Test Connection** command use t
 
 The native **KX q (Direct IPC)** NotebookController uses this same connection manager. It routes complete q cells through the active profile's existing client and configured namespace, so notebook cells and normal editor runs preserve one q session's assignments and state. A saved disconnected active profile may connect on demand only after the user intentionally selects that direct controller. No per-cell or per-notebook connection is created.
 
-Both **KX q (Direct IPC)** and mixed-notebook **Run q Cell (KX)** use the active profile and its existing q process/session. The latter is an explicit q-cell action while Python remains selected; normal Python-controller Run is never intercepted. The Python `kx_notebook` / `%%q` helper is separate: it calls only the evaluator configured inside that Python kernel, and optional PyKX uses that kernel's existing object. A first-party direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
+**KX q (Direct IPC)** uses the active profile. Mixed-notebook **Run q Cell (KX)** uses the notebook's explicit q target and reuses that profile's existing q process/session; it never falls through to the first profile in the list. The latter is an explicit q-cell action while Python remains selected, so normal Python-controller Run is never intercepted. The Python `kx_notebook` / `%%q` helper is separate: it calls only the evaluator configured inside that Python kernel, and optional PyKX uses that kernel's existing object. A first-party direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
 
 Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.
 
