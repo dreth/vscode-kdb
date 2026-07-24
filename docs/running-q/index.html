@@ -934,7 +934,7 @@
 </tbody>
 </table>
 <p>A code lens at the top of a q document also runs the whole script.</p>
-<p>These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when <strong>KX q (Direct IPC)</strong> is selected, or Python when a Python controller is selected. Separately, 0.2.6 contributes a default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> for <strong>Run q Cell (KX)</strong> only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or <code>Ctrl+Shift+Enter</code>. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.</p>
+<p>These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when <strong>KX q (Direct IPC)</strong> is selected, or Python when a Python controller is selected. Separately, KX contributes a default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> for <strong>Run q Cell (KX)</strong> only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or <code>Ctrl+Shift+Enter</code>. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.</p>
 <h2 id="notebook-commands">Notebook commands</h2>
 <table>
 <thead>
@@ -978,7 +978,7 @@
 </tr>
 </tbody>
 </table>
-<p>For a q-only notebook, select <strong>KX q (Direct IPC)</strong>, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use <strong>Run q Cell (KX)</strong> on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading <code>%%q</code> and use complete-cell <code>.Q.ld</code> script grouping. q-only uses the active profile; mixed mode uses the notebook's explicit target and reuses that profile's q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare <code>%%q</code>, restore the notebook default/Python language, then use normal Run after installing and configuring <code>kx_notebook</code>. The extension does not monkey-patch Jupyter or intercept Python-controller Run.</p>
+<p>For a q-only notebook, select <strong>KX q (Direct IPC)</strong>, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use <strong>Run q Cell (KX)</strong> on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading <code>%%q</code> and use the same client-side complete-source grouping as editor scripts. q-only uses the active profile; mixed mode uses the notebook's explicit target and reuses that profile's q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare <code>%%q</code>, restore the notebook default/Python language, then use normal Run after installing and configuring <code>kx_notebook</code>. The extension does not monkey-patch Jupyter or intercept Python-controller Run.</p>
 <h2 id="exact-execution-semantics">Exact execution semantics</h2>
 <ul>
 <li>A non-empty selection is preserved exactly.</li>
@@ -987,8 +987,9 @@
 <li>A selection containing a line break is treated as a script.</li>
 <li><strong>Run q Script</strong> treats the entire document as a script.</li>
 </ul>
-<p>Multiline selections and documents are normalized to line-feed endings and grouped by q's <code>.Q.ld</code> script-line grouping. Groups execute in order and the final value is returned. This requires q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer. Older q versions receive a clear script-version error; single-line raw execution does not use <code>.Q.ld</code>.</p>
-<p>Whitespace, q indentation, and script termination rules still belong to q. Select the intended text when a partial document should run.</p>
+<p>Multiline selections, documents, and complete direct cells normalize CRLF/CR to line-feed endings and use a client-side q script-line grouper. An unindented source line starts a group; following indented lines continue it. Blank lines and comments preserve source order. <code>/</code> ... <code>\</code> block comments, top-level q system-command lines, and a bare <code>\</code> that starts q's trailing script comment retain their script meaning. Groups execute in order through ordinary q <code>value</code>, and the final executed group is returned.</p>
+<p>Whitespace, q indentation, source validity, and system-command behavior still belong to q. A system command in the source can therefore affect later groups in the same run. Select the intended text when a partial document should run.</p>
+<p>Generated script/cell requests do not depend on <code>.Q.ld</code> and are not rejected by q release date. Deterministic compatibility coverage runs the full direct-cell request against a simulated missing-<code>.Q.ld</code> capability; the release live test uses only the installed modern q runtime. There was no historical q binary available for a live run, so version 0.2.7 claims no exact minimum q version or live old-q result.</p>
 <h2 id="syntax-scope">Syntax scope</h2>
 <p>The extension owns its first-party TextMate q grammar. Version 0.2.2 recognizes a top-line <code>%%q</code> as a notebook directive while retaining the ordinary q rules and highlighting below it. The extension continues to associate q with <code>.q</code> files only. It does not claim <code>.k</code>: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.</p>
 <p>This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change <code>.q</code> source documents. In notebooks, the cell language selects highlighting and the selected controller owns execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents; the native notebook controller uses VS Code's normal Run UI.</p>
@@ -998,9 +999,9 @@
 <ul>
 <li><code>.</code> evaluates raw current-line/single-line text as sent;</li>
 <li>a non-root namespace evaluates it after temporarily switching q namespace; and</li>
-<li>script and multiline paths apply the same namespace around <code>.Q.ld</code> grouping.</li>
+<li>script, multiline, and complete-cell paths save the current process namespace, enter the configured namespace, and evaluate the client-produced groups there.</li>
 </ul>
-<p>The wrapper restores the server's previous namespace after success or failure. A q error is rethrown and shown as an error, not converted into an ordinary result row.</p>
+<p>The wrapper restores the server's previous namespace after success or failure, including after a source system command changed it during the run. A q error is rethrown and shown as an error, not converted into an ordinary result row. Assignments and definitions still persist in the namespace in which q evaluates them.</p>
 <h2 id="result-placement">Result placement</h2>
 <p>The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.</p>
 <p><strong>Run Selection in New Result</strong> creates another panel. It does not route through SQLTools and does not create <code>.session.sql</code> files. A direct-controller notebook result can hand off its live in-memory value while the bound live record exists; reopened/Python-helper output contains only the saved bounded preview.</p>

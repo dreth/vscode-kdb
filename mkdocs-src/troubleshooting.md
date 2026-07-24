@@ -72,7 +72,7 @@ Name and namespace-only changes do not recycle a healthy client. Validation erro
 
 ## A saved connection does not appear
 
-Version 0.2.6 verifies the complete profile list after VS Code reports a settings write. A successful save immediately refreshes **KX Connections** and shows a confirmation; a failed or silent/no-op write keeps the form open, refreshes the tree, and shows both inline and VS Code errors. Distinct valid profiles all appear. The active row is marked `ACTIVE`; removing it leaves no active profile instead of silently choosing the first remaining row.
+Version 0.2.7 verifies the complete profile list after VS Code reports a settings write. A successful save immediately refreshes **KX Connections** and shows a confirmation; a failed or silent/no-op write keeps the form open, refreshes the tree, and shows both inline and VS Code errors. Distinct valid profiles all appear. The active row is marked `ACTIVE`; removing it leaves no active profile instead of silently choosing the first remaining row.
 
 The Connections title toolbar intentionally contains Add and Refresh, not SQLTools import. Use **KX: Import SQLTools KDB Connections** from the Command Palette for one-time migration.
 
@@ -84,17 +84,19 @@ A genuine q evaluation error does not by itself discard an otherwise healthy IPC
 
 Reduce the expression in a q console when possible. Do not include sensitive production query text in a public report.
 
-## Script requires newer q
+## Complete script fails on a q process
 
-Whole documents, selections containing line breaks, and every **KX q (Direct IPC)** notebook cell use `.Q.ld` grouping and require q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer.
+Version 0.2.7 does not require `.Q.ld` and does not reject a process by q release date. Whole documents, selections containing line breaks, and direct notebook cells are grouped on the client and sent as ordinary q `value` expressions. Normal q indentation, quotes/newlines within a group, comments, system commands, and the bare-`\` trailing script comment still determine what q accepts and executes.
 
-Upgrade q, or execute a valid single-line expression from a normal `.q` editor using **Run Selection / Current Line**. Direct notebook cells always use complete-cell script semantics. The extension does not replace q script grouping with a SQL parser.
+Check the failing source in the configured namespace and inspect the genuine q error shown in KX Results. Direct notebook cells always use complete-cell script semantics; **Run Selection / Current Line** remains raw for a single physical line. KX does not replace q source semantics with a SQL parser.
+
+The compatibility fixture proves the generated full direct-cell request has no `.Q.ld` dependency when that capability is absent. The available live test uses the installed modern q runtime, not an historical binary. Report the q version/build and exact source shape when filing an older-process issue; this release states no exact minimum q version and does not claim a live old-q run.
 
 ## Namespace behavior looks wrong
 
 Open the connection and confirm **Database / Namespace** is `.` or a dot-qualified namespace such as `.analytics`. Editor paths temporarily switch to that namespace and restore the prior value. Errors are rethrown after restoration.
 
-If code depends on a different namespace midway through a script, make that q behavior explicit in the script rather than relying on hidden editor state.
+Script and complete-cell paths save the process's namespace, enter the configured namespace, evaluate each client-produced group, then restore the saved namespace after success or error. If a q system command deliberately changes namespace midway through a script, that change affects later groups during the same run; the outer wrapper still restores the pre-run namespace. Make such behavior explicit rather than relying on hidden editor state.
 
 ## Form Test Connection failed
 
@@ -155,7 +157,7 @@ The helper deliberately has no implicit q connection. If no callback is configur
 
 Open an ordinary Jupyter `.ipynb`, then use its top-right kernel selector or **Notebook: Select Notebook Kernel**. The native entry is **KX q (Direct IPC)**. It is a controller/kernel choice, not an entry in the Python controller's per-cell language picker.
 
-Confirm KX for VS Code 0.2.6 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
+Confirm KX for VS Code 0.2.7 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
 
 ## Run q Cell (KX) is missing
 
@@ -189,7 +191,7 @@ If a q-language cell has no marker, use its **Prepare for Python kernel** status
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.6 or the matching `kx_notebook` 0.2.6 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.7 or the matching `kx_notebook` 0.2.7 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
 Direct-controller output includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
 

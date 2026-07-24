@@ -169,4 +169,6 @@ Explorer requests temporarily apply the configured namespace and restore q's pre
 
 Root namespace `.` sends a single-line/current-line query as written. A non-root namespace wraps the query so q temporarily switches namespace, evaluates the text, restores the previous namespace, and rethrows genuine q errors.
 
-Whole-document and multiline selection runs use the corresponding script wrapper while preserving the same configured namespace. See [Running q](running-q.md) for script grouping and version requirements.
+Whole-document, multiline-selection, and complete direct-cell runs group q source lines on the client and evaluate the groups through ordinary q `value`. Their wrapper saves the process's current namespace, enters the configured namespace, evaluates the source groups in the existing session, restores the saved namespace after success or q error, and rethrows genuine q errors. Assignments and definitions remain in the namespace where q evaluated them.
+
+A q system command in the user's source retains normal q semantics and can change the namespace seen by later groups within that same run. The outer wrapper still restores the pre-run namespace when the run finishes. See [Running q](running-q.md) for indentation, comment, trailing-script-comment, compatibility-evidence, and execution details.

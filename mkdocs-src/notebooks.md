@@ -1,6 +1,6 @@
 # Jupyter/IPython Notebooks
 
-KX for VS Code 0.2.6 supports two clear first-party notebook modes:
+KX for VS Code 0.2.7 supports two clear first-party notebook modes:
 
 | Selected notebook kernel + cell | Use |
 | --- | --- |
@@ -12,7 +12,7 @@ VS Code selects one controller for the notebook. KX does not patch Jupyter or pr
 
 ## Mode 1: q-only Direct IPC controller
 
-Version 0.2.6 includes:
+Version 0.2.7 includes:
 
 - controller ID `vscode-kdb.q-notebook-controller`;
 - notebook type `jupyter-notebook`;
@@ -63,11 +63,15 @@ It cannot match Python, Markdown, an ordinary source editor, output focus, or a 
 
 ## Active connection and shared q session
 
-The q-only controller uses the active profile in **KX Connections**. Mixed cells use the notebook's explicit q target. Both reuse the profile-keyed `ConnectionManager` client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target. Every q cell uses the same script/namespace wrapper and requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer).
+The q-only controller uses the active profile in **KX Connections**. Mixed cells use the notebook's explicit q target. Both reuse the profile-keyed `ConnectionManager` client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target.
+
+Every direct q cell uses the same complete-source path as **Run q Script**. The extension groups physical q lines on the client, including indentation continuations, comments, top-level system commands, and q's bare-`\` trailing-script-comment convention, then evaluates the groups in order through ordinary q `value`. It saves the process's current namespace, enters the profile's configured namespace, and restores the saved namespace after success or q error. A source system command retains normal q semantics and can affect later groups within that run; the outer wrapper still restores the pre-run namespace afterward.
+
+This path has no `.Q.ld` or q release-date gate. Deterministic tests simulate missing `.Q.ld` through the full direct-cell request, while the available live test uses the installed modern q runtime. Version 0.2.7 does not state an exact minimum q version or claim a live historical-q run.
 
 A saved but disconnected target may connect on demand after an explicit KX execution gesture. Its profile/global connect and query timeouts apply. A missing mixed target stays actionable rather than falling through. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.
 
-Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; the selected q controller completes its native execution, while mixed mode writes a cancellation result only if the q cell is still unchanged. q work or side effects already sent may continue on the server. Version 0.2.6 does not claim server-side interruption.
+Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; the selected q controller completes its native execution, while mixed mode writes a cancellation result only if the q cell is still unchanged. q work or side effects already sent may continue on the server. Version 0.2.7 does not claim server-side interruption.
 
 ## Live KX result and saved snapshot
 

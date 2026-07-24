@@ -12,14 +12,14 @@ tables `.analytics
 
 ## Standalone status
 
-The current `0.2.6` release supports both q-only and mixed Python/q notebooks. Select **KX q (Direct IPC)** for native q-only Run. With Python selected, use the leading **Make q Cell (KX)** and **Run q Cell (KX)** actions plus the visible notebook q-target chooser. Mixed output is committed as an undoable notebook edit after q finishes, so the notebook becomes dirty until saved; Python cells remain untouched. Inline output uses compact KX Results controls, all six real chart types/column capabilities, and shared result settings; hidden legend series remain hidden across chart refreshes. Query responses default to 30 minutes independently of the 30-second connect/handshake default. Persisted table previews default to 20 rows while the current direct live result remains full and virtualized. The separate Python/IPython `%%q` helper remains available only when a Python-kernel evaluator must own q execution.
+The current `0.2.7` release supports both q-only and mixed Python/q notebooks. Select **KX q (Direct IPC)** for native q-only Run. With Python selected, use the leading **Make q Cell (KX)** and **Run q Cell (KX)** actions plus the visible notebook q-target chooser. Mixed output is committed as an undoable notebook edit after q finishes, so the notebook becomes dirty until saved; Python cells remain untouched. Complete q cells and editor scripts use client-side q source-line grouping followed by ordinary `value` evaluation in the existing direct process/session, without a q release-date gate. Inline output uses compact KX Results controls, all six real chart types/column capabilities, and shared result settings; hidden legend series remain hidden across chart refreshes. Query responses default to 30 minutes independently of the 30-second connect/handshake default. Persisted table previews default to 20 rows while the current direct live result remains full and virtualized. The separate Python/IPython `%%q` helper remains available only when a Python-kernel evaluator must own q execution.
 
 Implemented foundations include:
 
 - multiple direct q IPC profiles managed through one responsive **KX Connection** form, with verified persistence, an explicit active marker/selector, extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value **Test Connection** path;
 - a KX-owned **Import SQLTools KDB Connections** review for exact legacy driver aliases, scoped configuration discovery, safe skip/rename conflicts, explicit one-time password transfer, and no overwrite or sync;
 - optional per-profile connect/handshake and query timeout overrides with independent 30-second and 30-minute global defaults;
-- exact current-line, selection, and whole-document q execution;
+- exact current-line execution plus client-grouped multiline, whole-document, and complete-cell q execution through ordinary q `value`, with configured-namespace save/enter/restore;
 - a supported `vscode.notebooks.createNotebookController` for q-only Jupyter notebooks plus leading **Make q Cell (KX)** / **Run q Cell (KX)** actions, q-cell status, a notebook-level explicit profile target, and a focused q-cell shortcut for mixed Python notebooks, with shared complete-cell execution, profile/session/namespace continuity, actionable connection errors, bounded live/portable output, and no private Jupyter API;
 - actual q `TextDocument.languageId` editing aids, safe restore-to-notebook-default, a separate durable Python `%%q` preparation route, and a real VS Code NotebookRenderer for `application/vnd.kx.result+json` v1; direct output stores KX MIME plus `text/plain`, while the Python helper can add static HTML/text fallbacks;
 - a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand `meta`, confirmed bounded table/variable previews, and metadata-only functions/projections;
@@ -38,6 +38,8 @@ This is not a full KDB-X or q Professional compatibility claim. Standalone owns 
 - A reachable kdb+/q process listening for q IPC.
 - Credentials accepted by that process, if authentication is enabled.
 - For the optional Python-kernel notebook route only: Python 3.9+, IPython, and the separately installed `kx_notebook` helper with an explicit evaluator callback; optional PyKX remains separately installed/licensed.
+
+Direct execution compatibility is feature-based rather than gated on a q version/date. The deterministic suite covers generated requests for a process without `.Q.ld`, but the release's live check used only the installed modern q runtime. No exact minimum q version or live historical-q result is claimed.
 
 SQLTools is not required.
 

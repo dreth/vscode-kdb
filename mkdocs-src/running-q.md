@@ -12,7 +12,7 @@ The `.q` editor commands execute q text; they do not parse SQL, split SQL statem
 
 A code lens at the top of a q document also runs the whole script.
 
-These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when **KX q (Direct IPC)** is selected, or Python when a Python controller is selected. Separately, 0.2.6 contributes a default `Ctrl+Enter` / `Cmd+Enter` for **Run q Cell (KX)** only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or `Ctrl+Shift+Enter`. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.
+These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when **KX q (Direct IPC)** is selected, or Python when a Python controller is selected. Separately, KX contributes a default `Ctrl+Enter` / `Cmd+Enter` for **Run q Cell (KX)** only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or `Ctrl+Shift+Enter`. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.
 
 ## Notebook commands
 
@@ -27,7 +27,7 @@ These editor keybindings are gated to normal q text editors. VS Code delegates n
 | **Prepare this q cell for the active Python kernel** | Contextual action for a q-language cell without `%%q`; adds only the marker/KX metadata. It does not restore or execute the cell. |
 | **KX: Open Saved Notebook Preview in Results Panel** | Opens only a valid bounded KX MIME preview already saved on the selected cell. It never reruns q or recovers omitted rows. |
 
-For a q-only notebook, select **KX q (Direct IPC)**, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use **Run q Cell (KX)** on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading `%%q` and use complete-cell `.Q.ld` script grouping. q-only uses the active profile; mixed mode uses the notebook's explicit target and reuses that profile's q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare `%%q`, restore the notebook default/Python language, then use normal Run after installing and configuring `kx_notebook`. The extension does not monkey-patch Jupyter or intercept Python-controller Run.
+For a q-only notebook, select **KX q (Direct IPC)**, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use **Run q Cell (KX)** on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading `%%q` and use the same client-side complete-source grouping as editor scripts. q-only uses the active profile; mixed mode uses the notebook's explicit target and reuses that profile's q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare `%%q`, restore the notebook default/Python language, then use normal Run after installing and configuring `kx_notebook`. The extension does not monkey-patch Jupyter or intercept Python-controller Run.
 
 ## Exact execution semantics
 
@@ -37,9 +37,11 @@ For a q-only notebook, select **KX q (Direct IPC)**, use q-language cells, and R
 - A selection containing a line break is treated as a script.
 - **Run q Script** treats the entire document as a script.
 
-Multiline selections and documents are normalized to line-feed endings and grouped by q's `.Q.ld` script-line grouping. Groups execute in order and the final value is returned. This requires q 4.0 dated 2023-03-28 or newer, or q 4.1t dated 2022-11-01 or newer. Older q versions receive a clear script-version error; single-line raw execution does not use `.Q.ld`.
+Multiline selections, documents, and complete direct cells normalize CRLF/CR to line-feed endings and use a client-side q script-line grouper. An unindented source line starts a group; following indented lines continue it. Blank lines and comments preserve source order. `/` ... `\` block comments, top-level q system-command lines, and a bare `\` that starts q's trailing script comment retain their script meaning. Groups execute in order through ordinary q `value`, and the final executed group is returned.
 
-Whitespace, q indentation, and script termination rules still belong to q. Select the intended text when a partial document should run.
+Whitespace, q indentation, source validity, and system-command behavior still belong to q. A system command in the source can therefore affect later groups in the same run. Select the intended text when a partial document should run.
+
+Generated script/cell requests do not depend on `.Q.ld` and are not rejected by q release date. Deterministic compatibility coverage runs the full direct-cell request against a simulated missing-`.Q.ld` capability; the release live test uses only the installed modern q runtime. There was no historical q binary available for a live run, so version 0.2.7 claims no exact minimum q version or live old-q result.
 
 ## Syntax scope
 
@@ -55,9 +57,9 @@ The connection's **Database / Namespace** value is applied consistently:
 
 - `.` evaluates raw current-line/single-line text as sent;
 - a non-root namespace evaluates it after temporarily switching q namespace; and
-- script and multiline paths apply the same namespace around `.Q.ld` grouping.
+- script, multiline, and complete-cell paths save the current process namespace, enter the configured namespace, and evaluate the client-produced groups there.
 
-The wrapper restores the server's previous namespace after success or failure. A q error is rethrown and shown as an error, not converted into an ordinary result row.
+The wrapper restores the server's previous namespace after success or failure, including after a source system command changed it during the run. A q error is rethrown and shown as an error, not converted into an ordinary result row. Assignments and definitions still persist in the namespace in which q evaluates them.
 
 ## Result placement
 
