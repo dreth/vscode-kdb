@@ -4,6 +4,16 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.4 - 2026-07-24
+
+- Fixed q general null/no-value responses from assignments, declarations, and calls such as `hopen` so they render as compact qText (`::`) in `.q` results, native q notebook cells, and notebook-to-panel handoff. Empty generic values also use qText, while schema-bearing zero-row q tables remain tables.
+- Removed normal live-session, transport, decoding, snapshot, and recovery prose from inline notebook results. Routine output now stays focused on the result, with status text reserved for errors, unavailable data, truncation, and explicit bounds.
+- Reworked inline notebook tables around a stable scroll viewport: small results use their natural height, larger results use a bounded default, both saved and live tables can be resized vertically, horizontal and vertical scroll positions survive virtual updates, and sticky headers/row numbers no longer overlap data.
+- Added theme-aware drag, Shift-range, and keyboard selection for notebook tables. Live selections copy bounded TSV or CSV ranges through the owning extension-host result, including rows outside the currently loaded virtual slice; saved selections support the same two formats.
+- Added compact live search, three-state sort, selection copy, reset-size, chart, and KX Results controls without adding panel-only features to notebook cells.
+- Expanded saved and live inline charts to support selectable X, chart type, and up to 16 selected numeric Y series through the shared charting model. Inline uPlot charts now use panel-aligned grid, background, legend, selection, drag zoom, reset, and clustered multi-series bars, and remain below the table only while shown.
+- Added deterministic q IPC fixtures for real no-value, empty vector, and typed zero-row table payloads; pure renderer-model tests for sizing, virtualization, selection, copy, and multi-series controls; and validated live range-copy protocol bounds.
+
 ## 0.2.3 - 2026-07-23
 
 - Added the supported VS Code `NotebookController` `vscode-kdb.q-notebook-controller` for ordinary `jupyter-notebook` documents. **KX q (Direct IPC)** is activated by `onNotebook:jupyter-notebook`, appears in the normal notebook kernel/controller picker, advertises only `q`, and is distinct from a Python controller's per-cell language picker.

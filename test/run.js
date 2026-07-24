@@ -15,6 +15,7 @@ const {
   QIpcReceiveBuffer,
   deserializeQMessage,
   deserializeQPayload,
+  qValuePrefersQText,
   qValueRowsMaterialized,
   qValueToColumnarPanel,
   serializeTextQuery,
@@ -98,16 +99,32 @@ const {
   DEFAULT_NOTEBOOK_ROW_LIMIT,
   KX_NOTEBOOK_MIME,
   MAX_NOTEBOOK_BYTE_LIMIT,
+  MAX_NOTEBOOK_QTEXT_CHARS,
   MAX_NOTEBOOK_ROW_LIMIT,
   MIN_NOTEBOOK_BYTE_LIMIT,
   MIN_NOTEBOOK_ROW_LIMIT,
   createPortableKxResult,
+  createPortableKxTextResult,
   notebookResultPlainText,
   notebookResultStaticHtml,
   notebookResultToCsv,
   portableKxResultBytes,
   validatePortableKxResult,
 } = requireOut('notebook-contract');
+const {
+  notebookCellSelected,
+  notebookDelimitedRangeText,
+  notebookGridDefaultHeight,
+  notebookGridResizedHeight,
+  notebookGridWindow,
+  notebookMoveSelection,
+  notebookSelectionCellCount,
+  notebookSelectionCopyAllowed,
+  notebookSelectionForCell,
+  notebookSelectionRange,
+  reconcileNotebookChartYColumns,
+  toggleNotebookChartYColumn,
+} = requireOut('notebook-renderer-model');
 const {
   hasNotebookQMarker,
   notebookQMagicLine,
@@ -117,6 +134,7 @@ const {
 } = requireOut('notebook-settings');
 const {
   LiveNotebookResultStore,
+  MAX_LIVE_NOTEBOOK_COPY_CELLS,
   MAX_LIVE_NOTEBOOK_SEARCH_MATCHES,
   MAX_LIVE_NOTEBOOK_SLICE_CELLS,
   MAX_LIVE_NOTEBOOK_SLICE_COLUMNS,
@@ -136,6 +154,8 @@ const {
   preparedNotebookQCellMetadata,
 } = requireOut('notebook-cell-preparation');
 const {
+  MAX_NOTEBOOK_LIVE_COPY_CELLS,
+  MAX_NOTEBOOK_LIVE_COLUMNS,
   MAX_NOTEBOOK_LIVE_SLICE_TEXT_CHARS,
   notebookRendererSettingsMessage,
   parseNotebookLiveResultReference,
@@ -196,6 +216,7 @@ const tests = [
   ['columnar result windows and exports', testColumnarResults],
   ['actual notebook cell language provider and q preparation', testNotebookCellLanguage],
   ['portable notebook MIME contract and static fallbacks', testNotebookContract],
+  ['notebook renderer sizing, selection, copy, and chart model', testNotebookRendererModel],
   ['live notebook result registry bounds and lifecycle', testLiveNotebookResultStore],
   ['native direct q notebook controller provider', testDirectQNotebookController],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
@@ -409,6 +430,43 @@ async function testQIpc() {
   invalidBuffer.append(invalidEndian);
   assert.throws(() => invalidBuffer.readMessage(), /Invalid q IPC endian flag 2/);
   assert.throws(() => deserializeQPayload(vectorHeader(20, 1)), /Unsupported q IPC type 20/);
+
+  const noValue = deserializeQPayload(hex('6500'));
+  assert.deepStrictEqual(noValue, { qtype: 'generalNull' });
+  assert.strictEqual(qValuePrefersQText(noValue), true);
+  assert.deepStrictEqual(
+    qValueToColumnarPanel(noValue),
+    { mode: 'text', text: '::', kind: 'no value', rowsMaterialized: true },
+    'q :: and assignment/declaration responses must not become a scalar value grid'
+  );
+  const typedNull = deserializeQPayload(hex('fa00000080'));
+  assert.strictEqual(typedNull, null);
+  assert.strictEqual(qValueToColumnarPanel(typedNull).mode, 'text');
+  assert.strictEqual(qValueToColumnarPanel(typedNull).text, '0N');
+  for (const emptyPayload of [
+    hex('000000000000'),
+    hex('060000000000'),
+  ]) {
+    const empty = deserializeQPayload(emptyPayload);
+    assert.deepStrictEqual(empty, []);
+    assert.strictEqual(qValuePrefersQText(empty), true);
+    assert.deepStrictEqual(qValueToColumnarPanel(empty), {
+      mode: 'text',
+      text: '()',
+      kind: 'list',
+      rowsMaterialized: true,
+    });
+  }
+  assert.strictEqual(qValuePrefersQText(42), false);
+  assert.strictEqual(qValueToColumnarPanel(42).mode, 'grid');
+
+  const emptyTypedTable = deserializeQPayload(hex(
+    '6200630b00010000006100000001000000060000000000'
+  ));
+  const emptyTypedTablePanel = qValueToColumnarPanel(emptyTypedTable);
+  assert.strictEqual(emptyTypedTablePanel.mode, 'grid');
+  assert.deepStrictEqual(emptyTypedTablePanel.cols, ['a']);
+  assert.strictEqual(emptyTypedTablePanel.result.rowCount, 0);
 
   const table = deserializeQPayload(qTable(
     ['sym', 'size'],
@@ -4970,7 +5028,7 @@ function testNotebookContract() {
       requestId: 4,
       chartType: 'line',
       xColumn: 'time',
-      yColumns: ['price'],
+      yColumns: ['price', 'size'],
       maxPoints: 2500,
     }),
     {
@@ -4979,10 +5037,52 @@ function testNotebookContract() {
       requestId: 4,
       chartType: 'line',
       xColumn: 'time',
-      yColumns: ['price'],
+      yColumns: ['price', 'size'],
       maxPoints: 2500,
     }
   );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'requestLiveChart',
+    liveId,
+    requestId: 4,
+    chartType: 'line',
+    xColumn: 'time',
+    yColumns: ['price', 'price'],
+    maxPoints: 2500,
+  }), undefined, 'live chart series must be unique');
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'requestLiveChart',
+    liveId,
+    requestId: 4,
+    chartType: 'line',
+    xColumn: 'time',
+    yColumns: ['time'],
+    maxPoints: 2500,
+  }), undefined, 'the live chart X column cannot also be a Y series');
+  const liveCopyRequest = {
+    type: 'copyLiveRange',
+    liveId,
+    requestId: 5,
+    startRow: 10,
+    endRow: 19,
+    startColumn: 2,
+    endColumn: 4,
+    format: 'tsv',
+    includeHeaders: true,
+    sortColumn: 'sym',
+    sortDirection: 'desc',
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage(liveCopyRequest),
+    liveCopyRequest
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    ...liveCopyRequest,
+    startRow: 0,
+    endRow: MAX_NOTEBOOK_LIVE_COPY_CELLS,
+    startColumn: 0,
+    endColumn: 0,
+  }), undefined, 'live copy requests must stay within the explicit cell bound');
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
       type: 'updateResultSetting',
@@ -5037,6 +5137,8 @@ function testNotebookContract() {
     kind: 'table',
     columns: ['sym', 'price'],
     rowCount: 1_000_000,
+    chartXColumns: ['price'],
+    chartYColumns: ['price'],
     metadata: {
       query: 'select from trade',
       connectionName: 'Local q • Direct IPC • .analytics',
@@ -5052,12 +5154,38 @@ function testNotebookContract() {
     kind: 'table',
     columns: ['sym', 'price'],
     rowCount: 1_000_000,
+    chartXColumns: ['price'],
+    chartYColumns: ['price'],
     metadata: {
       query: 'select from trade',
       connectionName: 'Local q • Direct IPC • .analytics',
       elapsedMs: 12,
       messages: ['Full live table.'],
     },
+  });
+  const liveCopySuccess = {
+    type: 'liveCopy',
+    liveId,
+    requestId: 10,
+    ok: true,
+    message: 'Copied 30 cells.',
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(liveCopySuccess),
+    liveCopySuccess
+  );
+  assert.deepStrictEqual(parseNotebookRendererHostMessage({
+    type: 'liveCopy',
+    liveId,
+    requestId: 11,
+    ok: false,
+    message: 'Selection is unavailable.',
+  }), {
+    type: 'liveCopy',
+    liveId,
+    requestId: 11,
+    ok: false,
+    message: 'Selection is unavailable.',
   });
   const validSliceMessage = {
     type: 'liveSlice',
@@ -5137,8 +5265,8 @@ function testNotebookContract() {
   const html = notebookResultStaticHtml(payload);
   assert.match(html, /Schema:/);
   assert.match(html, /Rows: 1000000/);
-  assert.match(html, /persisted preview: 2/);
-  assert.match(html, /Preview only/);
+  assert.match(html, /saved here: 2/);
+  assert.match(html, /Showing a bounded result/);
   assert.match(html, /<svg/);
   assert.match(html, /&lt;unsafe session&gt;/);
   assert.match(html, /&lt;img src=x onerror=alert\(1\)&gt;/);
@@ -5146,10 +5274,68 @@ function testNotebookContract() {
   assert.ok(!html.includes('<img src=x'));
   const plain = notebookResultPlainText(payload);
   assert.match(plain, /KX\/q result/);
-  assert.match(plain, /omitted full result is not stored/i);
+  assert.match(plain, /Bounded output/i);
   const csv = notebookResultToCsv(payload);
   assert.match(csv, /^sym,px,ts,note\n/);
   assert.ok(csv.includes('<img src=x onerror=alert(1)>'));
+
+  const qTextPayload = createPortableKxTextResult({
+    text: '::<script>alert(1)</script>',
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+    label: 'Local q',
+    elapsedMs: 2,
+  });
+  assert.strictEqual(qTextPayload.kind, 'qText');
+  assert.strictEqual(qTextPayload.data.text, '::<script>alert(1)</script>');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(qTextPayload, 'schema'), false);
+  assert.deepStrictEqual(
+    validatePortableKxResult(qTextPayload),
+    { ok: true, value: qTextPayload }
+  );
+  assert.strictEqual(notebookResultPlainText(qTextPayload), qTextPayload.data.text);
+  const qTextHtml = notebookResultStaticHtml(qTextPayload);
+  assert.match(qTextHtml, /<pre>::&lt;script&gt;alert\(1\)&lt;\/script&gt;<\/pre>/);
+  assert.ok(!qTextHtml.includes('<script>alert'));
+  const surrogateBoundedQText = createPortableKxTextResult({
+    text: `${'x'.repeat(MAX_NOTEBOOK_QTEXT_CHARS - 2)}😀z`,
+    marker: 'direct-ipc',
+    byteLimit: MAX_NOTEBOOK_BYTE_LIMIT,
+  });
+  assert.strictEqual(surrogateBoundedQText.result.truncated, true);
+  assert.ok(surrogateBoundedQText.result.truncationReasons.includes('cellValueLimit'));
+  assert.ok(!/[\uD800-\uDBFF]$/.test(surrogateBoundedQText.data.text));
+  assert.ok(!surrogateBoundedQText.data.text.includes('\uFFFD'));
+  const oversizedQText = createPortableKxTextResult({
+    text: '🙂'.repeat(MIN_NOTEBOOK_BYTE_LIMIT),
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  });
+  assert.strictEqual(oversizedQText.result.truncated, true);
+  assert.ok(oversizedQText.result.truncationReasons.includes('byteLimit'));
+  assert.ok(portableKxResultBytes(oversizedQText) <= MIN_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(validatePortableKxResult(oversizedQText).ok, true);
+  const invalidQText = JSON.parse(JSON.stringify(qTextPayload));
+  invalidQText.schema = { columns: [] };
+  assert.strictEqual(validatePortableKxResult(invalidQText).ok, false);
+
+  const multiSeriesPayload = createPortableKxResult({
+    columns: ['time', 'bid', 'ask'],
+    rows: [[1, 10, 11], [2, 12, 13], [3, 14, 15]],
+    chart: {
+      visible: true,
+      type: 'line',
+      xColumn: 'time',
+      yColumns: ['bid', 'ask'],
+    },
+  });
+  assert.deepStrictEqual(multiSeriesPayload.chart.yColumns, ['bid', 'ask']);
+  assert.strictEqual(validatePortableKxResult(multiSeriesPayload).ok, true);
+  assert.strictEqual(
+    (notebookResultStaticHtml(multiSeriesPayload).match(/<polyline /g) || []).length,
+    2,
+    'static saved output must preserve every compatible Y series'
+  );
 
   const byteBounded = createPortableKxResult({
     columns: ['value'],
@@ -5271,7 +5457,16 @@ function testNotebookContract() {
   assert.match(rendererSource, /validatePortableKxResult\(raw\)/);
   assert.match(rendererSource, /context\.postMessage\?\.\(\{ type: 'ready' \}\)/);
   assert.match(rendererSource, /type: 'openPreview'/);
+  assert.match(rendererSource, /type: 'copyLiveRange'/);
+  assert.match(rendererSource, /multiColumnControl/);
+  assert.match(rendererSource, /notebookGridDefaultHeight/);
+  assert.match(rendererSource, /resize:\s*vertical/);
+  assert.match(rendererSource, /aria-activedescendant/);
+  assert.match(rendererSource, /setAttribute\('role', 'row'\)/);
+  assert.match(rendererSource, /state\.liveViewport\.scrollTop = state\.liveScrollTop/);
   assert.match(rendererSource, /textContent/);
+  assert.ok(!/document\.addEventListener\(['"]copy|window\.addEventListener\(['"]copy/.test(rendererSource));
+  assert.ok(!/(Live full result|Live in-session view|decoded Direct IPC|saved bounded snapshot|persisted preview)/i.test(rendererSource));
   assert.ok(!/\.innerHTML\s*=|\.outerHTML\s*=|insertAdjacentHTML|document\.write|\beval\s*\(/.test(rendererSource));
   const rendererBundlePath = path.join(ROOT, 'renderer', 'kx-notebook-renderer.js');
   assert.ok(fs.existsSync(rendererBundlePath));
@@ -5279,11 +5474,151 @@ function testNotebookContract() {
   assert.ok(!/innerHTML|outerHTML|insertAdjacentHTML|document\.write|\beval\s*\(|new Function|https?:\/\//.test(rendererBundle));
 }
 
+function testNotebookRendererModel() {
+  assert.strictEqual(notebookGridDefaultHeight(2, 28, 30), 88);
+  assert.strictEqual(notebookGridDefaultHeight(10_000, 28, 30), 420);
+  assert.strictEqual(notebookGridDefaultHeight(0, 28, 30), 72);
+  assert.strictEqual(notebookGridResizedHeight(12), 72);
+  assert.strictEqual(notebookGridResizedHeight(640), 640);
+  assert.strictEqual(notebookGridResizedHeight(5_000), 900);
+
+  const compactWindow = notebookGridWindow({
+    rowCount: 1_000,
+    columnCount: 20,
+    scrollTop: 310,
+    scrollLeft: 500,
+    viewportWidth: 640,
+    viewportHeight: 140,
+    rowHeight: 28,
+    cellWidth: 160,
+    rowIndexWidth: 64,
+    headerHeight: 30,
+    rowOverscan: 2,
+    columnOverscan: 1,
+    maxRows: 120,
+    maxColumns: 48,
+    maxCells: 20_000,
+  });
+  const tallWindow = notebookGridWindow({
+    rowCount: 1_000,
+    columnCount: 20,
+    scrollTop: 310,
+    scrollLeft: 500,
+    viewportWidth: 640,
+    viewportHeight: 420,
+    rowHeight: 28,
+    cellWidth: 160,
+    rowIndexWidth: 64,
+    headerHeight: 30,
+    rowOverscan: 2,
+    columnOverscan: 1,
+    maxRows: 120,
+    maxColumns: 48,
+    maxCells: 20_000,
+  });
+  assert.ok(tallWindow.endRow > compactWindow.endRow);
+  assert.ok(compactWindow.startRow > 0);
+  assert.ok(compactWindow.startColumn > 0);
+  assert.ok(
+    (compactWindow.endRow - compactWindow.startRow + 1) *
+      (compactWindow.endColumn - compactWindow.startColumn + 1) <= 20_000
+  );
+  assert.deepStrictEqual(
+    notebookGridWindow({
+      rowCount: 0,
+      columnCount: 3,
+      scrollTop: 0,
+      scrollLeft: 0,
+      viewportWidth: 640,
+      viewportHeight: 72,
+      rowHeight: 28,
+      cellWidth: 160,
+      rowIndexWidth: 64,
+      headerHeight: 30,
+      rowOverscan: 2,
+      columnOverscan: 1,
+      maxRows: 120,
+      maxColumns: 48,
+      maxCells: 20_000,
+    }),
+    { startRow: 0, endRow: -1, startColumn: 0, endColumn: 2 },
+    'a zero-row table must keep its schema/header window'
+  );
+
+  let selection = notebookSelectionForCell(undefined, 2, 1, false);
+  selection = notebookSelectionForCell(selection, 5, 3, true);
+  assert.deepStrictEqual(notebookSelectionRange(selection), {
+    startRow: 2,
+    endRow: 5,
+    startColumn: 1,
+    endColumn: 3,
+  });
+  assert.strictEqual(notebookSelectionCellCount(selection), 12);
+  assert.strictEqual(notebookSelectionCopyAllowed(undefined, 20_000), false);
+  assert.strictEqual(notebookSelectionCopyAllowed(selection, 20_000), true);
+  assert.strictEqual(notebookSelectionCopyAllowed(selection, 11), false);
+  assert.strictEqual(notebookCellSelected(selection, 4, 2), true);
+  assert.strictEqual(notebookCellSelected(selection, 6, 2), false);
+  const moved = notebookMoveSelection(selection, 1, -2, false, 10, 5);
+  assert.deepStrictEqual(moved, {
+    anchorRow: 6,
+    anchorColumn: 1,
+    focusRow: 6,
+    focusColumn: 1,
+  });
+  const csvSelection = notebookSelectionForCell(undefined, 0, 0, false);
+  csvSelection.focusRow = 1;
+  csvSelection.focusColumn = 1;
+  assert.strictEqual(
+    notebookDelimitedRangeText(
+      ['name', 'note'],
+      csvSelection,
+      'csv',
+      true,
+      (row, column) => [
+        ['AAPL', 'a,b'],
+        ['MSFT', '"quoted"'],
+      ][row][column]
+    ),
+    'name,note\nAAPL,"a,b"\nMSFT,"""quoted"""'
+  );
+
+  const eligible = ['bid', 'ask', 'size'];
+  assert.deepStrictEqual(
+    reconcileNotebookChartYColumns(eligible, 'time', ['ask', 'bid']),
+    ['ask', 'bid']
+  );
+  assert.deepStrictEqual(
+    reconcileNotebookChartYColumns(eligible, 'ask', ['ask', 'bid', 'size']),
+    ['bid', 'size'],
+    'changing X must remove only the X collision'
+  );
+  assert.deepStrictEqual(
+    toggleNotebookChartYColumn(eligible, 'time', ['bid'], 'ask', true),
+    ['bid', 'ask']
+  );
+  assert.deepStrictEqual(
+    toggleNotebookChartYColumn(eligible, 'time', ['bid'], 'bid', false),
+    ['bid'],
+    'the checklist must retain at least one Y series'
+  );
+  assert.strictEqual(
+    reconcileNotebookChartYColumns(
+      Array.from({ length: 30 }, (_, index) => `y${index}`),
+      'time',
+      Array.from({ length: 30 }, (_, index) => `y${index}`)
+    ).length,
+    16
+  );
+}
+
 function testLiveNotebookResultStore() {
   const {
+    liveChartMessage,
     liveNotebookDisplayOptions,
     liveResultMessage,
     liveSliceMessage,
+    safeLiveColumnNames,
   } = requireOutWithMocks('notebook-integration', {
     vscode: createVscodeRuntimeMock(),
   });
@@ -5315,6 +5650,8 @@ function testLiveNotebookResultStore() {
   assert.strictEqual(baseView.mode, 'table');
   assert.strictEqual(baseView.rowCount, 3);
   assert.deepStrictEqual(baseView.columns, ['n', 'name', 'values']);
+  assert.deepStrictEqual(baseView.chartXColumns, ['n']);
+  assert.deepStrictEqual(baseView.chartYColumns, ['n']);
   assert.strictEqual(baseView.query, 'select from trade');
   assert.strictEqual(baseView.connectionName, 'Local q • Direct IPC • .analytics');
   const hostDisplayOptions = liveNotebookDisplayOptions({
@@ -5334,6 +5671,31 @@ function testLiveNotebookResultStore() {
   assert.strictEqual(parseNotebookRendererHostMessage(hostLiveResult).available, true);
   assert.strictEqual(hostLiveResult.rowCount, 3);
   assert.deepStrictEqual(hostLiveResult.columns, ['n', 'name', 'values']);
+  assert.deepStrictEqual(hostLiveResult.metadata.messages, []);
+  assert.ok(!/(snapshot|decoded|in-session|full live)/i.test(JSON.stringify(hostLiveResult)));
+  assert.deepStrictEqual(
+    safeLiveColumnNames(['bad\nname', 'badname', '', 'badname']),
+    ['badname', 'badname_2', 'column3', 'badname_3']
+  );
+  const chartCapColumns = Array.from(
+    { length: MAX_NOTEBOOK_LIVE_COLUMNS + 1 },
+    (_, index) => `metric${index}`
+  );
+  const chartCapId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/chart-column-cap',
+    query: 'chartColumnCap',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable(
+      chartCapColumns,
+      [Object.fromEntries(chartCapColumns.map((column, index) => [column, index]))]
+    ),
+  });
+  const chartCapView = store.view(chartCapId, notebookUri);
+  assert.strictEqual(chartCapView.columns.length, MAX_NOTEBOOK_LIVE_COLUMNS + 1);
+  assert.strictEqual(chartCapView.chartXColumns.length, MAX_NOTEBOOK_LIVE_COLUMNS);
+  assert.strictEqual(chartCapView.chartYColumns.length, MAX_NOTEBOOK_LIVE_COLUMNS);
   const hostLiveSlice = liveSliceMessage(
     store,
     notebookUri,
@@ -5377,6 +5739,20 @@ function testLiveNotebookResultStore() {
     ['1', 'alpha hit', '1, 2'],
     ['2', 'beta hit', '2, 3'],
   ]);
+  assert.strictEqual(
+    store.copyText(baseId, notebookUri, {
+      startRow: 0,
+      endRow: 2,
+      startColumn: 0,
+      endColumn: 1,
+      format: 'csv',
+      includeHeaders: true,
+      sortColumn: 'n',
+      sortDirection: 'asc',
+    }),
+    'n,name\n1,alpha hit\n2,beta hit\n3,gamma',
+    'copy must cover a bounded sorted range independently of the loaded virtual slice'
+  );
   assert.deepStrictEqual(
     store.slice(baseId, notebookUri, {
       startRow: 0,
@@ -5436,6 +5812,11 @@ function testLiveNotebookResultStore() {
     MAX_NOTEBOOK_LIVE_SLICE_TEXT_CHARS,
     'the live store and renderer message validator must share one aggregate text ceiling'
   );
+  assert.strictEqual(
+    MAX_LIVE_NOTEBOOK_COPY_CELLS,
+    MAX_NOTEBOOK_LIVE_COPY_CELLS,
+    'the live store and renderer message validator must share one copy cell ceiling'
+  );
 
   const largeCell = 'x'.repeat(10_000);
   const aggregateColumns = Array.from({ length: 100 }, (_, index) => `value${index}`);
@@ -5460,7 +5841,7 @@ function testLiveNotebookResultStore() {
     0
   );
   assert.ok(aggregateTextChars <= MAX_LIVE_NOTEBOOK_SLICE_TEXT_CHARS);
-  assert.match(aggregateSlice.cells[0][0], /truncated for live slice response/i);
+  assert.match(aggregateSlice.cells[0][0], /cell truncated; open KX Results/i);
 
   for (let index = 0; index < MAX_LIVE_NOTEBOOK_SORT_CACHE_ENTRIES + 3; index++) {
     store.slice(wideId, notebookUri, {
@@ -5508,6 +5889,7 @@ function testLiveNotebookResultStore() {
   const chartRows = Array.from({ length: 120 }, (_, index) => ({
     time: index,
     price: index * 2,
+    size: index * 3,
   }));
   const chartId = store.register({
     notebookUri,
@@ -5515,13 +5897,13 @@ function testLiveNotebookResultStore() {
     query: 'chartSource',
     connectionName: 'Local q',
     elapsedMs: 3,
-    value: modelQTable(['time', 'price'], chartRows),
+    value: modelQTable(['time', 'price', 'size'], chartRows),
   });
   const chart = store.chart(chartId, notebookUri, {
     requestId: 7,
     chartType: 'line',
     xColumn: 'time',
-    yColumns: ['price'],
+    yColumns: ['price', 'size'],
     maxPoints: 20,
     maxSourceRows: 120,
   });
@@ -5529,13 +5911,108 @@ function testLiveNotebookResultStore() {
   assert.strictEqual(chart.chartType, 'line');
   assert.strictEqual(chart.sourceRowCount, 120);
   assert.ok(chart.sampledPointCount <= 20);
-  assert.deepStrictEqual(chart.series.map(series => series.columnName), ['price']);
+  assert.deepStrictEqual(chart.series.map(series => series.columnName), ['price', 'size']);
   assert.strictEqual(store.chart(chartId, otherNotebookUri, {
     requestId: 1,
     chartType: 'line',
     xColumn: 'time',
     yColumns: ['price'],
     maxPoints: 10,
+  }), undefined);
+
+  const normalizedColumnId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/normalized-columns',
+    query: 'normalizedColumns',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable(
+      ['time\nraw', 'price\rraw'],
+      [
+        { ['time\nraw']: 1, ['price\rraw']: 10 },
+        { ['time\nraw']: 2, ['price\rraw']: 30 },
+        { ['time\nraw']: 3, ['price\rraw']: 20 },
+      ]
+    ),
+  });
+  const normalizedHost = liveResultMessage(
+    store,
+    notebookUri,
+    normalizedColumnId,
+    20,
+    hostDisplayOptions
+  );
+  assert.deepStrictEqual(normalizedHost.columns, ['timeraw', 'priceraw']);
+  assert.deepStrictEqual(normalizedHost.chartXColumns, ['timeraw', 'priceraw']);
+  assert.deepStrictEqual(normalizedHost.chartYColumns, ['timeraw', 'priceraw']);
+  const normalizedSorted = liveSliceMessage(
+    store,
+    notebookUri,
+    {
+      type: 'requestLiveSlice',
+      liveId: normalizedColumnId,
+      requestId: 21,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 1,
+      sortColumn: 'priceraw',
+      sortDirection: 'desc',
+    },
+    hostDisplayOptions
+  );
+  assert.deepStrictEqual(normalizedSorted.cells, [['2', '30']]);
+  const normalizedChart = liveChartMessage(
+    store,
+    notebookUri,
+    {
+      type: 'requestLiveChart',
+      liveId: normalizedColumnId,
+      requestId: 22,
+      chartType: 'line',
+      xColumn: 'timeraw',
+      yColumns: ['priceraw'],
+      maxPoints: 500,
+    },
+    hostDisplayOptions,
+    { chartMaxSourceRows: 2_000_000 }
+  );
+  assert.strictEqual(normalizedChart.error, undefined);
+  assert.strictEqual(normalizedChart.data.xColumn, 'timeraw');
+  assert.deepStrictEqual(
+    normalizedChart.data.series.map(series => series.columnName),
+    ['priceraw']
+  );
+  assert.deepStrictEqual(parseNotebookRendererHostMessage(normalizedChart), normalizedChart);
+
+  const emptyTableId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/empty-table',
+    query: '([]a:`int$())',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable(['a'], []),
+  });
+  const emptyTableView = store.view(emptyTableId, notebookUri);
+  assert.strictEqual(emptyTableView.mode, 'table');
+  assert.deepStrictEqual(emptyTableView.columns, ['a']);
+  assert.strictEqual(emptyTableView.rowCount, 0);
+  const noValueId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/no-value',
+    query: 'x:1',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: deserializeQPayload(hex('6500')),
+  });
+  const noValueView = store.view(noValueId, notebookUri);
+  assert.strictEqual(noValueView.mode, 'text');
+  assert.strictEqual(noValueView.text, '::');
+  assert.strictEqual(store.slice(noValueId, notebookUri, {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 0,
+    endColumn: 0,
   }), undefined);
 
   const dictionary = {
@@ -5883,14 +6360,71 @@ async function testDirectQNotebookController() {
   await registered.executeHandler([qTextCell], notebook, registered);
   const qTextExecution = runtime.executionFor(qTextCell);
   const qTextPayload = notebookOutputItem(qTextExecution.output, KX_NOTEBOOK_MIME).value;
-  assert.deepStrictEqual(qTextPayload.schema.columns.map(column => column.name), ['qText']);
-  assert.strictEqual(qTextPayload.data.rows[0][0].value, '{x+y}');
+  assert.strictEqual(qTextPayload.kind, 'qText');
+  assert.strictEqual(qTextPayload.data.text, '{x+y}');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(qTextPayload, 'schema'), false);
+  assert.strictEqual(notebookTextOutput(qTextExecution.output), '{x+y}');
   const qTextLiveId = qTextExecution.output.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
   const qTextLiveView = liveResults.view(qTextLiveId, notebook.uri.toString(), {
     functionDisplayStrategy: 'qText',
   });
   assert.strictEqual(qTextLiveView.mode, 'text');
   assert.strictEqual(qTextLiveView.text, '{x+y}');
+
+  bridge.executeImpl = async (_connection, _source, onIssued) => {
+    onIssued();
+    return deserializeQPayload(hex('6500'));
+  };
+  const noValueCell = runtime.cell({
+    languageId: 'q',
+    source: 'h:hopen `::5001',
+    uri: 'vscode-notebook-cell:///native-q/no-value',
+  });
+  await registered.executeHandler([noValueCell], notebook, registered);
+  const noValueExecution = runtime.executionFor(noValueCell);
+  const noValuePayload = notebookOutputItem(noValueExecution.output, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(noValuePayload.kind, 'qText');
+  assert.strictEqual(noValuePayload.data.text, '::');
+  assert.strictEqual(notebookTextOutput(noValueExecution.output), '::');
+  const noValueLiveView = liveResults.view(
+    noValueExecution.output.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id,
+    notebook.uri.toString()
+  );
+  assert.strictEqual(noValueLiveView.mode, 'text');
+  assert.strictEqual(noValueLiveView.text, '::');
+  assert.deepStrictEqual(noValueExecution.endCalls.map(call => call.success), [true]);
+
+  bridge.executeImpl = async (_connection, _source, onIssued) => {
+    onIssued();
+    return [];
+  };
+  const emptyListCell = runtime.cell({
+    languageId: 'q',
+    source: '()',
+    uri: 'vscode-notebook-cell:///native-q/empty-list',
+  });
+  await registered.executeHandler([emptyListCell], notebook, registered);
+  const emptyListExecution = runtime.executionFor(emptyListCell);
+  const emptyListPayload = notebookOutputItem(emptyListExecution.output, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(emptyListPayload.kind, 'qText');
+  assert.strictEqual(emptyListPayload.data.text, '()');
+
+  bridge.executeImpl = async (_connection, _source, onIssued) => {
+    onIssued();
+    return modelQTable(['a'], []);
+  };
+  const emptyTableCell = runtime.cell({
+    languageId: 'q',
+    source: '([]a:`int$())',
+    uri: 'vscode-notebook-cell:///native-q/empty-table',
+  });
+  await registered.executeHandler([emptyTableCell], notebook, registered);
+  const emptyTableExecution = runtime.executionFor(emptyTableCell);
+  const emptyTablePayload = notebookOutputItem(emptyTableExecution.output, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(emptyTablePayload.kind, 'table');
+  assert.deepStrictEqual(emptyTablePayload.schema.columns.map(column => column.name), ['a']);
+  assert.strictEqual(emptyTablePayload.result.rowCount, 0);
+  assert.strictEqual(emptyTablePayload.result.previewRowCount, 0);
 
   const magicCell = runtime.cell({
     languageId: 'q',
@@ -6029,15 +6563,15 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.3');
+  assert.strictEqual(manifest.version, '0.2.4');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.3');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.3');
+  assert.strictEqual(packageLock.version, '0.2.4');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.4');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
   );
-  assert.match(pythonNotebookPyproject, /^version = "0\.2\.3"$/m);
+  assert.match(pythonNotebookPyproject, /^version = "0\.2\.4"$/m);
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);

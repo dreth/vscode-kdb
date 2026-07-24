@@ -56,6 +56,19 @@ async function runAssertions(port) {
     await client.connect();
     assert.ok(client.getProtocolVersion() >= 1);
     assert.strictEqual(await client.query('1+1'), 2);
+    const assignment = await client.query('rootVector:rootVector');
+    assert.deepStrictEqual(assignment, { qtype: 'generalNull' });
+    assert.deepStrictEqual(qValueToColumnarPanel(assignment), {
+      mode: 'text',
+      text: '::',
+      kind: 'no value',
+      rowsMaterialized: true,
+    });
+    assert.strictEqual(qValueToColumnarPanel(await client.query('()')).mode, 'text');
+    const zeroRowTable = qValueToColumnarPanel(await client.query('([]a:`int$())'));
+    assert.strictEqual(zeroRowTable.mode, 'grid');
+    assert.deepStrictEqual(zeroRowTable.cols, ['a']);
+    assert.strictEqual(zeroRowTable.result.rowCount, 0);
 
     const temporaryTestClient = new KdbIpcClient({
       host: '127.0.0.1',
@@ -199,9 +212,9 @@ async function runAssertions(port) {
       await client.query(qScriptInNamespace('scriptFn:{[x]\r\n x+1\r\n }\r\nscriptFn 4', '.analytics')),
       5
     );
-    assert.strictEqual(
+    assert.deepStrictEqual(
       await client.query(qScriptInNamespace('stoppedBefore:1\n\\\nstoppedAfter:1', '.analytics')),
-      null
+      { qtype: 'generalNull' }
     );
     assert.strictEqual(await client.query('`stoppedBefore in key `.analytics'), true);
     assert.strictEqual(await client.query('`stoppedAfter in key `.analytics'), false);

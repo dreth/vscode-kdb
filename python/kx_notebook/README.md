@@ -11,7 +11,7 @@ but the extension never changes a selected kernel environment automatically.
 
 This package is the separate **Python-controller route**. Keep the normal
 Python/IPython controller selected and use `%%q` only when Python and q must
-coexist in that kernel. KX for VS Code 0.2.3 also provides a native
+coexist in that kernel. KX for VS Code 0.2.4 also provides a native
 **KX q (Direct IPC)** notebook controller; that direct route needs no Python
 package or `%%q` marker and executes through the active profile in the
 first-party KX Connections view. No extension-managed variables, namespace
@@ -92,7 +92,7 @@ select from trades where sym=`AAPL
 ```
 
 The helper validates these marker options before calling the evaluator. They
-affect only the persisted preview; they do not change or cap the evaluator's q
+affect only the saved notebook output; they do not change or cap the evaluator's q
 execution unless the configured evaluator applies its own server-side limit.
 
 Normal Run is owned by the selected Python controller. KX for VS Code does not

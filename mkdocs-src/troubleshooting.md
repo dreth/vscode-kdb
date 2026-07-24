@@ -149,7 +149,7 @@ The helper deliberately has no implicit q connection. If no callback is configur
 
 Open an ordinary Jupyter `.ipynb`, then use its top-right kernel selector or **Notebook: Select Notebook Kernel**. The native entry is **KX q (Direct IPC)**. It is a controller/kernel choice, not an entry in the Python controller's per-cell language picker.
 
-Confirm KX for VS Code 0.2.3 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
+Confirm KX for VS Code 0.2.4 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
 
 ## An existing cell is not q
 
@@ -167,7 +167,7 @@ If a q-language cell has no marker, use its **Prepare for Python kernel** status
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.3 or the matching `kx_notebook` 0.2.3 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.4 or the matching `kx_notebook` 0.2.4 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
 Direct-controller output includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
 

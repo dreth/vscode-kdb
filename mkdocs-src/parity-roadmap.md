@@ -4,7 +4,7 @@ KX for VS Code is being developed as the future first-party KX product. During t
 
 The detailed, source-backed status is maintained in the repository's [`PARITY.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY.md). Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim. The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) and [machine-readable JSON](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.json) record 63 classified cases / 381 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. The result is valid executable evidence with known gaps, not source-of-truth sign-off or a claim that the products are functionally or visually identical.
 
-The repository manifest is at `0.2.3` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
+The repository manifest is at `0.2.4` for direct user testing. This package is not a KDB-X or q Professional parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.
 
 ## Current standalone architecture
 
@@ -51,7 +51,7 @@ The one-shot importer is not one of those omitted runtime behaviors. It accepts 
 The TextMate q grammar, native direct q notebook controller, optional qText result presentation, Server Explorer, Query History, migration review, and portable notebook snapshots move useful standalone capability forward without reproducing the breadth of KDB-X or q Professional. The product remains intentionally strongest at direct q execution and table/result visualization, with bounded first-party surfaces instead of a q LSP, lint engine, source-document formatter, remote Jupyter runtime, bundled gateway, administration, or compatibility subsystem.
 
 - [q Professional / `jshinonome/vscode-k-pro` at `fc9afacaeaf5e90eb013eb34426488841cc24f2a`](https://github.com/jshinonome/vscode-k-pro/tree/fc9afacaeaf5e90eb013eb34426488841cc24f2a) documents a formatter and supplied product-level readability inspiration only. Its public repository is all-rights-reserved; no code, logic, or assets were copied.
-- [KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected under Apache-2.0. Its qlint command is linting, not a general qText result pretty-printer. No source code, logic, or assets were adapted for 0.2.3.
+- [KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected under Apache-2.0. Its qlint command is linting, not a general qText result pretty-printer. No source code, logic, or assets were adapted for 0.2.4.
 - SQLTools remains absent as a runtime or UI dependency. The importer, views, and local storage do not depend on SQLTools connection, result, or session abstractions.
 
 The native TextMate q grammar now recognizes a leading `%%q` notebook directive and retains normal q highlighting below it; ordinary q token rules remain unchanged. `.k` remains unassociated until a demonstrated, testable need justifies the compatibility risk. Optional qText formatting is display-only, not a source formatter.

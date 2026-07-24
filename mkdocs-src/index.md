@@ -12,7 +12,7 @@ tables `.analytics
 
 ## Standalone status
 
-The current `0.2.3` release adds **KX q (Direct IPC)** as a native first-class controller in the normal Jupyter notebook kernel/controller selector. It executes complete q cells through the active first-party KX profile, existing q client, and configured namespace. The separate Python/IPython `%%q` helper remains available when a Python kernel must own execution. The release also retains the explicit one-shot bridge for importing legacy KDB profiles already saved in VS Code settings. There is no SQLTools runtime/UI dependency, private Jupyter integration, session-file behavior, or ongoing synchronization.
+The current `0.2.4` release polishes **KX q (Direct IPC)** and the inline NotebookRenderer. q no-value/generic empty results are compact qText while schema-bearing zero-row tables remain tables; saved and live grids use compact natural sizing, vertical resize, stable two-axis scrolling, range selection/copy, and multi-series chart controls. The separate Python/IPython `%%q` helper remains available when a Python kernel must own execution. The release also retains the explicit one-shot bridge for importing legacy KDB profiles already saved in VS Code settings. There is no SQLTools runtime/UI dependency, private Jupyter integration, session-file behavior, or ongoing synchronization.
 
 Implemented foundations include:
 
@@ -20,12 +20,13 @@ Implemented foundations include:
 - a KX-owned **Import SQLTools KDB Connections** review for exact legacy driver aliases, scoped configuration discovery, safe skip/rename conflicts, explicit one-time password transfer, and no overwrite or sync;
 - optional per-profile connect/handshake and query timeout overrides with bounded global defaults;
 - exact current-line, selection, and whole-document q execution;
-- a supported `vscode.notebooks.createNotebookController` for ordinary Jupyter notebooks, q syntax and normal complete-cell Run, active-profile/session/namespace continuity, actionable connection errors, live first-party result views, shared result settings, bounded portable snapshots, and no private Jupyter API;
+- a supported `vscode.notebooks.createNotebookController` for ordinary Jupyter notebooks, q syntax and normal complete-cell Run, active-profile/session/namespace continuity, actionable connection errors, live first-party result views, shared result settings, bounded portable output, and no private Jupyter API;
 - actual q `TextDocument.languageId` editing aids, safe restore-to-notebook-default, a separate durable Python `%%q` preparation route, and a real VS Code NotebookRenderer for `application/vnd.kx.result+json` v1; direct output stores KX MIME plus `text/plain`, while the Python helper can add static HTML/text fallbacks;
 - a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand `meta`, confirmed bounded table/variable previews, and metadata-only functions/projections;
 - disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;
-- grid and q-text results, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
-- line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;
+- grid and q-text results, correct q no-value/empty classification, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
+- compact/resizable notebook tables with stable two-axis scrolling, bounded range copy, and line/scatter/step/bar multi-series charts below the table;
+- panel line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;
 - an opt-in tokenized loopback data server; and
 - a dedicated `KX` Output channel with opt-in performance tracing.
 

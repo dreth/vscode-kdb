@@ -14,6 +14,7 @@ export const MAX_NOTEBOOK_LIVE_SEARCH_MATCHES = 1_000;
 export const MAX_NOTEBOOK_LIVE_CHART_POINTS = 10_000;
 export const MAX_NOTEBOOK_LIVE_COLUMNS = 4_096;
 export const MAX_NOTEBOOK_LIVE_TEXT_CHARS = 1_048_576;
+export const MAX_NOTEBOOK_LIVE_COPY_CELLS = 20_000;
 
 export type NotebookLiveSortDirection = 'asc' | 'desc';
 export type NotebookLiveChartType = 'line' | 'scatter' | 'step' | 'bar';
@@ -71,6 +72,19 @@ export type NotebookRendererMessage =
     yColumns: string[];
     maxPoints: number;
   }
+  | {
+    type: 'copyLiveRange';
+    liveId: string;
+    requestId: number;
+    startRow: number;
+    endRow: number;
+    startColumn: number;
+    endColumn: number;
+    format: 'tsv' | 'csv';
+    includeHeaders: boolean;
+    sortColumn?: string;
+    sortDirection?: NotebookLiveSortDirection;
+  }
   | { type: 'openLiveResult'; liveId: string }
   | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean };
 
@@ -113,6 +127,8 @@ export interface NotebookLiveResultMessage {
   kind?: string;
   columns?: string[];
   rowCount?: number;
+  chartXColumns?: string[];
+  chartYColumns?: string[];
   text?: string;
   metadata?: NotebookLiveResultMetadata;
   message?: string;
@@ -165,12 +181,21 @@ export interface NotebookLiveChartMessage {
   error?: string;
 }
 
+export interface NotebookLiveCopyMessage {
+  type: 'liveCopy';
+  liveId: string;
+  requestId: number;
+  ok: boolean;
+  message?: string;
+}
+
 export type NotebookRendererHostMessage =
   | NotebookRendererSettingsMessage
   | NotebookLiveResultMessage
   | NotebookLiveSliceMessage
   | NotebookLiveSearchMessage
-  | NotebookLiveChartMessage;
+  | NotebookLiveChartMessage
+  | NotebookLiveCopyMessage;
 
 export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMessage | undefined {
   if (!isRecord(raw) || typeof raw.type !== 'string') {
@@ -201,6 +226,9 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
   if (raw.type === 'requestLiveChart') {
     return parseLiveChartRequest(raw);
   }
+  if (raw.type === 'copyLiveRange') {
+    return parseLiveCopyRequest(raw);
+  }
   if (raw.type === 'openLiveResult') {
     return hasOnlyKeys(raw, ['type', 'liveId']) && validLiveId(raw.liveId)
       ? { type: raw.type, liveId: raw.liveId }
@@ -230,6 +258,9 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   }
   if (raw.type === 'liveChart') {
     return parseLiveChartMessage(raw);
+  }
+  if (raw.type === 'liveCopy') {
+    return parseLiveCopyMessage(raw);
   }
   return undefined;
 }
@@ -338,6 +369,47 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
   };
 }
 
+function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'liveId',
+    'requestId',
+    'startRow',
+    'endRow',
+    'startColumn',
+    'endColumn',
+    'format',
+    'includeHeaders',
+    'sortColumn',
+    'sortDirection',
+  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+    !nonNegativeSafeInteger(raw.startRow) || !nonNegativeSafeInteger(raw.endRow) ||
+    !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn) ||
+    raw.endRow < raw.startRow || raw.endColumn < raw.startColumn ||
+    (raw.format !== 'tsv' && raw.format !== 'csv') ||
+    typeof raw.includeHeaders !== 'boolean' ||
+    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    return undefined;
+  }
+  const cellCount =
+    (raw.endRow - raw.startRow + 1) * (raw.endColumn - raw.startColumn + 1);
+  if (!Number.isSafeInteger(cellCount) || cellCount > MAX_NOTEBOOK_LIVE_COPY_CELLS) {
+    return undefined;
+  }
+  return {
+    type: 'copyLiveRange',
+    liveId: raw.liveId,
+    requestId: raw.requestId,
+    startRow: raw.startRow,
+    endRow: raw.endRow,
+    startColumn: raw.startColumn,
+    endColumn: raw.endColumn,
+    format: raw.format,
+    includeHeaders: raw.includeHeaders,
+    ...sortFields(raw),
+  };
+}
+
 function parseResultSettingUpdate(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, ['type', 'key', 'value']) || typeof raw.key !== 'string') {
     return undefined;
@@ -385,6 +457,8 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     'kind',
     'columns',
     'rowCount',
+    'chartXColumns',
+    'chartYColumns',
     'text',
     'metadata',
     'message',
@@ -404,7 +478,9 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
   if ((raw.mode !== 'table' && raw.mode !== 'text') ||
     !validBoundedText(raw.kind, 128) ||
     !Array.isArray(raw.columns) || raw.columns.length > MAX_NOTEBOOK_LIVE_COLUMNS ||
-    !raw.columns.every(validColumnName) || !nonNegativeSafeInteger(raw.rowCount)) {
+    !raw.columns.every(validColumnName) || !nonNegativeSafeInteger(raw.rowCount) ||
+    !validOptionalColumnList(raw.chartXColumns) ||
+    !validOptionalColumnList(raw.chartYColumns)) {
     return undefined;
   }
   const metadata = parseLiveResultMetadata(raw.metadata);
@@ -420,6 +496,12 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     kind: raw.kind,
     columns: raw.columns.slice(),
     rowCount: raw.rowCount,
+    ...(Array.isArray(raw.chartXColumns)
+      ? { chartXColumns: raw.chartXColumns.slice() as string[] }
+      : {}),
+    ...(Array.isArray(raw.chartYColumns)
+      ? { chartYColumns: raw.chartYColumns.slice() as string[] }
+      : {}),
     ...(raw.mode === 'text' ? { text: raw.text as string } : {}),
     metadata,
     ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
@@ -536,6 +618,22 @@ function parseLiveChartMessage(raw: Record<string, unknown>): NotebookLiveChartM
     requestId: raw.requestId,
     ...(data ? { data } : {}),
     ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
+  };
+}
+
+function parseLiveCopyMessage(raw: Record<string, unknown>): NotebookLiveCopyMessage | undefined {
+  if (!hasOnlyKeys(raw, ['type', 'liveId', 'requestId', 'ok', 'message']) ||
+    !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+    typeof raw.ok !== 'boolean' || !validOptionalText(raw.message, 4_096) ||
+    (!raw.ok && typeof raw.message !== 'string')) {
+    return undefined;
+  }
+  return {
+    type: 'liveCopy',
+    liveId: raw.liveId,
+    requestId: raw.requestId,
+    ok: raw.ok,
+    ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
   };
 }
 
@@ -729,6 +827,12 @@ function validRequestId(value: unknown): value is number {
 
 function validColumnName(value: unknown): value is string {
   return validBoundedText(value, 256) && !/[\0\r\n]/.test(value);
+}
+
+function validOptionalColumnList(value: unknown): boolean {
+  return value === undefined ||
+    (Array.isArray(value) && value.length <= MAX_NOTEBOOK_LIVE_COLUMNS &&
+      value.every(validColumnName) && new Set(value).size === value.length);
 }
 
 function validBoundedText(value: unknown, max: number): value is string {
