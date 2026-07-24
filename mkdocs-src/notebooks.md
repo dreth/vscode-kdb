@@ -1,6 +1,6 @@
 # Jupyter/IPython Notebooks
 
-KX for VS Code 0.2.3 supports two explicit q notebook routes. They have different session ownership and must not be confused.
+KX for VS Code 0.2.4 supports two explicit q notebook routes. They have different session ownership and must not be confused.
 
 | Route | Select in VS Code | Execution/session | Cell source |
 | --- | --- | --- | --- |
@@ -11,7 +11,7 @@ Selecting one route never silently invokes the other. The extension uses only su
 
 ## Native KX q Direct IPC controller
 
-Version 0.2.3 registers:
+Version 0.2.4 includes:
 
 - controller ID `vscode-kdb.q-notebook-controller`;
 - notebook type `jupyter-notebook`;
@@ -43,7 +43,7 @@ The controller uses the same `ConnectionManager` client and q process/session as
 
 A saved but disconnected active profile may connect on demand because selecting **KX q (Direct IPC)** was an explicit execution choice. Its profile/global connect and query timeouts apply. If no active saved profile exists, output says **Add or select a KX connection in the KX Connections view**. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.
 
-Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local execution wait and completes the notebook execution reliably, but q work or side effects already sent may continue on the server. Version 0.2.3 does not claim server-side interruption.
+Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local execution wait and completes the notebook execution reliably, but q work or side effects already sent may continue on the server. Version 0.2.4 does not claim server-side interruption.
 
 ## Live direct result and saved snapshot
 
@@ -52,7 +52,11 @@ A successful direct result has two representations:
 1. an extension-host live result backed by the decoded q value; and
 2. a safe bounded `application/vnd.kx.result+json` version 1 snapshot plus `text/plain` fallback stored in notebook output.
 
-While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. It supports bounded virtual grid slices, qText/list/dictionary/table display, capped search, bounded sorting, mouse selection/copy within the loaded slice, column scrolling, and sampled uPlot chart requests. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Selection copies TSV only for a rectangle within the loaded slice and at most 20,000 cells. Keyboard grid navigation, column hide/reorder/resize, and full export remain panel features. **Open in KX Results** hands the same live value to the full panel.
+While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. q general null/no-value responses produced by assignments, declarations, and calls such as `hopen`, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.
+
+Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Capped search, three-state sort, drag selection, Shift-range selection, and keyboard navigation are available inline. A selected rectangle of at most 20,000 cells can be copied as TSV or CSV through the owning extension-host record, including selected rows outside the currently loaded virtual slice. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Column hide/reorder and full export remain panel features. The concise **KX Results** action hands the same live value to the full panel.
+
+Inline charts remain below the table when shown. Line, scatter, step, and clustered bar charts support selectable X, up to 16 selected numeric Y series, a point cap, theme-aware axes/grid/background, legend toggles, crosshair selection, drag zoom, and Reset zoom. Live chart requests use the full in-memory value within the chart source-row and point limits.
 
 `vscode-kdb.results.*` is the common durable settings source for live notebook results and the standard panel. Supported density/sizing, array formatting, qText and value-display strategies, elapsed-time display, and chart changes use a validated renderer/extension message path. A supported setting changed from a live notebook result updates the same global VS Code configuration used by other live q cells and open KX panels.
 
@@ -80,7 +84,7 @@ The opaque ID persisted beside the snapshot is not an IPC handle and cannot recr
 
 Direct-controller output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and `text/plain`. It does not add `text/html` or a persisted chart specification. The separate Python helper can add escaped `text/html` and an optional persisted chart specification. Neither route stores credentials, passwords, tokens, connection objects, recoverable IPC handles, or the unbounded live result. Omitted rows cannot be recovered from a saved or reopened `.ipynb`.
 
-The snapshot renderer provides a compact paged table, preview CSV copy, explicit truncation notices, and local uPlot line/scatter/step/bar controls. Direct saved-preview chart choices are transient and do not write a chart specification. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.
+The saved-result renderer provides the same compact vertically resizable table, stable two-axis scrolling, drag/Shift/keyboard range selection, TSV/CSV selection copy, explicit truncation notices, and local multi-series uPlot line/scatter/step/bar controls. Direct saved-output chart choices are transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.
 
 `vscode-kdb.notebook.presentation` accepts:
 
@@ -88,7 +92,7 @@ The snapshot renderer provides a compact paged table, preview CSV copy, explicit
 - `panel`; or
 - `both`.
 
-These automatic modes apply to Python-helper output. Direct-controller results always remain inline beneath the cell and expose an explicit button: live values open in the full KX Results panel while their record exists; expired/reopened direct output opens only the bounded snapshot. No mode or handoff reruns q or recovers omitted rows.
+These automatic modes apply to Python-helper output. Direct-controller results always remain inline beneath the cell and expose a concise KX Results action: live values open in the full panel while their record exists; expired/reopened direct output opens only the bounded rows stored in the notebook. No mode or handoff reruns q or recovers omitted rows.
 
 ## Separate Python `%%q` helper route
 

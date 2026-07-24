@@ -35,6 +35,10 @@ export interface QFunction {
   source?: string;
 }
 
+export interface QGeneralNull {
+  qtype: 'generalNull';
+}
+
 export interface QTable {
   qtype: 'table';
   columns: string[];
@@ -62,7 +66,14 @@ export interface QDict {
 }
 
 export type QDisplayValue = QCellValue;
-export type QValue = QCellValue | QValue[] | QTable | QKeyedTable | QDict | QFunction;
+export type QValue =
+  | QCellValue
+  | QValue[]
+  | QTable
+  | QKeyedTable
+  | QDict
+  | QFunction
+  | QGeneralNull;
 export type QResultDisplayStrategy = 'grid' | 'qText';
 
 export interface QResultDisplayOptions {
@@ -100,6 +111,7 @@ const DEFAULT_QTEXT_MAX_DEPTH = 16;
 const DEFAULT_QTEXT_MAX_ITEMS = Number.MAX_SAFE_INTEGER;
 const DEFAULT_QTEXT_MAX_CHARS = 1024 * 1024;
 const QTEXT_TRUNCATED_SUFFIX = '... [truncated]';
+export const Q_GENERAL_NULL: QGeneralNull = Object.freeze({ qtype: 'generalNull' });
 
 export interface QColumnarPanelResult {
   mode: 'grid';
@@ -1103,6 +1115,10 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
     };
   }
 
+  if (qValuePrefersQText(value)) {
+    return qTextPanelResult(value, qValueKind(value));
+  }
+
   if (isQFunction(value)) {
     if (displayOptions.functionDisplayStrategy === 'qText') {
       return qTextPanelResult(value, 'function');
@@ -1193,6 +1209,26 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
   };
 }
 
+/**
+ * Empty and no-value q results have no meaningful rectangular row model.
+ * Keep actual q tables (including typed zero-row tables) in the grid path.
+ */
+export function qValuePrefersQText(value: QValue): boolean {
+  if (isQTable(value) || isQKeyedTable(value)) {
+    return false;
+  }
+  if (isQGeneralNull(value) || value === null) {
+    return true;
+  }
+  if (typeof value === 'string' || Array.isArray(value)) {
+    return value.length === 0;
+  }
+  if (isQDict(value)) {
+    return value.entries.length === 0;
+  }
+  return isPlainObject(value) && Object.keys(value as unknown as object).length === 0;
+}
+
 export function normalizeQResultDisplayOptions(options?: QResultDisplayOptions): NormalizedQResultDisplayOptions {
   return {
     functionDisplayStrategy: normalizeQResultDisplayStrategy(options && options.functionDisplayStrategy, 'qText'),
@@ -1264,6 +1300,10 @@ function qTextValue(value: QValue, depth: number, options: NormalizedQTextFormat
 
   if (depth >= options.maxDepth) {
     return qTextSummary(value, options);
+  }
+
+  if (isQGeneralNull(value)) {
+    return qTextTake('::', options);
   }
 
   const primitiveText = qTextPrimitive(value);
@@ -1384,6 +1424,9 @@ function qTextDict(value: QDict, depth: number, options: NormalizedQTextFormatOp
 }
 
 function qTextSummary(value: QValue, options: NormalizedQTextFormatOptions): string {
+  if (isQGeneralNull(value)) {
+    return qTextTake('::', options);
+  }
   if (isQFunction(value)) {
     return qTextTake(qFunctionDisplayText(value), options);
   }
@@ -1836,7 +1879,9 @@ class QReader {
     }
 
     if (type < 104) {
-      return this.readInt8() === 0 && type === 101 ? null : makeQFunction(qFunctionTypeFromIpcType(type), type);
+      return this.readInt8() === 0 && type === 101
+        ? Q_GENERAL_NULL
+        : makeQFunction(qFunctionTypeFromIpcType(type), type);
     }
 
     if (type > 105) {
@@ -2290,6 +2335,9 @@ function normalizePanelCell(value: QValue): unknown {
 }
 
 function normalizeNestedValue(value: QValue): QNestedDisplayValue {
+  if (isQGeneralNull(value)) {
+    return '::';
+  }
   if (isQFunction(value)) {
     return qFunctionDisplayText(value);
   }
@@ -2406,12 +2454,32 @@ function isQFunction(value: QValue): value is QFunction {
   return isQTyped(value, 'function');
 }
 
+function isQGeneralNull(value: QValue): value is QGeneralNull {
+  return isQTyped(value, 'generalNull');
+}
+
 function isQTyped(value: QValue, qtype: string): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) && (value as { qtype?: string }).qtype === qtype;
 }
 
 function isPlainObject(value: QValue): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) && !(value as { qtype?: string }).qtype;
+}
+
+function qValueKind(value: QValue): string {
+  if (isQGeneralNull(value)) {
+    return 'no value';
+  }
+  if (value === null || typeof value === 'string') {
+    return 'scalar';
+  }
+  if (Array.isArray(value)) {
+    return 'list';
+  }
+  if (isQDict(value)) {
+    return 'dictionary';
+  }
+  return 'object';
 }
 
 function longPartsToBigInt(low: number, high: number): bigint {

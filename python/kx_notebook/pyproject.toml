@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "kx-notebook"
-version = "0.2.3"
+version = "0.2.4"
 description = "Portable KX/q result MIME output for ordinary IPython and Jupyter notebooks"
 readme = "README.md"
 requires-python = ">=3.9"

@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Native direct q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -86,8 +86,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.3.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.3.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.4.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.4.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",

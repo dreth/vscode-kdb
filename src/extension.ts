@@ -466,7 +466,7 @@ function toPanelResult(
       query,
       connectionName,
       elapsedMs,
-      messages: [`q returned ${converted.kind} as text in ${elapsedMs} ms.`],
+      messages: [],
     };
   }
   return {
@@ -474,9 +474,7 @@ function toPanelResult(
     query,
     connectionName,
     elapsedMs,
-    messages: [
-      `q returned ${converted.kind} with ${converted.result.rowCount} row${converted.result.rowCount === 1 ? '' : 's'} in ${elapsedMs} ms.`,
-    ],
+    messages: [],
   };
 }
 

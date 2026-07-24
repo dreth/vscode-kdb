@@ -3,6 +3,7 @@ import { connectionEndpoint, KxConnection } from './connection';
 import {
   KX_NOTEBOOK_MIME,
   createPortableKxResult,
+  createPortableKxTextResult,
   notebookResultPlainText,
   validatePortableKxResult,
 } from './notebook-contract';
@@ -320,31 +321,25 @@ export function directQResultOutputItems(
   elapsedMs: number
 ): vscode.NotebookCellOutputItem[] {
   const panel = qValueToColumnarPanel(value, displayOptions);
-  let columns: string[];
-  let rows: unknown[][];
-  let rowCount: number;
-  let cellValue: ((rowIndex: number, columnIndex: number) => unknown) | undefined;
-  if (panel.mode === 'text') {
-    columns = ['qText'];
-    rows = [[panel.text]];
-    rowCount = 1;
-  } else {
-    columns = panel.result.columns.slice();
-    rows = [];
-    rowCount = panel.result.rowCount;
-    cellValue = (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex);
-  }
-  const portable = createPortableKxResult({
-    columns,
-    rows,
-    ...(cellValue ? { cellValue } : {}),
-    rowCount,
-    rowLimit: settings.rowLimit,
-    byteLimit: settings.byteLimit,
-    label: `${connection.name} • Direct IPC • ${connection.database}`,
-    elapsedMs,
-    marker: 'direct-ipc',
-  });
+  const portable = panel.mode === 'text'
+    ? createPortableKxTextResult({
+      text: panel.text,
+      byteLimit: settings.byteLimit,
+      label: `${connection.name} • Direct IPC • ${connection.database}`,
+      elapsedMs,
+      marker: 'direct-ipc',
+    })
+    : createPortableKxResult({
+      columns: panel.result.columns.slice(),
+      rows: [],
+      cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
+      rowCount: panel.result.rowCount,
+      rowLimit: settings.rowLimit,
+      byteLimit: settings.byteLimit,
+      label: `${connection.name} • Direct IPC • ${connection.database}`,
+      elapsedMs,
+      marker: 'direct-ipc',
+    });
   const validation = validatePortableKxResult(portable);
   if (!validation.ok) {
     throw new Error(`Portable KX notebook result validation failed: ${validation.error}`);

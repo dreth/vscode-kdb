@@ -4,7 +4,7 @@ Every normal `.q` editor run targets the extension-owned **KX Results** viewer. 
 
 ## Grid and q-text modes
 
-True q tables and keyed tables always use the grid, and scalars use a small synthetic grid. Vectors/lists, dictionaries, functions, and other decoded composite values use either a synthetic grid or deterministic q-like text according to the [display strategy settings](settings.md#result-display).
+True q tables and keyed tables always use the grid, including schema-bearing zero-row tables. Ordinary non-null scalars use a small synthetic grid. q general null/no-value responses, typed nulls, empty generic/typed vectors, empty strings, and empty generic composites use compact qText instead of a fabricated `value` or `index,value` grid. Non-empty vectors/lists, dictionaries, functions, and other decoded composite values use either a synthetic grid or deterministic q-like text according to the [display strategy settings](settings.md#result-display).
 
 The defaults are:
 
@@ -37,7 +37,7 @@ Panels preserve editor focus on creation. Replacing a loading result locally can
 
 ### Notebook live results and saved snapshots
 
-For a current direct-controller result, **Open in KX Results** can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The inline live renderer is intentionally narrower: bounded virtual slices, capped search, sort below 250,000 rows, mouse selection/TSV copy within the loaded slice, and sampled charts. The direct notebook renderer and panel share durable `vscode-kdb.results.*` settings.
+For a current direct-controller result, **Open in KX Results** can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The compact inline subset provides natural/resizable table height, stable two-axis virtual scrolling, sticky headers/row numbers, capped search, sort below 250,000 rows, drag/Shift/keyboard range selection, bounded TSV/CSV copy through the full live value, and sampled multi-Y charts. The direct notebook renderer and panel share durable `vscode-kdb.results.*` settings.
 
 Every direct output also includes a validated bounded `application/vnd.kx.result+json` v1 snapshot. Each opaque live record is bound to notebook URI/cell URI for the current extension-host session, removed on cell rerun, cell removal, or notebook close, cleared on deactivation, and subject to a 512-record oldest-first cap. If the record is absent, **KX: Open Saved Notebook Preview in Results Panel** opens only the snapshot and reports persisted versus total row count.
 

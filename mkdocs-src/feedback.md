@@ -12,7 +12,7 @@ Before filing, check the source-backed [`PARITY.md`](https://github.com/dreth/vs
 - Whether the target is loopback, private network, or a separately managed tunnel.
 - Endpoint host category and port, with sensitive infrastructure generalized when needed.
 - Which command and execution mode failed: current line, single-line selection, multiline selection, or script.
-- For notebooks: selected controller, cell language, active KX profile/namespace for Direct IPC, or Python/IPython and `kx_notebook` versions for the helper route. Also include presentation setting, snapshot row/byte limits, persisted preview/total counts, whether a direct live record was still available, and whether the issue occurs during Run, live rendering, reopen, panel handoff, or static HTML/PDF export.
+- For notebooks: selected controller, cell language, active KX profile/namespace for Direct IPC, or Python/IPython and `kx_notebook` versions for the helper route. Also include presentation setting, saved-output row/byte limits and saved/total counts, whether a direct live record was still available, and whether the issue occurs during Run, live rendering, reopen, panel handoff, or static HTML/PDF export.
 - Result shape and approximate rows/columns for viewer, chart, copy/export, or performance problems.
 - Minimal reproduction steps and expected/actual behavior.
 - Relevant **View > Output > KX** records after reviewing them for environment-sensitive metadata.

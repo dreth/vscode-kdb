@@ -35,7 +35,7 @@ select avg price by 0D00:05 xbar time from trade where date=.z.D
 | q-text | Bounds nested traversal at 16 levels; caps very large output at 1,048,576 characters and marks character truncation. |
 | Notebook live registry | Current extension-host session only; records are bound to notebook/cell URI, removed on rerun/cell removal/notebook close/deactivation, capped at 512, and oldest-first evicted. Each result caches at most four full sort orders. |
 | Notebook live slice | At most 500 rows, 128 columns, 20,000 cells, and 2,000,000 aggregate text characters per host message; individual display cells cap at 65,536 characters. |
-| Notebook persisted preview | Defaults to 1,000 rows and 1,000,000 bytes; accepted settings are 1-10,000 rows and 16,384-10,000,000 bytes. The contract additionally caps 256 columns and 32,768 characters per cell value. Schema/counts and truncation reasons remain visible. |
+| Notebook saved output | Defaults to 1,000 rows and 1,000,000 bytes; accepted settings are 1-10,000 rows and 16,384-10,000,000 bytes. The contract additionally caps 256 columns and 32,768 characters per table cell or 1,048,576 qText characters. Schema/counts and truncation reasons remain visible. |
 
 Some cell and chart limits are configurable. Internal time, byte-size, group-count, and file-format limits remain protective boundaries. Raising a configurable limit can temporarily block the extension host.
 

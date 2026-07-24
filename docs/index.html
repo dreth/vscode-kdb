@@ -818,19 +818,20 @@
 <span class="nb">tables</span><span class="w"> </span><span class="ss">`</span><span class="o">.</span><span class="n">analytics</span>
 </code></pre></div>
 <h2 id="standalone-status">Standalone status</h2>
-<p>The current <code>0.2.3</code> release adds <strong>KX q (Direct IPC)</strong> as a native first-class controller in the normal Jupyter notebook kernel/controller selector. It executes complete q cells through the active first-party KX profile, existing q client, and configured namespace. The separate Python/IPython <code>%%q</code> helper remains available when a Python kernel must own execution. The release also retains the explicit one-shot bridge for importing legacy KDB profiles already saved in VS Code settings. There is no SQLTools runtime/UI dependency, private Jupyter integration, session-file behavior, or ongoing synchronization.</p>
+<p>The current <code>0.2.4</code> release polishes <strong>KX q (Direct IPC)</strong> and the inline NotebookRenderer. q no-value/generic empty results are compact qText while schema-bearing zero-row tables remain tables; saved and live grids use compact natural sizing, vertical resize, stable two-axis scrolling, range selection/copy, and multi-series chart controls. The separate Python/IPython <code>%%q</code> helper remains available when a Python kernel must own execution. The release also retains the explicit one-shot bridge for importing legacy KDB profiles already saved in VS Code settings. There is no SQLTools runtime/UI dependency, private Jupyter integration, session-file behavior, or ongoing synchronization.</p>
 <p>Implemented foundations include:</p>
 <ul>
 <li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value <strong>Test Connection</strong> path;</li>
 <li>a KX-owned <strong>Import SQLTools KDB Connections</strong> review for exact legacy driver aliases, scoped configuration discovery, safe skip/rename conflicts, explicit one-time password transfer, and no overwrite or sync;</li>
 <li>optional per-profile connect/handshake and query timeout overrides with bounded global defaults;</li>
 <li>exact current-line, selection, and whole-document q execution;</li>
-<li>a supported <code>vscode.notebooks.createNotebookController</code> for ordinary Jupyter notebooks, q syntax and normal complete-cell Run, active-profile/session/namespace continuity, actionable connection errors, live first-party result views, shared result settings, bounded portable snapshots, and no private Jupyter API;</li>
+<li>a supported <code>vscode.notebooks.createNotebookController</code> for ordinary Jupyter notebooks, q syntax and normal complete-cell Run, active-profile/session/namespace continuity, actionable connection errors, live first-party result views, shared result settings, bounded portable output, and no private Jupyter API;</li>
 <li>actual q <code>TextDocument.languageId</code> editing aids, safe restore-to-notebook-default, a separate durable Python <code>%%q</code> preparation route, and a real VS Code NotebookRenderer for <code>application/vnd.kx.result+json</code> v1; direct output stores KX MIME plus <code>text/plain</code>, while the Python helper can add static HTML/text fallbacks;</li>
 <li>a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand <code>meta</code>, confirmed bounded table/variable previews, and metadata-only functions/projections;</li>
 <li>disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;</li>
-<li>grid and q-text results, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
-<li>line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;</li>
+<li>grid and q-text results, correct q no-value/empty classification, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
+<li>compact/resizable notebook tables with stable two-axis scrolling, bounded range copy, and line/scatter/step/bar multi-series charts below the table;</li>
+<li>panel line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;</li>
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>

@@ -29,6 +29,7 @@ import {
 } from './notebook-live-results';
 import {
   NotebookLiveChartMessage,
+  NotebookLiveCopyMessage,
   NotebookLiveResultMessage,
   NotebookLiveSearchMessage,
   NotebookLiveSliceMessage,
@@ -231,6 +232,58 @@ export class NotebookIntegration implements vscode.Disposable {
         ),
         event.editor
       );
+      return;
+    }
+    if (message.type === 'copyLiveRange') {
+      let response: NotebookLiveCopyMessage;
+      try {
+        const sortColumn = message.sortColumn && message.sortDirection
+          ? liveSourceColumnMap(
+            liveResults,
+            notebookUri,
+            message.liveId,
+            displayOptions
+          ).get(message.sortColumn)
+          : undefined;
+        const text = liveResults?.copyText(
+          message.liveId,
+          notebookUri,
+          {
+            startRow: message.startRow,
+            endRow: message.endRow,
+            startColumn: message.startColumn,
+            endColumn: message.endColumn,
+            format: message.format,
+            includeHeaders: message.includeHeaders,
+            ...(sortColumn && message.sortDirection
+              ? {
+                sortColumn,
+                sortDirection: message.sortDirection,
+              }
+              : {}),
+          },
+          displayOptions
+        );
+        if (text === undefined) {
+          throw new Error('Result unavailable.');
+        }
+        await vscode.env.clipboard.writeText(text);
+        response = {
+          type: 'liveCopy',
+          liveId: message.liveId,
+          requestId: message.requestId,
+          ok: true,
+        };
+      } catch (error) {
+        response = {
+          type: 'liveCopy',
+          liveId: message.liveId,
+          requestId: message.requestId,
+          ok: false,
+          message: safeHostError(error),
+        };
+      }
+      await this.messaging.postMessage(response, event.editor);
       return;
     }
     if (message.type === 'openLiveResult') {
@@ -497,22 +550,36 @@ export class NotebookIntegration implements vscode.Disposable {
   }
 
   private showPreview(payload: PortableKxResult): void {
+    if (payload.kind === 'qText') {
+      KxResultsPanel.showResult(this.context, {
+        mode: 'text',
+        text: payload.data.text,
+        query: payload.provenance.qSource ?? (payload.provenance.marker === 'direct-ipc'
+          ? 'Direct IPC'
+          : '%%q'),
+        connectionName: payload.provenance.label ?? 'Notebook result',
+        elapsedMs: payload.provenance.elapsedMs ?? 0,
+        messages: payload.result.truncated
+          ? [`Output truncated at the notebook limit (${payload.result.byteLimit} bytes).`]
+          : [],
+      });
+      return;
+    }
     const columns = payload.schema.columns.map(column => column.name);
-    const messages: string[] = [
-      `Saved notebook preview: ${payload.result.previewRowCount} of ${payload.result.rowCount} rows.`,
-    ];
+    const messages: string[] = [];
     if (payload.result.truncated) {
       messages.push(
-        'Preview only. Omitted rows are not stored in the notebook and cannot be recovered by this panel.'
+        `Showing ${payload.result.previewRowCount.toLocaleString()} of ` +
+        `${payload.result.rowCount.toLocaleString()} rows saved in this notebook.`
       );
     }
     KxResultsPanel.showResult(this.context, {
       table: createColumnarPanelResult(columns, payload.data.rows.length, (rowIndex, columnIndex) =>
         portableCellValue(payload.data.rows[rowIndex][columnIndex])),
       query: payload.provenance.qSource ?? (payload.provenance.marker === 'direct-ipc'
-        ? 'Direct IPC (saved notebook preview)'
-        : '%%q (saved notebook preview)'),
-      connectionName: payload.provenance.label ?? 'Notebook saved preview',
+        ? 'Direct IPC'
+        : '%%q'),
+      connectionName: payload.provenance.label ?? 'Notebook result',
       elapsedMs: payload.provenance.elapsedMs ?? 0,
       messages,
     }, 'replace', { autoChart: payload.chart?.visible === true });
@@ -529,22 +596,17 @@ export class NotebookIntegration implements vscode.Disposable {
       view = liveResults?.view(liveId, notebookUri, displayOptions);
     } catch {
       void vscode.window.showWarningMessage(
-        'The full live KX notebook result could not be converted for the results panel. ' +
-        'The bounded saved snapshot remains in the cell.'
+        'Result unavailable. The saved notebook output remains in the cell.'
       );
       return;
     }
     if (!view) {
       void vscode.window.showWarningMessage(
-        'The full live KX notebook result is no longer available. ' +
-        'The bounded saved snapshot remains in the cell.'
+        'Result unavailable. The saved notebook output remains in the cell.'
       );
       return;
     }
-    const messages = [
-      `Full live ${view.kind} from the current Direct IPC extension-host session.`,
-      'This panel uses the in-memory result. The saved notebook snapshot remains bounded.',
-    ];
+    const messages: string[] = [];
     if (view.mode === 'text') {
       KxResultsPanel.showResult(this.context, {
         mode: 'text',
@@ -763,7 +825,7 @@ export function liveResultMessage(
       liveId,
       requestId,
       available: false,
-      message: 'Full live result conversion failed; showing the bounded saved notebook snapshot.',
+      message: 'Result unavailable.',
     };
   }
   if (!view) {
@@ -772,25 +834,24 @@ export function liveResultMessage(
       liveId,
       requestId,
       available: false,
-      message: 'Full live result unavailable; showing the bounded saved notebook snapshot.',
+      message: 'Result unavailable.',
     };
   }
   const rawColumns = view.columns.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS);
   const columns = safeLiveColumnNames(rawColumns);
-  const messages = [
-    `Full live ${view.kind} from the current Direct IPC extension-host session.`,
-    'The saved notebook snapshot is bounded and cannot recover omitted rows after this live record is gone.',
-  ];
+  const chartXNames = new Set(view.chartXColumns);
+  const chartYNames = new Set(view.chartYColumns);
+  const chartXColumns = columns.filter((_column, index) => chartXNames.has(rawColumns[index]));
+  const chartYColumns = columns.filter((_column, index) => chartYNames.has(rawColumns[index]));
+  const messages: string[] = [];
   if (columns.length < view.columns.length) {
     messages.push(
-      `Inline live metadata exposes ${columns.length} of ${view.columns.length} columns; ` +
-      'open the full KX panel to access every column.'
+      `Showing ${columns.length} of ${view.columns.length} columns. Open KX Results for all columns.`
     );
   }
   if (columns.some((column, index) => column !== rawColumns[index])) {
     messages.push(
-      'One or more unsafe/oversized inline column labels were normalized; ' +
-      'open the full KX panel for exact labels and related operations.'
+      'Some column labels were shortened or normalized. Open KX Results for exact labels.'
     );
   }
   return {
@@ -802,6 +863,8 @@ export function liveResultMessage(
     kind: boundedHostText(view.kind, 128),
     columns,
     rowCount: view.rowCount,
+    chartXColumns,
+    chartYColumns,
     ...(view.mode === 'text'
       ? { text: boundedHostText(view.text || '', 1_048_576) }
       : {}),
@@ -821,6 +884,14 @@ export function liveSliceMessage(
   displayOptions: LiveNotebookDisplayOptions
 ): NotebookLiveSliceMessage {
   try {
+    const sortColumn = message.sortColumn && message.sortDirection
+      ? liveSourceColumnMap(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        displayOptions
+      ).get(message.sortColumn)
+      : undefined;
     const slice = liveResults?.slice(
       message.liveId,
       notebookUri,
@@ -829,9 +900,9 @@ export function liveSliceMessage(
         endRow: message.endRow,
         startColumn: message.startColumn,
         endColumn: message.endColumn,
-        ...(message.sortColumn && message.sortDirection
+        ...(sortColumn && message.sortDirection
           ? {
-            sortColumn: message.sortColumn,
+            sortColumn,
             sortDirection: message.sortDirection,
           }
           : {}),
@@ -855,7 +926,7 @@ export function liveSliceMessage(
 function unavailableLiveSlice(
   liveId: string,
   requestId: number,
-  detail = 'Full live result unavailable; use the bounded saved snapshot.'
+  detail = 'Result unavailable.'
 ): NotebookLiveSliceMessage {
   return {
     type: 'liveSlice',
@@ -877,13 +948,24 @@ export function liveSearchMessage(
   displayOptions: LiveNotebookDisplayOptions
 ): NotebookLiveSearchMessage {
   try {
+    const sortColumn = message.sortColumn && message.sortDirection
+      ? liveSourceColumnMap(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        displayOptions
+      ).get(message.sortColumn)
+      : undefined;
     const result = liveResults?.search(
       message.liveId,
       notebookUri,
       message.query,
       displayOptions,
-      message.sortColumn && message.sortDirection
-        ? { sortColumn: message.sortColumn, sortDirection: message.sortDirection }
+      sortColumn && message.sortDirection
+        ? {
+          sortColumn,
+          sortDirection: message.sortDirection,
+        }
         : undefined
     );
     if (!result) {
@@ -903,7 +985,7 @@ export function liveSearchMessage(
 function unavailableLiveSearch(
   liveId: string,
   requestId: number,
-  detail = 'Full live result unavailable; search is limited to the saved snapshot.'
+  detail = 'Result unavailable.'
 ): NotebookLiveSearchMessage {
   return {
     type: 'liveSearch',
@@ -926,14 +1008,29 @@ export function liveChartMessage(
   resultSettings: SharedKxResultSettings
 ): NotebookLiveChartMessage {
   try {
+    const columnMap = liveSourceColumnMap(
+      liveResults,
+      notebookUri,
+      message.liveId,
+      displayOptions
+    );
+    const sourceXColumn = columnMap.get(message.xColumn);
+    const sourceYColumns = message.yColumns.map(column => columnMap.get(column));
+    if (!sourceXColumn || sourceYColumns.some(column => !column)) {
+      throw new Error('Chart columns unavailable.');
+    }
+    const displayBySource = new Map<string, string>();
+    for (const [display, source] of columnMap) {
+      displayBySource.set(source, display);
+    }
     const chart = liveResults?.chart(
       message.liveId,
       notebookUri,
       {
         requestId: message.requestId,
         chartType: message.chartType,
-        xColumn: message.xColumn,
-        yColumns: message.yColumns,
+        xColumn: sourceXColumn,
+        yColumns: sourceYColumns as string[],
         maxPoints: message.maxPoints,
         maxSourceRows: resultSettings.chartMaxSourceRows,
       },
@@ -944,7 +1041,7 @@ export function liveChartMessage(
         type: 'liveChart',
         liveId: message.liveId,
         requestId: message.requestId,
-        error: 'Full live result unavailable; charting uses the saved snapshot only.',
+        error: 'Result unavailable.',
       };
     }
     return {
@@ -953,12 +1050,13 @@ export function liveChartMessage(
       requestId: message.requestId,
       data: {
         chartType: message.chartType,
-        xColumn: chart.xColumn,
+        xColumn: displayBySource.get(chart.xColumn) || message.xColumn,
         xKind: chart.xKind,
         x: chart.x,
         xText: chart.xText,
         series: chart.series.map(series => ({
-          columnName: series.columnName,
+          columnName: displayBySource.get(series.columnName) ||
+            boundedHostText(series.columnName, 256).replace(/[\r\n]/g, ''),
           values: series.values,
         })),
         warnings: chart.warnings.slice(0, 32).map(value => boundedHostText(value, 1_024)),
@@ -975,13 +1073,13 @@ export function liveChartMessage(
 }
 
 function boundedHostText(value: string, maxChars: number): string {
-  return String(value || '').replace(/\0/g, '').slice(0, maxChars);
+  return String(value || '').slice(0, maxChars).replace(/\0/g, '');
 }
 
-function safeLiveColumnNames(values: readonly string[]): string[] {
+export function safeLiveColumnNames(values: readonly string[]): string[] {
   const used = new Set<string>();
   return values.map((value, index) => {
-    const base = boundedHostText(String(value), 256).replace(/[\r\n]/g, '') ||
+    const base = boundedHostText(value, 256).replace(/[\r\n]/g, '') ||
       `column${index + 1}`;
     let name = base;
     let suffix = 2;
@@ -992,6 +1090,18 @@ function safeLiveColumnNames(values: readonly string[]): string[] {
     used.add(name);
     return name;
   });
+}
+
+function liveSourceColumnMap(
+  liveResults: LiveNotebookResultStore | undefined,
+  notebookUri: string,
+  liveId: string,
+  displayOptions: LiveNotebookDisplayOptions
+): Map<string, string> {
+  const rawColumns = liveResults?.tableColumns(liveId, notebookUri, displayOptions)
+    ?.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS) || [];
+  const displayColumns = safeLiveColumnNames(rawColumns);
+  return new Map(displayColumns.map((display, index) => [display, rawColumns[index]]));
 }
 
 function safeHostError(error: unknown): string {
