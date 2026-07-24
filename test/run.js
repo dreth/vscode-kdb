@@ -34,7 +34,13 @@ const {
   planChartZoomReset,
 } = requireOut('chart-zoom');
 const {
+  chartLegendToggleKey,
+  chartSeriesVisible,
+  updateHiddenChartSeriesKeys,
+} = requireOut('chart-series-state');
+const {
   DEFAULT_CONNECTION_TIMEOUT_MS,
+  DEFAULT_QUERY_TIMEOUT_MS,
   MAX_TIMEOUT_MS,
   connectionSessionChanged,
   connectionEndpoint,
@@ -117,11 +123,17 @@ const {
   notebookGridDefaultHeight,
   notebookGridResizedHeight,
   notebookGridWindow,
+  notebookChartControlModel,
   notebookMoveSelection,
+  notebookMovedSearchMatchIndex,
+  notebookSavedSearchMatches,
   notebookSelectionCellCount,
   notebookSelectionCopyAllowed,
   notebookSelectionForCell,
   notebookSelectionRange,
+  notebookSearchEnterAction,
+  notebookSelectionToolsState,
+  reconcileNotebookChartConfiguration,
   reconcileNotebookChartYColumns,
   toggleNotebookChartYColumn,
 } = requireOut('notebook-renderer-model');
@@ -219,6 +231,7 @@ const tests = [
   ['notebook renderer sizing, selection, copy, and chart model', testNotebookRendererModel],
   ['live notebook result registry bounds and lifecycle', testLiveNotebookResultStore],
   ['native direct q notebook controller provider', testDirectQNotebookController],
+  ['mixed q notebook command and status routing', testMixedQNotebookCommandIntegration],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
 ];
@@ -334,6 +347,56 @@ function testChartZoomLifecycle() {
   assert.strictEqual(chartRangeIsZoomed(temporalFull, { min: temporalFull.min + 1, max: temporalFull.max }), true);
   assert.strictEqual(captureChartFullXRange(null, { min: 4, max: 4 }, false), null);
   assert.strictEqual(chartRangeIsZoomed(full, { min: NaN, max: 40 }), false);
+  let hiddenSeries = updateHiddenChartSeriesKeys([], ['price', 'size'], ['price']);
+  assert.deepStrictEqual(hiddenSeries, ['price']);
+  hiddenSeries = updateHiddenChartSeriesKeys(
+    hiddenSeries,
+    ['price', 'size'],
+    ['price']
+  );
+  assert.deepStrictEqual(
+    hiddenSeries,
+    ['price'],
+    'refinement/rerender must preserve a hidden series'
+  );
+  hiddenSeries = updateHiddenChartSeriesKeys(hiddenSeries, ['price', 'size'], []);
+  assert.deepStrictEqual(hiddenSeries, [], 'an explicit legend re-show must clear hidden state');
+  hiddenSeries = updateHiddenChartSeriesKeys(['price'], ['size'], []);
+  assert.deepStrictEqual(
+    hiddenSeries,
+    ['price'],
+    'temporarily incompatible chart configurations must retain stable hidden identities'
+  );
+  hiddenSeries = updateHiddenChartSeriesKeys(hiddenSeries, ['price', 'size'], ['price']);
+  assert.deepStrictEqual(hiddenSeries, ['price']);
+  assert.strictEqual(chartSeriesVisible(hiddenSeries, 'price'), false);
+  const hiddenRefreshPaths = [
+    'zoom',
+    'reset zoom',
+    'refine',
+    'rerender',
+    'resize',
+    'renderer settings change',
+    'chart configuration update',
+  ];
+  for (const refreshPath of hiddenRefreshPaths) {
+    const renderedKeys = refreshPath === 'refine' ? ['size'] : ['price', 'size'];
+    const hiddenRenderedKeys = renderedKeys.filter(key => !chartSeriesVisible(hiddenSeries, key));
+    hiddenSeries = updateHiddenChartSeriesKeys(
+      hiddenSeries,
+      renderedKeys,
+      hiddenRenderedKeys
+    );
+    assert.strictEqual(
+      chartSeriesVisible(hiddenSeries, 'price'),
+      false,
+      `${refreshPath} must not restore a legend-hidden series`
+    );
+  }
+  assert.strictEqual(chartLegendToggleKey('Enter'), true);
+  assert.strictEqual(chartLegendToggleKey(' '), true);
+  assert.strictEqual(chartLegendToggleKey('Spacebar'), true);
+  assert.strictEqual(chartLegendToggleKey('ArrowRight'), false);
 
   const panelSource = readSource('kx-results-panel.ts');
   const zoomSource = readSource('chart-zoom.ts');
@@ -345,6 +408,22 @@ function testChartZoomLifecycle() {
   assert.match(panelSource, /\$\{chartZoomDataAfterResponse\.toString\(\)\}/);
   assert.match(panelSource, /\$\{planChartZoomReset\.toString\(\)\}/);
   assert.match(panelSource, /\$\{chartRangeIsZoomed\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartLegendToggleKey\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartSeriesVisible\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{updateHiddenChartSeriesKeys\.toString\(\)\}/);
+  assert.match(panelSource, /let chartHiddenSeriesKeys = \[\];/);
+  assert.match(panelSource, /let chartRenderedSeriesKeys = \[\];/);
+  assert.match(panelSource, /function captureChartSeriesVisibility\(self\)/);
+  assert.match(panelSource, /captureChartSeriesVisibility\(chartUPlot\);[\s\S]*?chartUPlot\.destroy\(\)/);
+  assert.match(panelSource, /show: chartSeriesVisible\(chartHiddenSeriesKeys, chartRenderedSeriesKeys\[index\]\)/);
+  assert.match(panelSource, /setSeries: \[self => \{[\s\S]*?captureChartSeriesVisibility\(self\)/);
+  assert.match(panelSource, /function decorateChartLegendAccessibility\(self\)/);
+  assert.match(panelSource, /label\.tabIndex = 0;/);
+  assert.match(panelSource, /label\.setAttribute\('role', 'button'\)/);
+  assert.match(panelSource, /label\.setAttribute\([\s\S]*?'aria-pressed'/);
+  assert.match(panelSource, /chartLegendToggleKey\(event\.key\)/);
+  assert.match(panelSource, /self\.setSeries\(index, \{ show: self\.series\[index\]\.show === false \}\)/);
+  assert.match(panelSource, /chartCanvasWrap\.addEventListener\('dblclick'/);
   assert.match(panelSource, /<button id="resetChartZoom" disabled>Reset zoom<\/button>/);
   assert.match(panelSource, /resetChartZoomButton\.addEventListener\('click', resetChartZoom\)/);
   assert.match(panelSource, /setScale: \[updateChartZoomState\]/);
@@ -663,7 +742,9 @@ async function testQIpc() {
     assert.ok(!timeoutDiagnostics.includes(timeoutUsername));
     assert.ok(!timeoutDiagnostics.includes(timeoutPassword));
     assert.ok(timeoutDiagnosticLines.map(line => JSON.parse(line)).some(event =>
-      event.phase === 'query' && event.status === 'failed' && event.endpoint === `127.0.0.1:${timeoutPort}`
+      event.phase === 'query' && event.status === 'failed' &&
+      event.endpoint === `127.0.0.1:${timeoutPort}` &&
+      event.timeoutMs === 100 && event.timeoutDisabled === false
     ));
   } finally {
     await queryTimeoutClient.close();
@@ -1031,6 +1112,18 @@ async function testDiagnostics() {
   assert.ok(events.some(event => event.phase === 'handshake' && event.status === 'success'));
   assert.ok(events.some(event => event.phase === 'query' && event.status === 'success'));
   assert.ok(events.some(event =>
+    event.phase === 'connect' && event.status === 'start' &&
+    event.timeoutMs === 1000 && event.timeoutDisabled === false
+  ));
+  assert.ok(events.some(event =>
+    event.phase === 'handshake' && event.status === 'start' &&
+    event.timeoutMs === 1000 && event.timeoutDisabled === false
+  ));
+  assert.ok(events.some(event =>
+    event.phase === 'query' && event.status === 'start' &&
+    event.timeoutMs === 1000 && event.timeoutDisabled === false
+  ));
+  assert.ok(events.some(event =>
     event.phase === 'query' && event.status === 'failed' && event.errorName === 'KdbQError'
   ));
   assert.ok(events.some(event => event.phase === 'close' && event.status === 'success'));
@@ -1393,6 +1486,7 @@ function testConnections() {
   assert.throws(() => validateConnection({ ...connection, username: 'user:name' }), /cannot contain colons/);
   assert.strictEqual(MAX_TIMEOUT_MS, 2147483647);
   assert.strictEqual(DEFAULT_CONNECTION_TIMEOUT_MS, 30000);
+  assert.strictEqual(DEFAULT_QUERY_TIMEOUT_MS, 1800000);
   assert.strictEqual(parseOptionalTimeout('', 'Timeout'), undefined);
   assert.strictEqual(parseOptionalTimeout('  ', 'Timeout'), undefined);
   assert.strictEqual(parseOptionalTimeout('0', 'Timeout'), 0);
@@ -1421,6 +1515,22 @@ function testConnections() {
     resolveConnectionTimeouts(timedConnection, { connectTimeoutMs: 1200, queryTimeoutMs: 3400 }),
     { connectTimeoutMs: 0, queryTimeoutMs: MAX_TIMEOUT_MS },
     'connection overrides, including zero, must win independently'
+  );
+  assert.deepStrictEqual(
+    resolveConnectionTimeouts(
+      { connectTimeoutMs: 0 },
+      { connectTimeoutMs: 1200, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS }
+    ),
+    { connectTimeoutMs: 0, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS },
+    'disabling a profile connect/handshake timeout must not disable or shorten query responses'
+  );
+  assert.deepStrictEqual(
+    resolveConnectionTimeouts(
+      { queryTimeoutMs: 0 },
+      { connectTimeoutMs: DEFAULT_CONNECTION_TIMEOUT_MS, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS }
+    ),
+    { connectTimeoutMs: DEFAULT_CONNECTION_TIMEOUT_MS, queryTimeoutMs: 0 },
+    'disabling a profile query response timeout must not disable connect/handshake deadlines'
   );
   assert.strictEqual(connectionSessionChanged(connection, { ...connection, name: 'Renamed' }), false);
   assert.strictEqual(connectionSessionChanged(connection, { ...connection, database: '.other' }), false);
@@ -4654,18 +4764,60 @@ async function testConnectionManagerLifecycle() {
   );
   assert.strictEqual(canceledClient.closed, true);
 
+  delete runtimeSettings.connectionTimeoutMs;
+  delete runtimeSettings.queryTimeoutMs;
+  assert.deepStrictEqual(
+    timeoutManager.globalTimeouts(),
+    {
+      connectTimeoutMs: DEFAULT_CONNECTION_TIMEOUT_MS,
+      queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS,
+    },
+    'omitted global settings must resolve to a 30-second handshake and independent 30-minute query response'
+  );
+  const defaultTimeoutProfile = validateConnection({
+    ...connection,
+    id: 'kx-default-timeouts',
+    name: 'Default timeout q',
+  });
+  const defaultTimeoutClient = await timeoutManager.connect(defaultTimeoutProfile);
+  assert.strictEqual(defaultTimeoutClient.options.connectTimeoutMs, DEFAULT_CONNECTION_TIMEOUT_MS);
+  assert.strictEqual(defaultTimeoutClient.options.queryTimeoutMs, DEFAULT_QUERY_TIMEOUT_MS);
+
   runtimeSettings.connectionTimeoutMs = 4321;
+  assert.deepStrictEqual(
+    timeoutManager.globalTimeouts(),
+    { connectTimeoutMs: 4321, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS },
+    'an omitted global query value must use the independent 30-minute default'
+  );
+  assert.deepStrictEqual(
+    timeoutManager.timeoutsFor(connection),
+    { connectTimeoutMs: 4321, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS },
+    'existing profiles with no per-profile query override must inherit the new global query default'
+  );
   runtimeSettings.queryTimeoutMs = null;
   assert.deepStrictEqual(
     timeoutManager.globalTimeouts(),
-    { connectTimeoutMs: 4321, queryTimeoutMs: 4321 },
-    'null query timeout must preserve the pre-0.1.3 connectionTimeoutMs behavior'
+    { connectTimeoutMs: 4321, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS },
+    'legacy null global values must safely fall back to the independent query default'
+  );
+  runtimeSettings.queryTimeoutMs = 0;
+  assert.deepStrictEqual(
+    timeoutManager.globalTimeouts(),
+    { connectTimeoutMs: 4321, queryTimeoutMs: 0 },
+    'global zero must disable only the query response deadline'
+  );
+  runtimeSettings.connectionTimeoutMs = 0;
+  runtimeSettings.queryTimeoutMs = DEFAULT_QUERY_TIMEOUT_MS;
+  assert.deepStrictEqual(
+    timeoutManager.globalTimeouts(),
+    { connectTimeoutMs: 0, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS },
+    'global zero connect/handshake timeout must not disable the query response deadline'
   );
   runtimeSettings.connectionTimeoutMs = MAX_TIMEOUT_MS + 1;
   runtimeSettings.queryTimeoutMs = -1;
   assert.deepStrictEqual(
     timeoutManager.globalTimeouts(),
-    { connectTimeoutMs: DEFAULT_CONNECTION_TIMEOUT_MS, queryTimeoutMs: DEFAULT_CONNECTION_TIMEOUT_MS },
+    { connectTimeoutMs: DEFAULT_CONNECTION_TIMEOUT_MS, queryTimeoutMs: DEFAULT_QUERY_TIMEOUT_MS },
     'invalid hand-edited global values must resolve to bounded safe defaults'
   );
   await timeoutManager.disconnectAll();
@@ -5059,6 +5211,60 @@ function testNotebookContract() {
     yColumns: ['time'],
     maxPoints: 2500,
   }), undefined, 'the live chart X column cannot also be a Y series');
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'requestLiveChart',
+      liveId,
+      requestId: 5,
+      chartType: 'bar',
+      xColumn: 'time',
+      yColumns: ['price'],
+      groupByColumn: 'sym',
+      maxPoints: 2500,
+    }),
+    {
+      type: 'requestLiveChart',
+      liveId,
+      requestId: 5,
+      chartType: 'bar',
+      xColumn: 'time',
+      yColumns: ['price'],
+      groupByColumn: 'sym',
+      maxPoints: 2500,
+    }
+  );
+  const candlestickRequest = {
+    type: 'requestLiveChart',
+    liveId,
+    requestId: 6,
+    chartType: 'candlestick',
+    xColumn: 'time',
+    yColumns: [],
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    maxPoints: 2500,
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage(candlestickRequest),
+    candlestickRequest,
+    'candlestick live requests must carry four distinct numeric roles'
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    ...candlestickRequest,
+    closeColumn: 'open',
+  }), undefined);
+  assert.strictEqual(parseNotebookRendererMessage({
+    ...candlestickRequest,
+    chartType: 'box',
+    yColumns: ['price'],
+    groupByColumn: 'sym',
+    openColumn: undefined,
+    highColumn: undefined,
+    lowColumn: undefined,
+    closeColumn: undefined,
+  }), undefined, 'box charts must not advertise unsupported grouping');
   const liveCopyRequest = {
     type: 'copyLiveRange',
     liveId,
@@ -5069,6 +5275,7 @@ function testNotebookContract() {
     endColumn: 4,
     format: 'tsv',
     includeHeaders: true,
+    includeRowIndex: true,
     sortColumn: 'sym',
     sortDirection: 'desc',
   };
@@ -5097,6 +5304,27 @@ function testNotebookContract() {
     value: 'unsafe',
   }), undefined);
   assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'updateResultSetting',
+      key: 'includeHeaders',
+      value: false,
+    }),
+    { type: 'updateResultSetting', key: 'includeHeaders', value: false }
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'updateResultSetting',
+      key: 'includeRowIndex',
+      value: true,
+    }),
+    { type: 'updateResultSetting', key: 'includeRowIndex', value: true }
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'updateResultSetting',
+    key: 'includeRowIndex',
+    value: 'true',
+  }), undefined);
+  assert.deepStrictEqual(
     parseNotebookRendererMessage({ type: 'openLiveResult', liveId }),
     { type: 'openLiveResult', liveId }
   );
@@ -5107,9 +5335,12 @@ function testNotebookContract() {
     fontSize: 0,
     density: 'standard',
     showRowIndex: true,
+    includeHeaders: true,
+    includeRowIndex: true,
     elapsedTimeDisplay: 'auto',
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
+    chartZoomMaxSampledPoints: 7_000,
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
@@ -5162,6 +5393,45 @@ function testNotebookContract() {
       elapsedMs: 12,
       messages: ['Full live table.'],
     },
+  });
+  const candleData = {
+    chartType: 'candlestick',
+    xColumn: 'time',
+    xKind: 'temporal',
+    x: [1, 2],
+    xText: ['t1', 't2'],
+    xDomain: { min: 1, max: 2 },
+    series: [{
+      columnName: 'OHLC',
+      sourceColumnName: 'close',
+      values: [11, 12],
+    }],
+    ohlcColumns: {
+      open: 'open',
+      high: 'high',
+      low: 'low',
+      close: 'close',
+    },
+    candlesticks: [
+      { x: 1, xText: 't1', open: 10, high: 12, low: 9, close: 11 },
+      { x: 2, xText: 't2', open: 11, high: 13, low: 10, close: 12 },
+    ],
+    sourceRowCount: 2,
+    eligibleRowCount: 2,
+    sampledPointCount: 2,
+    algorithm: 'ohlc-exact/2',
+    warnings: [],
+  };
+  assert.deepStrictEqual(parseNotebookRendererHostMessage({
+    type: 'liveChart',
+    liveId,
+    requestId: 10,
+    data: candleData,
+  }), {
+    type: 'liveChart',
+    liveId,
+    requestId: 10,
+    data: candleData,
   });
   const liveCopySuccess = {
     type: 'liveCopy',
@@ -5336,6 +5606,44 @@ function testNotebookContract() {
     2,
     'static saved output must preserve every compatible Y series'
   );
+  const groupedPayload = createPortableKxResult({
+    columns: ['time', 'price', 'sym'],
+    rows: [[1, 10, 'A'], [1, 20, 'B']],
+    chart: {
+      visible: true,
+      type: 'line',
+      xColumn: 'time',
+      yColumns: ['price'],
+      groupByColumn: 'sym',
+    },
+  });
+  assert.strictEqual(validatePortableKxResult(groupedPayload).ok, true);
+  assert.match(
+    notebookResultStaticHtml(groupedPayload),
+    /Static grouped line chart rendering is unavailable/,
+    'static fallback must not fake the interactive Group by result'
+  );
+  const candlestickPayload = createPortableKxResult({
+    columns: ['time', 'open', 'high', 'low', 'close'],
+    rows: [[1, 10, 12, 9, 11], [2, 11, 13, 10, 12]],
+    chart: {
+      visible: true,
+      type: 'candlestick',
+      xColumn: 'time',
+      yColumns: [],
+      openColumn: 'open',
+      highColumn: 'high',
+      lowColumn: 'low',
+      closeColumn: 'close',
+    },
+  });
+  assert.strictEqual(candlestickPayload.chart.type, 'candlestick');
+  assert.strictEqual(validatePortableKxResult(candlestickPayload).ok, true);
+  assert.match(
+    notebookResultStaticHtml(candlestickPayload),
+    /Static candlestick chart rendering is unavailable/,
+    'the static fallback must disclose its boundary instead of drawing a fake line chart'
+  );
 
   const byteBounded = createPortableKxResult({
     columns: ['value'],
@@ -5459,6 +5767,55 @@ function testNotebookContract() {
   assert.match(rendererSource, /type: 'openPreview'/);
   assert.match(rendererSource, /type: 'copyLiveRange'/);
   assert.match(rendererSource, /multiColumnControl/);
+  assert.match(rendererSource, /\['line', 'scatter', 'step', 'bar', 'box', 'candlestick'\]/);
+  assert.match(rendererSource, /labelledSelectOptions\([\s\S]*?'Group by'/);
+  for (const label of ['Open', 'High', 'Low', 'Close']) {
+    assert.ok(rendererSource.includes(`['${label}',`), `${label} candlestick selector must exist`);
+  }
+  assert.match(rendererSource, /button\('Render'/);
+  assert.match(rendererSource, /Chart settings changed — Render to update\./);
+  assert.match(rendererSource, /notebookSearchEnterAction\(/);
+  assert.match(rendererSource, /action === 'previous' \? -1 : 1/);
+  assert.match(rendererSource, /input\.title = 'Enter: next match; Shift\+Enter: previous match'/);
+  assert.match(rendererSource, /Search saved result rows/);
+  assert.match(rendererSource, /notebookSavedSearchMatches\(/);
+  assert.match(rendererSource, /notebookMovedSearchMatchIndex\(/);
+  assert.match(rendererSource, /activeSavedSearchRow\(state\.savedSearch, rowIndex\)/);
+  assert.match(rendererSource, /notebookSelectionToolsState\(/);
+  assert.match(rendererSource, /summary\.textContent = 'Settings'/);
+  assert.match(rendererSource, /function drawNotebookBoxes\(/);
+  assert.match(rendererSource, /function drawNotebookCandlesticks\(/);
+  assert.match(rendererSource, /capturePlotSeriesVisibility\(state\)/);
+  assert.match(rendererSource, /reconcileNotebookChartConfiguration\(/);
+  assert.match(rendererSource, /notebookChartControlModel\(/);
+  assert.match(rendererSource, /reconciledChart\.compatible && previousChart\.data/);
+  const receiveLiveResultSource = sourceSection(
+    rendererSource,
+    'function receiveLiveResult(',
+    'function renderState('
+  );
+  assert.ok(
+    !/hiddenChartSeriesKeys\s*=/.test(receiveLiveResultSource),
+    'a shared-settings live-result refresh must retain stable hidden-series identities'
+  );
+  assert.match(receiveLiveResultSource, /visible: previous\.visible|reconciledChart\.configuration/);
+  assert.match(receiveLiveResultSource, /requestId: nextRequestId\(\)/);
+  assert.match(rendererSource, /function decoratePlotLegendAccessibility\(plot: uPlot\)/);
+  assert.match(rendererSource, /label\.tabIndex = 0/);
+  assert.match(rendererSource, /label\.setAttribute\('role', 'button'\)/);
+  assert.match(rendererSource, /chartLegendToggleKey\(event\.key\)/);
+  assert.match(rendererSource, /syncPlotLegendAccessibility\(plot\)/);
+  assert.ok(!/Reset size|Reset Size/.test(rendererSource), 'the renderer must not expose an inert size reset');
+  assert.ok(!/Previous match|Next match/.test(rendererSource), 'search navigation uses Enter and Shift+Enter');
+  assert.ok(!/Point cap/.test(rendererSource), 'sampling guardrails must not be a notebook-only main control');
+  assert.match(
+    rendererSource,
+    /headingWrap\.append\(node\('strong', 'kx-heading', 'KX Results'\)\)/,
+    'the compact renderer header must use KX Results vocabulary'
+  );
+  assert.match(rendererSource, /function notebookChartPointLimit\(\)/);
+  assert.match(rendererSource, /resultSettings\.chartZoomMaxSampledPoints/);
+  assert.match(rendererSource, /maxPoints:\s*notebookChartPointLimit\(\)/);
   assert.match(rendererSource, /notebookGridDefaultHeight/);
   assert.match(rendererSource, /resize:\s*vertical/);
   assert.match(rendererSource, /aria-activedescendant/);
@@ -5557,6 +5914,166 @@ function testNotebookRendererModel() {
   assert.strictEqual(notebookSelectionCopyAllowed(undefined, 20_000), false);
   assert.strictEqual(notebookSelectionCopyAllowed(selection, 20_000), true);
   assert.strictEqual(notebookSelectionCopyAllowed(selection, 11), false);
+  assert.deepStrictEqual(
+    notebookSelectionToolsState(undefined, 20_000, true),
+    { visible: false, open: false, copyEnabled: false }
+  );
+  assert.deepStrictEqual(
+    notebookSelectionToolsState(selection, 20_000, false),
+    { visible: true, open: false, copyEnabled: true }
+  );
+  assert.deepStrictEqual(
+    notebookSelectionToolsState(selection, 20_000, true),
+    { visible: true, open: true, copyEnabled: true }
+  );
+  assert.deepStrictEqual(
+    notebookSelectionToolsState(selection, 11, true),
+    { visible: false, open: false, copyEnabled: false }
+  );
+  assert.strictEqual(notebookSearchEnterAction(0, false, false), 'request');
+  assert.strictEqual(notebookSearchEnterAction(3, true, false), 'request');
+  assert.strictEqual(notebookSearchEnterAction(3, false, false), 'next');
+  assert.strictEqual(notebookSearchEnterAction(3, false, true), 'previous');
+  assert.strictEqual(notebookMovedSearchMatchIndex(-1, 3, 1), 0);
+  assert.strictEqual(notebookMovedSearchMatchIndex(-1, 3, -1), 2);
+  assert.strictEqual(notebookMovedSearchMatchIndex(2, 3, 1), 0);
+  assert.strictEqual(notebookMovedSearchMatchIndex(0, 3, -1), 2);
+  assert.strictEqual(notebookMovedSearchMatchIndex(0, 0, 1), -1);
+  assert.deepStrictEqual(
+    notebookSavedSearchMatches(
+      [
+        ['MSFT', '20'],
+        ['AAPL', '10'],
+        ['aapl', '30'],
+      ],
+      [1, 0, 2],
+      'AaPl',
+      10
+    ),
+    {
+      matches: [
+        { displayRow: 0, sourceRow: 1 },
+        { displayRow: 2, sourceRow: 2 },
+      ],
+      capped: false,
+    },
+    'saved search must be case-insensitive and use the current sorted row mapping'
+  );
+  assert.deepStrictEqual(
+    notebookSavedSearchMatches([['x'], ['x']], [0, 1], 'x', 1),
+    { matches: [{ displayRow: 0, sourceRow: 0 }], capped: true }
+  );
+  const preservedChart = reconcileNotebookChartConfiguration(
+    {
+      visible: true,
+      chartType: 'line',
+      xColumn: 'time',
+      yColumns: ['price', 'size'],
+      groupByColumn: 'sym',
+      openColumn: 'open',
+      highColumn: 'high',
+      lowColumn: 'low',
+      closeColumn: 'close',
+    },
+    ['time', 'price'],
+    ['price', 'size', 'open', 'high', 'low', 'close'],
+    ['sym']
+  );
+  assert.strictEqual(preservedChart.compatible, true);
+  assert.deepStrictEqual(preservedChart.configuration, {
+    visible: true,
+    chartType: 'line',
+    xColumn: 'time',
+    yColumns: ['price', 'size'],
+    groupByColumn: 'sym',
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+  });
+  const reconciledCandle = reconcileNotebookChartConfiguration(
+    {
+      ...preservedChart.configuration,
+      chartType: 'candlestick',
+      yColumns: ['price'],
+      groupByColumn: '',
+      closeColumn: 'removed',
+    },
+    ['time'],
+    ['price', 'open', 'high', 'low', 'close'],
+    ['sym']
+  );
+  assert.strictEqual(reconciledCandle.compatible, false);
+  assert.strictEqual(reconciledCandle.configuration.visible, true);
+  assert.strictEqual(reconciledCandle.configuration.chartType, 'candlestick');
+  assert.strictEqual(reconciledCandle.configuration.closeColumn, 'close');
+  const chartControlExpectations = {
+    line: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
+    scatter: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
+    step: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
+    bar: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
+    box: { usesGenericY: true, supportsGroupBy: false, usesOhlc: false },
+    candlestick: { usesGenericY: false, supportsGroupBy: false, usesOhlc: true },
+  };
+  for (const [chartType, expectedCapabilities] of Object.entries(chartControlExpectations)) {
+    const controls = notebookChartControlModel(
+      {
+        chartType,
+        xColumn: 'time',
+        yColumns: chartType === 'candlestick' ? [] : ['price', 'size'],
+        groupByColumn: chartType === 'box' || chartType === 'candlestick' ? '' : 'sym',
+        openColumn: 'open',
+        highColumn: 'high',
+        lowColumn: 'low',
+        closeColumn: 'close',
+      },
+      ['time', 'price'],
+      ['price', 'size', 'open', 'high', 'low', 'close'],
+      ['sym']
+    );
+    assert.deepStrictEqual(
+      controls.capabilities,
+      expectedCapabilities,
+      `${chartType} controls must use the shared chart capability model`
+    );
+    assert.deepStrictEqual(
+      controls.groupColumns,
+      expectedCapabilities.supportsGroupBy ? ['sym'] : [],
+      `${chartType} must expose Group by only when supported`
+    );
+    assert.strictEqual(controls.validationMessage, '');
+  }
+  assert.match(
+    notebookChartControlModel(
+      {
+        chartType: 'candlestick',
+        xColumn: 'time',
+        yColumns: [],
+        openColumn: 'open',
+        highColumn: 'high',
+        lowColumn: 'low',
+        closeColumn: 'open',
+      },
+      ['time'],
+      ['open', 'high', 'low', 'close'],
+      ['sym']
+    ).validationMessage,
+    /four distinct/
+  );
+  assert.match(
+    notebookChartControlModel(
+      {
+        chartType: 'line',
+        xColumn: 'time',
+        yColumns: ['price'],
+        groupByColumn: 'missing',
+      },
+      ['time'],
+      ['price'],
+      ['sym']
+    ).validationMessage,
+    /Group by column is unavailable/
+  );
   assert.strictEqual(notebookCellSelected(selection, 4, 2), true);
   assert.strictEqual(notebookCellSelected(selection, 6, 2), false);
   const moved = notebookMoveSelection(selection, 1, -2, false, 10, 5);
@@ -5581,6 +6098,21 @@ function testNotebookRendererModel() {
       ][row][column]
     ),
     'name,note\nAAPL,"a,b"\nMSFT,"""quoted"""'
+  );
+  assert.strictEqual(
+    notebookDelimitedRangeText(
+      ['#', 'name'],
+      csvSelection,
+      'csv',
+      true,
+      (row, column) => [
+        ['existing', 'AAPL'],
+        ['existing', 'MSFT'],
+      ][row][column],
+      true
+    ),
+    '#_1,#,name\n1,existing,AAPL\n2,existing,MSFT',
+    'shared row-index copy uses a collision-safe header and one-based source rows'
   );
 
   const eligible = ['bid', 'ask', 'size'];
@@ -5890,6 +6422,11 @@ function testLiveNotebookResultStore() {
     time: index,
     price: index * 2,
     size: index * 3,
+    sym: index % 2 === 0 ? 'AAPL' : 'MSFT',
+    open: index + 10,
+    high: index + 13,
+    low: index + 8,
+    close: index + 11,
   }));
   const chartId = store.register({
     notebookUri,
@@ -5897,7 +6434,10 @@ function testLiveNotebookResultStore() {
     query: 'chartSource',
     connectionName: 'Local q',
     elapsedMs: 3,
-    value: modelQTable(['time', 'price', 'size'], chartRows),
+    value: modelQTable(
+      ['time', 'price', 'size', 'sym', 'open', 'high', 'low', 'close'],
+      chartRows
+    ),
   });
   const chart = store.chart(chartId, notebookUri, {
     requestId: 7,
@@ -5912,6 +6452,68 @@ function testLiveNotebookResultStore() {
   assert.strictEqual(chart.sourceRowCount, 120);
   assert.ok(chart.sampledPointCount <= 20);
   assert.deepStrictEqual(chart.series.map(series => series.columnName), ['price', 'size']);
+  const chartView = store.view(chartId, notebookUri);
+  assert.ok(chartView.chartGroupColumns.includes('sym'));
+  const groupedChart = store.chart(chartId, notebookUri, {
+    requestId: 8,
+    chartType: 'bar',
+    xColumn: 'time',
+    yColumns: ['price'],
+    groupByColumn: 'sym',
+    maxPoints: 20,
+  });
+  assert.strictEqual(groupedChart.groupByColumn, 'sym');
+  assert.ok(groupedChart.series.every(series => series.groupValue));
+  const boxChart = store.chart(chartId, notebookUri, {
+    requestId: 9,
+    chartType: 'box',
+    xColumn: 'time',
+    yColumns: ['price', 'size'],
+    maxPoints: 20,
+  });
+  assert.strictEqual(boxChart.chartType, 'box');
+  assert.strictEqual(boxChart.boxSeries.length, 2);
+  const candleChart = store.chart(chartId, notebookUri, {
+    requestId: 10,
+    chartType: 'candlestick',
+    xColumn: 'time',
+    yColumns: [],
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    maxPoints: 20,
+  });
+  assert.strictEqual(candleChart.chartType, 'candlestick');
+  assert.deepStrictEqual(candleChart.ohlcColumns, {
+    open: 'open',
+    high: 'high',
+    low: 'low',
+    close: 'close',
+  });
+  assert.ok(candleChart.candlesticks.length <= 20);
+  const candleHost = liveChartMessage(
+    store,
+    notebookUri,
+    {
+      type: 'requestLiveChart',
+      liveId: chartId,
+      requestId: 11,
+      chartType: 'candlestick',
+      xColumn: 'time',
+      yColumns: [],
+      openColumn: 'open',
+      highColumn: 'high',
+      lowColumn: 'low',
+      closeColumn: 'close',
+      maxPoints: 20,
+    },
+    hostDisplayOptions,
+    { chartMaxSourceRows: 120 }
+  );
+  assert.strictEqual(candleHost.error, undefined);
+  assert.strictEqual(candleHost.data.chartType, 'candlestick');
+  assert.deepStrictEqual(parseNotebookRendererHostMessage(candleHost), candleHost);
   assert.strictEqual(store.chart(chartId, otherNotebookUri, {
     requestId: 1,
     chartType: 'line',
@@ -6079,6 +6681,43 @@ function testLiveNotebookResultStore() {
     'live result identifiers are valid only inside the owning extension-host session'
   );
 
+  let stagedIdCounter = 0;
+  const stagedStore = new LiveNotebookResultStore(
+    4,
+    () => `staged-result-${String(++stagedIdCounter).padStart(24, '0')}`
+  );
+  const priorId = stagedStore.register(
+    liveRegistration('file:///stage.ipynb', 'cell:///old', 1)
+  );
+  const stagedId = stagedStore.stage(
+    liveRegistration('file:///stage.ipynb', 'cell:///old', 2)
+  );
+  assert.strictEqual(stagedStore.has(priorId, 'file:///stage.ipynb'), true);
+  assert.strictEqual(stagedStore.has(stagedId, 'file:///stage.ipynb'), true);
+  stagedStore.remove(stagedId, 'file:///unrelated.ipynb');
+  assert.strictEqual(stagedStore.has(stagedId, 'file:///stage.ipynb'), true);
+  stagedStore.remove(stagedId, 'file:///stage.ipynb');
+  assert.strictEqual(stagedStore.has(stagedId, 'file:///stage.ipynb'), false);
+  assert.strictEqual(
+    stagedStore.has(priorId, 'file:///stage.ipynb'),
+    true,
+    'discarding a staged replacement must preserve the prior cell binding'
+  );
+  const reboundId = stagedStore.stage(
+    liveRegistration('file:///stage.ipynb', 'cell:///old', 3)
+  );
+  stagedStore.removeCell('file:///stage.ipynb', 'cell:///old');
+  stagedStore.rebind(
+    reboundId,
+    liveRegistration('file:///stage.ipynb', 'cell:///replacement', 3)
+  );
+  assert.strictEqual(stagedStore.has(priorId, 'file:///stage.ipynb'), false);
+  assert.strictEqual(stagedStore.has(reboundId, 'file:///stage.ipynb'), true);
+  stagedStore.removeCell('file:///stage.ipynb', 'cell:///old');
+  assert.strictEqual(stagedStore.has(reboundId, 'file:///stage.ipynb'), true);
+  stagedStore.removeCell('file:///stage.ipynb', 'cell:///replacement');
+  assert.strictEqual(stagedStore.has(reboundId, 'file:///stage.ipynb'), false);
+
   let evictionId = 0;
   const evictionStore = new LiveNotebookResultStore(
     2,
@@ -6148,7 +6787,7 @@ async function testDirectQNotebookController() {
     host: '127.0.0.1',
     port: 5001,
     database: '.analytics',
-    username: '',
+    username: 'notebook-user-secret',
   };
   bridge.connection = connection;
   bridge.connected = false;
@@ -6158,7 +6797,10 @@ async function testDirectQNotebookController() {
   assert.match(registered.detail, /Notebook q/);
   assert.match(registered.detail, /127\.0\.0\.1:5001/);
   assert.match(registered.detail, /namespace \.analytics/);
-  assert.match(registered.detail, /disconnected; connects on Run while this controller is selected/);
+  assert.match(registered.detail, /connects on Run q Cell \(KX\) or native Run while selected/);
+  assert.strictEqual(directController.routeLabel(), 'KX • Notebook q • .analytics');
+  assert.ok(!directController.routeLabel().includes(connection.host));
+  assert.ok(!directController.routeLabel().includes(connection.username));
   bridge.connected = true;
   bridge.fireState();
   assert.match(registered.detail, /connected/);
@@ -6177,11 +6819,14 @@ async function testDirectQNotebookController() {
     source: '1+1',
     uri: 'vscode-notebook-cell:///native-q/deselected',
   });
+  const createCallsBeforeDeselected = runtime.createExecutionCalls.length;
   await registered.executeHandler([deselectedCell], notebook, registered);
   assert.strictEqual(bridge.calls.length, 0);
-  assert.match(
-    notebookErrorText(runtime.executionFor(deselectedCell).output),
-    /Select KX q \(Direct IPC\).*kernel\/controller picker/i
+  assert.strictEqual(runtime.executionFor(deselectedCell), undefined);
+  assert.strictEqual(
+    runtime.createExecutionCalls.length,
+    createCallsBeforeDeselected + 1,
+    'the fake host must reject native cell executions from an unassociated controller'
   );
   const selectionEventsBeforeReselect = selectionEvents;
   registered.selectionEmitter.fire({ notebook, selected: true });
@@ -6276,21 +6921,193 @@ async function testDirectQNotebookController() {
     'live output metadata must remain scoped to its owning notebook'
   );
 
+  registered.selectionEmitter.fire({ notebook, selected: false });
+  assert.strictEqual(
+    directController.isSelected(notebook),
+    false,
+    'the mixed q action must run while the Python/Jupyter controller remains selected'
+  );
+  let mixedSessionValue;
+  const mixedFullSource =
+    'mixedValue:40\n/ Run q Cell (KX) must send the complete cell\nmixedValue+:1\nmixedValue';
+  const mixedContinuationSource = 'mixedValue+:1\nmixedValue';
+  bridge.executeImpl = async (target, source, onIssued) => {
+    assert.strictEqual(target, connection);
+    onIssued();
+    if (source === mixedFullSource) {
+      mixedSessionValue = 41;
+    } else if (source === mixedContinuationSource && mixedSessionValue === 41) {
+      mixedSessionValue += 1;
+    } else {
+      throw new Error(`unexpected mixed q source: ${source}`);
+    }
+    return mixedSessionValue;
+  };
+  const mixedCell = runtime.cell({
+    languageId: 'q',
+    source: mixedFullSource,
+    uri: 'vscode-notebook-cell:///native-q/mixed-1',
+  });
+  const oldMixedOutput = new runtime.vscode.NotebookCellOutput([
+    runtime.vscode.NotebookCellOutputItem.text('old mixed output'),
+  ]);
+  const mixedMetadata = {
+    custom: { owner: 'user', keep: true },
+  };
+  const stalePythonSummary = {
+    executionOrder: 7,
+    success: true,
+    timing: { startTime: 10, endTime: 20 },
+  };
+  mixedCell.metadata = mixedMetadata;
+  mixedCell.outputs = [oldMixedOutput];
+  mixedCell.executionSummary = stalePythonSummary;
+  mixedCell.notebook = notebook;
+  const pythonSiblingOutput = { owner: 'python-controller', value: 42 };
+  const pythonSibling = runtime.cell({
+    languageId: 'python',
+    source: 'python_value = 42',
+    uri: 'vscode-notebook-cell:///native-q/mixed-python-sibling',
+  });
+  pythonSibling.outputs = [pythonSiblingOutput];
+  pythonSibling.notebook = notebook;
+  const mixedCallsBefore = bridge.calls.length;
+  const nativeCreateCallsBeforeMixed = runtime.createExecutionCalls.length;
+  const workspaceEditsBeforeMixed = runtime.workspaceEdits.length;
+  runtime.controls.beforeApplyEdit = () => {
+    assert.deepStrictEqual(
+      mixedCell.outputs,
+      [oldMixedOutput],
+      'the prior output must remain until the public notebook edit commits'
+    );
+    assert.deepStrictEqual(pythonSibling.outputs, [pythonSiblingOutput]);
+  };
+  assert.strictEqual(await directController.runCell(mixedCell), 'executed');
+  runtime.controls.beforeApplyEdit = undefined;
+  assert.strictEqual(bridge.calls[mixedCallsBefore].source, mixedFullSource);
+  assert.strictEqual(bridge.calls[mixedCallsBefore].connection, connection);
+  assert.strictEqual(
+    runtime.createExecutionCalls.length,
+    nativeCreateCallsBeforeMixed,
+    'mixed mode must never call createNotebookCellExecution on the unselected KX controller'
+  );
+  assert.strictEqual(runtime.executions.filter(run => run.cell === mixedCell).length, 0);
+  assert.strictEqual(runtime.workspaceEdits.length, workspaceEditsBeforeMixed + 1);
+  const mixedWorkspaceEdit = runtime.workspaceEdits.at(-1);
+  assert.ok(mixedWorkspaceEdit instanceof runtime.vscode.WorkspaceEdit);
+  assert.strictEqual(mixedWorkspaceEdit.entries[0].edits[0].kind, 'replaceCells');
+  const mixedReplacement = runtime.replacementFor(mixedCell);
+  assert.ok(mixedReplacement);
+  assert.notStrictEqual(
+    mixedReplacement.document.uri.toString(),
+    mixedCell.document.uri.toString(),
+    'stable replaceCells creates a fresh public notebook cell handle'
+  );
+  assert.strictEqual(mixedReplacement.document.getText(), mixedFullSource);
+  assert.strictEqual(mixedReplacement.document.languageId, 'q');
+  assert.deepStrictEqual(mixedReplacement.metadata, mixedMetadata);
+  assert.strictEqual(
+    mixedReplacement.executionSummary,
+    undefined,
+    'a mixed KX run must not retain a stale Python/Jupyter execution summary'
+  );
+  assert.deepStrictEqual(pythonSibling.outputs, [pythonSiblingOutput]);
+  assert.strictEqual(pythonSibling.document.languageId, 'python');
+  const mixedOutput = runtime.outputFor(mixedReplacement);
+  assert.strictEqual(
+    notebookOutputItem(mixedOutput, KX_NOTEBOOK_MIME).value.provenance.marker,
+    'direct-ipc'
+  );
+  const mixedLiveId = mixedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
+  assert.strictEqual(
+    liveResults.view(mixedLiveId, notebook.uri.toString()).query,
+    mixedFullSource
+  );
+
+  const continuationCell = runtime.cell({
+    languageId: 'q',
+    source: mixedContinuationSource,
+    uri: 'vscode-notebook-cell:///native-q/mixed-2',
+  });
+  continuationCell.notebook = notebook;
+  assert.strictEqual(await directController.runCell(continuationCell), 'executed');
+  const continuationReplacement = runtime.replacementFor(continuationCell);
+  assert.strictEqual(
+    notebookOutputItem(
+      runtime.outputFor(continuationReplacement),
+      KX_NOTEBOOK_MIME
+    ).value.data.rows[0][0].value,
+    42,
+    'mixed q cells must continue through the same active direct IPC process/session'
+  );
+  assert.strictEqual(
+    directController.isSelected(notebook),
+    false,
+    'self-created mixed executions must not select or mutate the notebook controller'
+  );
+
+  const untouchedPythonOutput = { owner: 'python-controller' };
+  const mixedPythonCell = runtime.cell({
+    languageId: 'python',
+    source: 'print("Python stays Python")',
+    uri: 'vscode-notebook-cell:///native-q/mixed-python',
+  });
+  mixedPythonCell.notebook = notebook;
+  mixedPythonCell.outputs = [untouchedPythonOutput];
+  const executionsBeforePythonGuard = runtime.executions.length;
+  const editsBeforePythonGuard = runtime.workspaceEdits.length;
+  const callsBeforePythonGuard = bridge.calls.length;
+  assert.strictEqual(await directController.runCell(mixedPythonCell), 'not-q');
+  assert.strictEqual(runtime.executions.length, executionsBeforePythonGuard);
+  assert.strictEqual(runtime.workspaceEdits.length, editsBeforePythonGuard);
+  assert.strictEqual(bridge.calls.length, callsBeforePythonGuard);
+  assert.deepStrictEqual(mixedPythonCell.outputs, [untouchedPythonOutput]);
+  assert.strictEqual(mixedPythonCell.document.languageId, 'python');
+
+  const qLanguageMarkdown = runtime.cell({
+    kind: runtime.vscode.NotebookCellKind.Markup,
+    languageId: 'q',
+    source: '# not executable q',
+    uri: 'vscode-notebook-cell:///native-q/q-markdown',
+  });
+  qLanguageMarkdown.notebook = notebook;
+  assert.strictEqual(await directController.runCell(qLanguageMarkdown), 'not-q');
+  assert.strictEqual(runtime.executions.length, executionsBeforePythonGuard);
+  assert.strictEqual(runtime.workspaceEdits.length, editsBeforePythonGuard);
+  assert.strictEqual(bridge.calls.length, callsBeforePythonGuard);
+
+  const unsupportedNotebook = runtime.notebook('file:///workspace/not-kx.ipynb');
+  unsupportedNotebook.notebookType = 'other-notebook';
+  const unsupportedCell = runtime.cell({
+    languageId: 'q',
+    source: '1+1',
+    uri: 'vscode-notebook-cell:///native-q/unsupported',
+  });
+  unsupportedCell.notebook = unsupportedNotebook;
+  assert.strictEqual(
+    await directController.runCell(unsupportedCell),
+    'unsupported-notebook'
+  );
+  assert.strictEqual(bridge.calls.length, callsBeforePythonGuard);
+
   bridge.connection = undefined;
   bridge.fireState();
+  assert.strictEqual(directController.routeLabel(), 'KX • No active connection');
   const noConnectionCell = runtime.cell({
     languageId: 'q',
     source: '1+1',
     uri: 'vscode-notebook-cell:///native-q/3',
   });
+  noConnectionCell.notebook = notebook;
+  registered.selectionEmitter.fire({ notebook, selected: false });
   const callsBeforeNoConnection = bridge.calls.length;
-  await registered.executeHandler([noConnectionCell], notebook, registered);
-  const noConnectionExecution = runtime.executionFor(noConnectionCell);
+  assert.strictEqual(await directController.runCell(noConnectionCell), 'executed');
+  const noConnectionReplacement = runtime.replacementFor(noConnectionCell);
   assert.strictEqual(bridge.calls.length, callsBeforeNoConnection);
-  const noConnectionError = notebookErrorText(noConnectionExecution.output);
+  const noConnectionError = notebookErrorText(runtime.outputFor(noConnectionReplacement));
+  assert.match(noConnectionError, /Run q Cell \(KX\)/);
   assert.match(noConnectionError, /Add or select a KX connection/);
   assert.match(noConnectionError, /KX Connections view/);
-  assert.deepStrictEqual(noConnectionExecution.endCalls.map(call => call.success), [false]);
 
   bridge.connection = connection;
   bridge.connected = true;
@@ -6308,23 +7125,25 @@ async function testDirectQNotebookController() {
     source: 'connectThenRun[]',
     uri: 'vscode-notebook-cell:///native-q/startup-failure',
   });
+  startupFailureCell.notebook = notebook;
   const callsBeforeStartupFailure = bridge.calls.length;
-  await registered.executeHandler([startupFailureCell], notebook, registered);
-  const startupFailureExecution = runtime.executionFor(startupFailureCell);
+  assert.strictEqual(await directController.runCell(startupFailureCell), 'executed');
+  const startupFailureOutput = runtime.outputFor(runtime.replacementFor(startupFailureCell));
   assert.strictEqual(bridge.calls.length, callsBeforeStartupFailure + 1);
   assert.strictEqual(bridge.errorTargets.at(-1), connection);
-  const startupFailureError = notebookErrorText(startupFailureExecution.output);
-  assert.match(startupFailureError, /Direct IPC execution failed/i);
+  const startupFailureError = notebookErrorText(startupFailureOutput);
+  assert.match(startupFailureError, /Run q Cell \(KX\) failed/i);
   assert.match(startupFailureError, /KX: Test Connection/i);
   assert.match(startupFailureError, /\[redacted\]/);
   assert.ok(!startupFailureError.includes(startupSecret));
-  assert.strictEqual(notebookOutputItem(startupFailureExecution.output, KX_NOTEBOOK_MIME), undefined);
+  assert.strictEqual(notebookOutputItem(startupFailureOutput, KX_NOTEBOOK_MIME), undefined);
   assert.strictEqual(
-    startupFailureExecution.output.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY],
+    startupFailureOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY],
     undefined,
     'a startup failure must not allocate a live-result record'
   );
-  assert.deepStrictEqual(startupFailureExecution.endCalls.map(call => call.success), [false]);
+  assert.strictEqual(directController.isSelected(notebook), false);
+  registered.selectionEmitter.fire({ notebook, selected: true });
 
   bridge.errorImpl = async error => error instanceof Error ? error.message : String(error);
   bridge.executeImpl = async (_connection, _source, onIssued) => {
@@ -6451,6 +7270,27 @@ async function testDirectQNotebookController() {
   assert.strictEqual(bridge.calls.length, callsBeforePreCancel);
   assert.deepStrictEqual(preCanceledExecution.endCalls.map(call => call.success), [undefined]);
 
+  const mixedPreCancelOutput = { owner: 'previous-mixed-run' };
+  const mixedPreCanceledCell = runtime.cell({
+    languageId: 'q',
+    source: 'mixedNeverSent[]',
+    uri: 'vscode-notebook-cell:///native-q/mixed-pre-cancel',
+  });
+  mixedPreCanceledCell.outputs = [mixedPreCancelOutput];
+  mixedPreCanceledCell.notebook = notebook;
+  registered.selectionEmitter.fire({ notebook, selected: false });
+  const callsBeforeMixedPreCancel = bridge.calls.length;
+  const createsBeforeMixedPreCancel = runtime.createExecutionCalls.length;
+  const editsBeforeMixedPreCancel = runtime.workspaceEdits.length;
+  runtime.controls.preCancelProgress = true;
+  assert.strictEqual(await directController.runCell(mixedPreCanceledCell), 'executed');
+  runtime.controls.preCancelProgress = false;
+  assert.strictEqual(bridge.calls.length, callsBeforeMixedPreCancel);
+  assert.strictEqual(runtime.createExecutionCalls.length, createsBeforeMixedPreCancel);
+  assert.strictEqual(runtime.workspaceEdits.length, editsBeforeMixedPreCancel);
+  assert.deepStrictEqual(mixedPreCanceledCell.outputs, [mixedPreCancelOutput]);
+  assert.strictEqual(runtime.replacementFor(mixedPreCanceledCell), undefined);
+
   const issued = deferred();
   bridge.executeImpl = (_connection, _source, onIssued, signal) => {
     onIssued();
@@ -6464,26 +7304,156 @@ async function testDirectQNotebookController() {
     source: 'longRunning[]',
     uri: 'vscode-notebook-cell:///native-q/7',
   });
-  const postCanceledRun = registered.executeHandler(
-    [postCanceledCell],
-    notebook,
-    registered
-  );
+  postCanceledCell.notebook = notebook;
+  registered.selectionEmitter.fire({ notebook, selected: false });
+  const createCallsBeforeMixedCancel = runtime.createExecutionCalls.length;
+  const postCanceledRun = directController.runCell(postCanceledCell);
   const dispatchedSignal = await assertCompletesWithin(
-    'notebook controller query dispatch',
+    'mixed q-cell query dispatch',
     () => issued.promise,
     1000
   );
-  const postCanceledExecution = runtime.executionFor(postCanceledCell);
-  postCanceledExecution.token.cancel();
-  await assertCompletesWithin(
-    'notebook controller post-dispatch cancellation',
+  const executionsBeforeDuplicateRun = runtime.executions.length;
+  assert.strictEqual(
+    await directController.runCell(postCanceledCell),
+    'busy',
+    'a second KX gesture must not duplicate an in-flight cell execution'
+  );
+  assert.strictEqual(runtime.executions.length, executionsBeforeDuplicateRun);
+  runtime.progressRuns.at(-1).token.cancel();
+  assert.strictEqual(await assertCompletesWithin(
+    'mixed q-cell post-dispatch cancellation',
     () => postCanceledRun,
     1000
-  );
+  ), 'executed');
   assert.strictEqual(dispatchedSignal.aborted, true);
-  assert.match(notebookTextOutput(postCanceledExecution.output), /server work already sent may continue/i);
-  assert.deepStrictEqual(postCanceledExecution.endCalls.map(call => call.success), [undefined]);
+  const postCanceledOutput = runtime.outputFor(runtime.replacementFor(postCanceledCell));
+  assert.match(notebookTextOutput(postCanceledOutput), /Run q Cell \(KX\)/);
+  assert.match(notebookTextOutput(postCanceledOutput), /server work already sent may continue/i);
+  assert.strictEqual(
+    runtime.createExecutionCalls.length,
+    createCallsBeforeMixedCancel,
+    'mixed cancellation must not create an execution on the unselected KX controller'
+  );
+
+  bridge.executeImpl = async (_connection, _source, onIssued) => {
+    onIssued();
+    return 99;
+  };
+  const retainedCell = runtime.cell({
+    languageId: 'q',
+    source: 'replacementMustFail[]',
+    uri: 'vscode-notebook-cell:///native-q/retained-live',
+  });
+  retainedCell.notebook = notebook;
+  const retainedLiveId = liveResults.register({
+    notebookUri: notebook.uri.toString(),
+    cellUri: retainedCell.document.uri.toString(),
+    query: 'oldQuery[]',
+    connectionName: 'Notebook q • Direct IPC • .analytics',
+    elapsedMs: 1,
+    value: 17,
+  });
+  const retainedOutput = new runtime.vscode.NotebookCellOutput(
+    [runtime.vscode.NotebookCellOutputItem.text('old live output')],
+    {
+      [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
+        version: 1,
+        id: retainedLiveId,
+      },
+    }
+  );
+  retainedCell.outputs = [retainedOutput];
+  const stagedIdBeforeFailure = liveId;
+  runtime.controls.applyEditResult = false;
+  assert.strictEqual(await directController.runCell(retainedCell), 'write-failed');
+  runtime.controls.applyEditResult = true;
+  assert.strictEqual(liveId, stagedIdBeforeFailure + 1);
+  const failedStagedId = `controller-live-${String(liveId).padStart(24, '0')}`;
+  assert.strictEqual(
+    liveResults.has(retainedLiveId, notebook.uri.toString()),
+    true,
+    'a failed notebook edit must retain the prior displayed live result'
+  );
+  assert.strictEqual(
+    liveResults.has(failedStagedId, notebook.uri.toString()),
+    false,
+    'a failed notebook edit must remove only its staged live result'
+  );
+  assert.deepStrictEqual(retainedCell.outputs, [retainedOutput]);
+  assert.strictEqual(runtime.replacementFor(retainedCell), undefined);
+
+  const pythonRaceOutput = { owner: 'python-controller', value: 'newer output' };
+  const raceCell = runtime.cell({
+    languageId: 'q',
+    source: 'mustNotOverwritePythonRace[]',
+    uri: 'vscode-notebook-cell:///native-q/python-race',
+  });
+  raceCell.notebook = notebook;
+  const stagedIdBeforeRace = liveId;
+  runtime.controls.beforeApplyEdit = () => {
+    runtime.touchCell(raceCell, { outputs: [pythonRaceOutput] });
+  };
+  assert.strictEqual(
+    await directController.runCell(raceCell),
+    'stale',
+    'a newer Jupyter/Python output must win the notebook-version race'
+  );
+  runtime.controls.beforeApplyEdit = undefined;
+  assert.deepStrictEqual(raceCell.outputs, [pythonRaceOutput]);
+  assert.strictEqual(runtime.replacementFor(raceCell), undefined);
+  const racedStagedId = `controller-live-${String(liveId).padStart(24, '0')}`;
+  assert.strictEqual(liveId, stagedIdBeforeRace + 1);
+  assert.strictEqual(liveResults.has(racedStagedId, notebook.uri.toString()), false);
+
+  const cancelBeforeCommitOutput = { owner: 'previous-run' };
+  const cancelBeforeCommitCell = runtime.cell({
+    languageId: 'q',
+    source: 'cancelBeforeCommit[]',
+    uri: 'vscode-notebook-cell:///native-q/cancel-before-commit',
+  });
+  cancelBeforeCommitCell.outputs = [cancelBeforeCommitOutput];
+  cancelBeforeCommitCell.notebook = notebook;
+  const editsBeforeCommitCancel = runtime.workspaceEdits.length;
+  const stagedIdBeforeCommitCancel = liveId;
+  runtime.controls.onWorkspaceEditConstruct = () => {
+    runtime.progressRuns.at(-1).token.cancel();
+  };
+  assert.strictEqual(
+    await directController.runCell(cancelBeforeCommitCell),
+    'executed'
+  );
+  runtime.controls.onWorkspaceEditConstruct = undefined;
+  assert.strictEqual(runtime.workspaceEdits.length, editsBeforeCommitCancel);
+  assert.deepStrictEqual(cancelBeforeCommitCell.outputs, [cancelBeforeCommitOutput]);
+  assert.strictEqual(runtime.replacementFor(cancelBeforeCommitCell), undefined);
+  const canceledStagedId = `controller-live-${String(liveId).padStart(24, '0')}`;
+  assert.strictEqual(liveId, stagedIdBeforeCommitCancel + 1);
+  assert.strictEqual(liveResults.has(canceledStagedId, notebook.uri.toString()), false);
+
+  const closeIssued = deferred();
+  const closeResult = deferred();
+  bridge.executeImpl = (_connection, _source, onIssued) => {
+    onIssued();
+    closeIssued.resolve();
+    return closeResult.promise;
+  };
+  const closingNotebook = runtime.notebook('file:///workspace/closing-mixed.ipynb');
+  const closingCell = runtime.cell({
+    languageId: 'q',
+    source: 'closeDuringQuery[]',
+    uri: 'vscode-notebook-cell:///native-q/close-during-query',
+  });
+  closingCell.notebook = closingNotebook;
+  const closingRun = directController.runCell(closingCell);
+  await assertCompletesWithin('mixed q close dispatch', () => closeIssued.promise, 1000);
+  closingNotebook.isClosed = true;
+  closeResult.resolve(123);
+  assert.strictEqual(
+    await assertCompletesWithin('mixed q notebook close', () => closingRun, 1000),
+    'unavailable'
+  );
+  assert.strictEqual(runtime.replacementFor(closingCell), undefined);
 
   const privateSecret = 'notebook-password-must-not-leak';
   const replacementConnection = {
@@ -6507,19 +7477,23 @@ async function testDirectQNotebookController() {
     source: 'willFail[]',
     uri: 'vscode-notebook-cell:///native-q/8',
   });
-  await registered.executeHandler([errorCell], notebook, registered);
-  const errorExecution = runtime.executionFor(errorCell);
-  const renderedError = notebookErrorText(errorExecution.output);
+  errorCell.notebook = notebook;
+  assert.strictEqual(await directController.runCell(errorCell), 'executed');
+  const renderedError = notebookErrorText(
+    runtime.outputFor(runtime.replacementFor(errorCell))
+  );
+  assert.match(renderedError, /Run q Cell \(KX\) failed/i);
   assert.strictEqual(bridge.errorTargets.at(-1), connection);
   assert.match(renderedError, /selected active KX connection/);
   assert.ok(!renderedError.includes('Wrong later target'));
   assert.ok(!renderedError.includes('127.0.0.1:5999'));
   assert.ok(!renderedError.includes(privateSecret));
   assert.match(renderedError, /\[redacted\]/);
-  assert.deepStrictEqual(errorExecution.endCalls.map(call => call.success), [false]);
+  assert.strictEqual(directController.isSelected(notebook), false);
 
   bridge.connection = connection;
   bridge.errorImpl = async error => error.message;
+  registered.selectionEmitter.fire({ notebook, selected: true });
   const startFailureCell = runtime.cell({
     languageId: 'q',
     source: 'notStarted[]',
@@ -6548,10 +7522,145 @@ async function testDirectQNotebookController() {
   selectionSubscription.dispose();
   directController.dispose();
   directController.dispose();
+  const disposedCell = runtime.cell({
+    languageId: 'q',
+    source: '1+1',
+    uri: 'vscode-notebook-cell:///native-q/disposed',
+  });
+  disposedCell.notebook = notebook;
+  assert.strictEqual(await directController.runCell(disposedCell), 'unavailable');
   assert.strictEqual(registered.disposeCalls, 1);
   assert.strictEqual(bridge.stateSubscriptionDisposals, 1);
   assert.strictEqual(registered.selectionEmitter.listenerCount, 0);
   assert.strictEqual(directController.isSelected(notebook), false);
+}
+
+async function testMixedQNotebookCommandIntegration() {
+  const runtime = createNotebookIntegrationRuntime();
+  const {
+    NotebookIntegration,
+    RUN_Q_NOTEBOOK_CELL_COMMAND,
+  } = requireOutWithMocks('notebook-integration', {
+    vscode: runtime.vscode,
+    './kx-results-panel': {
+      KxResultsPanel: {},
+      sharedKxResultSettings: () => ({}),
+      updateSharedKxResultSetting: async () => undefined,
+    },
+  });
+  const notebook = {
+    uri: testUri('file:///workspace/mixed-python-q.ipynb'),
+    notebookType: 'jupyter-notebook',
+    metadata: {
+      metadata: {
+        language_info: { name: 'python' },
+        kernelspec: { language: 'python' },
+      },
+    },
+    cellCount: 0,
+    cellAt(index) {
+      return this.cells[index];
+    },
+    cells: [],
+  };
+  const qCell = runtime.cell(notebook, 0, 'q', 'a:41\na+1');
+  const pythonCell = runtime.cell(notebook, 1, 'python', 'print("Python stays Python")');
+  notebook.cells.push(qCell, pythonCell);
+  notebook.cellCount = notebook.cells.length;
+  const editor = {
+    notebook,
+    selections: [{ start: 0, end: 1 }],
+  };
+  runtime.vscode.window.activeNotebookEditor = editor;
+  runtime.vscode.window.activeTextEditor = { document: qCell.document };
+
+  const selectionChanged = new runtime.vscode.EventEmitter();
+  let directSelected = false;
+  let routeLabel = 'KX • Active q • .analytics';
+  let nextRunResult = 'executed';
+  const runCalls = [];
+  const directController = {
+    controller: {
+      description: 'Direct IPC • Active q',
+      detail: 'Direct IPC • Active q • namespace .analytics',
+    },
+    onDidChangeSelection: selectionChanged.event,
+    isSelected: target => target === notebook && directSelected,
+    routeLabel: () => routeLabel,
+    async runCell(cell) {
+      runCalls.push(cell);
+      return nextRunResult;
+    },
+  };
+  const integration = new NotebookIntegration({}, { directController });
+  const command = runtime.commands.get(RUN_Q_NOTEBOOK_CELL_COMMAND);
+  assert.strictEqual(typeof command, 'function');
+  assert.strictEqual(runtime.statusProviders.length, 1);
+  const provider = runtime.statusProviders[0].provider;
+
+  const qStatus = provider.provideCellStatusBarItems(qCell);
+  assert.strictEqual(qStatus.text, '$(database) KX • Active q • .analytics');
+  assert.strictEqual(qStatus.command.command, RUN_Q_NOTEBOOK_CELL_COMMAND);
+  assert.deepStrictEqual(qStatus.command.arguments, [qCell]);
+  assert.match(qStatus.tooltip, /without changing the selected notebook controller/i);
+  assert.strictEqual(provider.provideCellStatusBarItems(pythonCell), undefined);
+  const resourceContext = runtime.contexts.filter(entry =>
+    entry.key === 'vscode-kdb.qNotebookCellResources'
+  ).at(-1);
+  assert.deepStrictEqual(resourceContext.value, [qCell.document.uri.toString()]);
+
+  await command();
+  assert.deepStrictEqual(runCalls, [qCell]);
+  assert.strictEqual(qCell.document.languageId, 'q');
+  assert.strictEqual(pythonCell.document.languageId, 'python');
+
+  const warningsBeforePython = runtime.warnings.length;
+  await command(pythonCell);
+  assert.deepStrictEqual(runCalls, [qCell]);
+  assert.strictEqual(runtime.warnings.length, warningsBeforePython + 1);
+  assert.match(runtime.warnings.at(-1), /q-language code cell/i);
+  assert.deepStrictEqual(pythonCell.outputs, [{ owner: 'python-controller' }]);
+
+  directSelected = true;
+  selectionChanged.fire();
+  const callsBeforeDirectSelected = runCalls.length;
+  await command(qCell);
+  assert.strictEqual(runCalls.length, callsBeforeDirectSelected);
+  assert.match(runtime.information.at(-1), /normal Run Cell or Ctrl\+Enter/i);
+  const directStatus = provider.provideCellStatusBarItems(qCell);
+  assert.strictEqual(directStatus.command, undefined);
+  assert.match(directStatus.tooltip, /normal Run Cell and Ctrl\+Enter/i);
+
+  directSelected = false;
+  routeLabel = 'KX • No active connection';
+  selectionChanged.fire();
+  const missingRouteStatus = provider.provideCellStatusBarItems(qCell);
+  assert.strictEqual(missingRouteStatus.text, '$(database) KX • No active connection');
+  assert.strictEqual(missingRouteStatus.command.command, RUN_Q_NOTEBOOK_CELL_COMMAND);
+  assert.match(missingRouteStatus.tooltip, /KX Connections view/i);
+
+  nextRunResult = 'busy';
+  await command(qCell);
+  assert.match(runtime.warnings.at(-1), /already running/i);
+
+  nextRunResult = 'stale';
+  await command(qCell);
+  assert.match(runtime.warnings.at(-1), /did not overwrite/i);
+
+  nextRunResult = 'write-failed';
+  await command(qCell);
+  assert.match(runtime.errors.at(-1), /could not apply its inline output/i);
+
+  nextRunResult = 'unavailable';
+  await command(qCell);
+  assert.match(runtime.errors.at(-1), /notebook or KX direct IPC controller closed/i);
+
+  integration.dispose();
+  assert.strictEqual(runtime.commands.has(RUN_Q_NOTEBOOK_CELL_COMMAND), false);
+  assert.deepStrictEqual(
+    runtime.contexts.filter(entry => entry.key === 'vscode-kdb.qNotebookCellResources').at(-1),
+    { key: 'vscode-kdb.qNotebookCellResources', value: [] }
+  );
 }
 
 function testManifestAndSources() {
@@ -6563,15 +7672,15 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.4');
+  assert.strictEqual(manifest.version, '0.2.5');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.4');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.4');
+  assert.strictEqual(packageLock.version, '0.2.5');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.5');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
   );
-  assert.match(pythonNotebookPyproject, /^version = "0\.2\.4"$/m);
+  assert.match(pythonNotebookPyproject, /^version = "0\.2\.5"$/m);
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -6610,6 +7719,7 @@ function testManifestAndSources() {
     'KX: Restore Notebook Cell Language',
     'KX: Tag Notebook Cell as q',
     'Prepare this q cell for the active Python kernel',
+    'Run q Cell (KX)',
     'KX: Open Saved Notebook Preview in Results Panel',
   ].forEach(title => assert.ok(commandTitles.has(title), `missing command contribution: ${title}`));
 
@@ -6647,13 +7757,36 @@ function testManifestAndSources() {
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection / Current Line'], 'ctrl+enter', 'cmd+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run q Script'], 'ctrl+alt+enter', 'cmd+alt+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection in New Result'], 'ctrl+shift+enter', 'cmd+shift+enter');
-  keybindings.forEach(binding => {
+  assertKeybinding(keybindings, commandByTitle['Run q Cell (KX)'], 'ctrl+enter', 'cmd+enter');
+  keybindings.filter(binding => binding.command !== commandByTitle['Run q Cell (KX)'])
+    .forEach(binding => {
     assert.match(
       String(binding.when || ''),
       /!notebookEditorFocused/,
       `${binding.command} must not steal a Jupyter notebook execution keybinding`
     );
   });
+  const mixedRunBinding = keybindings.find(binding =>
+    binding.command === commandByTitle['Run q Cell (KX)']
+  );
+  assert.ok(mixedRunBinding);
+  for (const guard of [
+    /notebookCellEditorFocused/,
+    /editorTextFocus/,
+    /notebookEditorFocused/,
+    /notebookType == 'jupyter-notebook'/,
+    /notebookCellType == 'code'/,
+    /editorLangId == q/,
+    /resourceScheme == vscode-notebook-cell/,
+    /notebookKernel != 'DanielAlonso\.vscode-kdb\/vscode-kdb\.q-notebook-controller'/,
+    /!vscode-kdb\.notebookDirectQControllerSelected/,
+  ]) {
+    assert.match(
+      mixedRunBinding.when,
+      guard,
+      'mixed q Ctrl+Enter must be limited to the focused q cell editor while another controller is selected'
+    );
+  }
   assert.strictEqual(keybindings.some(binding =>
     [
       'vscode-kdb.setNotebookCellLanguageQ',
@@ -6745,6 +7878,12 @@ function testManifestAndSources() {
     commandById['vscode-kdb.prepareNotebookCellForPythonKernel'].title,
     'Prepare this q cell for the active Python kernel'
   );
+  assert.deepStrictEqual(commandById['vscode-kdb.runQNotebookCell'], {
+    command: 'vscode-kdb.runQNotebookCell',
+    title: 'Run q Cell (KX)',
+    icon: '$(play)',
+    enablement: "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected",
+  });
   const serverCommandIds = [
     'vscode-kdb.refreshServerExplorer',
     'vscode-kdb.previewServerObject',
@@ -6777,10 +7916,32 @@ function testManifestAndSources() {
   assert.match(setQCellItems[0].group, /^inline@/);
   assert.match(setQCellItems[0].when, /notebookType == 'jupyter-notebook'/);
   assert.match(setQCellItems[0].when, /notebookCellType == 'code'/);
+  const mixedRunItems = notebookCellTitleItems.filter(item =>
+    item.command === 'vscode-kdb.runQNotebookCell'
+  );
+  assert.strictEqual(
+    mixedRunItems.length,
+    1,
+    'one q-only notebook/cell/title contribution must serve the inline KX run action and cell context'
+  );
+  assert.match(mixedRunItems[0].group, /^inline@/);
+  assert.match(mixedRunItems[0].when, /notebookType == 'jupyter-notebook'/);
+  assert.match(mixedRunItems[0].when, /notebookCellType == 'code'/);
+  assert.match(
+    mixedRunItems[0].when,
+    /notebookCellResource in vscode-kdb\.qNotebookCellResources/,
+    'the per-cell action must use the cell resource list, not a notebook-wide language guess'
+  );
+  assert.match(
+    mixedRunItems[0].when,
+    /!vscode-kdb\.notebookDirectQControllerSelected/,
+    'the mixed-run action must not duplicate native Run while Direct IPC is selected'
+  );
   for (const id of [
     'vscode-kdb.restoreNotebookCellLanguage',
     'vscode-kdb.tagNotebookCellAsQ',
     'vscode-kdb.prepareNotebookCellForPythonKernel',
+    'vscode-kdb.runQNotebookCell',
   ]) {
     const item = notebookCellTitleItems.find(candidate => candidate.command === id);
     assert.ok(item, `${id} must be available from the contextual notebook cell title menu`);
@@ -6971,12 +8132,13 @@ function testManifestAndSources() {
   assert.match(connectTimeoutSetting.description, /connect and handshake/i);
   assert.match(connectTimeoutSetting.description, /0 to disable/i);
   const queryTimeoutSetting = configurationProperties['vscode-kdb.queryTimeoutMs'];
-  assert.deepStrictEqual(queryTimeoutSetting.type, ['integer', 'null']);
-  assert.strictEqual(queryTimeoutSetting.default, null);
+  assert.strictEqual(queryTimeoutSetting.type, 'integer');
+  assert.strictEqual(queryTimeoutSetting.default, DEFAULT_QUERY_TIMEOUT_MS);
   assert.strictEqual(queryTimeoutSetting.minimum, 0);
   assert.strictEqual(queryTimeoutSetting.maximum, MAX_TIMEOUT_MS);
-  assert.match(queryTimeoutSetting.description, /inherits connectionTimeoutMs/i);
-  assert.match(queryTimeoutSetting.description, /0 disables/i);
+  assert.match(queryTimeoutSetting.description, /30 minutes/i);
+  assert.match(queryTimeoutSetting.description, /independent/i);
+  assert.match(queryTimeoutSetting.description, /0 to disable only/i);
   const performanceTraceSetting = configurationProperties['vscode-kdb.performance.trace'];
   assert.strictEqual(performanceTraceSetting.type, 'boolean');
   assert.strictEqual(performanceTraceSetting.default, false);
@@ -7093,6 +8255,46 @@ function testManifestAndSources() {
   assert.match(notebookControllerSource, /cell\.document\.getText\(\)/);
   assert.match(notebookControllerSource, /cell\.document\.languageId !== 'q'/);
   assert.match(notebookControllerSource, /this\.liveResults\.register\(/);
+  assert.match(
+    notebookControllerSource,
+    /public async runCell\(cell: vscode\.NotebookCell\)/
+  );
+  const mixedControllerSource = sourceSection(
+    notebookControllerSource,
+    'private async runMixedCell',
+    'private reserveCellExecution'
+  );
+  assert.match(mixedControllerSource, /new vscode\.WorkspaceEdit\(\)/);
+  assert.match(mixedControllerSource, /vscode\.NotebookEdit\.replaceCells\(/);
+  assert.match(mixedControllerSource, /this\.liveResults\.rebind\(/);
+  assert.match(notebookControllerSource, /this\.liveResults\.stage\(/);
+  assert.ok(
+    !/createNotebookCellExecution/.test(mixedControllerSource),
+    'mixed q execution must not create an execution on an unselected controller'
+  );
+  assert.strictEqual(
+    (notebookControllerSource.match(/this\.bridge\.executeScript\(/g) || []).length,
+    1,
+    'native controller and mixed q action must share one direct IPC dispatch implementation'
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /registerCommand\(\s*'vscode-kdb\.runQNotebookCell'/
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /`\$\(database\) \$\{routeLabel\}`/
+  );
+  const mixedRunnerSource = sourceSection(
+    notebookIntegrationSource,
+    'private async runQCellWithKx',
+    'private async setSelectedCellsToQ'
+  );
+  assert.match(mixedRunnerSource, /runner\.runCell\(cell\)/);
+  assert.ok(
+    !/setTextDocumentLanguage|applyEdit|%%q|selectKernel|notebook\.selectKernel/.test(mixedRunnerSource),
+    'Run q Cell (KX) must not rewrite Python/q cells or mutate the selected notebook controller'
+  );
   assert.match(liveNotebookResultsSource, /MAX_LIVE_NOTEBOOK_SLICE_CELLS/);
   assert.ok(!/ms-toolsai\.jupyter|vscode-jupyter/.test(
     `${extensionSource}\n${notebookControllerSource}\n${liveNotebookResultsSource}`
@@ -7148,6 +8350,10 @@ function testManifestAndSources() {
   assert.match(
     extensionSource,
     /Prepare this q cell for the active Python kernel[\s\S]*?showInformationMessage\([\s\S]*?PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND/
+  );
+  assert.match(
+    extensionSource,
+    /Run q Cell \(KX\)[\s\S]*?showInformationMessage\([\s\S]*?RUN_Q_NOTEBOOK_CELL_COMMAND/
   );
   assert.match(
     extensionSource,
@@ -7293,7 +8499,7 @@ function testManifestAndSources() {
     ['username', 'Username'],
     ['password', 'Password'],
     ['connectTimeoutMs', 'Connect / handshake timeout (ms)'],
-    ['queryTimeoutMs', 'Query timeout (ms)'],
+    ['queryTimeoutMs', 'Query response timeout (ms)'],
   ];
   formControls.forEach(([id, label]) => {
     assert.ok(formHtml.includes(`<label for="${id}">${label}`), `missing visible label for ${id}`);
@@ -7561,9 +8767,189 @@ function eventLoopTurn() {
   return new Promise(resolve => setImmediate(resolve));
 }
 
+function createNotebookIntegrationRuntime() {
+  const commands = new Map();
+  const contexts = [];
+  const warnings = [];
+  const information = [];
+  const errors = [];
+  const statusProviders = [];
+
+  class EventEmitter {
+    constructor() {
+      this.listeners = new Set();
+      this.disposed = false;
+      this.event = listener => {
+        if (this.disposed) {
+          return { dispose() {} };
+        }
+        this.listeners.add(listener);
+        let active = true;
+        return {
+          dispose: () => {
+            if (!active) {
+              return;
+            }
+            active = false;
+            this.listeners.delete(listener);
+          },
+        };
+      };
+    }
+
+    fire(value) {
+      for (const listener of [...this.listeners]) {
+        listener(value);
+      }
+    }
+
+    dispose() {
+      this.disposed = true;
+      this.listeners.clear();
+    }
+  }
+
+  class NotebookCellStatusBarItem {
+    constructor(text, alignment) {
+      this.text = text;
+      this.alignment = alignment;
+    }
+  }
+
+  const activeNotebookChanged = new EventEmitter();
+  const notebookSelectionChanged = new EventEmitter();
+  const notebookDocumentChanged = new EventEmitter();
+  const configurationChanged = new EventEmitter();
+  const rendererMessages = new EventEmitter();
+  const disposable = dispose => ({ dispose: dispose || (() => undefined) });
+  const vscode = {
+    EventEmitter,
+    NotebookCellKind: {
+      Markup: 1,
+      Code: 2,
+    },
+    NotebookCellStatusBarAlignment: {
+      Left: 1,
+      Right: 2,
+    },
+    NotebookCellStatusBarItem,
+    window: {
+      activeNotebookEditor: undefined,
+      activeTextEditor: undefined,
+      onDidChangeActiveNotebookEditor: activeNotebookChanged.event,
+      onDidChangeNotebookEditorSelection: notebookSelectionChanged.event,
+      showWarningMessage(message) {
+        warnings.push(message);
+        return Promise.resolve(undefined);
+      },
+      showInformationMessage(message) {
+        information.push(message);
+        return Promise.resolve(undefined);
+      },
+      showErrorMessage(message) {
+        errors.push(message);
+        return Promise.resolve(undefined);
+      },
+    },
+    workspace: {
+      onDidChangeNotebookDocument: notebookDocumentChanged.event,
+      onDidChangeConfiguration: configurationChanged.event,
+      getConfiguration() {
+        return {
+          get(_key, fallback) {
+            return fallback;
+          },
+        };
+      },
+    },
+    languages: {
+      async setTextDocumentLanguage(document, languageId) {
+        document.languageId = languageId;
+        return document;
+      },
+      async getLanguages() {
+        return ['python', 'q', 'markdown'];
+      },
+    },
+    commands: {
+      registerCommand(id, handler) {
+        commands.set(id, handler);
+        return disposable(() => commands.delete(id));
+      },
+      executeCommand(id, ...args) {
+        if (id === 'setContext') {
+          contexts.push({ key: args[0], value: args[1] });
+          return Promise.resolve(undefined);
+        }
+        const handler = commands.get(id);
+        return handler ? Promise.resolve(handler(...args)) : Promise.resolve(undefined);
+      },
+    },
+    notebooks: {
+      createRendererMessaging() {
+        return {
+          onDidReceiveMessage: rendererMessages.event,
+          async postMessage() {
+            return true;
+          },
+        };
+      },
+      registerNotebookCellStatusBarItemProvider(notebookType, provider) {
+        const registration = { notebookType, provider };
+        statusProviders.push(registration);
+        return disposable(() => {
+          const index = statusProviders.indexOf(registration);
+          if (index >= 0) {
+            statusProviders.splice(index, 1);
+          }
+        });
+      },
+    },
+  };
+
+  return {
+    vscode,
+    commands,
+    contexts,
+    warnings,
+    information,
+    errors,
+    statusProviders,
+    cell(notebook, index, languageId, source) {
+      const document = {
+        languageId,
+        uri: testUri(`vscode-notebook-cell:///mixed/${index}`),
+        getText: () => source,
+      };
+      return {
+        notebook,
+        index,
+        kind: vscode.NotebookCellKind.Code,
+        document,
+        metadata: {},
+        outputs: languageId === 'python' ? [{ owner: 'python-controller' }] : [],
+      };
+    },
+  };
+}
+
 function createNotebookControllerRuntime() {
   const controllers = [];
   const executions = [];
+  const createExecutionCalls = [];
+  const workspaceEdits = [];
+  const progressRuns = [];
+  const replacements = new Map();
+  const notebooksByUri = new Map();
+  let replacementId = 0;
+  const controls = {
+    applyEditResult: true,
+    applyEditThrows: false,
+    beforeApplyEdit: undefined,
+    deferNotebookEvent: false,
+    onWorkspaceEditConstruct: undefined,
+    preCancelProgress: false,
+  };
   const configuration = new Map([
     ['vscode-kdb.notebook.maxOutputRows', 2],
     ['vscode-kdb.notebook.maxOutputBytes', 4096],
@@ -7611,10 +8997,53 @@ function createNotebookControllerRuntime() {
     }
   }
 
+  const notebookChanges = new EventEmitter();
+
   class NotebookCellOutput {
     constructor(items, metadata = {}) {
       this.items = items;
       this.metadata = metadata;
+    }
+  }
+
+  class NotebookCellData {
+    constructor(kind, value, languageId) {
+      this.kind = kind;
+      this.value = value;
+      this.languageId = languageId;
+      this.outputs = undefined;
+      this.metadata = undefined;
+      this.executionSummary = undefined;
+    }
+  }
+
+  class NotebookRange {
+    constructor(start, end) {
+      this.start = Math.min(start, end);
+      this.end = Math.max(start, end);
+      this.isEmpty = this.start === this.end;
+    }
+  }
+
+  class NotebookEdit {
+    static replaceCells(range, newCells) {
+      return { kind: 'replaceCells', range, newCells };
+    }
+  }
+
+  class WorkspaceEdit {
+    constructor() {
+      this.entries = [];
+      controls.onWorkspaceEditConstruct?.();
+    }
+
+    set(uri, edits) {
+      const notebook = notebooksByUri.get(uri.toString());
+      this.entries.push({
+        uri,
+        edits,
+        version: notebook?.version,
+      });
     }
   }
 
@@ -7644,6 +9073,68 @@ function createNotebookControllerRuntime() {
     }
   }
 
+  function makeCell({
+    kind = 2,
+    languageId = 'q',
+    source = '',
+    uri = `vscode-notebook-cell:///cell/${replacementId + 1}`,
+    metadata = {},
+    outputs = [],
+    executionSummary,
+    preCanceled = false,
+    startThrows = false,
+    endThrows = false,
+    createExecutionThrows = false,
+  } = {}) {
+    const cell = {
+      kind,
+      preCanceled,
+      startThrows,
+      endThrows,
+      createExecutionThrows,
+      metadata,
+      outputs,
+      executionSummary,
+      _notebook: undefined,
+      _source: source,
+      document: {
+        languageId,
+        uri: testUri(uri),
+        getText: () => cell._source,
+      },
+    };
+    Object.defineProperties(cell, {
+      notebook: {
+        enumerable: true,
+        get() {
+          return this._notebook;
+        },
+        set(value) {
+          if (this._notebook === value) {
+            return;
+          }
+          if (this._notebook) {
+            const previousIndex = this._notebook.cells.indexOf(this);
+            if (previousIndex >= 0) {
+              this._notebook.cells.splice(previousIndex, 1);
+            }
+          }
+          this._notebook = value;
+          if (value && !value.cells.includes(this)) {
+            value.cells.push(this);
+          }
+        },
+      },
+      index: {
+        enumerable: true,
+        get() {
+          return this._notebook ? this._notebook.cells.indexOf(this) : -1;
+        },
+      },
+    });
+    return cell;
+  }
+
   function createExecution(cell) {
     const token = new CancellationToken(cell.preCanceled);
     const execution = {
@@ -7670,10 +9161,12 @@ function createNotebookControllerRuntime() {
       async clearOutput() {
         this.clearOutputCalls += 1;
         this.output = undefined;
+        cell.outputs = [];
       },
       async replaceOutput(output) {
         this.replaceOutputCalls.push(output);
         this.output = output;
+        cell.outputs = Array.isArray(output) ? [...output] : [output];
       },
     };
     executions.push(execution);
@@ -7687,6 +9180,13 @@ function createNotebookControllerRuntime() {
       Code: 2,
     },
     NotebookCellOutput,
+    NotebookCellData,
+    NotebookRange,
+    NotebookEdit,
+    WorkspaceEdit,
+    ProgressLocation: {
+      Notification: 15,
+    },
     NotebookCellOutputItem: {
       json(value, mime) {
         return { kind: 'json', mime, value };
@@ -7703,6 +9203,78 @@ function createNotebookControllerRuntime() {
       },
     },
     workspace: {
+      onDidChangeNotebookDocument: notebookChanges.event,
+      async applyEdit(edit) {
+        workspaceEdits.push(edit);
+        if (typeof controls.beforeApplyEdit === 'function') {
+          await controls.beforeApplyEdit(edit);
+        }
+        if (controls.applyEditThrows) {
+          throw new Error('injected workspace edit failure');
+        }
+        if (!controls.applyEditResult) {
+          return false;
+        }
+        for (const entry of edit.entries) {
+          const notebook = notebooksByUri.get(entry.uri.toString());
+          if (!notebook || notebook.isClosed || notebook.version !== entry.version) {
+            return false;
+          }
+          for (const notebookEdit of entry.edits) {
+            if (notebookEdit.kind !== 'replaceCells') {
+              throw new Error(`unsupported notebook edit ${notebookEdit.kind}`);
+            }
+            const removedCells = notebook.cells.slice(
+              notebookEdit.range.start,
+              notebookEdit.range.end
+            );
+            const addedCells = notebookEdit.newCells.map(data => {
+              const replacement = makeCell({
+                kind: data.kind,
+                languageId: data.languageId,
+                source: data.value,
+                uri: `${removedCells[0]?.document.uri.toString() || 'vscode-notebook-cell:///cell'}` +
+                  `?replacement=${++replacementId}`,
+                metadata: data.metadata,
+                outputs: data.outputs || [],
+                executionSummary: data.executionSummary,
+              });
+              replacement._notebook = notebook;
+              return replacement;
+            });
+            notebook.cells.splice(
+              notebookEdit.range.start,
+              notebookEdit.range.end - notebookEdit.range.start,
+              ...addedCells
+            );
+            removedCells.forEach((removed, removedIndex) => {
+              if (addedCells[removedIndex]) {
+                replacements.set(removed, addedCells[removedIndex]);
+              }
+            });
+            for (const removed of removedCells) {
+              removed._notebook = notebook;
+            }
+            notebook.version += 1;
+            const event = {
+              notebook,
+              metadata: undefined,
+              contentChanges: [{
+                range: notebookEdit.range,
+                addedCells,
+                removedCells,
+              }],
+              cellChanges: [],
+            };
+            if (controls.deferNotebookEvent) {
+              setTimeout(() => notebookChanges.fire(event), 0);
+            } else {
+              notebookChanges.fire(event);
+            }
+          }
+        }
+        return true;
+      },
       getConfiguration(section) {
         return {
           get(key, fallback) {
@@ -7712,14 +9284,38 @@ function createNotebookControllerRuntime() {
         };
       },
     },
+    window: {
+      withProgress(options, task) {
+        const token = new CancellationToken(controls.preCancelProgress);
+        const run = { options, token };
+        progressRuns.push(run);
+        return task({ report() {} }, token);
+      },
+    },
     notebooks: {
       createNotebookController(id, notebookType, label, executeHandler) {
         const selectionEmitter = new EventEmitter();
+        const selectedNotebooks = new Set();
+        const fireSelection = selectionEmitter.fire.bind(selectionEmitter);
+        selectionEmitter.fire = event => {
+          const key = event.notebook.uri.toString();
+          if (event.selected) {
+            selectedNotebooks.add(key);
+          } else {
+            selectedNotebooks.delete(key);
+          }
+          fireSelection(event);
+        };
         const controller = {
           id,
           notebookType,
           label,
-          executeHandler,
+          executeHandler(cells, notebook, ...args) {
+            for (const cell of cells) {
+              cell.notebook = notebook;
+            }
+            return executeHandler(cells, notebook, ...args);
+          },
           selectionEmitter,
           onDidChangeSelectedNotebooks: selectionEmitter.event,
           supportedLanguages: undefined,
@@ -7728,6 +9324,13 @@ function createNotebookControllerRuntime() {
           detail: undefined,
           disposeCalls: 0,
           createNotebookCellExecution(cell) {
+            createExecutionCalls.push(cell);
+            if (!cell.notebook ||
+              !selectedNotebooks.has(cell.notebook.uri.toString())) {
+              throw new Error(
+                'Notebook controller is not associated with the target notebook'
+              );
+            }
             if (cell.createExecutionThrows) {
               throw new Error('injected duplicate execution');
             }
@@ -7747,6 +9350,10 @@ function createNotebookControllerRuntime() {
     vscode,
     controllers,
     executions,
+    createExecutionCalls,
+    workspaceEdits,
+    progressRuns,
+    controls,
     cell({
       kind = vscode.NotebookCellKind.Code,
       languageId = 'q',
@@ -7757,27 +9364,64 @@ function createNotebookControllerRuntime() {
       endThrows = false,
       createExecutionThrows = false,
     } = {}) {
-      return {
+      return makeCell({
         kind,
+        languageId,
+        source,
+        uri,
         preCanceled,
         startThrows,
         endThrows,
         createExecutionThrows,
-        document: {
-          languageId,
-          uri: testUri(uri),
-          getText: () => source,
-        },
-      };
+      });
     },
     notebook(uri) {
-      return {
+      const notebook = {
         uri: testUri(uri),
         notebookType: 'jupyter-notebook',
+        version: 1,
+        isClosed: false,
+        cells: [],
+        get cellCount() {
+          return this.cells.length;
+        },
+        cellAt(index) {
+          return this.cells[index];
+        },
+        getCells(range) {
+          return range
+            ? this.cells.slice(range.start, range.end)
+            : this.cells.slice();
+        },
       };
+      notebooksByUri.set(notebook.uri.toString(), notebook);
+      return notebook;
     },
     executionFor(cell) {
       return executions.filter(execution => execution.cell === cell).at(-1);
+    },
+    outputFor(cell) {
+      return cell.outputs[0];
+    },
+    replacementFor(cell) {
+      return replacements.get(cell);
+    },
+    touchCell(cell, changes = {}) {
+      if (Object.prototype.hasOwnProperty.call(changes, 'source')) {
+        cell._source = changes.source;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, 'languageId')) {
+        cell.document.languageId = changes.languageId;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, 'outputs')) {
+        cell.outputs = changes.outputs;
+      }
+      if (Object.prototype.hasOwnProperty.call(changes, 'executionSummary')) {
+        cell.executionSummary = changes.executionSummary;
+      }
+      if (cell.notebook) {
+        cell.notebook.version += 1;
+      }
     },
   };
 }

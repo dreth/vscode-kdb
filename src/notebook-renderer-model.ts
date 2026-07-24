@@ -1,3 +1,9 @@
+import {
+  ChartType,
+  ChartTypeCapabilities,
+  chartTypeCapabilities,
+} from './charting';
+
 export interface NotebookCellSelection {
   anchorRow: number;
   anchorColumn: number;
@@ -205,18 +211,107 @@ export function notebookSelectionCopyAllowed(
   return cells > 0 && cells <= Math.max(0, nonNegativeInteger(maximumCells));
 }
 
+export interface NotebookSelectionToolsState {
+  visible: boolean;
+  open: boolean;
+  copyEnabled: boolean;
+}
+
+export function notebookSelectionToolsState(
+  selection: NotebookCellSelection | undefined,
+  maximumCells: number,
+  requestedOpen: boolean
+): NotebookSelectionToolsState {
+  const visible = notebookSelectionCopyAllowed(selection, maximumCells);
+  return {
+    visible,
+    open: visible && requestedOpen,
+    copyEnabled: visible,
+  };
+}
+
+export type NotebookSearchEnterAction = 'request' | 'next' | 'previous';
+
+export function notebookSearchEnterAction(
+  matchCount: number,
+  pending: boolean,
+  shiftKey: boolean
+): NotebookSearchEnterAction {
+  if (Math.max(0, nonNegativeInteger(matchCount)) < 1 || pending) {
+    return 'request';
+  }
+  return shiftKey ? 'previous' : 'next';
+}
+
+export interface NotebookSavedSearchMatch {
+  displayRow: number;
+  sourceRow: number;
+}
+
+export function notebookSavedSearchMatches(
+  rowTexts: readonly (readonly string[])[],
+  rowOrder: readonly number[],
+  query: string,
+  maximumMatches: number
+): { matches: NotebookSavedSearchMatch[]; capped: boolean } {
+  const needle = query.toLocaleLowerCase();
+  const maximum = Math.max(0, nonNegativeInteger(maximumMatches));
+  if (!needle || maximum === 0) {
+    return { matches: [], capped: false };
+  }
+  const matches: NotebookSavedSearchMatch[] = [];
+  let capped = false;
+  for (let displayRow = 0; displayRow < rowOrder.length; displayRow += 1) {
+    const sourceRow = rowOrder[displayRow];
+    if (!Number.isSafeInteger(sourceRow) || sourceRow < 0 || sourceRow >= rowTexts.length ||
+      !rowTexts[sourceRow].some(value => value.toLocaleLowerCase().includes(needle))) {
+      continue;
+    }
+    if (matches.length >= maximum) {
+      capped = true;
+      break;
+    }
+    matches.push({ displayRow, sourceRow });
+  }
+  return { matches, capped };
+}
+
+export function notebookMovedSearchMatchIndex(
+  activeIndex: number,
+  matchCount: number,
+  direction: number
+): number {
+  const count = nonNegativeInteger(matchCount);
+  if (count < 1) {
+    return -1;
+  }
+  const current = Number.isSafeInteger(activeIndex) && activeIndex >= 0 && activeIndex < count
+    ? activeIndex
+    : direction < 0 ? 0 : -1;
+  return (current + (direction < 0 ? -1 : 1) + count) % count;
+}
+
 export function notebookDelimitedRangeText(
   columns: readonly string[],
   selection: NotebookCellSelection,
   format: NotebookCopyFormat,
   includeHeaders: boolean,
-  cellText: (row: number, column: number) => string
+  cellText: (row: number, column: number) => string,
+  includeRowIndex = false
 ): string {
   const range = notebookSelectionRange(selection)!;
   const delimiter = format === 'csv' ? ',' : '\t';
   const lines: string[] = [];
   if (includeHeaders) {
     const headers: string[] = [];
+    if (includeRowIndex) {
+      let rowHeader = '#';
+      let suffix = 1;
+      while (columns.slice(range.startColumn, range.endColumn + 1).includes(rowHeader)) {
+        rowHeader = `#_${suffix++}`;
+      }
+      headers.push(delimitedCell(rowHeader, delimiter));
+    }
     for (let column = range.startColumn; column <= range.endColumn; column += 1) {
       headers.push(delimitedCell(columns[column] || '', delimiter));
     }
@@ -224,6 +319,9 @@ export function notebookDelimitedRangeText(
   }
   for (let row = range.startRow; row <= range.endRow; row += 1) {
     const cells: string[] = [];
+    if (includeRowIndex) {
+      cells.push(String(row + 1));
+    }
     for (let column = range.startColumn; column <= range.endColumn; column += 1) {
       cells.push(delimitedCell(cellText(row, column), delimiter));
     }
@@ -279,6 +377,141 @@ export function toggleNotebookChartYColumn(
     return selected;
   }
   return selected.filter(value => value !== column);
+}
+
+export type NotebookRendererChartType =
+  | 'line'
+  | 'scatter'
+  | 'step'
+  | 'bar'
+  | 'box'
+  | 'candlestick';
+
+export interface NotebookRendererChartConfiguration {
+  visible: boolean;
+  chartType: NotebookRendererChartType;
+  xColumn: string;
+  yColumns: string[];
+  groupByColumn: string;
+  openColumn: string;
+  highColumn: string;
+  lowColumn: string;
+  closeColumn: string;
+}
+
+export interface NotebookChartControlConfiguration {
+  chartType: ChartType;
+  xColumn: string;
+  yColumns: readonly string[];
+  groupByColumn?: string;
+  openColumn?: string;
+  highColumn?: string;
+  lowColumn?: string;
+  closeColumn?: string;
+}
+
+export interface NotebookChartControlModel {
+  capabilities: ChartTypeCapabilities;
+  yColumns: string[];
+  groupColumns: string[];
+  validationMessage: string;
+}
+
+export function notebookChartControlModel(
+  configuration: NotebookChartControlConfiguration,
+  xColumns: readonly string[],
+  numericColumns: readonly string[],
+  groupColumns: readonly string[]
+): NotebookChartControlModel {
+  const capabilities = chartTypeCapabilities(configuration.chartType);
+  const yColumns = numericColumns.filter(name => name !== configuration.xColumn);
+  const eligibleGroupColumns = capabilities.supportsGroupBy ? [...groupColumns] : [];
+  let validationMessage = '';
+  if (!configuration.xColumn || !xColumns.includes(configuration.xColumn)) {
+    validationMessage = 'Select one numeric or temporal X column.';
+  } else if (capabilities.usesOhlc) {
+    const entries = [
+      ['Open', configuration.openColumn || ''],
+      ['High', configuration.highColumn || ''],
+      ['Low', configuration.lowColumn || ''],
+      ['Close', configuration.closeColumn || ''],
+    ];
+    const missing = entries.filter(([, value]) => !value).map(([label]) => label);
+    const values = entries.map(([, value]) => value);
+    if (missing.length > 0) {
+      validationMessage =
+        `Select numeric ${missing.join(', ')} column${missing.length === 1 ? '' : 's'}.`;
+    } else if (new Set(values).size !== values.length) {
+      validationMessage = 'Open, High, Low, and Close must use four distinct numeric columns.';
+    } else if (values.some(value => !yColumns.includes(value))) {
+      validationMessage = 'Candlestick fields must use numeric columns available in this result.';
+    }
+  } else if (configuration.yColumns.length === 0 ||
+    configuration.yColumns.some(value => !yColumns.includes(value))) {
+    validationMessage = 'Select at least one numeric Y column distinct from X.';
+  } else if (capabilities.supportsGroupBy && configuration.groupByColumn &&
+    !eligibleGroupColumns.includes(configuration.groupByColumn)) {
+    validationMessage = 'Selected Group by column is unavailable.';
+  }
+  return {
+    capabilities,
+    yColumns,
+    groupColumns: eligibleGroupColumns,
+    validationMessage,
+  };
+}
+
+export function reconcileNotebookChartConfiguration(
+  previous: NotebookRendererChartConfiguration,
+  xColumns: readonly string[],
+  yColumns: readonly string[],
+  groupColumns: readonly string[]
+): { configuration: NotebookRendererChartConfiguration; compatible: boolean } {
+  const defaultX = xColumns.find(name => yColumns.some(candidate => candidate !== name)) ||
+    xColumns[0] || '';
+  const xColumn = xColumns.includes(previous.xColumn) ? previous.xColumn : defaultX;
+  const selectedY = reconcileNotebookChartYColumns(
+    yColumns,
+    xColumn,
+    previous.yColumns
+  );
+  const supportsGroup = previous.chartType === 'line' ||
+    previous.chartType === 'scatter' ||
+    previous.chartType === 'step' ||
+    previous.chartType === 'bar';
+  const groupByColumn = supportsGroup && groupColumns.includes(previous.groupByColumn)
+    ? previous.groupByColumn
+    : '';
+  const roleColumn = (current: string, role: string): string => {
+    if (yColumns.includes(current)) {
+      return current;
+    }
+    const normalized = role.toLocaleLowerCase();
+    const matches = yColumns.filter(name => name.trim().toLocaleLowerCase() === normalized);
+    return matches.length === 1 ? matches[0] : '';
+  };
+  const configuration: NotebookRendererChartConfiguration = {
+    visible: previous.visible,
+    chartType: previous.chartType,
+    xColumn,
+    yColumns: selectedY,
+    groupByColumn,
+    openColumn: roleColumn(previous.openColumn, 'open'),
+    highColumn: roleColumn(previous.highColumn, 'high'),
+    lowColumn: roleColumn(previous.lowColumn, 'low'),
+    closeColumn: roleColumn(previous.closeColumn, 'close'),
+  };
+  const sameY = previous.yColumns.length === selectedY.length &&
+    previous.yColumns.every((value, index) => value === selectedY[index]);
+  const compatible = previous.xColumn === xColumn && (
+    previous.chartType === 'candlestick'
+      ? previous.openColumn === configuration.openColumn &&
+        previous.highColumn === configuration.highColumn &&
+        previous.lowColumn === configuration.lowColumn &&
+        previous.closeColumn === configuration.closeColumn
+      : sameY && (!supportsGroup || previous.groupByColumn === groupByColumn)
+  );
+  return { configuration, compatible };
 }
 
 function delimitedCell(value: string, delimiter: string): string {

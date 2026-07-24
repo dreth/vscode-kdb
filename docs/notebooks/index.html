@@ -428,15 +428,15 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
-  <a href="#native-kx-q-direct-ipc-controller" class="md-nav__link">
+  <a href="#mode-1-q-only-direct-ipc-controller" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Native KX q Direct IPC controller
+        Mode 1: q-only Direct IPC controller
 
     </span>
   </a>
 
-    <nav class="md-nav" aria-label="Native KX q Direct IPC controller">
+    <nav class="md-nav" aria-label="Mode 1: q-only Direct IPC controller">
       <ul class="md-nav__list">
 
           <li class="md-nav__item">
@@ -450,11 +450,28 @@
 
 </li>
 
-          <li class="md-nav__item">
-  <a href="#active-connection-and-session-continuity" class="md-nav__link">
+      </ul>
+    </nav>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#mode-2-mixed-python-and-q" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Active connection and session continuity
+        Mode 2: mixed Python and q
+
+    </span>
+  </a>
+
+    <nav class="md-nav" aria-label="Mode 2: mixed Python and q">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#focused-q-cell-shortcut" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Focused q-cell shortcut
 
     </span>
   </a>
@@ -467,15 +484,26 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#live-direct-result-and-saved-snapshot" class="md-nav__link">
+  <a href="#active-connection-and-shared-q-session" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Live direct result and saved snapshot
+        Active connection and shared q session
 
     </span>
   </a>
 
-    <nav class="md-nav" aria-label="Live direct result and saved snapshot">
+</li>
+
+        <li class="md-nav__item">
+  <a href="#live-kx-result-and-saved-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Live KX result and saved snapshot
+
+    </span>
+  </a>
+
+    <nav class="md-nav" aria-label="Live KX result and saved snapshot">
       <ul class="md-nav__list">
 
           <li class="md-nav__item">
@@ -833,15 +861,15 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
-  <a href="#native-kx-q-direct-ipc-controller" class="md-nav__link">
+  <a href="#mode-1-q-only-direct-ipc-controller" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Native KX q Direct IPC controller
+        Mode 1: q-only Direct IPC controller
 
     </span>
   </a>
 
-    <nav class="md-nav" aria-label="Native KX q Direct IPC controller">
+    <nav class="md-nav" aria-label="Mode 1: q-only Direct IPC controller">
       <ul class="md-nav__list">
 
           <li class="md-nav__item">
@@ -855,11 +883,28 @@
 
 </li>
 
-          <li class="md-nav__item">
-  <a href="#active-connection-and-session-continuity" class="md-nav__link">
+      </ul>
+    </nav>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#mode-2-mixed-python-and-q" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Active connection and session continuity
+        Mode 2: mixed Python and q
+
+    </span>
+  </a>
+
+    <nav class="md-nav" aria-label="Mode 2: mixed Python and q">
+      <ul class="md-nav__list">
+
+          <li class="md-nav__item">
+  <a href="#focused-q-cell-shortcut" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Focused q-cell shortcut
 
     </span>
   </a>
@@ -872,15 +917,26 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#live-direct-result-and-saved-snapshot" class="md-nav__link">
+  <a href="#active-connection-and-shared-q-session" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Live direct result and saved snapshot
+        Active connection and shared q session
 
     </span>
   </a>
 
-    <nav class="md-nav" aria-label="Live direct result and saved snapshot">
+</li>
+
+        <li class="md-nav__item">
+  <a href="#live-kx-result-and-saved-snapshot" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Live KX result and saved snapshot
+
+    </span>
+  </a>
+
+    <nav class="md-nav" aria-label="Live KX result and saved snapshot">
       <ul class="md-nav__list">
 
           <li class="md-nav__item">
@@ -981,34 +1037,34 @@
 
 
 <h1 id="jupyteripython-notebooks">Jupyter/IPython Notebooks</h1>
-<p>KX for VS Code 0.2.4 supports two explicit q notebook routes. They have different session ownership and must not be confused.</p>
+<p>KX for VS Code 0.2.5 supports two clear first-party notebook modes:</p>
 <table>
 <thead>
 <tr>
-<th>Route</th>
-<th>Select in VS Code</th>
-<th>Execution/session</th>
-<th>Cell source</th>
+<th>Mode</th>
+<th>Selected controller</th>
+<th>Python cells</th>
+<th>q cells</th>
 </tr>
 </thead>
 <tbody>
 <tr>
+<td>q-only</td>
 <td><strong>KX q (Direct IPC)</strong></td>
-<td>Notebook's normal kernel/controller selector</td>
-<td>Existing active profile and q client from <strong>KX Connections</strong></td>
-<td>Ordinary q; leading <code>%%q</code> is rejected</td>
+<td>Unsupported by this q-only controller</td>
+<td>Normal Run Cell / Run All / <code>Ctrl+Enter</code></td>
 </tr>
 <tr>
-<td>Python/IPython helper</td>
-<td>A normal Python Jupyter controller</td>
-<td>Evaluator configured inside that Python kernel</td>
-<td>Leading <code>%%q</code></td>
+<td>Mixed Python + q</td>
+<td>Normal Python Jupyter controller</td>
+<td>Normal Jupyter Run</td>
+<td><strong>Run q Cell (KX)</strong> toolbar/context/Command Palette action</td>
 </tr>
 </tbody>
 </table>
-<p>Selecting one route never silently invokes the other. The extension uses only supported VS Code notebook APIs and does not patch or intercept Microsoft Jupyter.</p>
-<h2 id="native-kx-q-direct-ipc-controller">Native KX q Direct IPC controller</h2>
-<p>Version 0.2.4 includes:</p>
+<p>VS Code selects one controller for the notebook. KX does not patch Jupyter or pretend built-in Run can dispatch cells through multiple selected controllers. The mixed action is an explicit second execution gesture for q-language cells; it leaves the Python controller and Python cells untouched.</p>
+<h2 id="mode-1-q-only-direct-ipc-controller">Mode 1: q-only Direct IPC controller</h2>
+<p>Version 0.2.5 includes:</p>
 <ul>
 <li>controller ID <code>vscode-kdb.q-notebook-controller</code>;</li>
 <li>notebook type <code>jupyter-notebook</code>;</li>
@@ -1018,34 +1074,83 @@
 <p>Open an ordinary <code>.ipynb</code>, use the notebook's top-right kernel/controller selector or <strong>Notebook: Select Notebook Kernel</strong>, and choose <strong>KX q (Direct IPC)</strong>. This is VS Code's native controller/kernel surface, analogous to choosing another language kernel. It is not an entry in the Python controller's per-cell language picker and does not masquerade as a Python kernel.</p>
 <p>The controller is registered dynamically through <code>vscode.notebooks.createNotebookController</code>. The manifest's <code>onNotebook:jupyter-notebook</code> activation event ensures the extension activates for an ordinary Jupyter notebook. No private Jupyter API, <code>ms-toolsai.jupyter</code> runtime import, or hidden command interception is used.</p>
 <h3 id="run-complete-q-cells-normally">Run complete q cells normally</h3>
-<p>With the direct controller selected, use normal <strong>Run Cell</strong>, <strong>Run All</strong>, or <code>Ctrl+Enter</code>. VS Code calls the controller execution handler with the complete cell source. No selection or alternate KX run gesture is required. A leading <code>%%q</code> is rejected to prevent route confusion; remove it, or select the Python controller for the helper route.</p>
+<p>With the direct controller selected, use normal <strong>Run Cell</strong>, <strong>Run All</strong>, or <code>Ctrl+Enter</code> / <code>Cmd+Enter</code>. VS Code calls the controller execution handler with the complete cell source. No selection or alternate KX run gesture is required. The mixed-mode KX shortcut and inline action stand down while this controller is selected. A leading <code>%%q</code> is rejected; remove it, or use the separate Python helper route.</p>
 <p>The controller advertises q, so q-language code cells use the extension's TextMate grammar. If an existing code cell still has another language, select it and use <strong>KX: Set Notebook Cell Language to q</strong>. The inline Set-q button is hidden after the cell is q. <strong>KX: Restore Notebook Cell Language</strong> remains a secondary editing aid.</p>
-<p>Markdown is ignored. A non-q code cell is never dispatched to q and receives a clear output that the direct controller supports q only. KX does not intercept a Run owned by a selected Python controller.</p>
-<h3 id="active-connection-and-session-continuity">Active connection and session continuity</h3>
-<p>Direct notebook execution uses the profile currently selected in the first-party <strong>KX Connections</strong> view. The controller description/detail and q cell status identify:</p>
+<p>Markdown is ignored. A non-q code cell is never dispatched to q and receives a clear output that the direct controller supports q only.</p>
+<h2 id="mode-2-mixed-python-and-q">Mode 2: mixed Python and q</h2>
+<p>Keep the normal Python Jupyter controller selected. Python cells continue to use Jupyter's Run commands, execution order, variables, and outputs. KX never changes their language, controller, or source.</p>
+<p>For each intended q cell:</p>
+<ol>
+<li>Set the cell language to q with the inline language action, notebook cell context menu, or <strong>KX: Set Notebook Cell Language to q</strong>.</li>
+<li>Use the compact <strong>Run q Cell (KX)</strong> play action, its cell context entry, or the Command Palette command.</li>
+<li>Read the active route from the q cell status: <code>KX • &lt;active connection&gt; • &lt;namespace&gt;</code>.</li>
+</ol>
+<p>The action sends the complete cell source through the same direct KX query/session/result machinery as the q-only controller. It does not require <code>%%q</code>, select the KX controller, or mutate the Python controller.</p>
+<p>Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. <strong>Run q Cell (KX)</strong> leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.</p>
+<h3 id="focused-q-cell-shortcut">Focused q-cell shortcut</h3>
+<p>While the q cell editor itself has text focus, the contributed default <code>Ctrl+Enter</code> on Windows/Linux or <code>Cmd+Enter</code> on macOS invokes <strong>Run q Cell (KX)</strong>. The public manifest guard requires all of:</p>
 <ul>
-<li><strong>Direct IPC</strong>;</li>
-<li>active profile name;</li>
-<li>endpoint and namespace; and</li>
-<li>connected state, or that the saved profile will connect on Run.</li>
+<li>notebook cell editor and editor text focus;</li>
+<li>notebook type <code>jupyter-notebook</code>;</li>
+<li>code cell type;</li>
+<li>language exactly <code>q</code>;</li>
+<li>resource scheme <code>vscode-notebook-cell</code>; and</li>
+<li><strong>KX q (Direct IPC)</strong> not selected.</li>
 </ul>
-<p>The controller uses the same <code>ConnectionManager</code> client and q process/session as normal <code>.q</code> editor runs. It does not open a per-cell or per-notebook connection. Assignments, q variables, process configuration, and namespace state therefore remain visible across direct notebook cells and editor runs on that active profile. Every direct cell uses the q script/namespace wrapper and requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer).</p>
-<p>A saved but disconnected active profile may connect on demand because selecting <strong>KX q (Direct IPC)</strong> was an explicit execution choice. Its profile/global connect and query timeouts apply. If no active saved profile exists, output says <strong>Add or select a KX connection in the KX Connections view</strong>. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.</p>
-<p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local execution wait and completes the notebook execution reliably, but q work or side effects already sent may continue on the server. Version 0.2.4 does not claim server-side interruption.</p>
-<h2 id="live-direct-result-and-saved-snapshot">Live direct result and saved snapshot</h2>
-<p>A successful direct result has two representations:</p>
+<p>It cannot match Python, Markdown, an ordinary source editor, output focus, or a cell container without editor focus. In those other focus states VS Code's normal notebook shortcut remains in charge; use the visible KX action for q execution. Extension default bindings outrank the built-in notebook rule when this exact guard matches, while later user/keymap rules can still override any default shortcut. If <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> was customized, use the toolbar/context/Command Palette action or inspect <strong>Developer: Toggle Keyboard Shortcuts Troubleshooting</strong>. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.</p>
+<h2 id="active-connection-and-shared-q-session">Active connection and shared q session</h2>
+<p>Both first-party modes use the profile currently selected in <strong>KX Connections</strong>. They use the same <code>ConnectionManager</code> client and q process/session as normal <code>.q</code> editor runs; they do not open a per-cell or per-notebook connection. Assignments, q variables, process configuration, and namespace state therefore remain visible across q-only cells, mixed-mode KX q cells, and editor runs on that active profile. Every q cell uses the same script/namespace wrapper and requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer).</p>
+<p>A saved but disconnected active profile may connect on demand after either explicit KX execution gesture. Its profile/global connect and query timeouts apply. If no active saved profile exists, output says <strong>Add or select a KX connection in the KX Connections view</strong>. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.</p>
+<p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; the selected q controller completes its native execution, while mixed mode writes a cancellation result only if the q cell is still unchanged. q work or side effects already sent may continue on the server. Version 0.2.5 does not claim server-side interruption.</p>
+<h2 id="live-kx-result-and-saved-snapshot">Live KX result and saved snapshot</h2>
+<p>A successful result from either first-party KX mode has two representations:</p>
 <ol>
 <li>an extension-host live result backed by the decoded q value; and</li>
 <li>a safe bounded <code>application/vnd.kx.result+json</code> version 1 snapshot plus <code>text/plain</code> fallback stored in notebook output.</li>
 </ol>
 <p>While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. q general null/no-value responses produced by assignments, declarations, and calls such as <code>hopen</code>, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.</p>
-<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Capped search, three-state sort, drag selection, Shift-range selection, and keyboard navigation are available inline. A selected rectangle of at most 20,000 cells can be copied as TSV or CSV through the owning extension-host record, including selected rows outside the currently loaded virtual slice. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Column hide/reorder and full export remain panel features. The concise <strong>KX Results</strong> action hands the same live value to the full panel.</p>
-<p>Inline charts remain below the table when shown. Line, scatter, step, and clustered bar charts support selectable X, up to 16 selected numeric Y series, a point cap, theme-aware axes/grid/background, legend toggles, crosshair selection, drag zoom, and Reset zoom. Live chart requests use the full in-memory value within the chart source-row and point limits.</p>
+<p>The renderer is a compact adaptation of the standard KX Results interaction model:</p>
+<ul>
+<li>the one-line header uses <strong>KX Results</strong> and <strong>Settings</strong>;</li>
+<li>table controls use Search, match status, and Chart;</li>
+<li>Search <code>Enter</code> / <code>Shift+Enter</code> navigate next/previous matches without separate buttons;</li>
+<li>selection copy appears only after selecting cells, in a compact <strong>Tools</strong> menu with one format selector and one Copy action; and</li>
+<li>no inert Reset Size, default disabled match-navigation, duplicate Copy TSV/CSV, or placeholder controls are shown.</li>
+</ul>
+<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Three-state sort, drag selection, Shift-range selection, and keyboard navigation remain available. A selected rectangle of at most 20,000 cells can be copied through the owning extension-host record, including selected rows outside the currently loaded virtual slice. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Column hide/reorder and full export remain panel features. <strong>KX Results</strong> hands the same live value to the full panel.</p>
+<p>Inline charts use the same real capability model as the panel:</p>
+<table>
+<thead>
+<tr>
+<th>Type</th>
+<th>Required controls</th>
+<th>Group By</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Line, scatter, step, bar</td>
+<td>X and one or more Y series</td>
+<td>Available for a categorical column</td>
+</tr>
+<tr>
+<td>Box</td>
+<td>X and one or more numeric Y series</td>
+<td>Unavailable</td>
+</tr>
+<tr>
+<td>Candlestick</td>
+<td>X and distinct Open, High, Low, Close fields</td>
+<td>Unavailable</td>
+</tr>
+</tbody>
+</table>
+<p>The notebook-only visible Point cap is removed. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and chart sampling defaults still bound work, and compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed. Legend-hidden series remain hidden through zoom, Reset zoom/double-click, explicit rerender, resize, renderer settings messages, and compatible configuration updates. Zoom refinement remains available after opening the value in the full KX Results panel; the notebook renderer does not advertise a Refine action it cannot perform.</p>
 <p><code>vscode-kdb.results.*</code> is the common durable settings source for live notebook results and the standard panel. Supported density/sizing, array formatting, qText and value-display strategies, elapsed-time display, and chart changes use a validated renderer/extension message path. A supported setting changed from a live notebook result updates the same global VS Code configuration used by other live q cells and open KX panels.</p>
 <h3 id="exact-live-lifetime">Exact live lifetime</h3>
 <p>The live registry exists only in memory for the current extension-host session:</p>
 <ul>
-<li>every opaque record is bound to its notebook URI and cell URI;</li>
+<li>every opaque record is bound to its notebook URI and current cell URI (mixed mode rebinds it after the output edit replaces the q cell handle);</li>
 <li>rerunning a cell replaces that cell's record;</li>
 <li>removing a cell removes that cell's record;</li>
 <li>closing a notebook removes all records for that notebook;</li>
@@ -1085,17 +1190,17 @@
 </tr>
 </tbody>
 </table>
-<p>Direct-controller output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and <code>text/plain</code>. It does not add <code>text/html</code> or a persisted chart specification. The separate Python helper can add escaped <code>text/html</code> and an optional persisted chart specification. Neither route stores credentials, passwords, tokens, connection objects, recoverable IPC handles, or the unbounded live result. Omitted rows cannot be recovered from a saved or reopened <code>.ipynb</code>.</p>
-<p>The saved-result renderer provides the same compact vertically resizable table, stable two-axis scrolling, drag/Shift/keyboard range selection, TSV/CSV selection copy, explicit truncation notices, and local multi-series uPlot line/scatter/step/bar controls. Direct saved-output chart choices are transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
+<p>First-party direct output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and <code>text/plain</code>. It does not add <code>text/html</code> or a persisted chart specification. The separate Python helper can add escaped <code>text/html</code> and an optional persisted chart specification. Neither route stores credentials, passwords, tokens, connection objects, recoverable IPC handles, or the unbounded live result. Omitted rows cannot be recovered from a saved or reopened <code>.ipynb</code>.</p>
+<p>The saved-result renderer provides the same compact table/Tools/Chart model, stable two-axis scrolling, range selection copy, explicit truncation notices, and all capability-valid chart selectors over the stored rows. Direct saved-output chart choices are transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
 <p><code>vscode-kdb.notebook.presentation</code> accepts:</p>
 <ul>
 <li><code>inline</code> (default);</li>
 <li><code>panel</code>; or</li>
 <li><code>both</code>.</li>
 </ul>
-<p>These automatic modes apply to Python-helper output. Direct-controller results always remain inline beneath the cell and expose a concise KX Results action: live values open in the full panel while their record exists; expired/reopened direct output opens only the bounded rows stored in the notebook. No mode or handoff reruns q or recovers omitted rows.</p>
+<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell and expose a concise KX Results action: live values open in the full panel while their record exists; expired/reopened output opens only the bounded rows stored in the notebook. No mode or handoff reruns q or recovers omitted rows.</p>
 <h2 id="separate-python-q-helper-route">Separate Python <code>%%q</code> helper route</h2>
-<p>Use <code>python/kx_notebook</code> when q must run through an evaluator owned by the selected Python/IPython kernel. This route remains separate from Direct IPC and does not share q variables, namespace state, or session identity with it by implication.</p>
+<p>Use <code>python/kx_notebook</code> only when q must run through an evaluator owned by the selected Python/IPython kernel. This is distinct from mixed mode's <strong>Run q Cell (KX)</strong>: the helper remains inside Python, requires <code>%%q</code>, and does not share q variables, namespace state, or session identity with direct KX execution by implication.</p>
 <p>The helper bundles no q runtime, PyKX binary, credential, IPC connection, or remote bridge. Install it into the same Python environment selected as the notebook kernel:</p>
 <div class="highlight"><pre><span></span><code>uv<span class="w"> </span>venv<span class="w"> </span>/tmp/vscode-kdb-kx-notebook
 uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span>/tmp/vscode-kdb-kx-notebook/bin/python<span class="w"> </span><span class="se">\</span>
@@ -1136,6 +1241,7 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 </ol>
 <p>The contextual <strong>Prepare this q cell for the active Python kernel</strong> action adds the marker and KX metadata without executing. Tag/Prepare actions are hidden while the direct controller is selected to avoid presenting the Python route as a direct-controller requirement.</p>
 <p>The helper emits the same bounded version 1 MIME contract plus escaped <code>text/html</code> and <code>text/plain</code> fallbacks. Its marker limits bound persisted output, not server-side q execution. The helper never opens a connection and never receives a Direct IPC live-result identity. A user callback may independently target the same external q process, but that is user-owned configuration—not extension-managed state sharing.</p>
+<p>When a helper evaluator returns <code>EvaluationResult(..., chart=Chart(...))</code>, <code>Chart.type</code> accepts <code>line</code>, <code>scatter</code>, <code>step</code>, <code>bar</code>, <code>box</code>, or <code>candlestick</code>. Line/scatter/step/bar may use <code>group_by_column</code>. Candlestick requires <code>y_columns=()</code> plus distinct <code>open_column</code>, <code>high_column</code>, <code>low_column</code>, and <code>close_column</code> fields. The interactive renderer supports all six; the static HTML fallback draws only ungrouped line/scatter/step/bar and clearly reports grouped, box, or candlestick selections as interactive-only.</p>
 <h2 id="cell-metadata">Cell metadata</h2>
 <p>VS Code's built-in Jupyter serializer can persist a non-default q cell as:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
@@ -1148,7 +1254,7 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 </code></pre></div>
 <p>That serializer-owned field is separate from the helper's nested <code>metadata.vscode-kdb</code> marker/limit object. Tagging merges its metadata without deleting unrelated fields and preserves an existing leading <code>%%q</code> marker.</p>
 <h2 id="evidence-boundary">Evidence boundary</h2>
-<p>Focused pure/provider tests cover controller identity/type/label/language, registration/disposal, supported activation, active-profile and namespace routing, session continuity, complete-cell dispatch, q-only filtering, scalar/table/error output, connection failures, cancellation, redaction, live result lifetime, bounded snapshots, shared settings messages, Python-route separation, and bans on private Jupyter/SQLTools runtime coupling.</p>
+<p>Focused pure/provider tests cover controller identity/type/label/language, registration/disposal, mixed action/toolbar/context/keybinding guards, native-controller preservation, active-profile and namespace routing, shared session continuity, complete-cell dispatch, Python-cell isolation, race/error/cancellation handling, live result lifetime, bounded snapshots, shared settings messages, helper-route separation, and bans on private Jupyter/SQLTools runtime coupling.</p>
 <p>These checks do not launch a real VS Code Extension Host and are not visual selector, notebook UI, or end-to-end execution evidence.</p>
 
 

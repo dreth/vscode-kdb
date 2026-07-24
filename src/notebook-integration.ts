@@ -45,6 +45,7 @@ import {
   safeNotebookPresentation,
   safeNotebookRowLimit,
 } from './notebook-settings';
+import type { DirectQCellRunResult } from './notebook-controller';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
 export const SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
@@ -52,8 +53,10 @@ export const RESTORE_NOTEBOOK_CELL_LANGUAGE_COMMAND = 'vscode-kdb.restoreNoteboo
 export const TAG_NOTEBOOK_CELL_AS_Q_COMMAND = 'vscode-kdb.tagNotebookCellAsQ';
 export const PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND =
   'vscode-kdb.prepareNotebookCellForPythonKernel';
+export const RUN_Q_NOTEBOOK_CELL_COMMAND = 'vscode-kdb.runQNotebookCell';
 
 const NOTEBOOK_Q_CELL_CONTEXT = 'vscode-kdb.notebookQCell';
+const NOTEBOOK_Q_CELL_RESOURCES_CONTEXT = 'vscode-kdb.qNotebookCellResources';
 const NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT =
   'vscode-kdb.notebookQCellNeedsKernelPreparation';
 const NOTEBOOK_DEFAULT_LANGUAGE_CONTEXT = 'vscode-kdb.notebookDefaultLanguageAvailable';
@@ -67,6 +70,8 @@ export interface DirectQControllerSelection {
   readonly onDidChangeSelection: vscode.Event<void>;
   readonly controller: Pick<vscode.NotebookController, 'detail' | 'description'>;
   isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean;
+  routeLabel(): string;
+  runCell(cell: vscode.NotebookCell): Promise<DirectQCellRunResult>;
 }
 
 export interface NotebookIntegrationOptions {
@@ -112,13 +117,17 @@ export class NotebookIntegration implements vscode.Disposable {
         'vscode-kdb.prepareNotebookCellForPythonKernel',
         (cell?: vscode.NotebookCell) => this.prepareSelectedQCells(cell)
       ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.runQNotebookCell',
+        (cell?: vscode.NotebookCell) => this.runQCellWithKx(cell)
+      ),
       vscode.commands.registerCommand('vscode-kdb.openNotebookPreviewInResults', () =>
         this.openSelectedNotebookPreview()),
       vscode.notebooks.registerNotebookCellStatusBarItemProvider(
         'jupyter-notebook',
         {
           onDidChangeCellStatusBarItems: this.statusBarChanged.event,
-          provideCellStatusBarItems: cell => this.kernelPreparationStatusBarItem(cell),
+          provideCellStatusBarItems: cell => this.kxRouteStatusBarItem(cell),
         }
       ),
       vscode.window.onDidChangeActiveNotebookEditor(() => this.updateContexts()),
@@ -147,6 +156,7 @@ export class NotebookIntegration implements vscode.Disposable {
   public dispose(): void {
     this.disposables.splice(0).forEach(disposable => disposable.dispose());
     void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_CONTEXT, false);
+    void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_RESOURCES_CONTEXT, []);
     void vscode.commands.executeCommand(
       'setContext',
       NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT,
@@ -255,6 +265,7 @@ export class NotebookIntegration implements vscode.Disposable {
             endColumn: message.endColumn,
             format: message.format,
             includeHeaders: message.includeHeaders,
+            includeRowIndex: message.includeRowIndex,
             ...(sortColumn && message.sortDirection
               ? {
                 sortColumn,
@@ -288,6 +299,57 @@ export class NotebookIntegration implements vscode.Disposable {
     }
     if (message.type === 'openLiveResult') {
       this.openLiveResult(liveResults, notebookUri, message.liveId, displayOptions);
+    }
+  }
+
+  private async runQCellWithKx(commandCell?: vscode.NotebookCell): Promise<void> {
+    const editor = activeJupyterNotebookEditor('running a q cell with KX');
+    if (!editor) {
+      return;
+    }
+    const runner = this.options.directController;
+    if (!runner) {
+      void vscode.window.showErrorMessage(
+        'Run q Cell (KX) is unavailable because the KX direct IPC controller did not start.'
+      );
+      return;
+    }
+    if (this.directControllerSelected(editor.notebook)) {
+      void vscode.window.showInformationMessage(
+        'KX q (Direct IPC) is selected. Use the notebook’s normal Run Cell or Ctrl+Enter action.'
+      );
+      return;
+    }
+    const cell = commandCell?.notebook === editor.notebook
+      ? commandCell
+      : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    if (!cell || !isQCell(cell)) {
+      void vscode.window.showWarningMessage(
+        'Run q Cell (KX) applies only to a q-language code cell in the active Jupyter notebook.'
+      );
+      return;
+    }
+    const result = await runner.runCell(cell);
+    if (result === 'busy') {
+      void vscode.window.showWarningMessage(
+        'This notebook cell is already running. Wait for it to finish or cancel it before retrying.'
+      );
+    } else if (result === 'stale') {
+      void vscode.window.showWarningMessage(
+        'The q cell or its output changed while KX was running, so Run q Cell (KX) did not overwrite it.'
+      );
+    } else if (result === 'write-failed') {
+      void vscode.window.showErrorMessage(
+        'Run q Cell (KX) finished, but VS Code could not apply its inline output. Retry the cell.'
+      );
+    } else if (result === 'unavailable') {
+      void vscode.window.showErrorMessage(
+        'Run q Cell (KX) is unavailable because the notebook or KX direct IPC controller closed.'
+      );
+    } else if (result !== 'executed') {
+      void vscode.window.showWarningMessage(
+        'Run q Cell (KX) applies only to a q-language code cell in a Jupyter notebook.'
+      );
     }
   }
 
@@ -635,6 +697,11 @@ export class NotebookIntegration implements vscode.Disposable {
     void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_CONTEXT, !!cell && isQCell(cell));
     void vscode.commands.executeCommand(
       'setContext',
+      NOTEBOOK_Q_CELL_RESOURCES_CONTEXT,
+      qCellResources(editor)
+    );
+    void vscode.commands.executeCommand(
+      'setContext',
       NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT,
       qCell && !directSelected && !hasNotebookQMarker(cell!.document.getText())
     );
@@ -657,42 +724,36 @@ export class NotebookIntegration implements vscode.Disposable {
     this.statusBarChanged.fire();
   }
 
-  private kernelPreparationStatusBarItem(
+  private kxRouteStatusBarItem(
     cell: vscode.NotebookCell
   ): vscode.NotebookCellStatusBarItem | undefined {
     if (!isQCell(cell)) {
       return undefined;
     }
-    if (this.directControllerSelected(cell.notebook)) {
-      const item = new vscode.NotebookCellStatusBarItem(
-        '$(database) KX q • Direct IPC',
-        vscode.NotebookCellStatusBarAlignment.Right
-      );
-      item.tooltip = this.options.directController?.controller.detail ||
-        this.options.directController?.controller.description ||
-        'KX q Direct IPC controller';
-      item.accessibilityInformation = {
-        label: 'KX q Direct IPC controller selected',
-      };
-      item.priority = 100;
-      return item;
-    }
-    if (hasNotebookQMarker(cell.document.getText())) {
-      return undefined;
-    }
+    const directSelected = this.directControllerSelected(cell.notebook);
+    const routeLabel = this.options.directController?.routeLabel() ||
+      'KX • No active connection';
     const item = new vscode.NotebookCellStatusBarItem(
-      '$(lightbulb) Prepare for Python kernel',
+      `$(database) ${routeLabel}`,
       vscode.NotebookCellStatusBarAlignment.Right
     );
-    item.command = {
-      command: PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND,
-      title: 'Prepare this q cell for the active Python kernel',
-      arguments: [cell],
-    };
-    item.tooltip =
-      'Add a leading %%q marker for the configured kx_notebook evaluator. The current Python controller may require restoring the notebook language before Run; no q controller or connection is created.';
+    if (directSelected) {
+      item.tooltip =
+        `${routeLabel}. KX q (Direct IPC) is selected; normal Run Cell and Ctrl+Enter execute this q cell through KX.`;
+    } else {
+      item.command = {
+        command: RUN_Q_NOTEBOOK_CELL_COMMAND,
+        title: 'Run q Cell (KX)',
+        arguments: [cell],
+      };
+      item.tooltip = routeLabel === 'KX • No active connection'
+        ? 'No active KX connection. Select one in the KX Connections view; Run q Cell (KX) will also show an actionable inline error.'
+        : `${routeLabel}. Run the complete q cell through this KX session without changing the selected notebook controller.`;
+    }
     item.accessibilityInformation = {
-      label: 'Prepare this q cell for the active Python kernel',
+      label: directSelected
+        ? `${routeLabel}; direct KX controller selected`
+        : `${routeLabel}; Run q Cell with KX`,
     };
     item.priority = 100;
     return item;
@@ -724,6 +785,37 @@ function selectedCell(editor: vscode.NotebookEditor | undefined): vscode.Noteboo
   }
   const index = editor.selections[0]?.start ?? 0;
   return index >= 0 && index < editor.notebook.cellCount ? editor.notebook.cellAt(index) : undefined;
+}
+
+function activeTextNotebookCell(editor: vscode.NotebookEditor): vscode.NotebookCell | undefined {
+  const document = vscode.window.activeTextEditor?.document;
+  if (!document || document.uri.scheme !== 'vscode-notebook-cell') {
+    return undefined;
+  }
+  const targetUri = document.uri.toString();
+  const cellCount = Math.min(editor.notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
+  for (let index = 0; index < cellCount; index++) {
+    const cell = editor.notebook.cellAt(index);
+    if (cell.document.uri.toString() === targetUri) {
+      return cell;
+    }
+  }
+  return undefined;
+}
+
+function qCellResources(editor: vscode.NotebookEditor | undefined): string[] {
+  if (!editor || !isJupyterNotebook(editor.notebook)) {
+    return [];
+  }
+  const resources: string[] = [];
+  const cellCount = Math.min(editor.notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
+  for (let index = 0; index < cellCount; index++) {
+    const cell = editor.notebook.cellAt(index);
+    if (isQCell(cell)) {
+      resources.push(cell.document.uri.toString());
+    }
+  }
+  return resources;
 }
 
 function selectedCells(
@@ -841,8 +933,10 @@ export function liveResultMessage(
   const columns = safeLiveColumnNames(rawColumns);
   const chartXNames = new Set(view.chartXColumns);
   const chartYNames = new Set(view.chartYColumns);
+  const chartGroupNames = new Set(view.chartGroupColumns);
   const chartXColumns = columns.filter((_column, index) => chartXNames.has(rawColumns[index]));
   const chartYColumns = columns.filter((_column, index) => chartYNames.has(rawColumns[index]));
+  const chartGroupColumns = columns.filter((_column, index) => chartGroupNames.has(rawColumns[index]));
   const messages: string[] = [];
   if (columns.length < view.columns.length) {
     messages.push(
@@ -865,6 +959,7 @@ export function liveResultMessage(
     rowCount: view.rowCount,
     chartXColumns,
     chartYColumns,
+    chartGroupColumns,
     ...(view.mode === 'text'
       ? { text: boundedHostText(view.text || '', 1_048_576) }
       : {}),
@@ -1016,7 +1111,27 @@ export function liveChartMessage(
     );
     const sourceXColumn = columnMap.get(message.xColumn);
     const sourceYColumns = message.yColumns.map(column => columnMap.get(column));
-    if (!sourceXColumn || sourceYColumns.some(column => !column)) {
+    const sourceGroupByColumn = message.groupByColumn
+      ? columnMap.get(message.groupByColumn)
+      : undefined;
+    const sourceOpenColumn = message.openColumn
+      ? columnMap.get(message.openColumn)
+      : undefined;
+    const sourceHighColumn = message.highColumn
+      ? columnMap.get(message.highColumn)
+      : undefined;
+    const sourceLowColumn = message.lowColumn
+      ? columnMap.get(message.lowColumn)
+      : undefined;
+    const sourceCloseColumn = message.closeColumn
+      ? columnMap.get(message.closeColumn)
+      : undefined;
+    if (!sourceXColumn || sourceYColumns.some(column => !column) ||
+      (message.groupByColumn && !sourceGroupByColumn) ||
+      (message.openColumn && !sourceOpenColumn) ||
+      (message.highColumn && !sourceHighColumn) ||
+      (message.lowColumn && !sourceLowColumn) ||
+      (message.closeColumn && !sourceCloseColumn)) {
       throw new Error('Chart columns unavailable.');
     }
     const displayBySource = new Map<string, string>();
@@ -1031,6 +1146,11 @@ export function liveChartMessage(
         chartType: message.chartType,
         xColumn: sourceXColumn,
         yColumns: sourceYColumns as string[],
+        groupByColumn: sourceGroupByColumn,
+        openColumn: sourceOpenColumn,
+        highColumn: sourceHighColumn,
+        lowColumn: sourceLowColumn,
+        closeColumn: sourceCloseColumn,
         maxPoints: message.maxPoints,
         maxSourceRows: resultSettings.chartMaxSourceRows,
       },
@@ -1051,14 +1171,66 @@ export function liveChartMessage(
       data: {
         chartType: message.chartType,
         xColumn: displayBySource.get(chart.xColumn) || message.xColumn,
+        ...(chart.groupByColumn
+          ? {
+            groupByColumn: displayBySource.get(chart.groupByColumn) ||
+              safeLiveChartLabel(chart.groupByColumn),
+          }
+          : {}),
         xKind: chart.xKind,
         x: chart.x,
         xText: chart.xText,
+        xDomain: chart.xDomain,
         series: chart.series.map(series => ({
           columnName: displayBySource.get(series.columnName) ||
-            boundedHostText(series.columnName, 256).replace(/[\r\n]/g, ''),
+            safeLiveChartLabel(series.columnName),
+          ...(series.sourceColumnName
+            ? {
+              sourceColumnName: displayBySource.get(series.sourceColumnName) ||
+                safeLiveChartLabel(series.sourceColumnName),
+            }
+            : {}),
+          ...(series.groupValue
+            ? { groupValue: boundedHostText(series.groupValue, 512).replace(/[\r\n]/g, ' ') }
+            : {}),
           values: series.values,
+          ...(series.gapFlags ? { gapFlags: series.gapFlags } : {}),
         })),
+        ...(chart.boxSeries
+          ? {
+            boxSeries: chart.boxSeries.map(series => ({
+              columnName: displayBySource.get(series.columnName) ||
+                safeLiveChartLabel(series.columnName),
+              stats: series.stats,
+            })),
+          }
+          : {}),
+        ...(chart.ohlcColumns
+          ? {
+            ohlcColumns: {
+              open: displayBySource.get(chart.ohlcColumns.open) ||
+                safeLiveChartLabel(chart.ohlcColumns.open),
+              high: displayBySource.get(chart.ohlcColumns.high) ||
+                safeLiveChartLabel(chart.ohlcColumns.high),
+              low: displayBySource.get(chart.ohlcColumns.low) ||
+                safeLiveChartLabel(chart.ohlcColumns.low),
+              close: displayBySource.get(chart.ohlcColumns.close) ||
+                safeLiveChartLabel(chart.ohlcColumns.close),
+            },
+          }
+          : {}),
+        ...(chart.candlesticks
+          ? {
+            candlesticks: chart.candlesticks.map(candle => ({
+              ...candle,
+              xText: boundedHostText(candle.xText, 512),
+            })),
+          }
+          : {}),
+        sourceRowCount: chart.sourceRowCount,
+        eligibleRowCount: chart.eligibleRowCount,
+        sampledPointCount: chart.sampledPointCount,
+        algorithm: boundedHostText(chart.algorithm, 256),
         warnings: chart.warnings.slice(0, 32).map(value => boundedHostText(value, 1_024)),
       },
     };
@@ -1070,6 +1242,10 @@ export function liveChartMessage(
       error: safeHostError(error),
     };
   }
+}
+
+function safeLiveChartLabel(value: string): string {
+  return boundedHostText(value, 256).replace(/[\r\n]/g, ' ') || 'series';
 }
 
 function boundedHostText(value: string, maxChars: number): string {

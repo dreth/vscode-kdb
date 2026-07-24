@@ -159,6 +159,150 @@ class ContractTests(unittest.TestCase):
         self.assertNotIn("https://", fallback)
         self.assertIn("see the HTML/SVG fallback", output.bundle["text/plain"])
 
+    def test_all_renderer_chart_selections_round_trip_with_capability_rules(
+        self,
+    ) -> None:
+        rows = [
+            {
+                "time": 1,
+                "price": 10.0,
+                "sym": "AAPL",
+                "open": 9.0,
+                "high": 12.0,
+                "low": 8.0,
+                "close": 11.0,
+            }
+        ]
+        for chart_type in ("line", "scatter", "step", "bar", "box"):
+            with self.subTest(chart_type=chart_type):
+                payload = build_mime_bundle(
+                    rows,
+                    chart=Chart(chart_type, "time", ("price",)),
+                ).bundle[MIME_TYPE]
+                self.assertEqual(payload["chart"]["type"], chart_type)
+                self.assertEqual(payload["chart"]["yColumns"], ["price"])
+
+        grouped = build_mime_bundle(
+            rows,
+            chart=Chart(
+                "line",
+                "time",
+                ("price",),
+                group_by_column="sym",
+            ),
+        ).bundle[MIME_TYPE]["chart"]
+        self.assertEqual(grouped["groupByColumn"], "sym")
+        self.assertNotIn("<svg", build_mime_bundle(
+            rows,
+            chart=Chart(
+                "bar",
+                "time",
+                ("price",),
+                group_by_column="sym",
+            ),
+        ).bundle["text/html"])
+
+        candle_output = build_mime_bundle(
+            rows,
+            chart=Chart(
+                "candlestick",
+                "time",
+                (),
+                open_column="open",
+                high_column="high",
+                low_column="low",
+                close_column="close",
+            ),
+        )
+        self.assertEqual(
+            candle_output.bundle[MIME_TYPE]["chart"],
+            {
+                "version": 1,
+                "visible": True,
+                "type": "candlestick",
+                "xColumn": "time",
+                "yColumns": [],
+                "openColumn": "open",
+                "highColumn": "high",
+                "lowColumn": "low",
+                "closeColumn": "close",
+            },
+        )
+        self.assertNotIn("<svg", candle_output.bundle["text/html"])
+        self.assertIn(
+            "interactive KX renderer",
+            candle_output.bundle["text/html"],
+        )
+
+    def test_invalid_chart_capability_combinations_are_rejected(self) -> None:
+        rows = [
+            {
+                "x": 1,
+                "y": 2,
+                "group": "A",
+                "open": 1,
+                "high": 3,
+                "low": 0,
+                "close": 2,
+            }
+        ]
+        with self.assertRaisesRegex(KxNotebookError, "unavailable for box"):
+            build_mime_bundle(
+                rows,
+                chart=Chart("box", "x", ("y",), group_by_column="group"),
+            )
+        with self.assertRaisesRegex(KxNotebookError, "group-by column"):
+            build_mime_bundle(
+                rows,
+                chart=Chart("line", "x", ("y",), group_by_column="missing"),
+            )
+        with self.assertRaisesRegex(KxNotebookError, "y columns must be empty"):
+            build_mime_bundle(
+                rows,
+                chart=Chart(
+                    "candlestick",
+                    "x",
+                    ("y",),
+                    open_column="open",
+                    high_column="high",
+                    low_column="low",
+                    close_column="close",
+                ),
+            )
+        with self.assertRaisesRegex(KxNotebookError, "requires open, high, low"):
+            build_mime_bundle(rows, chart=Chart("candlestick", "x", ()))
+        with self.assertRaisesRegex(KxNotebookError, "must be distinct"):
+            build_mime_bundle(
+                rows,
+                chart=Chart(
+                    "candlestick",
+                    "x",
+                    (),
+                    open_column="open",
+                    high_column="high",
+                    low_column="low",
+                    close_column="open",
+                ),
+            )
+        with self.assertRaisesRegex(KxNotebookError, "not in the table"):
+            build_mime_bundle(
+                rows,
+                chart=Chart(
+                    "candlestick",
+                    "x",
+                    (),
+                    open_column="open",
+                    high_column="high",
+                    low_column="low",
+                    close_column="missing",
+                ),
+            )
+        with self.assertRaisesRegex(KxNotebookError, "only for candlestick"):
+            build_mime_bundle(
+                rows,
+                chart=Chart("line", "x", ("y",), open_column="open"),
+            )
+
     def test_nonfinite_numbers_and_invalid_shapes_are_rejected(self) -> None:
         for value in (math.nan, math.inf, -math.inf):
             with self.subTest(value=value):

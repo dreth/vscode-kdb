@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Native direct q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -70,6 +70,7 @@
     "onCommand:vscode-kdb.restoreNotebookCellLanguage",
     "onCommand:vscode-kdb.tagNotebookCellAsQ",
     "onCommand:vscode-kdb.prepareNotebookCellForPythonKernel",
+    "onCommand:vscode-kdb.runQNotebookCell",
     "onCommand:vscode-kdb.openNotebookPreviewInResults"
   ],
   "scripts": {
@@ -86,8 +87,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.4.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.4.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.5.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.5.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -282,6 +283,12 @@
         "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected && vscode-kdb.notebookQCellNeedsKernelPreparation"
       },
       {
+        "command": "vscode-kdb.runQNotebookCell",
+        "title": "Run q Cell (KX)",
+        "icon": "$(play)",
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
         "command": "vscode-kdb.openNotebookPreviewInResults",
         "title": "KX: Open Saved Notebook Preview in Results Panel",
         "icon": "$(open-preview)",
@@ -289,6 +296,12 @@
       }
     ],
     "keybindings": [
+      {
+        "command": "vscode-kdb.runQNotebookCell",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && notebookKernel != 'DanielAlonso.vscode-kdb/vscode-kdb.q-notebook-controller' && !vscode-kdb.notebookDirectQControllerSelected"
+      },
       {
         "command": "vscode-kdb.runSelectionOrCurrentLine",
         "key": "ctrl+enter",
@@ -486,6 +499,10 @@
           "when": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected && vscode-kdb.notebookQCellNeedsKernelPreparation"
         },
         {
+          "command": "vscode-kdb.runQNotebookCell",
+          "when": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookQCell && !vscode-kdb.notebookDirectQControllerSelected"
+        },
+        {
           "command": "vscode-kdb.openNotebookPreviewInResults",
           "when": "vscode-kdb.notebookResultAvailable"
         }
@@ -534,6 +551,11 @@
           "command": "vscode-kdb.prepareNotebookCellForPythonKernel",
           "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && !vscode-kdb.notebookDirectQControllerSelected && vscode-kdb.notebookQCellNeedsKernelPreparation",
           "group": "1_modification@3"
+        },
+        {
+          "command": "vscode-kdb.runQNotebookCell",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource in vscode-kdb.qNotebookCellResources && !vscode-kdb.notebookDirectQControllerSelected",
+          "group": "inline@20"
         },
         {
           "command": "vscode-kdb.openNotebookPreviewInResults",
@@ -663,13 +685,13 @@
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 2147483647,
-                "description": "Optional per-connection TCP connect and q IPC handshake timeout override in milliseconds. Omit to inherit the global default; 0 disables both phase deadlines."
+                "description": "Optional per-connection TCP connect and q IPC handshake timeout override in milliseconds. Omit to inherit the global default, vscode-kdb.connectionTimeoutMs; 0 disables both phase deadlines without changing the query response timeout."
               },
               "queryTimeoutMs": {
                 "type": "integer",
                 "minimum": 0,
                 "maximum": 2147483647,
-                "description": "Optional per-connection query response timeout override in milliseconds. Omit to inherit the global default; 0 disables the timeout."
+                "description": "Optional per-connection query response timeout override in milliseconds. Omit to inherit the global default, vscode-kdb.queryTimeoutMs; 0 disables only the query response deadline."
               }
             }
           }
@@ -680,18 +702,15 @@
           "default": 30000,
           "minimum": 0,
           "maximum": 2147483647,
-          "description": "Global direct q IPC TCP connect and handshake timeout in milliseconds. Use 0 to disable both phase deadlines. Existing profiles also use this as the query timeout while queryTimeoutMs is null."
+          "description": "Global direct q IPC TCP connect and handshake timeout in milliseconds. Use 0 to disable both phase deadlines. This setting does not change the independent query response timeout."
         },
         "vscode-kdb.queryTimeoutMs": {
-          "type": [
-            "integer",
-            "null"
-          ],
+          "type": "integer",
           "scope": "application",
-          "default": null,
+          "default": 1800000,
           "minimum": 0,
           "maximum": 2147483647,
-          "description": "Global direct q IPC query response timeout in milliseconds. Null inherits connectionTimeoutMs for compatibility; 0 disables the query timeout."
+          "description": "Global direct q IPC query response timeout in milliseconds. Defaults to 1800000 (30 minutes), independently of the TCP connect and q IPC handshake timeout. Use 0 to disable only the query response deadline."
         },
         "vscode-kdb.performance.trace": {
           "type": "boolean",

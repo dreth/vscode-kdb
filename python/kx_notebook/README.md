@@ -10,12 +10,14 @@ The KX for VS Code VSIX carries this installable source tree for offline handoff
 but the extension never changes a selected kernel environment automatically.
 
 This package is the separate **Python-controller route**. Keep the normal
-Python/IPython controller selected and use `%%q` only when Python and q must
-coexist in that kernel. KX for VS Code 0.2.4 also provides a native
-**KX q (Direct IPC)** notebook controller; that direct route needs no Python
-package or `%%q` marker and executes through the active profile in the
-first-party KX Connections view. No extension-managed variables, namespace
-state, session identity, or live-result identity are shared between the routes.
+Python/IPython controller selected and use `%%q` only when Python must own the q
+evaluator inside that kernel. KX for VS Code 0.2.5 also provides a native
+**KX q (Direct IPC)** controller for q-only notebooks and **Run q Cell (KX)**
+for direct q execution while a Python controller remains selected. Both direct
+paths need no Python package or `%%q` marker and execute through the active
+profile in the first-party KX Connections view. No extension-managed variables,
+namespace state, session identity, or live-result identity are shared between
+this helper and either direct route.
 A user-supplied Python evaluator may independently target the same external
 process, but helper output never receives a Direct IPC live-result identity.
 
@@ -51,6 +53,22 @@ display_result(
     chart=Chart(type="line", x_column="time", y_columns=("price",)),
 )
 ```
+
+`Chart.type` accepts `line`, `scatter`, `step`, `bar`, `box`, or `candlestick`. Line/scatter/step/bar may set `group_by_column`; box does not. Candlestick uses an empty `y_columns=()` plus four distinct fields: `open_column`, `high_column`, `low_column`, and `close_column`:
+
+```python
+Chart(
+    type="candlestick",
+    x_column="time",
+    y_columns=(),
+    open_column="open",
+    high_column="high",
+    low_column="low",
+    close_column="close",
+)
+```
+
+The VS Code renderer supports all six interactive modes. The network-free HTML fallback draws only ungrouped line/scatter/step/bar selections; it reports box, candlestick, and grouped charts as interactive-only instead of drawing a misleading substitute.
 
 The default portable limits are 1,000 preview rows and 1,000,000 bytes across the three
 MIME representations. `row_limit` and `byte_limit` can be lowered per call.

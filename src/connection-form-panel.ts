@@ -248,7 +248,7 @@ export class ConnectionFormPanel {
         state: 'success',
         phase: 'query',
         message: `Query phase succeeded for ${result.endpoint}.${namespace} ` +
-          `Effective timeouts: connect/handshake ${result.connectTimeoutMs} ms; query ${result.queryTimeoutMs} ms.${secret}`,
+          `Effective timeouts: TCP connect/q IPC handshake ${result.connectTimeoutMs} ms each; query response ${result.queryTimeoutMs} ms.${secret}`,
       });
     } catch (error) {
       if (this.activeTest !== test || this.disposed) {
@@ -560,7 +560,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         <details id="advanced">
           <summary>Advanced direct q IPC</summary>
           <div class="advanced-body">
-            <p class="advanced-intro">Leave either value blank to use its global default. Use <code>0</code> to disable that phase timeout. Queue time before a query starts is not included.</p>
+            <p class="advanced-intro">Leave each value blank to use its global default. The connect/handshake and query response deadlines are independent. Use <code>0</code> to disable only that deadline. Queue time before a query starts is not included.</p>
             <div class="grid">
               <div class="field">
                 <label for="connectTimeoutMs">Connect / handshake timeout (ms)</label>
@@ -568,7 +568,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
                 <p id="connectTimeoutHelp" class="help">Use global default. A full timeout budget applies separately to TCP connect and q IPC handshake.</p>
               </div>
               <div class="field">
-                <label for="queryTimeoutMs">Query timeout (ms)</label>
+                <label for="queryTimeoutMs">Query response timeout (ms)</label>
                 <input id="queryTimeoutMs" name="queryTimeoutMs" type="number" min="0" max="2147483647" step="1" inputmode="numeric" aria-describedby="queryTimeoutHelp">
                 <p id="queryTimeoutHelp" class="help">Use global default. The timer starts when this connection sends the query and waits for its response.</p>
               </div>
@@ -749,7 +749,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         }
         [
           [controls.connectTimeoutMs, 'Connect / handshake timeout'],
-          [controls.queryTimeoutMs, 'Query timeout']
+          [controls.queryTimeoutMs, 'Query response timeout']
         ].forEach(([control, label]) => {
           const value = control.value.trim();
           if (value && (!/^\\d+$/.test(value) || Number(value) > Number(control.max))) {
@@ -786,7 +786,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         controls.connectTimeoutMs.placeholder = 'Use global default (' + values.globalConnectTimeoutMs + ' ms)';
         controls.queryTimeoutMs.placeholder = 'Use global default (' + values.globalQueryTimeoutMs + ' ms)';
         document.getElementById('connectTimeoutHelp').textContent = 'Use global default (' + values.globalConnectTimeoutMs + ' ms). A full timeout budget applies separately to TCP connect and q IPC handshake; 0 disables both deadlines.';
-        document.getElementById('queryTimeoutHelp').textContent = 'Use global default (' + values.globalQueryTimeoutMs + ' ms). The timer starts when the query is sent and waits for its response; 0 disables it.';
+        document.getElementById('queryTimeoutHelp').textContent = 'Use global query response default (' + values.globalQueryTimeoutMs + ' ms). The timer starts when the query is sent and waits for its response; 0 disables only this deadline.';
         reservedNames = Array.isArray(values.reservedNames)
           ? values.reservedNames.filter(value => typeof value === 'string').map(value => value.toLocaleLowerCase())
           : [];

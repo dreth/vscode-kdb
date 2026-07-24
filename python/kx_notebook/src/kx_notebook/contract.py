@@ -49,6 +49,11 @@ class Chart:
     x_column: str
     y_columns: tuple[str, ...]
     title: Optional[str] = None
+    group_by_column: Optional[str] = None
+    open_column: Optional[str] = None
+    high_column: Optional[str] = None
+    low_column: Optional[str] = None
+    close_column: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -494,12 +499,18 @@ def _normalize_chart(
     if not isinstance(chart, Chart):
         raise KxNotebookError("chart must be a kx_notebook.Chart")
     chart_type = str(chart.type).lower()
-    if chart_type not in {"line", "scatter", "step", "bar"}:
-        raise KxNotebookError("chart type must be line, scatter, step, or bar")
+    supported_types = {"line", "scatter", "step", "bar", "box", "candlestick"}
+    if chart_type not in supported_types:
+        raise KxNotebookError(
+            "chart type must be line, scatter, step, bar, box, or candlestick"
+        )
     if chart.x_column not in columns:
         raise KxNotebookError(f"chart x column {chart.x_column!r} is not in the table")
     y_columns = list(chart.y_columns)
-    if not y_columns or len(y_columns) > 16:
+    if chart_type == "candlestick":
+        if y_columns:
+            raise KxNotebookError("candlestick chart y columns must be empty")
+    elif not y_columns or len(y_columns) > 16:
         raise KxNotebookError("chart requires between 1 and 16 y columns")
     if len(set(y_columns)) != len(y_columns):
         raise KxNotebookError("chart y columns must be unique")
@@ -508,6 +519,38 @@ def _normalize_chart(
     missing = [name for name in y_columns if name not in columns]
     if missing:
         raise KxNotebookError(f"chart y column {missing[0]!r} is not in the table")
+    supports_group_by = chart_type in {"line", "scatter", "step", "bar"}
+    if chart.group_by_column is not None:
+        if not supports_group_by:
+            raise KxNotebookError(
+                f"group_by_column is unavailable for {chart_type} charts"
+            )
+        if chart.group_by_column not in columns:
+            raise KxNotebookError(
+                f"chart group-by column {chart.group_by_column!r} is not in the table"
+            )
+    ohlc_columns = (
+        chart.open_column,
+        chart.high_column,
+        chart.low_column,
+        chart.close_column,
+    )
+    resolved_ohlc: list[str] = []
+    if chart_type == "candlestick":
+        if any(value is None for value in ohlc_columns):
+            raise KxNotebookError(
+                "candlestick chart requires open, high, low, and close columns"
+            )
+        resolved_ohlc = [str(value) for value in ohlc_columns]
+        if len(set(resolved_ohlc)) != 4:
+            raise KxNotebookError("candlestick OHLC columns must be distinct")
+        missing_ohlc = [name for name in resolved_ohlc if name not in columns]
+        if missing_ohlc:
+            raise KxNotebookError(
+                f"candlestick column {missing_ohlc[0]!r} is not in the table"
+            )
+    elif any(value is not None for value in ohlc_columns):
+        raise KxNotebookError("OHLC columns are available only for candlestick charts")
     output: dict[str, Any] = {
         "version": 1,
         "visible": True,
@@ -515,6 +558,17 @@ def _normalize_chart(
         "xColumn": chart.x_column,
         "yColumns": y_columns,
     }
+    if chart.group_by_column is not None:
+        output["groupByColumn"] = chart.group_by_column
+    if chart_type == "candlestick":
+        output.update(
+            {
+                "openColumn": resolved_ohlc[0],
+                "highColumn": resolved_ohlc[1],
+                "lowColumn": resolved_ohlc[2],
+                "closeColumn": resolved_ohlc[3],
+            }
+        )
     if chart.title is not None:
         output["title"] = _required_bounded_string(
             "chart title", chart.title, MAX_LABEL_CHARS

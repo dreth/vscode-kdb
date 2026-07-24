@@ -1,7 +1,18 @@
 import uPlot from 'uplot';
 import uPlotCss from 'uplot/dist/uPlot.min.css';
 import type { ActivationFunction, OutputItem, RendererContext } from 'vscode-notebook-renderer';
-import { buildChartData, chartColumnOptions } from '../src/charting';
+import {
+  CHART_ZOOM_MAX_SAMPLED_POINTS,
+  ChartType,
+  buildChartData,
+  chartColumnOptions,
+  chartTypeCapabilities,
+} from '../src/charting';
+import {
+  chartLegendToggleKey,
+  chartSeriesVisible,
+  updateHiddenChartSeriesKeys,
+} from '../src/chart-series-state';
 import {
   ColumnarPanelResult,
   createColumnarPanelResult,
@@ -13,23 +24,28 @@ import {
   NotebookChartType,
   PortableKxResult,
   PortableKxTableResult,
-  notebookResultToCsv,
   portableCellValue,
   portableCellText,
   validatePortableKxResult,
 } from '../src/notebook-contract';
 import {
   NotebookCellSelection,
+  NotebookSavedSearchMatch,
   notebookCellSelected,
   notebookDelimitedRangeText,
   notebookGridDefaultHeight,
   notebookGridResizedHeight,
   notebookGridWindow,
+  notebookChartControlModel,
   notebookMoveSelection,
+  notebookMovedSearchMatchIndex,
+  reconcileNotebookChartConfiguration,
+  notebookSavedSearchMatches,
   notebookSelectionCellCount,
-  notebookSelectionCopyAllowed,
   notebookSelectionForCell,
   notebookSelectionRange,
+  notebookSearchEnterAction,
+  notebookSelectionToolsState,
   reconcileNotebookChartYColumns,
   toggleNotebookChartYColumn,
 } from '../src/notebook-renderer-model';
@@ -76,14 +92,28 @@ interface LiveSearchState {
   error?: string;
 }
 
+interface SavedSearchState {
+  query: string;
+  matches: NotebookSavedSearchMatch[];
+  activeIndex: number;
+  capped: boolean;
+}
+
 interface LiveChartState {
   visible: boolean;
   chartType: NotebookLiveChartType;
   xColumn: string;
   yColumns: string[];
+  groupByColumn: string;
+  openColumn: string;
+  highColumn: string;
+  lowColumn: string;
+  closeColumn: string;
   maxPoints: number;
   requestId: number;
+  requestSignature?: string;
   pending: boolean;
+  dirty: boolean;
   data?: NotebookLiveChartData;
   error?: string;
 }
@@ -94,6 +124,7 @@ interface OutputState {
   element: HTMLElement;
   payload: PortableKxResult;
   savedChart: NotebookChartSpec | undefined;
+  savedRenderedChart: NotebookChartSpec | undefined;
   savedChartVisible: boolean;
   savedTableVisible: boolean;
   savedTablePageStart: number;
@@ -111,6 +142,7 @@ interface OutputState {
   liveRowCount: number;
   liveChartXColumns: string[];
   liveChartYColumns: string[];
+  liveChartGroupColumns: string[];
   liveText?: string;
   liveMetadata?: NotebookLiveResultMetadata;
   liveMessage?: string;
@@ -132,8 +164,11 @@ interface OutputState {
   liveCopyRequestId: number;
   liveCopyMessage?: string;
   liveCopyButtons?: HTMLButtonElement[];
+  liveCopyTools?: HTMLDetailsElement;
   liveCopyStatus?: HTMLElement;
   savedSelection?: NotebookCellSelection;
+  savedSearch: SavedSearchState;
+  savedCopyTools?: HTMLDetailsElement;
   savedSortColumn?: number;
   savedSortDirection?: NotebookLiveSortDirection;
   savedScrollTop: number;
@@ -142,6 +177,8 @@ interface OutputState {
   savedViewport?: HTMLElement;
   renderTimer?: number;
   searchTimer?: number;
+  plotSeriesKeys: string[];
+  hiddenChartSeriesKeys: string[];
 }
 
 interface RendererState {
@@ -158,8 +195,8 @@ const LIVE_COLUMN_OVERSCAN = 2;
 const LIVE_MAX_RENDER_ROWS = 120;
 const LIVE_MAX_RENDER_COLUMNS = 48;
 const LIVE_MAX_CANVAS_HEIGHT = 8_000_000;
-const LIVE_DEFAULT_CHART_POINTS = 2500;
 const LIVE_CLIPBOARD_CELL_LIMIT = 20_000;
+const SAVED_SEARCH_MAX_MATCHES = 10_000;
 const states = new Map<string, OutputState>();
 let presentation: NotebookPresentation = 'inline';
 let requestSequence = 0;
@@ -195,12 +232,23 @@ export const activate: ActivationFunction<RendererState> = context => {
         element,
         payload,
         savedChart: payload.kind === 'table' && payload.chart
-          ? { ...payload.chart, yColumns: payload.chart.yColumns.slice() }
+          ? {
+            ...defaultNotebookOhlcColumns(payload.schema.columns.map(column => column.name)),
+            ...payload.chart,
+            yColumns: payload.chart.yColumns.slice(),
+          }
+          : undefined,
+        savedRenderedChart: payload.kind === 'table' && payload.chart
+          ? {
+            ...defaultNotebookOhlcColumns(payload.schema.columns.map(column => column.name)),
+            ...payload.chart,
+            yColumns: payload.chart.yColumns.slice(),
+          }
           : undefined,
         savedChartVisible: payload.kind === 'table' && payload.chart?.visible === true,
         savedTableVisible: true,
         savedTablePageStart: 0,
-        savedMaxChartPoints: 1000,
+        savedMaxChartPoints: notebookChartPointLimit(),
         savedChartYOpen: false,
         panelOpened: false,
         liveId: liveReference?.id,
@@ -210,15 +258,19 @@ export const activate: ActivationFunction<RendererState> = context => {
         liveRowCount: 0,
         liveChartXColumns: [],
         liveChartYColumns: [],
+        liveChartGroupColumns: [],
         liveSliceRequestId: 0,
         liveScrollTop: 0,
         liveScrollLeft: 0,
         liveCopyRequestId: 0,
         savedScrollTop: 0,
         savedScrollLeft: 0,
+        savedSearch: emptySavedSearch(),
         liveSearch: emptyLiveSearch(),
         liveChart: emptyLiveChart(),
         liveChartYOpen: false,
+        plotSeriesKeys: [],
+        hiddenChartSeriesKeys: [],
       };
       states.set(outputItem.id, state);
       renderState(context, state);
@@ -251,7 +303,17 @@ function receiveHostMessage(
       previous.listDisplayStrategy !== resultSettings.listDisplayStrategy ||
       previous.objectDisplayStrategy !== resultSettings.objectDisplayStrategy;
     const sliceTextChanged = previous.arrayDisplayFormat !== resultSettings.arrayDisplayFormat;
+    const chartPointLimitChanged =
+      previous.chartZoomMaxSampledPoints !== resultSettings.chartZoomMaxSampledPoints;
     states.forEach(state => {
+      if (chartPointLimitChanged) {
+        const maxPoints = notebookChartPointLimit();
+        state.savedMaxChartPoints = maxPoints;
+        if (state.liveChart.maxPoints !== maxPoints) {
+          state.liveChart.maxPoints = maxPoints;
+          markLiveChartDirty(state.liveChart);
+        }
+      }
       if (conversionChanged && state.liveId && state.liveStatus === 'available') {
         requestLiveResult(context, state);
         return;
@@ -324,7 +386,11 @@ function receiveHostMessage(
         continue;
       }
       state.liveChart.pending = false;
-      state.liveChart.data = message.data;
+      if (message.data) {
+        state.liveChart.data = message.data;
+        state.liveChart.dirty =
+          state.liveChart.requestSignature !== liveChartConfigurationSignature(state.liveChart);
+      }
       state.liveChart.error = message.error;
       renderState(context, state);
     } else if (message.type === 'liveCopy') {
@@ -345,6 +411,7 @@ function receiveLiveResult(
   if (message.requestId !== state.liveRequestId) {
     return;
   }
+  const previousChart = state.liveChart;
   if (!message.available) {
     state.liveStatus = 'unavailable';
     state.liveMode = undefined;
@@ -352,6 +419,7 @@ function receiveLiveResult(
     state.liveRowCount = 0;
     state.liveChartXColumns = [];
     state.liveChartYColumns = [];
+    state.liveChartGroupColumns = [];
     state.liveText = undefined;
     state.liveMetadata = undefined;
     state.liveSlice = undefined;
@@ -367,6 +435,7 @@ function receiveLiveResult(
   state.liveRowCount = message.rowCount || 0;
   state.liveChartXColumns = message.chartXColumns || [];
   state.liveChartYColumns = message.chartYColumns || [];
+  state.liveChartGroupColumns = message.chartGroupColumns || [];
   state.liveText = message.text;
   state.liveMetadata = message.metadata;
   state.liveMessage = message.message;
@@ -376,7 +445,25 @@ function receiveLiveResult(
   state.liveSortDirection = undefined;
   state.liveSelection = undefined;
   state.liveSearch = emptyLiveSearch();
-  state.liveChart = chartForColumns(state.liveChartXColumns, state.liveChartYColumns);
+  const reconciledChart = reconcileNotebookChartConfiguration(
+    previousChart,
+    state.liveChartXColumns,
+    state.liveChartYColumns,
+    state.liveChartGroupColumns
+  );
+  state.liveChart = {
+    ...previousChart,
+    ...reconciledChart.configuration,
+    maxPoints: notebookChartPointLimit(),
+    requestId: nextRequestId(),
+    requestSignature: undefined,
+    pending: false,
+    dirty: true,
+    ...(reconciledChart.compatible && previousChart.data
+      ? { data: previousChart.data }
+      : { data: undefined }),
+    error: undefined,
+  };
   renderState(context, state);
 }
 
@@ -413,7 +500,7 @@ function renderHeader(
 ): void {
   const header = node('header', 'kx-header');
   const headingWrap = node('div', 'kx-heading-wrap');
-  headingWrap.append(node('strong', 'kx-heading', 'KX/q result'));
+  headingWrap.append(node('strong', 'kx-heading', 'KX Results'));
   const label = state.liveMetadata?.connectionName || state.payload.provenance.label;
   if (label) {
     headingWrap.append(node('span', 'kx-meta', label));
@@ -523,43 +610,67 @@ function renderLiveTableTools(
   input.maxLength = MAX_NOTEBOOK_LIVE_SEARCH_CHARS;
   input.placeholder = 'Search rows';
   input.setAttribute('aria-label', 'Search result rows');
+  const searchStatus = node('span', 'kx-meta', liveSearchStatus(state));
+  searchStatus.id = `${state.domIdPrefix}-search-status`;
+  searchStatus.setAttribute('role', 'status');
+  searchStatus.setAttribute('aria-live', 'polite');
+  input.setAttribute('aria-describedby', searchStatus.id);
   input.value = state.liveSearch.query;
   input.addEventListener('input', () => {
-    state.liveSearch.query = input.value.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS);
+    state.liveSearch = {
+      ...emptyLiveSearch(),
+      query: input.value.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS),
+    };
     scheduleLiveSearch(context, state);
   });
   input.addEventListener('keydown', event => {
     if (event.key === 'Enter') {
       event.preventDefault();
+      const action = notebookSearchEnterAction(
+        state.liveSearch.matches.length,
+        state.liveSearch.pending,
+        event.shiftKey
+      );
+      if (action === 'request') {
+        requestLiveSearch(context, state);
+      } else {
+        moveLiveSearchMatch(context, state, action === 'previous' ? -1 : 1);
+      }
+    } else if (event.key === 'Escape' && input.value) {
+      input.value = '';
+      state.liveSearch = emptyLiveSearch();
       requestLiveSearch(context, state);
     }
   });
-  tools.append(input);
-  const previous = button('Previous match', () => moveLiveSearchMatch(context, state, -1));
-  const next = button('Next match', () => moveLiveSearchMatch(context, state, 1));
-  previous.disabled = state.liveSearch.matches.length === 0;
-  next.disabled = state.liveSearch.matches.length === 0;
-  tools.append(previous, next, node('span', 'kx-meta', liveSearchStatus(state)));
-  const copyTsv = button('Copy TSV', () => requestLiveCopy(context, state, 'tsv'));
-  const copyCsv = button('Copy CSV', () => requestLiveCopy(context, state, 'csv'));
-  copyTsv.disabled = !notebookSelectionCopyAllowed(
+  input.title = 'Enter: next match; Shift+Enter: previous match';
+  tools.append(input, searchStatus);
+  const copyTools = document.createElement('details');
+  copyTools.className = 'kx-tools';
+  const copyToolsState = notebookSelectionToolsState(
     state.liveSelection,
-    LIVE_CLIPBOARD_CELL_LIMIT
+    LIVE_CLIPBOARD_CELL_LIMIT,
+    false
   );
-  copyCsv.disabled = copyTsv.disabled;
-  state.liveCopyButtons = [copyTsv, copyCsv];
-  tools.append(copyTsv, copyCsv);
-  tools.append(button('Reset size', () => {
-    state.liveViewportHeight = undefined;
-    state.liveViewport = undefined;
-    renderState(context, state);
-  }));
+  copyTools.hidden = !copyToolsState.visible;
+  copyTools.open = copyToolsState.open;
+  const copySummary = document.createElement('summary');
+  copySummary.textContent = 'Tools';
+  copySummary.setAttribute('aria-label', 'Selected cells tools');
+  const copyPanel = node('div', 'kx-tools-panel');
+  const format = labelledSelect('Format', ['tsv', 'csv'], 'tsv', () => {});
+  const formatSelect = format.querySelector('select')!;
+  const copy = button('Copy', () => {
+    requestLiveCopy(context, state, formatSelect.value === 'csv' ? 'csv' : 'tsv');
+  });
+  copy.disabled = !copyToolsState.copyEnabled;
+  copyPanel.append(format, copy);
+  copyTools.append(copySummary, copyPanel);
+  state.liveCopyButtons = [copy];
+  state.liveCopyTools = copyTools;
+  tools.append(copyTools);
   if (state.liveChartXColumns.length > 0 && state.liveChartYColumns.length > 0) {
-    tools.append(button(state.liveChart.visible ? 'Hide chart' : 'Chart', () => {
+    tools.append(button(state.liveChart.visible ? 'Close chart' : 'Chart', () => {
       state.liveChart.visible = !state.liveChart.visible;
-      if (state.liveChart.visible && !state.liveChart.data && !state.liveChart.pending) {
-        requestLiveChart(context, state);
-      }
       renderState(context, state);
     }));
   }
@@ -903,80 +1014,176 @@ function renderLiveChart(
   state: OutputState,
   root: HTMLElement
 ): void {
+  const chart = state.liveChart;
+  const controlModel = notebookChartControlModel(
+    chart,
+    state.liveChartXColumns,
+    state.liveChartYColumns,
+    state.liveChartGroupColumns
+  );
+  const capabilities = controlModel.capabilities;
   const panel = node('div', 'kx-chart-panel');
   const controls = node('div', 'kx-chart-controls');
   controls.append(labelledSelect(
-    'Type',
-    ['line', 'scatter', 'step', 'bar'],
-    state.liveChart.chartType,
+    'Chart type',
+    ['line', 'scatter', 'step', 'bar', 'box', 'candlestick'],
+    chart.chartType,
     value => {
-      state.liveChart.chartType = value as NotebookLiveChartType;
-      requestLiveChart(context, state);
+      chart.chartType = value as NotebookLiveChartType;
+      markLiveChartDirty(chart);
       renderState(context, state);
     }
   ));
-  controls.append(labelledSelect('X', state.liveChartXColumns, state.liveChart.xColumn, value => {
-    state.liveChart.xColumn = value;
-    state.liveChart.yColumns = reconcileNotebookChartYColumns(
+  controls.append(labelledSelect('X', state.liveChartXColumns, chart.xColumn, value => {
+    chart.xColumn = value;
+    chart.yColumns = reconcileNotebookChartYColumns(
       state.liveChartYColumns,
       value,
-      state.liveChart.yColumns
+      chart.yColumns
     );
-    requestLiveChart(context, state);
+    markLiveChartDirty(chart);
     renderState(context, state);
   }));
-  controls.append(multiColumnControl(
-    'Y',
-    state.liveChartYColumns.filter(name => name !== state.liveChart.xColumn),
-    state.liveChart.yColumns,
-    state.liveChartYOpen,
-    (column, checked) => {
-      state.liveChart.yColumns = toggleNotebookChartYColumn(
-        state.liveChartYColumns,
-        state.liveChart.xColumn,
-        state.liveChart.yColumns,
-        column,
-        checked
-      );
-      requestLiveChart(context, state);
-      renderState(context, state);
-    },
-    open => { state.liveChartYOpen = open; }
-  ));
-  controls.append(labelledSelect(
-    'Point cap',
-    ['500', '1000', '2500', '7000'],
-    String(state.liveChart.maxPoints),
-    value => {
-      state.liveChart.maxPoints = Math.min(MAX_NOTEBOOK_LIVE_CHART_POINTS, Number(value));
-      requestLiveChart(context, state);
-      renderState(context, state);
-    }
-  ));
-  controls.append(button('Reset zoom', () => {
+  if (capabilities.usesGenericY) {
+    controls.append(multiColumnControl(
+      'Y',
+      controlModel.yColumns,
+      chart.yColumns,
+      state.liveChartYOpen,
+      (column, checked) => {
+        chart.yColumns = toggleNotebookChartYColumn(
+          state.liveChartYColumns,
+          chart.xColumn,
+          chart.yColumns,
+          column,
+          checked
+        );
+        markLiveChartDirty(chart);
+        renderState(context, state);
+      },
+      open => { state.liveChartYOpen = open; }
+    ));
+  }
+  if (capabilities.supportsGroupBy) {
+    controls.append(labelledSelectOptions(
+      'Group by',
+      [
+        { value: '', label: 'None' },
+        ...controlModel.groupColumns.map(value => ({ value, label: value })),
+      ],
+      chart.groupByColumn,
+      value => {
+        chart.groupByColumn = value;
+        markLiveChartDirty(chart);
+        renderState(context, state);
+      }
+    ));
+  }
+  if (capabilities.usesOhlc) {
+    const numeric = controlModel.yColumns;
+    const ohlcControls: Array<[string, keyof Pick<
+      LiveChartState,
+      'openColumn' | 'highColumn' | 'lowColumn' | 'closeColumn'
+    >]> = [
+      ['Open', 'openColumn'],
+      ['High', 'highColumn'],
+      ['Low', 'lowColumn'],
+      ['Close', 'closeColumn'],
+    ];
+    ohlcControls.forEach(([label, key]) => {
+      controls.append(labelledSelectOptions(
+        label,
+        [
+          { value: '', label: `Select ${label}` },
+          ...numeric.map(value => ({ value, label: value })),
+        ],
+        chart[key],
+        value => {
+          chart[key] = value;
+          markLiveChartDirty(chart);
+          renderState(context, state);
+        }
+      ));
+    });
+  }
+  const render = button('Render', () => {
+    requestLiveChart(context, state);
+    renderState(context, state);
+  });
+  render.disabled = !!liveChartValidationMessage(state);
+  controls.append(render);
+  const reset = button('Reset zoom', () => {
     resetPlotZoom(state);
-  }));
+  });
+  reset.disabled = !chart.data;
+  controls.append(reset);
   panel.append(controls);
   const status = node('div', 'kx-status');
-  if (state.liveChart.pending) {
-    status.textContent = 'Preparing chart…';
-  } else if (state.liveChart.error) {
-    status.textContent = state.liveChart.error;
-  } else if (state.liveChart.data?.warnings?.length) {
-    status.textContent = state.liveChart.data.warnings.join(' ');
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  const validation = liveChartValidationMessage(state);
+  if (chart.pending) {
+    status.textContent = chart.data
+      ? 'Preparing updated chart; the previous chart remains visible.'
+      : 'Preparing chart…';
+  } else if (chart.error) {
+    status.textContent = chart.error;
+  } else if (validation) {
+    status.textContent = validation;
+  } else if (chart.dirty) {
+    status.textContent = chart.data
+      ? 'Chart settings changed — Render to update.'
+      : 'Press Render to create chart.';
+  } else if (chart.data) {
+    status.textContent = liveChartDataStatus(chart.data);
+  }
+  if (chart.data?.warnings?.length) {
+    status.textContent = `${status.textContent ? `${status.textContent} ` : ''}${chart.data.warnings.join(' ')}`;
   }
   if (status.textContent) {
     panel.append(status);
   }
-  const host = node('div', 'kx-chart-host');
-  if (!state.liveChart.pending && !state.liveChart.error && state.liveChart.data) {
+  if (chart.data) {
+    const host = node('div', 'kx-chart-host');
     panel.append(host);
+    root.append(panel);
+    drawLiveChart(state, host, chart.data);
+  } else {
+    root.append(panel);
   }
-  root.append(panel);
+}
 
-  if (!state.liveChart.pending && !state.liveChart.error && state.liveChart.data) {
-    drawLiveChart(state, host, state.liveChart.data);
+function markLiveChartDirty(chart: LiveChartState): void {
+  chart.dirty = true;
+  chart.error = undefined;
+}
+
+function liveChartValidationMessage(state: OutputState): string {
+  return notebookChartControlModel(
+    state.liveChart,
+    state.liveChartXColumns,
+    state.liveChartYColumns,
+    state.liveChartGroupColumns
+  ).validationMessage;
+}
+
+function liveChartDataStatus(data: NotebookLiveChartData): string {
+  const shown = data.sampledPointCount ?? data.x.length;
+  const eligible = data.eligibleRowCount;
+  const algorithm = data.algorithm ? ` (${data.algorithm})` : '';
+  if (data.chartType === 'candlestick') {
+    return `Showing ${shown.toLocaleString()} candles${eligible === undefined
+      ? ''
+      : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
   }
+  if (data.chartType === 'box') {
+    return `Showing ${shown.toLocaleString()} box groups${eligible === undefined
+      ? ''
+      : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
+  }
+  return `Showing ${shown.toLocaleString()} sampled points${eligible === undefined
+    ? ''
+    : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
 }
 
 function requestLiveChart(
@@ -984,70 +1191,52 @@ function requestLiveChart(
   state: OutputState
 ): void {
   const chart = state.liveChart;
-  if (!context.postMessage || !state.liveId || !chart.xColumn || chart.yColumns.length === 0) {
+  if (!context.postMessage || !state.liveId || liveChartValidationMessage(state)) {
     return;
   }
   const requestId = nextRequestId();
   chart.requestId = requestId;
+  chart.requestSignature = liveChartConfigurationSignature(chart);
   chart.pending = true;
-  chart.data = undefined;
   chart.error = undefined;
+  const capabilities = chartTypeCapabilities(chart.chartType);
   context.postMessage({
     type: 'requestLiveChart',
     liveId: state.liveId,
     requestId,
     chartType: chart.chartType,
     xColumn: chart.xColumn,
-    yColumns: chart.yColumns.slice(0, 16),
+    yColumns: capabilities.usesGenericY ? chart.yColumns.slice(0, 16) : [],
+    ...(capabilities.supportsGroupBy && chart.groupByColumn
+      ? { groupByColumn: chart.groupByColumn }
+      : {}),
+    ...(capabilities.usesOhlc
+      ? {
+        openColumn: chart.openColumn,
+        highColumn: chart.highColumn,
+        lowColumn: chart.lowColumn,
+        closeColumn: chart.closeColumn,
+      }
+      : {}),
     maxPoints: Math.min(MAX_NOTEBOOK_LIVE_CHART_POINTS, Math.max(1, chart.maxPoints)),
   });
 }
 
+function liveChartConfigurationSignature(chart: LiveChartState): string {
+  return JSON.stringify([
+    chart.chartType,
+    chart.xColumn,
+    chart.yColumns,
+    chart.groupByColumn,
+    chart.openColumn,
+    chart.highColumn,
+    chart.lowColumn,
+    chart.closeColumn,
+  ]);
+}
+
 function drawLiveChart(state: OutputState, host: HTMLElement, data: NotebookLiveChartData): void {
-  if (data.x.length === 0 || data.series.length === 0) {
-    host.append(node('div', 'kx-notice', 'Chart has no finite sampled points.'));
-    return;
-  }
-  const colors = chartColors();
-  const series: uPlot.Series[] = [{ label: data.xColumn }];
-  data.series.forEach((item, index) => {
-    const color = colors[index % colors.length];
-    const config: uPlot.Series = {
-      label: item.columnName,
-      stroke: color,
-      width: data.chartType === 'scatter' || data.chartType === 'bar' ? 0 : 1.5,
-      points: {
-        show: data.chartType === 'scatter',
-        size: data.chartType === 'scatter' ? 5 : 3,
-        stroke: color,
-        fill: color,
-      },
-      value: (_self, rawValue) => rawValue === null || rawValue === undefined
-        ? ''
-        : Number(rawValue).toFixed(resultSettings.chartDecimalPlaces),
-    };
-    if (data.chartType === 'step' && uPlot.paths.stepped) {
-      config.paths = uPlot.paths.stepped({ align: 1 });
-    }
-    if (data.chartType === 'bar') {
-      config.fill = alphaColor(color, 0.5);
-    }
-    series.push(config);
-  });
-  createPlot(
-    state,
-    host,
-    notebookPlotOptions(
-      host,
-      data.chartType,
-      data.xKind === 'temporal',
-      series,
-      data.x,
-      colors,
-      280
-    ),
-    [data.x, ...data.series.map(item => item.values)] as uPlot.AlignedData
-  );
+  drawNotebookChart(state, host, data);
 }
 
 function scheduleLiveSearch(
@@ -1067,6 +1256,10 @@ function requestLiveSearch(
   context: RendererContext<RendererState>,
   state: OutputState
 ): void {
+  if (state.searchTimer !== undefined) {
+    window.clearTimeout(state.searchTimer);
+    state.searchTimer = undefined;
+  }
   if (!context.postMessage || !state.liveId || state.liveMode !== 'table') {
     return;
   }
@@ -1218,17 +1411,6 @@ function renderSavedResult(
       renderState(context, state);
     }));
   }
-  toolbar.append(button('Copy CSV', () => {
-    void copyText(notebookResultToCsv(tablePayload)).then(
-      () => { status.textContent = 'Copied CSV.'; },
-      () => { status.textContent = 'Clipboard unavailable.'; }
-    );
-  }));
-  toolbar.append(button('Reset size', () => {
-    state.savedViewportHeight = undefined;
-    state.savedViewport = undefined;
-    renderState(context, state);
-  }));
   root.append(toolbar);
 
   const result = state.payload.result;
@@ -1259,6 +1441,7 @@ function renderSavedTable(
   }
   const payload = state.payload;
   const rowOrder = savedRowOrder(state, payload);
+  reconcileSavedSearch(state, payload, rowOrder);
   const copyStatus = node('span', 'kx-meta');
   const tableTools = node('div', 'kx-toolbar kx-table-tools');
   const copySelection = (format: 'tsv' | 'csv'): void => {
@@ -1269,23 +1452,116 @@ function renderSavedTable(
       payload.schema.columns.map(column => column.name),
       state.savedSelection,
       format,
-      true,
-      (row, column) => portableCellText(payload.data.rows[rowOrder[row]][column])
+      resultSettings.includeHeaders,
+      (row, column) => portableCellText(payload.data.rows[rowOrder[row]][column]),
+      resultSettings.includeRowIndex
     );
     void copyText(text).then(
       () => { copyStatus.textContent = 'Copied.'; },
       () => { copyStatus.textContent = 'Clipboard unavailable.'; }
     );
   };
-  const copyTsv = button('Copy selection TSV', () => copySelection('tsv'));
-  const copyCsv = button('Copy selection CSV', () => copySelection('csv'));
+  const copyTools = document.createElement('details');
+  copyTools.className = 'kx-tools';
+  const copySummary = document.createElement('summary');
+  copySummary.textContent = 'Tools';
+  copySummary.setAttribute('aria-label', 'Selected cells tools');
+  const copyPanel = node('div', 'kx-tools-panel');
+  const format = labelledSelect('Format', ['tsv', 'csv'], 'tsv', () => {});
+  const formatSelect = format.querySelector('select')!;
+  const copyButton = button('Copy', () => {
+    copySelection(formatSelect.value === 'csv' ? 'csv' : 'tsv');
+  });
   const updateCopyButtons = (): void => {
-    const disabled = notebookSelectionCellCount(state.savedSelection) < 1;
-    copyTsv.disabled = disabled;
-    copyCsv.disabled = disabled;
+    const toolsState = notebookSelectionToolsState(
+      state.savedSelection,
+      LIVE_CLIPBOARD_CELL_LIMIT,
+      copyTools.open
+    );
+    copyTools.hidden = !toolsState.visible;
+    copyTools.open = toolsState.open;
+    copyButton.disabled = !toolsState.copyEnabled;
   };
   updateCopyButtons();
-  tableTools.append(copyTsv, copyCsv, copyStatus);
+  copyPanel.append(format, copyButton);
+  copyTools.append(copySummary, copyPanel);
+  state.savedCopyTools = copyTools;
+  const searchInput = document.createElement('input');
+  searchInput.id = `${state.domIdPrefix}-saved-search`;
+  searchInput.type = 'search';
+  searchInput.maxLength = MAX_NOTEBOOK_LIVE_SEARCH_CHARS;
+  searchInput.placeholder = 'Search rows';
+  searchInput.setAttribute('aria-label', 'Search saved result rows');
+  searchInput.title = 'Enter: next match; Shift+Enter: previous match';
+  searchInput.value = state.savedSearch.query;
+  const searchStatus = node('span', 'kx-meta', savedSearchStatus(state.savedSearch));
+  searchStatus.id = `${state.domIdPrefix}-saved-search-status`;
+  searchStatus.setAttribute('role', 'status');
+  searchStatus.setAttribute('aria-live', 'polite');
+  searchInput.setAttribute('aria-describedby', searchStatus.id);
+  searchInput.addEventListener('input', () => {
+    state.savedSearch.query = searchInput.value.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS);
+    state.savedSearch.activeIndex = -1;
+    reconcileSavedSearch(state, payload, rowOrder);
+    searchStatus.textContent = savedSearchStatus(state.savedSearch);
+    updateSavedSearchClasses(wrap, state.savedSearch);
+  });
+  searchInput.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && searchInput.value) {
+      event.preventDefault();
+      searchInput.value = '';
+      state.savedSearch = emptySavedSearch();
+      searchStatus.textContent = '';
+      updateSavedSearchClasses(wrap, state.savedSearch);
+      return;
+    }
+    if (event.key !== 'Enter') {
+      return;
+    }
+    event.preventDefault();
+    const action = notebookSearchEnterAction(
+      state.savedSearch.matches.length,
+      false,
+      event.shiftKey
+    );
+    if (action === 'request') {
+      reconcileSavedSearch(state, payload, rowOrder);
+      searchStatus.textContent = savedSearchStatus(state.savedSearch);
+      return;
+    }
+    state.savedSearch.activeIndex = notebookMovedSearchMatchIndex(
+      state.savedSearch.activeIndex,
+      state.savedSearch.matches.length,
+      action === 'previous' ? -1 : 1
+    );
+    const match = state.savedSearch.matches[state.savedSearch.activeIndex];
+    if (!match) {
+      return;
+    }
+    const targetPageStart = Math.floor(match.displayRow / pageSize) * pageSize;
+    if (targetPageStart !== pageStart) {
+      state.savedViewportHeight = notebookGridResizedHeight(wrap.offsetHeight);
+      state.savedViewport = undefined;
+      state.savedTablePageStart = targetPageStart;
+      state.savedScrollTop = 0;
+      const searchInputId = searchInput.id;
+      renderState(context, state);
+      const nextViewport = state.savedViewport as HTMLElement | undefined;
+      nextViewport?.querySelector<HTMLElement>(`tr[data-row="${match.displayRow}"]`)
+        ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+      if (nextViewport) {
+        state.savedScrollTop = nextViewport.scrollTop;
+      }
+      document.getElementById(searchInputId)?.focus({ preventScroll: true });
+      return;
+    }
+    searchStatus.textContent = savedSearchStatus(state.savedSearch);
+    updateSavedSearchClasses(wrap, state.savedSearch);
+    wrap.querySelector<HTMLElement>(`tr[data-row="${match.displayRow}"]`)
+      ?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    state.savedScrollTop = wrap.scrollTop;
+  });
+  tableTools.append(searchInput, searchStatus, copyTools, copyStatus);
   root.append(tableTools);
 
   const wrap = node('div', 'kx-table-wrap');
@@ -1342,6 +1618,7 @@ function renderSavedTable(
         state.savedSortDirection = undefined;
       }
       state.savedSelection = undefined;
+      state.savedSearch.activeIndex = -1;
       state.savedTablePageStart = 0;
       renderState(context, state);
     });
@@ -1367,6 +1644,7 @@ function renderSavedTable(
     const rowIndex = pageStart + pageIndex;
     const row = payload.data.rows[sourceRow];
     const tr = document.createElement('tr');
+    tr.dataset.row = String(rowIndex);
     tr.setAttribute('role', 'row');
     tr.setAttribute('aria-rowindex', String(rowIndex + 2));
     if (resultSettings.showRowIndex) {
@@ -1386,6 +1664,9 @@ function renderSavedTable(
       if (notebookCellSelected(state.savedSelection, rowIndex, columnIndex)) {
         td.classList.add('is-selected');
         td.setAttribute('aria-selected', 'true');
+      }
+      if (activeSavedSearchRow(state.savedSearch, rowIndex)) {
+        td.classList.add('is-search-match');
       }
       td.addEventListener('mousedown', event => {
         if (event.button !== 0) {
@@ -1519,6 +1800,71 @@ function savedRowOrder(state: OutputState, payload: PortableKxTableResult): numb
   });
 }
 
+function emptySavedSearch(): SavedSearchState {
+  return {
+    query: '',
+    matches: [],
+    activeIndex: -1,
+    capped: false,
+  };
+}
+
+function reconcileSavedSearch(
+  state: OutputState,
+  payload: PortableKxTableResult,
+  rowOrder: readonly number[]
+): void {
+  const query = state.savedSearch.query.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS);
+  if (!query) {
+    state.savedSearch = emptySavedSearch();
+    return;
+  }
+  const activeSourceRow =
+    state.savedSearch.matches[state.savedSearch.activeIndex]?.sourceRow;
+  const result = notebookSavedSearchMatches(
+    payload.data.rows.map(row => row.map(portableCellText)),
+    rowOrder,
+    query,
+    SAVED_SEARCH_MAX_MATCHES
+  );
+  state.savedSearch = {
+    query,
+    matches: result.matches,
+    activeIndex: activeSourceRow === undefined
+      ? -1
+      : result.matches.findIndex(match => match.sourceRow === activeSourceRow),
+    capped: result.capped,
+  };
+}
+
+function savedSearchStatus(search: SavedSearchState): string {
+  if (!search.query) {
+    return '';
+  }
+  if (search.matches.length === 0) {
+    return 'No matches';
+  }
+  if (search.activeIndex >= 0) {
+    return `${search.activeIndex + 1}/${search.matches.length}${search.capped ? '+' : ''}`;
+  }
+  return `${search.matches.length}${search.capped ? '+' : ''} match` +
+    `${search.matches.length === 1 ? '' : 'es'}`;
+}
+
+function activeSavedSearchRow(search: SavedSearchState, row: number): boolean {
+  return search.activeIndex >= 0 &&
+    search.matches[search.activeIndex]?.displayRow === row;
+}
+
+function updateSavedSearchClasses(wrap: HTMLElement, search: SavedSearchState): void {
+  wrap.querySelectorAll<HTMLElement>('tr[data-row]').forEach(row => {
+    const active = activeSavedSearchRow(search, Number(row.dataset.row));
+    row.querySelectorAll<HTMLElement>('td[role="gridcell"]').forEach(cell => {
+      cell.classList.toggle('is-search-match', active);
+    });
+  });
+}
+
 function updateSavedSelectionClasses(
   wrap: HTMLElement,
   selection: NotebookCellSelection | undefined
@@ -1585,12 +1931,33 @@ function renderSavedChartControls(
     return;
   }
   const candidates = chartColumns(state.payload);
+  const controlModel = notebookChartControlModel(
+    {
+      chartType: chart.type,
+      xColumn: chart.xColumn,
+      yColumns: chart.yColumns,
+      groupByColumn: chart.groupByColumn,
+      openColumn: chart.openColumn,
+      highColumn: chart.highColumn,
+      lowColumn: chart.lowColumn,
+      closeColumn: chart.closeColumn,
+    },
+    candidates.x,
+    candidates.numeric,
+    candidates.group
+  );
+  const capabilities = controlModel.capabilities;
   const panel = node('div', 'kx-chart-panel');
   const controls = node('div', 'kx-chart-controls');
-  controls.append(labelledSelect('Type', ['line', 'scatter', 'step', 'bar'], chart.type, value => {
+  controls.append(labelledSelect(
+    'Chart type',
+    ['line', 'scatter', 'step', 'bar', 'box', 'candlestick'],
+    chart.type,
+    value => {
     chart.type = value as NotebookChartType;
     renderState(context, state);
-  }));
+    }
+  ));
   controls.append(labelledSelect('X', candidates.x, chart.xColumn, value => {
     chart.xColumn = value;
     chart.yColumns = reconcileNotebookChartYColumns(
@@ -1600,81 +1967,220 @@ function renderSavedChartControls(
     );
     renderState(context, state);
   }));
-  controls.append(multiColumnControl(
-    'Y',
-    candidates.numeric.filter(name => name !== chart.xColumn),
-    chart.yColumns,
-    state.savedChartYOpen,
-    (column, checked) => {
-      chart.yColumns = toggleNotebookChartYColumn(
-        candidates.numeric,
-        chart.xColumn,
-        chart.yColumns,
-        column,
-        checked
-      );
-      renderState(context, state);
-    },
-    open => { state.savedChartYOpen = open; }
-  ));
-  controls.append(labelledSelect(
-    'Point cap',
-    ['500', '1000', '2500'],
-    String(state.savedMaxChartPoints),
-    value => {
-      state.savedMaxChartPoints = Number(value);
-      renderState(context, state);
-    }
-  ));
-  controls.append(button('Reset zoom', () => {
+  if (capabilities.usesGenericY) {
+    controls.append(multiColumnControl(
+      'Y',
+      controlModel.yColumns,
+      chart.yColumns,
+      state.savedChartYOpen,
+      (column, checked) => {
+        chart.yColumns = toggleNotebookChartYColumn(
+          candidates.numeric,
+          chart.xColumn,
+          chart.yColumns,
+          column,
+          checked
+        );
+        renderState(context, state);
+      },
+      open => { state.savedChartYOpen = open; }
+    ));
+  }
+  if (capabilities.supportsGroupBy) {
+    controls.append(labelledSelectOptions(
+      'Group by',
+      [
+        { value: '', label: 'None' },
+        ...controlModel.groupColumns.map(value => ({ value, label: value })),
+      ],
+      chart.groupByColumn || '',
+      value => {
+        chart.groupByColumn = value || undefined;
+        renderState(context, state);
+      }
+    ));
+  }
+  if (capabilities.usesOhlc) {
+    const numeric = controlModel.yColumns;
+    const ohlcControls: Array<[string, keyof Pick<
+      NotebookChartSpec,
+      'openColumn' | 'highColumn' | 'lowColumn' | 'closeColumn'
+    >]> = [
+      ['Open', 'openColumn'],
+      ['High', 'highColumn'],
+      ['Low', 'lowColumn'],
+      ['Close', 'closeColumn'],
+    ];
+    ohlcControls.forEach(([label, key]) => {
+      controls.append(labelledSelectOptions(
+        label,
+        [
+          { value: '', label: `Select ${label}` },
+          ...numeric.map(value => ({ value, label: value })),
+        ],
+        chart[key] || '',
+        value => {
+          chart[key] = value || undefined;
+          renderState(context, state);
+        }
+      ));
+    });
+  }
+  const validation = controlModel.validationMessage;
+  const render = button('Render', () => {
+    state.savedRenderedChart = cloneNotebookChartSpec(chart);
+    renderState(context, state);
+  });
+  render.disabled = !!validation;
+  controls.append(render);
+  const reset = button('Reset zoom', () => {
     resetPlotZoom(state);
-  }));
+  });
+  reset.disabled = !state.savedRenderedChart;
+  controls.append(reset);
   panel.append(controls);
+  const renderedChart = state.savedRenderedChart;
+  const dirty = !!renderedChart &&
+    notebookChartSpecSignature(renderedChart) !== notebookChartSpecSignature(chart);
+  const status = node(
+    'div',
+    'kx-status',
+    validation || (dirty
+      ? 'Chart settings changed — Render to update.'
+      : renderedChart
+        ? ''
+        : 'Press Render to create chart.')
+  );
+  status.setAttribute('role', 'status');
+  status.setAttribute('aria-live', 'polite');
+  if (status.textContent) {
+    panel.append(status);
+  }
+  if (!renderedChart) {
+    root.append(panel);
+    return;
+  }
   const chartHost = node('div', 'kx-chart-host');
   panel.append(chartHost);
   root.append(panel);
 
-  const prepared = savedChartData(state.payload, chart, state.savedMaxChartPoints);
-  if (!prepared || prepared.data.length < 2) {
+  const prepared = savedChartData(state.payload, renderedChart, state.savedMaxChartPoints);
+  if (!prepared) {
     chartHost.append(node('div', 'kx-notice', 'Chart unavailable: selected columns contain no finite saved points.'));
     return;
   }
+  drawNotebookChart(state, chartHost, prepared);
+}
+
+function drawNotebookChart(
+  state: OutputState,
+  host: HTMLElement,
+  data: NotebookLiveChartData
+): void {
+  if (data.x.length === 0 || data.series.length === 0) {
+    host.append(node('div', 'kx-notice', 'Chart has no finite sampled points.'));
+    return;
+  }
   const colors = chartColors();
-  const series: uPlot.Series[] = [{ label: chart.xColumn }];
-  prepared.seriesNames.forEach((name, index) => {
-    const color = colors[index % colors.length];
-    const config: uPlot.Series = {
-      label: name,
+  const keys = notebookChartSeriesKeys(data);
+  state.plotSeriesKeys = keys;
+  const series: uPlot.Series[] = [{ label: data.xColumn }];
+  if (data.chartType === 'candlestick') {
+    const color = cssColor(host, '--vscode-charts-green', '#2ea043');
+    series.push({
+      label: 'OHLC',
+      show: chartSeriesVisible(state.hiddenChartSeriesKeys, keys[0]),
       stroke: color,
-      width: chart.type === 'scatter' || chart.type === 'bar' ? 0 : 1.5,
-      points: {
-        show: chart.type === 'scatter',
-        size: chart.type === 'scatter' ? 5 : 3,
-        stroke: color,
-        fill: color,
+      width: 0,
+      points: { show: false },
+      value: (_self, _rawValue, _seriesIndex, index) => {
+        const candle = index === null || index === undefined
+          ? undefined
+          : data.candlesticks?.[index];
+        return candle
+          ? `O ${formatChartNumber(candle.open)} H ${formatChartNumber(candle.high)} ` +
+            `L ${formatChartNumber(candle.low)} C ${formatChartNumber(candle.close)}`
+          : '';
       },
-    };
-    if (chart.type === 'step' && uPlot.paths.stepped) {
-      config.paths = uPlot.paths.stepped({ align: 1 });
-    }
-    if (chart.type === 'bar') {
-      config.fill = alphaColor(color, 0.5);
-    }
-    series.push(config);
-  });
+    });
+  } else {
+    data.series.forEach((item, index) => {
+      const color = colors[index % colors.length];
+      const config: uPlot.Series = {
+        label: item.columnName,
+        show: chartSeriesVisible(state.hiddenChartSeriesKeys, keys[index]),
+        stroke: color,
+        width: data.chartType === 'scatter' ||
+          data.chartType === 'bar' ||
+          data.chartType === 'box'
+          ? 0
+          : 1.5,
+        points: {
+          show: data.chartType === 'scatter',
+          size: data.chartType === 'scatter' ? 5 : 3,
+          stroke: color,
+          fill: color,
+        },
+        value: (_self, rawValue) => rawValue === null || rawValue === undefined
+          ? ''
+          : formatChartNumber(Number(rawValue)),
+      };
+      if (data.chartType === 'step' && uPlot.paths.stepped) {
+        config.paths = uPlot.paths.stepped({ align: 1 });
+      } else if (data.chartType === 'bar') {
+        config.fill = alphaColor(color, 0.5);
+      }
+      series.push(config);
+    });
+  }
+  const aligned = data.chartType === 'candlestick'
+    ? [
+      data.x,
+      data.candlesticks?.map(candle => candle.close) || [],
+    ] as uPlot.AlignedData
+    : [data.x, ...data.series.map(item => item.values)] as uPlot.AlignedData;
   createPlot(
     state,
-    chartHost,
+    host,
     notebookPlotOptions(
-      chartHost,
-      chart.type,
-      prepared.temporal,
+      host,
+      data.chartType,
+      data.xKind === 'temporal',
       series,
-      prepared.data[0] as number[],
+      data.x,
       colors,
-      280
+      280,
+      data,
+      state
     ),
-    prepared.data
+    aligned
+  );
+}
+
+function notebookChartSeriesKeys(data: NotebookLiveChartData): string[] {
+  if (data.chartType === 'candlestick') {
+    const roles = data.ohlcColumns;
+    return [
+      `candlestick\0${roles?.open || ''}\0${roles?.high || ''}\0` +
+      `${roles?.low || ''}\0${roles?.close || ''}`,
+    ];
+  }
+  return data.series.map(series =>
+    `${series.sourceColumnName || series.columnName}\0${series.groupValue || ''}\0${series.columnName}`
+  );
+}
+
+function capturePlotSeriesVisibility(state: OutputState, plot = state.plot): void {
+  if (!plot || state.plotSeriesKeys.length === 0) {
+    return;
+  }
+  const hiddenRenderedKeys = state.plotSeriesKeys.filter((_key, index) =>
+    plot.series[index + 1]?.show === false
+  );
+  state.hiddenChartSeriesKeys = updateHiddenChartSeriesKeys(
+    state.hiddenChartSeriesKeys,
+    state.plotSeriesKeys,
+    hiddenRenderedKeys
   );
 }
 
@@ -1686,6 +2192,11 @@ function createPlot(
 ): void {
   try {
     state.plot = new uPlot(options, data, host);
+    decoratePlotLegendAccessibility(state.plot);
+    host.addEventListener('dblclick', event => {
+      event.preventDefault();
+      resetPlotZoom(state);
+    });
     state.plotResizeObserver = new ResizeObserver(entries => {
       const width = Math.floor(entries[0]?.contentRect.width || 0);
       if (state.plot && width >= 320) {
@@ -1699,6 +2210,47 @@ function createPlot(
   }
 }
 
+function decoratePlotLegendAccessibility(plot: uPlot): void {
+  const labels = Array.from(
+    plot.root.querySelectorAll<HTMLElement>('.u-legend .u-series > th')
+  );
+  const offset = labels.length === plot.series.length ? 0 : 1;
+  labels.forEach((label, labelIndex) => {
+    const seriesIndex = labelIndex + offset;
+    if (seriesIndex < 1 || seriesIndex >= plot.series.length) {
+      return;
+    }
+    label.tabIndex = 0;
+    label.setAttribute('role', 'button');
+    label.setAttribute('aria-label', `Toggle chart series ${plot.series[seriesIndex].label || seriesIndex}`);
+    label.dataset.kxSeriesIndex = String(seriesIndex);
+    if (label.dataset.kxKeyboardToggle !== 'true') {
+      label.dataset.kxKeyboardToggle = 'true';
+      label.addEventListener('keydown', event => {
+        if (!chartLegendToggleKey(event.key)) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        const index = Number(label.dataset.kxSeriesIndex);
+        if (Number.isSafeInteger(index) && index > 0 && index < plot.series.length) {
+          plot.setSeries(index, { show: plot.series[index].show === false });
+        }
+      });
+    }
+  });
+  syncPlotLegendAccessibility(plot);
+}
+
+function syncPlotLegendAccessibility(plot: uPlot): void {
+  plot.root.querySelectorAll<HTMLElement>('.u-legend .u-series > th').forEach(label => {
+    const seriesIndex = Number(label.dataset.kxSeriesIndex);
+    if (Number.isSafeInteger(seriesIndex) && seriesIndex > 0 && seriesIndex < plot.series.length) {
+      label.setAttribute('aria-pressed', plot.series[seriesIndex].show === false ? 'false' : 'true');
+    }
+  });
+}
+
 function resetPlotZoom(state: OutputState): void {
   if (!state.plot) {
     return;
@@ -1709,16 +2261,28 @@ function resetPlotZoom(state: OutputState): void {
 
 function notebookPlotOptions(
   host: HTMLElement,
-  chartType: NotebookChartType,
+  chartType: ChartType,
   temporal: boolean,
   series: uPlot.Series[],
   xValues: number[],
   colors: string[],
-  height: number
+  height: number,
+  data: NotebookLiveChartData,
+  state: OutputState
 ): uPlot.Options {
   const axisColor = cssColor(host, '--vscode-descriptionForeground', '#999');
   const gridColor = cssColor(host, '--vscode-panel-border', '#555');
-  const isBar = chartType === 'bar';
+  const paddedX =
+    chartType === 'bar' || chartType === 'box' || chartType === 'candlestick';
+  const customY =
+    chartType === 'bar' || chartType === 'box' || chartType === 'candlestick';
+  const drawHook = chartType === 'bar'
+    ? (plot: uPlot) => drawClusteredBars(plot, colors)
+    : chartType === 'box'
+      ? (plot: uPlot) => drawNotebookBoxes(plot, data, colors)
+      : chartType === 'candlestick'
+        ? (plot: uPlot) => drawNotebookCandlesticks(plot, data, host)
+        : undefined;
   return {
     width: Math.max(320, Math.floor(host.getBoundingClientRect().width || 720)),
     height,
@@ -1727,7 +2291,7 @@ function notebookPlotOptions(
     scales: {
       x: {
         time: temporal,
-        ...(isBar
+        ...(paddedX
           ? {
             range: (_self, min, max) => {
               const step = minimumPositiveStep(xValues) || (temporal ? 86_400_000 : 1);
@@ -1738,13 +2302,18 @@ function notebookPlotOptions(
       },
       y: {
         auto: true,
-        ...(isBar
+        ...(customY
           ? {
             range: (_self, min, max) => {
-              const low = Math.min(0, min);
-              const high = Math.max(0, max);
+              const custom = notebookChartYRange(data, state);
+              const low = chartType === 'bar'
+                ? Math.min(0, custom?.min ?? min)
+                : (custom?.min ?? min);
+              const high = chartType === 'bar'
+                ? Math.max(0, custom?.max ?? max)
+                : (custom?.max ?? max);
               const padding = Math.max(1, Math.abs(high - low) * 0.05);
-              return [low - (low < 0 ? padding : 0), high + (high > 0 ? padding : 0)];
+              return [low - padding, high + padding];
             },
           }
           : {}),
@@ -1773,9 +2342,15 @@ function notebookPlotOptions(
       focus: { prox: 24 },
     },
     legend: { show: true, live: true, isolate: false },
-    ...(isBar
-      ? { hooks: { draw: [(self: uPlot) => drawClusteredBars(self, colors)] } }
-      : {}),
+    hooks: {
+      ...(drawHook ? { draw: [drawHook] } : {}),
+      setSeries: [
+        (plot: uPlot) => {
+          capturePlotSeriesVisibility(state, plot);
+          syncPlotLegendAccessibility(plot);
+        },
+      ],
+    },
   };
 }
 
@@ -1839,6 +2414,196 @@ function drawClusteredBars(plot: uPlot, colors: string[]): void {
   context.restore();
 }
 
+function drawNotebookCandlesticks(
+  plot: uPlot,
+  data: NotebookLiveChartData,
+  host: HTMLElement
+): void {
+  if (!data.candlesticks?.length || plot.series[1]?.show === false) {
+    return;
+  }
+  const ratio = window.devicePixelRatio || 1;
+  const up = cssColor(host, '--vscode-charts-green', '#2ea043');
+  const down = cssColor(host, '--vscode-charts-red', '#d73a49');
+  const hollow = cssColor(host, '--vscode-editor-background', '#1e1e1e');
+  const context = plot.ctx;
+  context.save();
+  context.beginPath();
+  context.rect(plot.bbox.left, plot.bbox.top, plot.bbox.width, plot.bbox.height);
+  context.clip();
+  data.candlesticks.forEach((candle, index) => {
+    const center = plot.valToPos(candle.x, 'x', true);
+    const bodyWidth = Math.max(
+      1 * ratio,
+      Math.min(18 * ratio, notebookLocalXGap(plot, data.x, index, 16 * ratio) * 0.68)
+    );
+    const high = plot.valToPos(candle.high, 'y', true);
+    const low = plot.valToPos(candle.low, 'y', true);
+    const open = plot.valToPos(candle.open, 'y', true);
+    const close = plot.valToPos(candle.close, 'y', true);
+    const rising = candle.close >= candle.open;
+    const color = rising ? up : down;
+    const top = Math.min(open, close);
+    const height = Math.max(1 * ratio, Math.abs(close - open));
+    context.strokeStyle = color;
+    context.fillStyle = rising ? hollow : color;
+    context.lineWidth = Math.max(1, ratio);
+    context.beginPath();
+    context.moveTo(center, high);
+    context.lineTo(center, low);
+    context.stroke();
+    context.fillRect(center - bodyWidth / 2, top, bodyWidth, height);
+    context.strokeRect(center - bodyWidth / 2, top, bodyWidth, height);
+  });
+  context.restore();
+}
+
+function drawNotebookBoxes(
+  plot: uPlot,
+  data: NotebookLiveChartData,
+  colors: string[]
+): void {
+  if (!data.boxSeries?.length) {
+    return;
+  }
+  const ratio = window.devicePixelRatio || 1;
+  const seriesCount = data.boxSeries.length;
+  const context = plot.ctx;
+  context.save();
+  context.beginPath();
+  context.rect(plot.bbox.left, plot.bbox.top, plot.bbox.width, plot.bbox.height);
+  context.clip();
+  data.x.forEach((x, xIndex) => {
+    const center = plot.valToPos(x, 'x', true);
+    const groupWidth = Math.max(
+      2 * ratio,
+      Math.min(72 * ratio, notebookLocalXGap(plot, data.x, xIndex, 44 * ratio) * 0.78)
+    );
+    const slotWidth = groupWidth / Math.max(1, seriesCount);
+    if (slotWidth < 1.75 * ratio) {
+      return;
+    }
+    data.boxSeries!.forEach((series, seriesIndex) => {
+      if (plot.series[seriesIndex + 1]?.show === false) {
+        return;
+      }
+      const stats = series.stats[xIndex];
+      if (!stats) {
+        return;
+      }
+      const seriesCenter =
+        center - groupWidth / 2 + slotWidth * seriesIndex + slotWidth / 2;
+      const width = Math.max(
+        1 * ratio,
+        Math.min(28 * ratio, slotWidth * 0.72, slotWidth - ratio)
+      );
+      const min = plot.valToPos(stats.min, 'y', true);
+      const q1 = plot.valToPos(stats.q1, 'y', true);
+      const median = plot.valToPos(stats.median, 'y', true);
+      const q3 = plot.valToPos(stats.q3, 'y', true);
+      const max = plot.valToPos(stats.max, 'y', true);
+      const color = colors[seriesIndex % colors.length];
+      context.strokeStyle = color;
+      context.fillStyle = alphaColor(color, 0.22);
+      context.lineWidth = Math.max(1, ratio);
+      context.beginPath();
+      context.moveTo(seriesCenter, max);
+      context.lineTo(seriesCenter, min);
+      context.moveTo(seriesCenter - width * 0.34, min);
+      context.lineTo(seriesCenter + width * 0.34, min);
+      context.moveTo(seriesCenter - width * 0.34, max);
+      context.lineTo(seriesCenter + width * 0.34, max);
+      context.stroke();
+      context.fillRect(
+        seriesCenter - width / 2,
+        Math.min(q1, q3),
+        width,
+        Math.max(1, Math.abs(q3 - q1))
+      );
+      context.strokeRect(
+        seriesCenter - width / 2,
+        Math.min(q1, q3),
+        width,
+        Math.max(1, Math.abs(q3 - q1))
+      );
+      context.beginPath();
+      context.moveTo(seriesCenter - width / 2, median);
+      context.lineTo(seriesCenter + width / 2, median);
+      context.stroke();
+    });
+  });
+  context.restore();
+}
+
+function notebookLocalXGap(
+  plot: uPlot,
+  values: number[],
+  index: number,
+  fallback: number
+): number {
+  if (values.length <= 1) {
+    return fallback;
+  }
+  const center = plot.valToPos(values[index], 'x', true);
+  let gap = Infinity;
+  if (index > 0) {
+    gap = Math.min(gap, Math.abs(center - plot.valToPos(values[index - 1], 'x', true)));
+  }
+  if (index + 1 < values.length) {
+    gap = Math.min(gap, Math.abs(plot.valToPos(values[index + 1], 'x', true) - center));
+  }
+  return Number.isFinite(gap) && gap > 0 ? gap : fallback;
+}
+
+function notebookChartYRange(
+  data: NotebookLiveChartData,
+  state: OutputState
+): { min: number; max: number } | undefined {
+  let min = Infinity;
+  let max = -Infinity;
+  const visible = (index: number): boolean =>
+    chartSeriesVisible(state.hiddenChartSeriesKeys, notebookChartSeriesKeys(data)[index]);
+  if (data.chartType === 'candlestick') {
+    if (visible(0)) {
+      data.candlesticks?.forEach(candle => {
+        min = Math.min(min, candle.low);
+        max = Math.max(max, candle.high);
+      });
+    }
+  } else if (data.chartType === 'box') {
+    data.boxSeries?.forEach((series, index) => {
+      if (!visible(index)) {
+        return;
+      }
+      series.stats.forEach(stats => {
+        if (stats) {
+          min = Math.min(min, stats.min);
+          max = Math.max(max, stats.max);
+        }
+      });
+    });
+  } else {
+    data.series.forEach((series, index) => {
+      if (!visible(index)) {
+        return;
+      }
+      series.values.forEach(value => {
+        if (value !== null && Number.isFinite(value)) {
+          min = Math.min(min, value);
+          max = Math.max(max, value);
+        }
+      });
+    });
+  }
+  return Number.isFinite(min) && Number.isFinite(max) ? { min, max } : undefined;
+}
+
+function formatChartNumber(value: number): string {
+  return Number.isFinite(value)
+    ? value.toFixed(resultSettings.chartDecimalPlaces)
+    : '';
+}
+
 function minimumPositiveStep(values: number[]): number | undefined {
   let minimum = Infinity;
   for (let index = 1; index < values.length; index += 1) {
@@ -1869,7 +2634,7 @@ function resultSettingsControl(
   const details = document.createElement('details');
   details.className = 'kx-settings';
   const summary = document.createElement('summary');
-  summary.textContent = '⚙';
+  summary.textContent = 'Settings';
   summary.title = 'Result settings';
   summary.setAttribute('aria-label', 'Result settings');
   details.append(summary);
@@ -1880,6 +2645,8 @@ function resultSettingsControl(
     settingNumber(context, 'Row height', 'rowHeight', resultSettings.rowHeight, 20, 80),
     settingNumber(context, 'Font size', 'fontSize', resultSettings.fontSize, 0, 32),
     settingCheckbox(context, 'Show row numbers', 'showRowIndex', resultSettings.showRowIndex),
+    settingCheckbox(context, 'Copy headers', 'includeHeaders', resultSettings.includeHeaders),
+    settingCheckbox(context, 'Copy row numbers', 'includeRowIndex', resultSettings.includeRowIndex),
     settingSelect(
       context,
       'Array display',
@@ -2078,12 +2845,17 @@ function savedChartData(
   payload: PortableKxTableResult,
   chart: NotebookChartSpec,
   limit: number
-): { data: uPlot.AlignedData; temporal: boolean; seriesNames: string[] } | undefined {
+): NotebookLiveChartData | undefined {
   try {
     const built = buildChartData(portableTable(payload), {
       chartType: chart.type,
       xColumn: chart.xColumn,
       yColumns: chart.yColumns,
+      groupByColumn: chart.groupByColumn,
+      openColumn: chart.openColumn,
+      highColumn: chart.highColumn,
+      lowColumn: chart.lowColumn,
+      closeColumn: chart.closeColumn,
       width: 720,
       version: 1,
       requestId: 1,
@@ -2093,21 +2865,20 @@ function savedChartData(
     if (built.x.length === 0 || built.series.length === 0) {
       return undefined;
     }
-    return {
-      temporal: built.xKind === 'temporal',
-      seriesNames: built.series.map(series => series.columnName),
-      data: [built.x, ...built.series.map(series => series.values)],
-    };
+    return built;
   } catch {
     return undefined;
   }
 }
 
-function chartColumns(payload: PortableKxTableResult): { x: string[]; numeric: string[] } {
+function chartColumns(
+  payload: PortableKxTableResult
+): { x: string[]; numeric: string[]; group: string[] } {
   const options = chartColumnOptions(portableTable(payload), 200);
   return {
     x: options.xColumns.map(option => option.columnName),
     numeric: options.yColumns.map(option => option.columnName),
+    group: options.groupColumns.map(option => option.columnName),
   };
 }
 
@@ -2127,20 +2898,72 @@ function ensureSavedChartSpec(state: OutputState): void {
     type: 'line',
     xColumn,
     yColumns: [yColumn],
+    ...defaultNotebookOhlcColumns(candidates.numeric),
+  };
+  state.savedRenderedChart = cloneNotebookChartSpec(state.savedChart);
+}
+
+function defaultNotebookOhlcColumns(columns: string[]): Pick<
+  NotebookChartSpec,
+  'openColumn' | 'highColumn' | 'lowColumn' | 'closeColumn'
+> {
+  const match = (role: string): string | undefined => {
+    const matches = columns.filter(name =>
+      name.trim().toLocaleLowerCase() === role.toLocaleLowerCase()
+    );
+    return matches.length === 1 ? matches[0] : undefined;
+  };
+  return {
+    openColumn: match('open'),
+    highColumn: match('high'),
+    lowColumn: match('low'),
+    closeColumn: match('close'),
   };
 }
 
-function chartForColumns(xColumns: string[], yColumns: string[]): LiveChartState {
+function cloneNotebookChartSpec(chart: NotebookChartSpec): NotebookChartSpec {
+  return { ...chart, yColumns: chart.yColumns.slice() };
+}
+
+function notebookChartSpecSignature(chart: NotebookChartSpec): string {
+  return JSON.stringify([
+    chart.type,
+    chart.xColumn,
+    chart.yColumns,
+    chart.groupByColumn || '',
+    chart.openColumn || '',
+    chart.highColumn || '',
+    chart.lowColumn || '',
+    chart.closeColumn || '',
+  ]);
+}
+
+function chartForColumns(
+  xColumns: string[],
+  yColumns: string[],
+  _groupColumns: string[] = []
+): LiveChartState {
   const xColumn = xColumns.find(name => yColumns.some(candidate => candidate !== name)) ||
     xColumns[0] || '';
+  const roleColumn = (role: string): string => {
+    const normalized = role.toLocaleLowerCase();
+    const matches = yColumns.filter(name => name.trim().toLocaleLowerCase() === normalized);
+    return matches.length === 1 ? matches[0] : '';
+  };
   return {
     visible: false,
     chartType: 'line',
     xColumn,
     yColumns: reconcileNotebookChartYColumns(yColumns, xColumn, []),
-    maxPoints: LIVE_DEFAULT_CHART_POINTS,
+    groupByColumn: '',
+    openColumn: roleColumn('open'),
+    highColumn: roleColumn('high'),
+    lowColumn: roleColumn('low'),
+    closeColumn: roleColumn('close'),
+    maxPoints: notebookChartPointLimit(),
     requestId: 0,
     pending: false,
+    dirty: true,
   };
 }
 
@@ -2227,7 +3050,8 @@ function requestLiveCopy(
     requestId,
     ...range,
     format,
-    includeHeaders: true,
+    includeHeaders: resultSettings.includeHeaders,
+    includeRowIndex: resultSettings.includeRowIndex,
     ...liveSortFields(state),
   });
   renderState(context, state);
@@ -2250,12 +3074,17 @@ function updateLiveSelectionClasses(state: OutputState): void {
 }
 
 function updateLiveCopyControls(state: OutputState): void {
-  const disabled = !notebookSelectionCopyAllowed(
+  const toolsState = notebookSelectionToolsState(
     state.liveSelection,
-    LIVE_CLIPBOARD_CELL_LIMIT
+    LIVE_CLIPBOARD_CELL_LIMIT,
+    state.liveCopyTools?.open === true
   );
+  if (state.liveCopyTools) {
+    state.liveCopyTools.hidden = !toolsState.visible;
+    state.liveCopyTools.open = toolsState.open;
+  }
   state.liveCopyButtons?.forEach(copyButton => {
-    copyButton.disabled = disabled;
+    copyButton.disabled = !toolsState.copyEnabled;
   });
   if (state.liveCopyStatus) {
     state.liveCopyStatus.textContent = state.liveCopyMessage || '';
@@ -2410,10 +3239,12 @@ function renderError(element: HTMLElement, message: string): void {
 }
 
 function destroyPlot(state: OutputState): void {
+  capturePlotSeriesVisibility(state);
   state.plotResizeObserver?.disconnect();
   state.plotResizeObserver = undefined;
   state.plot?.destroy();
   state.plot = undefined;
+  state.plotSeriesKeys = [];
 }
 
 function captureViewportState(state: OutputState): void {
@@ -2494,6 +3325,27 @@ function labelledSelect(
   return wrapper;
 }
 
+function labelledSelectOptions(
+  label: string,
+  values: Array<{ value: string; label: string }>,
+  selected: string,
+  onChange: (value: string) => void
+): HTMLLabelElement {
+  const wrapper = node('label', 'kx-control');
+  wrapper.append(node('span', '', label));
+  const select = document.createElement('select');
+  values.forEach(value => {
+    const option = document.createElement('option');
+    option.value = value.value;
+    option.textContent = value.label;
+    option.selected = value.value === selected;
+    select.append(option);
+  });
+  select.addEventListener('change', () => onChange(select.value));
+  wrapper.append(select);
+  return wrapper;
+}
+
 function multiColumnControl(
   label: string,
   values: string[],
@@ -2560,9 +3412,12 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
     fontSize: 0,
     density: 'standard',
     showRowIndex: true,
+    includeHeaders: true,
+    includeRowIndex: true,
     elapsedTimeDisplay: 'auto',
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
+    chartZoomMaxSampledPoints: CHART_ZOOM_MAX_SAMPLED_POINTS,
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
@@ -2573,15 +3428,25 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
   };
 }
 
+function notebookChartPointLimit(): number {
+  const configured = Number(resultSettings.chartZoomMaxSampledPoints);
+  return Math.min(
+    MAX_NOTEBOOK_LIVE_CHART_POINTS,
+    Number.isSafeInteger(configured) && configured >= 1
+      ? configured
+      : CHART_ZOOM_MAX_SAMPLED_POINTS
+  );
+}
+
 const rendererCss = `
 .kx-root{box-sizing:border-box;border:1px solid var(--vscode-notebook-cellBorderColor,var(--vscode-panel-border,#555));border-radius:5px;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font-family:var(--vscode-font-family,system-ui,sans-serif);font-size:var(--vscode-font-size,13px);padding:8px;max-width:100%}
 .kx-header{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap;margin-bottom:6px}.kx-heading-wrap{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.kx-heading{font-size:1.05em}.kx-meta{color:var(--vscode-descriptionForeground);font-size:.92em}
-.kx-toolbar,.kx-live-tools,.kx-chart-controls,.kx-pagination{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.kx-chart-controls{align-items:flex-end}.kx-root button,.kx-root select,.kx-root input{font:inherit;color:var(--vscode-button-secondaryForeground,var(--vscode-foreground));background:var(--vscode-button-secondaryBackground,var(--vscode-editorWidget-background));border:1px solid var(--vscode-button-border,var(--vscode-panel-border,#777));border-radius:3px;padding:3px 7px}.kx-root button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground)}.kx-root button:disabled{opacity:.55}.kx-live-tools input[type=search]{min-width:220px}
+.kx-toolbar,.kx-live-tools,.kx-chart-controls,.kx-pagination{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.kx-chart-controls{align-items:flex-end}.kx-root button,.kx-root select,.kx-root input{font:inherit;color:var(--vscode-button-secondaryForeground,var(--vscode-foreground));background:var(--vscode-button-secondaryBackground,var(--vscode-editorWidget-background));border:1px solid var(--vscode-button-border,var(--vscode-panel-border,#777));border-radius:3px;padding:3px 7px}.kx-root button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground)}.kx-root button:disabled{opacity:.55}.kx-live-tools input[type=search]{min-width:220px}.kx-tools{position:relative}.kx-tools>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-tools-panel{position:absolute;z-index:20;top:100%;right:0;display:flex;align-items:flex-end;gap:7px;min-width:210px;padding:8px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}
 .kx-notice,.kx-panel-mode,.kx-error{margin:7px 0;padding:6px 8px;border-left:3px solid var(--vscode-notificationsWarningIcon-foreground,#cca700);background:var(--vscode-textBlockQuote-background)}.kx-error{border-left-color:var(--vscode-errorForeground,#f14c4c)}
 .kx-messages{margin:5px 0;color:var(--vscode-descriptionForeground)}.kx-source{margin:6px 0}.kx-source pre{white-space:pre-wrap;max-height:150px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:6px}
 .kx-qtext{white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:8px;border:1px solid var(--vscode-panel-border,#555)}.kx-q-comment{color:var(--vscode-editorCodeLens-foreground)}.kx-q-string,.kx-q-symbol{color:var(--vscode-debugTokenExpression-string)}.kx-q-number,.kx-q-temporal{color:var(--vscode-debugTokenExpression-number)}.kx-q-keyword,.kx-q-command{color:var(--vscode-debugTokenExpression-name);font-weight:600}.kx-q-builtin,.kx-q-system,.kx-q-namespace{color:var(--vscode-symbolIcon-functionForeground)}.kx-q-operator{color:var(--vscode-symbolIcon-operatorForeground)}
 .kx-live-viewport{position:relative;overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;contain:strict;box-sizing:border-box;outline:none}.kx-live-viewport:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-live-canvas{position:relative;min-width:100%}.kx-live-row{position:absolute;left:0}.kx-live-header-row{z-index:3}.kx-live-cell,.kx-live-empty{box-sizing:border-box;position:absolute;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 7px;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);user-select:none}.kx-live-empty{color:var(--vscode-descriptionForeground)}button.kx-live-cell{text-align:left;border-radius:0}.kx-live-header{z-index:3;font-weight:600;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-row-index{z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-corner{z-index:4}.kx-live-cell.is-loading{color:transparent;background:linear-gradient(90deg,var(--vscode-editor-background),var(--vscode-editorWidget-background),var(--vscode-editor-background))}.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{color:var(--vscode-list-activeSelectionForeground,var(--vscode-editor-foreground));background:var(--vscode-list-activeSelectionBackground,#094771);box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-live-cell.is-search-match{background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}
-.kx-table-tools{margin-top:5px}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;min-width:100%;width:max-content;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}
+.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match{background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;min-width:100%;width:max-content;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}
 .kx-control{display:flex;flex-direction:column;gap:2px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-control select,.kx-control input{color:var(--vscode-foreground);min-width:90px}.kx-series-control{position:relative;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-series-control>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-series-list{position:absolute;z-index:15;top:100%;left:0;display:grid;gap:4px;max-height:220px;min-width:180px;max-width:min(360px,80vw);overflow:auto;padding:7px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}.kx-series-option{display:flex;align-items:center;gap:5px;white-space:nowrap}.kx-series-option span{overflow:hidden;text-overflow:ellipsis}.kx-chart-panel{border-top:1px solid var(--vscode-panel-border,#555);padding-top:7px;margin-top:7px}.kx-chart-host{width:100%;height:280px;margin-top:6px;overflow:hidden;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);box-sizing:border-box}.kx-chart-host .uplot{font-family:var(--vscode-font-family,system-ui,sans-serif);color:var(--vscode-editor-foreground);background:var(--vscode-editor-background)}.kx-chart-host .u-wrap{background:var(--vscode-editor-background)}.kx-chart-host .u-axis,.kx-chart-host .u-legend{color:var(--vscode-descriptionForeground)}.kx-chart-host .u-select{background:var(--vscode-list-activeSelectionBackground,rgba(80,140,220,.22))}.kx-chart-host .u-cursor-x,.kx-chart-host .u-cursor-y{border-color:var(--vscode-focusBorder,#607d8b)}.kx-chart-host .u-legend{margin:0;text-align:left;font:inherit}.kx-status{min-height:1.2em;margin-top:5px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-empty{padding:8px;color:var(--vscode-descriptionForeground)}
 .kx-settings{position:relative}.kx-settings>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-settings-panel{position:absolute;right:0;z-index:20;display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:7px;width:min(430px,80vw);padding:9px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px #0006}.kx-setting-checkbox{display:flex;align-items:center;gap:5px;font-size:.9em}
 `;

@@ -57,7 +57,13 @@ export interface PortableColumn {
   type: string;
 }
 
-export type NotebookChartType = 'line' | 'scatter' | 'step' | 'bar';
+export type NotebookChartType =
+  | 'line'
+  | 'scatter'
+  | 'step'
+  | 'bar'
+  | 'box'
+  | 'candlestick';
 
 export interface NotebookChartSpec {
   version: 1;
@@ -65,6 +71,11 @@ export interface NotebookChartSpec {
   type: NotebookChartType;
   xColumn: string;
   yColumns: string[];
+  groupByColumn?: string;
+  openColumn?: string;
+  highColumn?: string;
+  lowColumn?: string;
+  closeColumn?: string;
   title?: string;
 }
 
@@ -166,7 +177,14 @@ const TRUNCATION_REASONS = new Set<NotebookTruncationReason>([
   'columnLimit',
   'sourcePreview',
 ]);
-const CHART_TYPES = new Set<NotebookChartType>(['line', 'scatter', 'step', 'bar']);
+const CHART_TYPES = new Set<NotebookChartType>([
+  'line',
+  'scatter',
+  'step',
+  'bar',
+  'box',
+  'candlestick',
+]);
 
 export function createPortableKxResult(input: NotebookResultInput): PortableKxTableResult {
   const rowLimit = boundedInteger(
@@ -802,12 +820,29 @@ function normalizeChart(
     ? raw.yColumns.filter((value): value is string => typeof value === 'string' && columnNames.has(value))
     : [];
   const uniqueY = [...new Set(yColumns.filter(value => value !== xColumn))].slice(0, 16);
-  if (uniqueY.length === 0) {
+  if (type !== 'candlestick' && uniqueY.length === 0) {
     const fallback = columns.find(column => column.name !== xColumn)?.name;
     if (!fallback) {
       return undefined;
     }
     uniqueY.push(fallback);
+  }
+  const groupByColumn = type !== 'box' && type !== 'candlestick' &&
+    typeof raw.groupByColumn === 'string' && columnNames.has(raw.groupByColumn)
+    ? raw.groupByColumn
+    : undefined;
+  const ohlc = type === 'candlestick'
+    ? [
+      raw.openColumn,
+      raw.highColumn,
+      raw.lowColumn,
+      raw.closeColumn,
+    ].filter((value): value is string =>
+      typeof value === 'string' && columnNames.has(value)
+    )
+    : [];
+  if (type === 'candlestick' && (ohlc.length !== 4 || new Set(ohlc).size !== 4)) {
+    return undefined;
   }
   const title = typeof raw.title === 'string' && raw.title.length > 0
     ? clipText(raw.title, MAX_NOTEBOOK_LABEL_CHARS)
@@ -818,6 +853,15 @@ function normalizeChart(
     type,
     xColumn,
     yColumns: uniqueY,
+    ...(groupByColumn ? { groupByColumn } : {}),
+    ...(type === 'candlestick'
+      ? {
+        openColumn: ohlc[0],
+        highColumn: ohlc[1],
+        lowColumn: ohlc[2],
+        closeColumn: ohlc[3],
+      }
+      : {}),
     ...(title ? { title } : {}),
   };
 }
@@ -829,10 +873,15 @@ function validateChart(raw: unknown, columns: PortableColumn[]): NotebookChartSp
     'type',
     'xColumn',
     'yColumns',
+    'groupByColumn',
+    'openColumn',
+    'highColumn',
+    'lowColumn',
+    'closeColumn',
     'title',
   ]) || raw.version !== 1 || raw.visible !== true || typeof raw.type !== 'string' ||
     !CHART_TYPES.has(raw.type as NotebookChartType) || typeof raw.xColumn !== 'string' ||
-    !Array.isArray(raw.yColumns) || raw.yColumns.length === 0 || raw.yColumns.length > 16) {
+    !Array.isArray(raw.yColumns) || raw.yColumns.length > 16) {
     return undefined;
   }
   const names = new Set(columns.map(column => column.name));
@@ -849,15 +898,45 @@ function validateChart(raw: unknown, columns: PortableColumn[]): NotebookChartSp
   if (new Set(yColumns).size !== yColumns.length) {
     return undefined;
   }
+  const type = raw.type as NotebookChartType;
+  const supportsGroupBy =
+    type === 'line' || type === 'scatter' || type === 'step' || type === 'bar';
+  const groupByColumn = raw.groupByColumn === undefined
+    ? undefined
+    : typeof raw.groupByColumn === 'string' && names.has(raw.groupByColumn)
+      ? raw.groupByColumn
+      : null;
+  if (groupByColumn === null || (!supportsGroupBy && groupByColumn !== undefined)) {
+    return undefined;
+  }
+  const ohlc = [raw.openColumn, raw.highColumn, raw.lowColumn, raw.closeColumn];
+  if (type === 'candlestick') {
+    if (yColumns.length !== 0 ||
+      !ohlc.every(value => typeof value === 'string' && names.has(value)) ||
+      new Set(ohlc).size !== 4) {
+      return undefined;
+    }
+  } else if (yColumns.length === 0 || ohlc.some(value => value !== undefined)) {
+    return undefined;
+  }
   if (raw.title !== undefined && !boundedString(raw.title, 1, MAX_NOTEBOOK_LABEL_CHARS)) {
     return undefined;
   }
   return {
     version: 1,
     visible: true,
-    type: raw.type as NotebookChartType,
+    type,
     xColumn: raw.xColumn,
     yColumns,
+    ...(groupByColumn === undefined ? {} : { groupByColumn }),
+    ...(type === 'candlestick'
+      ? {
+        openColumn: raw.openColumn as string,
+        highColumn: raw.highColumn as string,
+        lowColumn: raw.lowColumn as string,
+        closeColumn: raw.closeColumn as string,
+      }
+      : {}),
     ...(raw.title === undefined ? {} : { title: raw.title }),
   };
 }
@@ -866,6 +945,11 @@ function staticChartSvg(result: PortableKxTableResult): string {
   const chart = result.chart;
   if (!chart) {
     return '';
+  }
+  if (chart.type === 'box' || chart.type === 'candlestick' || chart.groupByColumn) {
+    const mode = chart.groupByColumn ? `grouped ${chart.type}` : chart.type;
+    return `<div class="kx-note">Static ${escapeHtml(mode)} chart rendering is unavailable; ` +
+      'open this notebook in VS Code to use the interactive KX renderer.</div>';
   }
   const xIndex = result.schema.columns.findIndex(column => column.name === chart.xColumn);
   const yIndexes = chart.yColumns.map(name => result.schema.columns.findIndex(column => column.name === name));

@@ -3,6 +3,7 @@ import {
   ConnectionTimeouts,
   connectionEndpoint,
   DEFAULT_CONNECTION_TIMEOUT_MS,
+  DEFAULT_QUERY_TIMEOUT_MS,
   KxConnection,
   qScriptInNamespace,
   queryInNamespace,
@@ -57,10 +58,10 @@ export class ConnectionManager implements vscode.Disposable {
       configuration.get<unknown>('connectionTimeoutMs'),
       DEFAULT_CONNECTION_TIMEOUT_MS
     );
-    const configuredQueryTimeout = configuration.get<unknown>('queryTimeoutMs', null);
-    const queryTimeoutMs = configuredQueryTimeout === null || configuredQueryTimeout === undefined
-      ? connectTimeoutMs
-      : safeTimeoutMs(configuredQueryTimeout, connectTimeoutMs);
+    const queryTimeoutMs = safeTimeoutMs(
+      configuration.get<unknown>('queryTimeoutMs'),
+      DEFAULT_QUERY_TIMEOUT_MS
+    );
     return { connectTimeoutMs, queryTimeoutMs };
   }
 

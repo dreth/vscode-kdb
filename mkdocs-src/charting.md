@@ -6,9 +6,19 @@ The standalone extension does not currently contribute a run-and-auto-chart `.q`
 
 ## Notebook charts
 
-A live **KX q (Direct IPC)** result can issue bounded chart requests against its full in-memory value and can open that value in the standard KX Results panel for the panel's supported line, scatter, step, bar, box, candlestick, refinement, and export behavior. It uses the common durable `vscode-kdb.results.*` chart settings.
+A live result from either **KX q (Direct IPC)** or mixed-mode **Run q Cell (KX)** can issue bounded chart requests against its full in-memory value and can open that value in the standard KX Results panel. The renderer is a compact adaptation of the panel's real chart configuration model:
 
-The separate Python helper can persist a chart specification for line, scatter, step, or bar using eligible bounded rows. Direct-controller output does not write a chart specification to saved notebook output. The VS Code NotebookRenderer uses the bundled local uPlot implementation and provides show/hide, type, X column, up to 16 selected numeric Y series, point-cap, and Reset zoom controls for both live/direct and saved bounded data. The chart stays below the table, adds no chart height while hidden, and uses theme-aware background, grid, axes, legend toggles, crosshair selection, drag zoom, and clustered multi-series bars.
+- line, scatter, step, bar, box, and candlestick;
+- an eligible X column;
+- one or more eligible Y series;
+- Group By only for supported generic types; and
+- distinct Open, High, Low, and Close fields for candlestick.
+
+Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until **Render** is pressed. The chart stays below the table and adds no chart height while hidden.
+
+There is no notebook-only visible Point cap. Live requests still honor common `vscode-kdb.results.*` source/sampling settings and safe built-in limits; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, legend toggles, crosshair selection, drag zoom, and Reset zoom.
+
+The separate Python helper can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.
 
 On the Python-helper route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the helper result with the desired `kx_notebook.Chart` specification to persist a changed selection. Its escaped `text/html` fallback renders a network-free static SVG from the emitted specification. Direct-controller output has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
 
@@ -57,7 +67,7 @@ The bundled uPlot assets run locally under the VS Code webview content security 
 - a draggable chart/table splitter; and
 - PNG export of the rendered canvas, including custom bars, boxes, and candles.
 
-The first full render captures an immutable original X-domain and retains the original full sample. Manual drag zoom, auto-refinement, explicit **Refine zoom**, resize/rerender, and refined samples do not replace them. **Reset zoom** restores that original numeric or temporal domain and original sample, returns Y to automatic scaling, clears selection and tooltip state, and clears pending auto-refinement timer/state. The button state is derived from the current scale with a small deterministic floating-point tolerance.
+The first full render captures an immutable original X-domain and retains the original full sample. Manual drag zoom, auto-refinement, explicit **Refine zoom**, resize/rerender, and refined samples do not replace them. **Reset zoom** restores that original numeric or temporal domain and original sample, returns Y to automatic scaling, clears selection and tooltip state, and clears pending auto-refinement timer/state. Series hidden from the legend remain hidden through zoom, refinement, Reset zoom/double-click, rerender, resize, and settings/configuration refresh. The button state is derived from the current scale with a small deterministic floating-point tolerance.
 
 Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step retain sampled gaps for missing/non-finite Y values; other generic types skip them where appropriate.
 
