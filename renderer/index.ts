@@ -1415,10 +1415,15 @@ function renderSavedResult(
 
   const result = state.payload.result;
   if (result.truncated) {
+    const notice = result.previewRowCount < result.rowCount
+      ? `Saved preview: showing ${result.previewRowCount.toLocaleString()} of ` +
+        `${result.rowCount.toLocaleString()} rows. Omitted rows are not stored in this notebook.`
+      : 'Saved output was shortened to notebook limits; ' +
+        'omitted content is not stored in this notebook.';
     root.append(node(
       'div',
       'kx-notice',
-      `Showing ${result.previewRowCount.toLocaleString()} of ${result.rowCount.toLocaleString()} rows.`
+      notice
     ));
   }
   if (state.savedTableVisible) {

@@ -18,6 +18,7 @@ import {
   LiveNotebookResultStore,
 } from './notebook-live-results';
 import { NOTEBOOK_LIVE_RESULT_METADATA_KEY } from './notebook-message';
+import { NotebookQTargetProfile } from './notebook-q-target';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 
 export const KX_Q_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.q-notebook-controller';
@@ -69,6 +70,8 @@ interface MixedOutputWriteResult {
 
 export interface DirectQNotebookBridge {
   activeConnection(): KxConnection | undefined;
+  connections(): readonly KxConnection[];
+  connectionById(connectionId: string): KxConnection | undefined;
   isConnected(connectionId: string): boolean;
   executeScript(
     connection: KxConnection,
@@ -82,11 +85,11 @@ export interface DirectQNotebookBridge {
 
 export class KxQNotebookController implements vscode.Disposable {
   public readonly controller: vscode.NotebookController;
-  public readonly onDidChangeSelection: vscode.Event<void>;
+  public readonly onDidChangeState: vscode.Event<void>;
 
   private readonly stateSubscription: vscode.Disposable;
   private readonly selectionSubscription: vscode.Disposable;
-  private readonly selectionChanged = new vscode.EventEmitter<void>();
+  private readonly stateChanged = new vscode.EventEmitter<void>();
   private readonly selectedNotebooks = new Set<string>();
   private readonly activeExecutions = new Set<string>();
   private executionOrder = 0;
@@ -105,7 +108,7 @@ export class KxQNotebookController implements vscode.Disposable {
     this.controller.supportedLanguages = ['q'];
     this.controller.supportsExecutionOrder = true;
     this.stateSubscription = this.bridge.onDidChangeState(() => this.refreshDetails());
-    this.onDidChangeSelection = this.selectionChanged.event;
+    this.onDidChangeState = this.stateChanged.event;
     this.selectionSubscription = this.controller.onDidChangeSelectedNotebooks(event => {
       const key = event.notebook.uri.toString();
       if (event.selected) {
@@ -113,7 +116,7 @@ export class KxQNotebookController implements vscode.Disposable {
       } else {
         this.selectedNotebooks.delete(key);
       }
-      this.selectionChanged.fire();
+      this.stateChanged.fire();
     });
     this.refreshDetails();
   }
@@ -134,24 +137,36 @@ export class KxQNotebookController implements vscode.Disposable {
         `namespace ${connection.database}`,
         this.bridge.isConnected(connection.id)
           ? 'connected'
-          : 'disconnected; connects on Run q Cell (KX) or native Run while selected',
+          : 'disconnected; native Run connects this active profile while selected',
       ].join(' • ')
       : 'Direct IPC • No active KX connection • Add or select one in the KX Connections view';
-    this.selectionChanged.fire();
+    this.stateChanged.fire();
   }
 
-  public routeLabel(): string {
-    const connection = this.bridge.activeConnection();
+  public routeLabel(connection: KxConnection | undefined = this.bridge.activeConnection()): string {
     return connection
       ? `KX • ${safeStatusText(connection.name, 100)} • ${safeStatusText(connection.database, 512)}`
       : 'KX • No active connection';
+  }
+
+  public connectionProfiles(): NotebookQTargetProfile[] {
+    const activeId = this.bridge.activeConnection()?.id;
+    return this.bridge.connections().map(connection => ({
+      id: connection.id,
+      name: safeStatusText(connection.name, 100),
+      active: connection.id === activeId,
+      connected: this.bridge.isConnected(connection.id),
+    }));
   }
 
   public isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean {
     return this.selectedNotebooks.has(notebook.uri.toString());
   }
 
-  public async runCell(cell: vscode.NotebookCell): Promise<DirectQCellRunResult> {
+  public async runCell(
+    cell: vscode.NotebookCell,
+    connectionId: string
+  ): Promise<DirectQCellRunResult> {
     if (this.disposed) {
       return 'unavailable';
     }
@@ -167,7 +182,7 @@ export class KxQNotebookController implements vscode.Disposable {
     }
     this.activeExecutions.add(executionKey);
     try {
-      return await this.runMixedCell(cell);
+      return await this.runMixedCell(cell, this.bridge.connectionById(connectionId));
     } finally {
       this.activeExecutions.delete(executionKey);
     }
@@ -180,7 +195,7 @@ export class KxQNotebookController implements vscode.Disposable {
     this.disposed = true;
     this.stateSubscription.dispose();
     this.selectionSubscription.dispose();
-    this.selectionChanged.dispose();
+    this.stateChanged.dispose();
     this.selectedNotebooks.clear();
     this.activeExecutions.clear();
     this.controller.dispose();
@@ -210,13 +225,16 @@ export class KxQNotebookController implements vscode.Disposable {
     }
   }
 
-  private async runMixedCell(cell: vscode.NotebookCell): Promise<DirectQCellRunResult> {
+  private async runMixedCell(
+    cell: vscode.NotebookCell,
+    connection: KxConnection | undefined
+  ): Promise<DirectQCellRunResult> {
     const snapshot = mixedCellSnapshot(cell);
     const abortController = new AbortController();
     return vscode.window.withProgress(
       {
         location: vscode.ProgressLocation.Notification,
-        title: `${this.routeLabel()} • Run q Cell (KX)`,
+        title: `${this.routeLabel(connection)} • Run q Cell (KX)`,
         cancellable: true,
       },
       async (_progress, token) => {
@@ -228,7 +246,9 @@ export class KxQNotebookController implements vscode.Disposable {
             cell.notebook,
             'Run q Cell (KX)',
             token,
-            abortController.signal
+            abortController.signal,
+            connection,
+            'notebook'
           );
           if (prepared.canceled === 'before-issue') {
             return 'executed';
@@ -488,7 +508,9 @@ export class KxQNotebookController implements vscode.Disposable {
         notebook,
         KX_Q_NOTEBOOK_CONTROLLER_LABEL,
         execution.token,
-        abortController.signal
+        abortController.signal,
+        this.bridge.activeConnection(),
+        'active'
       );
       const materialized = this.materializeCellResult(
         prepared,
@@ -520,10 +542,11 @@ export class KxQNotebookController implements vscode.Disposable {
     notebook: vscode.NotebookDocument,
     runLabel: string,
     token: Pick<vscode.CancellationToken, 'isCancellationRequested'>,
-    signal: AbortSignal
+    signal: AbortSignal,
+    connection: KxConnection | undefined,
+    targetKind: 'active' | 'notebook'
   ): Promise<PreparedCellResult> {
     let issued = false;
-    let targetConnection: KxConnection | undefined;
     const canceledOutput = (): PreparedCellResult => ({
       success: undefined,
       canceled: issued ? 'after-issue' : 'before-issue',
@@ -535,15 +558,16 @@ export class KxQNotebookController implements vscode.Disposable {
       if (token.isCancellationRequested || signal.aborted) {
         return canceledOutput();
       }
-      const connection = this.bridge.activeConnection();
-      targetConnection = connection;
       this.refreshDetails();
       if (!connection) {
         return {
           success: false,
           output: errorOutput(
-            `${runLabel} has no active KX direct IPC connection. Add or select a KX connection ` +
-            'in the KX Connections view, optionally test it, then retry the cell.'
+            targetKind === 'notebook'
+              ? `${runLabel} has no available saved notebook q target. Choose a KX target for ` +
+                'this notebook, then retry the cell.'
+              : `${runLabel} has no active KX direct IPC connection. Add or select a KX connection ` +
+                'in the KX Connections view, optionally test it, then retry the cell.'
           ),
         };
       }
@@ -596,13 +620,15 @@ export class KxQNotebookController implements vscode.Disposable {
       if (token.isCancellationRequested || signal.aborted) {
         return canceledOutput();
       }
-      const detail = await this.safeErrorMessage(error, targetConnection);
-      const context = targetConnection ? ' for the selected active KX connection' : '';
+      const detail = await this.safeErrorMessage(error, connection);
+      const context = connection
+        ? ` for KX connection "${safeStatusText(connection.name, 100)}"`
+        : '';
       return {
         success: false,
         output: errorOutput(
           `${runLabel} failed${context}: ${detail}. ` +
-          'Use KX: Test Connection to verify the active profile.'
+          'Use KX: Test Connection to verify that profile.'
         ),
       };
     }

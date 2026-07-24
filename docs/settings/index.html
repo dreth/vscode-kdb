@@ -939,7 +939,7 @@
 <p>Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.</p>
 <h2 id="notebook-language-and-results">Notebook language and results</h2>
 <p>Notebook cell language is not a <code>vscode-kdb</code> setting. For a q-only notebook, select <strong>KX q (Direct IPC)</strong> and use normal Run. For a mixed notebook, keep the Python controller selected, set only the intended q code cells to language q, and use <strong>Run q Cell (KX)</strong>. Python cells retain normal Jupyter Run.</p>
-<p>Use the q cell-toolbar action, notebook cell context menu, or <strong>KX: Set Notebook Cell Language to q</strong>. It applies VS Code's supported document-language setter to every selected code cell, skips Markdown, and reports changed/already-q/failure counts. A q cell's KX status shows the active connection name and namespace without credentials.</p>
+<p>Use the leading <strong>Make q Cell (KX)</strong> action. It applies VS Code's supported document-language setter to selected code cells, skips Markdown, preserves source/metadata/output, and does not switch the Python kernel. An actual q cell shows <code>KX: &lt;profile&gt; · Ctrl+Enter</code> (<code>Cmd+Enter</code> on macOS) and a notebook-level <code>q default</code> chooser. Only the chosen profile ID/name are persisted; credentials and endpoint fields are excluded.</p>
 <p>VS Code's built-in Jupyter serializer stores a non-default q cell as raw <code>metadata.vscode.languageId: "q"</code>. The controller appears in the kernel/controller selector, not the Python controller's per-cell language picker.</p>
 <p><strong>KX: Restore Notebook Cell Language</strong> resolves the notebook default from <code>language_info.name</code> or <code>kernelspec.language</code> and applies it only to selected code cells. For an ordinary IPython notebook that is Python. The command is shown only when a default is available and refuses to apply an unregistered language. It preserves cell source, marker, other metadata, and output.</p>
 <table>
@@ -960,9 +960,9 @@
 </tr>
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputRows</code></td>
-<td><code>1000</code></td>
+<td><code>20</code></td>
 <td>Integer <code>1</code>-<code>10000</code></td>
-<td>Maximum rows persisted in a new direct-controller snapshot or newly tagged Python <code>%%q</code> marker.</td>
+<td>Maximum rows persisted in a new direct-controller snapshot or newly tagged Python <code>%%q</code> marker. Tables at or below the bound persist fully; larger tables retain schema/headers, the bounded preview, total count, and truncation notice.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputBytes</code></td>
@@ -974,7 +974,7 @@
 </table>
 <p><strong>KX: Tag Notebook Cell as q</strong> first sets actual q language mode, then persists the current row/byte values in one durable <code>%%q</code> marker and nested <code>vscode-kdb</code> metadata. It preserves an existing marker, cell code, and unrelated metadata. A q-language cell without the marker exposes <strong>Prepare this q cell for the active Python kernel</strong>, which performs only the marker/metadata preparation.</p>
 <p>These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, tokens, connection objects, recoverable IPC handles, and unbounded data. A direct result's full value is transient extension-host state only: bound to the notebook/current-cell URI (and rebound after a mixed output edit), removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.</p>
-<p>The direct controller and mixed <strong>Run q Cell (KX)</strong> action reject a leading <code>%%q</code>; they run ordinary complete-cell q through the active direct KX session. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, its guarded <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> shortcut runs the KX action; Python, Markdown, cell-container, and output focus keep normal notebook behavior.</p>
+<p>The direct controller and mixed <strong>Run q Cell (KX)</strong> action reject a leading <code>%%q</code>; they run ordinary complete-cell q. The q-only controller uses the active direct KX session; mixed cells use the notebook's explicit q target. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, its guarded <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> shortcut runs the KX action; Python, Markdown, cell-container, and output focus keep normal notebook behavior.</p>
 <p>The optional Python <code>%%q</code> helper is a distinct Python-kernel-owned evaluator route: keep its marker, restore the notebook default/Python language, and use normal Run. It does not share the direct KX q session by implication.</p>
 <p><code>inline</code> is the default Python-helper experience. For helper output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable <code>vscode-kdb.results.*</code> configuration as the panel; Settings messages update and broadcast that common source of truth.</p>
 <h2 id="feature-controls">Feature Controls</h2>
@@ -1350,7 +1350,7 @@
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.features.queryHistory&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.queryHistory.maxEntries&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.presentation&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;inline&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.maxOutputRows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.maxOutputRows&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">20</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.notebook.maxOutputBytes&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.connectionTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">30000</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">&quot;vscode-kdb.queryTimeoutMs&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1800000</span><span class="p">,</span>

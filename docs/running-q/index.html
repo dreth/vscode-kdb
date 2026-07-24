@@ -934,7 +934,7 @@
 </tbody>
 </table>
 <p>A code lens at the top of a q document also runs the whole script.</p>
-<p>These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when <strong>KX q (Direct IPC)</strong> is selected, or Python when a Python controller is selected. Separately, 0.2.5 contributes a default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> for <strong>Run q Cell (KX)</strong> only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or <code>Ctrl+Shift+Enter</code>. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.</p>
+<p>These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when <strong>KX q (Direct IPC)</strong> is selected, or Python when a Python controller is selected. Separately, 0.2.6 contributes a default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> for <strong>Run q Cell (KX)</strong> only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or <code>Ctrl+Shift+Enter</code>. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.</p>
 <h2 id="notebook-commands">Notebook commands</h2>
 <table>
 <thead>
@@ -950,11 +950,15 @@
 </tr>
 <tr>
 <td><strong>Run q Cell (KX)</strong></td>
-<td>With another controller selected, runs one q-language cell through the active KX profile/session. It is also bound to <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> only for focused q cell editor text.</td>
+<td>With another controller selected, runs one q-language cell through the notebook's explicit q target/session. It is also bound to <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> only for focused q cell editor text.</td>
 </tr>
 <tr>
-<td><strong>KX: Set Notebook Cell Language to q</strong></td>
-<td>Sets actual <code>TextDocument.languageId</code> to q through VS Code's supported API for every selected code cell, skips Markdown, and reports changed/already-q/failure counts. Available from the q cell toolbar, notebook cell context, and Command Palette.</td>
+<td><strong>Make q Cell (KX)</strong></td>
+<td>Sets actual <code>TextDocument.languageId</code> to q through VS Code's supported API without changing the selected Python kernel. It skips Markdown and preserves complete source, metadata, and output.</td>
+</tr>
+<tr>
+<td><strong>KX: Choose Notebook q Target</strong></td>
+<td>Chooses the saved KX profile used by mixed q cells. Only safe ID/display metadata enters the <code>.ipynb</code>; missing targets never fall through.</td>
 </tr>
 <tr>
 <td><strong>KX: Restore Notebook Cell Language</strong></td>
@@ -974,7 +978,7 @@
 </tr>
 </tbody>
 </table>
-<p>For a q-only notebook, select <strong>KX q (Direct IPC)</strong>, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use <strong>Run q Cell (KX)</strong> on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading <code>%%q</code>, use complete-cell <code>.Q.ld</code> script grouping, and share the active KX q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare <code>%%q</code>, restore the notebook default/Python language, then use normal Run after installing and configuring <code>kx_notebook</code>. The extension does not monkey-patch Jupyter or intercept Python-controller Run.</p>
+<p>For a q-only notebook, select <strong>KX q (Direct IPC)</strong>, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use <strong>Run q Cell (KX)</strong> on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading <code>%%q</code> and use complete-cell <code>.Q.ld</code> script grouping. q-only uses the active profile; mixed mode uses the notebook's explicit target and reuses that profile's q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare <code>%%q</code>, restore the notebook default/Python language, then use normal Run after installing and configuring <code>kx_notebook</code>. The extension does not monkey-patch Jupyter or intercept Python-controller Run.</p>
 <h2 id="exact-execution-semantics">Exact execution semantics</h2>
 <ul>
 <li>A non-empty selection is preserved exactly.</li>

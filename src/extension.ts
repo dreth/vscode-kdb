@@ -240,7 +240,7 @@ function qEditor(): vscode.TextEditor | undefined {
     const runWithKx = 'Run q Cell (KX)';
     const prepare = 'Prepare this q cell for the active Python kernel';
     void vscode.window.showInformationMessage(
-      'Notebook editor commands do not run a selection through KX. Run q Cell (KX) sends the complete q cell through the active KX connection without changing the selected Python controller. Prepare adds %%q for the separate kx_notebook Python route.',
+      'Notebook editor commands do not run a selection through KX. Run q Cell (KX) sends the complete q cell through the notebook’s selected KX target without changing the selected Python controller. Prepare adds %%q for the separate kx_notebook Python route.',
       runWithKx,
       prepare
     ).then(choice => choice === runWithKx
@@ -576,6 +576,8 @@ function directQNotebookBridge(
 ): DirectQNotebookBridge {
   return {
     activeConnection: () => store.activeConnection(),
+    connections: () => store.connections(),
+    connectionById: connectionId => store.connection(connectionId),
     isConnected: connectionId => manager.isConnected(connectionId),
     executeScript: (connection, source, onIssued, signal) =>
       manager.executeScript(connection, source, onIssued, signal),

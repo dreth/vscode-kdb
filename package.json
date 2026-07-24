@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Native direct q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -71,6 +71,7 @@
     "onCommand:vscode-kdb.tagNotebookCellAsQ",
     "onCommand:vscode-kdb.prepareNotebookCellForPythonKernel",
     "onCommand:vscode-kdb.runQNotebookCell",
+    "onCommand:vscode-kdb.selectNotebookQTarget",
     "onCommand:vscode-kdb.openNotebookPreviewInResults"
   ],
   "scripts": {
@@ -83,12 +84,13 @@
     "test:unit": "npm run compile && node test/run.js",
     "test:notebook-python": "uv run --python 3.9 --no-project --with-editable ./python/kx_notebook python -m unittest discover -s python/kx_notebook/tests -v",
     "test:notebook-cross": "npm run compile && node scripts/check-notebook-contract.js",
+    "test:extension-host": "npm run compile && node scripts/run-extension-host-test.js",
     "test:live-q": "npm run compile && node test/live/run.js",
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.5.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.5.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.6.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.6.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -260,9 +262,9 @@
       },
       {
         "command": "vscode-kdb.setNotebookCellLanguageQ",
-        "title": "KX: Set Notebook Cell Language to q",
+        "title": "Make q Cell (KX)",
         "icon": "$(symbol-keyword)",
-        "enablement": "notebookType == 'jupyter-notebook'"
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
         "command": "vscode-kdb.restoreNotebookCellLanguage",
@@ -286,6 +288,12 @@
         "command": "vscode-kdb.runQNotebookCell",
         "title": "Run q Cell (KX)",
         "icon": "$(play)",
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
+        "command": "vscode-kdb.selectNotebookQTarget",
+        "title": "KX: Choose Notebook q Target",
+        "icon": "$(server-process)",
         "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
@@ -359,14 +367,9 @@
           "group": "navigation@1"
         },
         {
-          "command": "vscode-kdb.importSqlToolsConnections",
-          "when": "view == vscode-kdb.connections",
-          "group": "navigation@2"
-        },
-        {
           "command": "vscode-kdb.refreshConnections",
           "when": "view == vscode-kdb.connections",
-          "group": "navigation@3"
+          "group": "navigation@2"
         },
         {
           "command": "vscode-kdb.refreshServerExplorer",
@@ -380,11 +383,6 @@
         }
       ],
       "view/item/context": [
-        {
-          "command": "vscode-kdb.importSqlToolsConnections",
-          "when": "view == vscode-kdb.connections && viewItem == vscode-kdb.connections.empty",
-          "group": "navigation@1"
-        },
         {
           "command": "vscode-kdb.connect",
           "when": "view == vscode-kdb.connections && viewItem =~ /^vscode-kdb\\.connection\\.disconnected\\./",
@@ -500,7 +498,11 @@
         },
         {
           "command": "vscode-kdb.runQNotebookCell",
-          "when": "notebookType == 'jupyter-notebook' && vscode-kdb.notebookQCell && !vscode-kdb.notebookDirectQControllerSelected"
+          "when": "notebookType == 'jupyter-notebook' && editorLangId == q && !vscode-kdb.notebookDirectQControllerSelected"
+        },
+        {
+          "command": "vscode-kdb.selectNotebookQTarget",
+          "when": "notebookType == 'jupyter-notebook' && editorLangId == q && !vscode-kdb.notebookDirectQControllerSelected"
         },
         {
           "command": "vscode-kdb.openNotebookPreviewInResults",
@@ -534,8 +536,8 @@
       "notebook/cell/title": [
         {
           "command": "vscode-kdb.setNotebookCellLanguageQ",
-          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && !vscode-kdb.notebookQCell",
-          "group": "inline@19"
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource not in vscode-kdb.qNotebookCellResources && !vscode-kdb.notebookDirectQControllerSelected",
+          "group": "inline@1"
         },
         {
           "command": "vscode-kdb.restoreNotebookCellLanguage",
@@ -555,7 +557,12 @@
         {
           "command": "vscode-kdb.runQNotebookCell",
           "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource in vscode-kdb.qNotebookCellResources && !vscode-kdb.notebookDirectQControllerSelected",
-          "group": "inline@20"
+          "group": "inline@1"
+        },
+        {
+          "command": "vscode-kdb.selectNotebookQTarget",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource in vscode-kdb.qNotebookCellResources && !vscode-kdb.notebookDirectQControllerSelected",
+          "group": "inline@2"
         },
         {
           "command": "vscode-kdb.openNotebookPreviewInResults",
@@ -588,10 +595,10 @@
         "vscode-kdb.notebook.maxOutputRows": {
           "type": "integer",
           "scope": "window",
-          "default": 1000,
+          "default": 20,
           "minimum": 1,
           "maximum": 10000,
-          "description": "Maximum rows persisted in a new KX notebook snapshot. Direct IPC controller output and newly tagged %%q cells use this bound; the tag command writes it into the magic and kx_notebook validates its explicit limit. A live direct result can expose more rows only while its in-memory result record exists."
+          "description": "Maximum rows persisted in a new KX notebook snapshot (20 by default). Direct IPC controller output and newly tagged %%q cells use this bound; the tag command writes it into the magic and kx_notebook validates its explicit limit. A live direct result can expose more rows only while its in-memory result record exists."
         },
         "vscode-kdb.notebook.maxOutputBytes": {
           "type": "integer",

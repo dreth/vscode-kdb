@@ -15,7 +15,7 @@ from typing import Any, Optional
 
 MIME_TYPE = "application/vnd.kx.result+json"
 CONTRACT_VERSION = 1
-DEFAULT_ROW_LIMIT = 1_000
+DEFAULT_ROW_LIMIT = 20
 DEFAULT_BYTE_LIMIT = 1_000_000
 MIN_BYTE_LIMIT = 16_384
 MAX_ROW_LIMIT = 10_000

@@ -947,7 +947,7 @@
 <h1 id="installation">Installation</h1>
 <h2 id="requirements">Requirements</h2>
 <p>KX for VS Code requires VS Code <code>1.96.0</code> or newer and a kdb+/q process reachable over q IPC for normal <code>.q</code> editor execution. The extension does not bundle q or a kdb+ license.</p>
-<p>The native <strong>KX q (Direct IPC)</strong> controller and mixed-notebook <strong>Run q Cell (KX)</strong> action use the same reachable q process and active KX profile as editor execution; neither requires a Python package. Because every direct q cell uses q script grouping, it requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer). The separate optional Python-kernel <code>%%q</code> route requires Python 3.9 or newer, IPython, and <code>kx_notebook</code> in that kernel. The helper bundles no q runtime or PyKX binary.</p>
+<p>The native <strong>KX q (Direct IPC)</strong> controller uses the active KX profile. Mixed-notebook <strong>Run q Cell (KX)</strong> uses the notebook's explicitly selected q target. Both use the same direct q machinery as editor execution and neither requires a Python package. Because every direct q cell uses q script grouping, it requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer). The separate optional Python-kernel <code>%%q</code> route requires Python 3.9 or newer, IPython, and <code>kx_notebook</code> in that kernel. The helper bundles no q runtime or PyKX binary.</p>
 <p>SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's <code>sqltools.connections</code> setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.</p>
 <h2 id="install-the-extension">Install the extension</h2>
 <p>Use a project-approved distribution of <strong>KX for VS Code</strong>. When installing a locally supplied VSIX, use VS Code's <strong>Extensions: Install from VSIX...</strong> command and confirm the extension name, publisher, and version before installation.</p>
@@ -977,7 +977,7 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 </ol>
 <p>The result should open in a KX-owned result panel. If it does not, see <a href="../troubleshooting/">Troubleshooting</a> and inspect <strong>View &gt; Output &gt; KX</strong>.</p>
 <h2 id="optional-one-time-connection-import">Optional one-time connection import</h2>
-<p>If you previously used the <code>DanielAlonso.kdb-sqltools</code> driver, run <strong>KX: Import SQLTools KDB Connections</strong> from the Command Palette or KX Connections toolbar. SQLTools may already be uninstalled. KX inspects existing user, workspace, and workspace-folder settings and reviews only profiles whose normalized driver is <code>KDB</code>, <code>kdb+</code>, <code>kdb</code>, <code>kdb-sqltools</code>, or <code>DanielAlonso.kdb-sqltools</code>.</p>
+<p>If you previously used the <code>DanielAlonso.kdb-sqltools</code> driver, run <strong>KX: Import SQLTools KDB Connections</strong> from the Command Palette. It is intentionally absent from the routine KX Connections title toolbar. SQLTools may already be uninstalled. KX inspects existing user, workspace, and workspace-folder settings and reviews only profiles whose normalized driver is <code>KDB</code>, <code>kdb+</code>, <code>kdb</code>, <code>kdb-sqltools</code>, or <code>DanielAlonso.kdb-sqltools</code>.</p>
 <p>The review never displays password values. SSH-enabled and malformed profiles are explained but cannot be selected. Existing KX profiles are skipped unless you explicitly import the candidate under a new unique name; this release has no replace or overwrite action. If selected settings contain passwords, choose whether to copy them once into VS Code SecretStorage, import without passwords, or cancel. Source settings remain unchanged and are never synchronized.</p>
 <p>The imported legacy connection timeout applies only to KX connect/handshake. Query timeout continues to inherit the KX global query default until you edit it. After import, use <strong>Review Imported Connection</strong> or the KX sidebar to inspect and test the saved direct profile.</p>
 <h2 id="use-the-native-direct-q-notebook-controller">Use the native direct q notebook controller</h2>
@@ -993,10 +993,11 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 <ol>
 <li>Keep the normal Python Jupyter controller selected.</li>
 <li>Leave Python cells as Python and run them normally.</li>
-<li>Set an intended q code cell to language q with <strong>KX: Set Notebook Cell Language to q</strong>.</li>
-<li>Use its compact <strong>Run q Cell (KX)</strong> play action or cell context entry.</li>
+<li>Click the leading <strong>Make q Cell (KX)</strong> action on the intended code cell. This changes the whole cell's language without changing the selected Python kernel.</li>
+<li>Choose the visible notebook-level <code>q default</code> target from saved KX profiles.</li>
+<li>Use the leading <strong>Run q Cell (KX)</strong> play action, its <code>KX: &lt;profile&gt; · Ctrl+Enter</code> status item, or the focused-cell shortcut.</li>
 </ol>
-<p>The KX action executes the complete q source through the active KX profile without switching the Python controller. q assignments continue through the same KX q process used by the direct controller and <code>.q</code> editor runs. Python variables and KX q variables remain separate.</p>
+<p>The KX action executes the complete q source through that explicit target without switching the Python controller. A target persists only safe profile ID/name metadata in the <code>.ipynb</code>; a missing or removed target asks for a replacement instead of using list order. q assignments continue through the selected profile's KX q process across q cells that share the target. Python variables and KX q variables remain separate.</p>
 <p>When the q cell editor itself has text focus, the contributed default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs the KX action. The shortcut is limited to q code-cell editor focus and is disabled when the KX direct controller is selected. Python, Markdown, cell-container, and output focus keep their normal notebook shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if the shortcut was customized.</p>
 <p>Mixed mode cannot claim native KX kernel execution while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.</p>
 <h2 id="notebook-commands">Notebook commands</h2>
@@ -1010,11 +1011,15 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 <tbody>
 <tr>
 <td><strong>Run q Cell (KX)</strong></td>
-<td>Execute the complete q-language cell through the active KX connection while another notebook controller remains selected.</td>
+<td>Execute the complete q-language cell through the notebook's explicit KX target while another notebook controller remains selected.</td>
 </tr>
 <tr>
-<td><strong>KX: Set Notebook Cell Language to q</strong></td>
-<td>Apply q language/highlighting to selected code cells; skips Markdown.</td>
+<td><strong>Make q Cell (KX)</strong></td>
+<td>Apply q language/highlighting to a complete code cell without changing the selected kernel.</td>
+</tr>
+<tr>
+<td><strong>KX: Choose Notebook q Target</strong></td>
+<td>Select the saved KX profile used by mixed q cells in this notebook.</td>
 </tr>
 <tr>
 <td><strong>KX: Restore Notebook Cell Language</strong></td>
@@ -1047,7 +1052,7 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <span class="n">configure_evaluator</span><span class="p">(</span><span class="k">lambda</span> <span class="n">source</span><span class="p">:</span> <span class="n">my_existing_q_session</span><span class="p">(</span><span class="n">source</span><span class="p">))</span>
 <span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
 </code></pre></div>
-<p>Use the q code-cell toolbar action or <strong>KX: Set Notebook Cell Language to q</strong> for actual q highlighting, then <strong>KX: Tag Notebook Cell as q</strong> to retain the durable <code>%%q</code> marker and configured output limits. The normal Python Jupyter controller does not advertise or Run q-language cells: keep the marker, use <strong>KX: Restore Notebook Cell Language</strong>, and then use normal Run so IPython invokes the configured magic. Selecting the Python kernel may perform that normalization itself.</p>
+<p>Use <strong>Make q Cell (KX)</strong> for actual q highlighting, then <strong>KX: Tag Notebook Cell as q</strong> to retain the durable <code>%%q</code> marker and configured output limits. The normal Python Jupyter controller does not advertise or Run q-language cells: keep the marker, use <strong>KX: Restore Notebook Cell Language</strong>, and then use normal Run so IPython invokes the configured magic. Selecting the Python kernel may perform that normalization itself.</p>
 <p>This helper path is separate from both <strong>KX q (Direct IPC)</strong> and <strong>Run q Cell (KX)</strong>. It never opens or borrows the extension's direct connection and does not share q variables/session state with first-party direct execution by implication. KX does not intercept Microsoft Jupyter or reroute Python-controller Run. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="verify-a-source-checkout">Verify a source checkout</h2>
 <p>The maintained non-visual checks are:</p>
@@ -1057,11 +1062,12 @@ npm<span class="w"> </span><span class="nb">test</span>
 npm<span class="w"> </span>run<span class="w"> </span>test:parity:self
 npm<span class="w"> </span>run<span class="w"> </span>test:notebook-python
 npm<span class="w"> </span>run<span class="w"> </span>test:notebook-cross
+npm<span class="w"> </span>run<span class="w"> </span>test:extension-host
 </code></pre></div>
 <p>When a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>The migration configuration-provider, NotebookController, mixed q-cell runner, active-session routing, live-result, and language-setter tests use pure helpers and faithful VS Code providers/fakes because the maintained suite does not launch an Extension Host. Source/manifest guards cover controller activation, q-only toolbar/context/keybinding scopes, grammar, and private-Jupyter/runtime boundaries. These commands do not claim visual or real VS Code Extension Host end-to-end coverage.</p>
+<p>Pure helpers and faithful VS Code providers/fakes cover migration configuration, native active-profile routing, mixed explicit-target routing, live results, status, menus, and keybinding scopes. The scoped Extension Host smoke covers activation, contributed commands, isolated two-profile configuration/active selection, and real notebook language conversion/restoration. It does not exercise the connection webview, kernel selector, toolbar/status layout, target QuickPick, or q execution and makes no visual UI E2E claim.</p>
 
 
 

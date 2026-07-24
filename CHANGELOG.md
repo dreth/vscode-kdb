@@ -4,6 +4,23 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.6 - 2026-07-24
+
+- Made mixed Python/q execution first-class: non-q Jupyter code cells show leading **Make q Cell (KX)**, actual q cells show leading **Run q Cell (KX)** with a play icon, and focused q cells route `Ctrl+Enter` / `Cmd+Enter` to that action while Python cells keep normal Jupyter execution.
+
+  | Selected notebook kernel + cell | Use |
+  | --- | --- |
+  | Python selected + Python cell | normal Run |
+  | Python selected + q cell | **Run q Cell (KX)** / `Ctrl+Enter` |
+  | KX q selected + q cell | normal Run |
+
+- Added q-cell status `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS) plus a notebook-level q-target chooser. Mixed notebooks keep Python selected and persist only the chosen profile ID/display name; renamed IDs resolve, removed targets require explicit replacement, and no run falls through to list order.
+- Kept q-only behavior native: with **KX q (Direct IPC)** selected, normal Run and notebook shortcuts execute complete q cells; redundant mixed controls and status are suppressed.
+- Fixed connection saves and display: passwordless profiles no longer depend on SecretStorage, writes and active selection are verified, multiple profiles appear immediately, active rows show `ACTIVE`, failures are visible, and deleting the active profile does not silently promote another.
+- Removed **Import SQLTools Connections** from the Connections title/item toolbar while retaining the one-time Command Palette migration.
+- Changed the default persisted notebook table preview to 20 rows. Tables at or below the bound persist fully; larger tables keep schema/headers, 20 preview rows, total count, and an explicit truncation notice while the current live KX Results value remains full and virtualized.
+- Added provider, source, manifest, connection-store/tree/form, notebook-target, renderer/contract, Python-helper, and scoped Extension Host regression coverage. Marketplace upload remains intentionally excluded.
+
 ## 0.2.5 - 2026-07-24
 
 - Added **Run q Cell (KX)** for mixed Python/q Jupyter notebooks. A q-language cell can execute its complete source through the active KX connection, process, and namespace while the normal Python controller remains selected; Python and Markdown cells are never rewritten or rerouted.

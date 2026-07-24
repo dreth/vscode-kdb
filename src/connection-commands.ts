@@ -200,7 +200,7 @@ export class ConnectionCommands {
     );
 
     const panel = new ConnectionFormPanel(initial, {
-      onSave: payload => this.saveConnectionForm(payload, draft.id, editing),
+      onSave: payload => this.saveConnectionFormWithFeedback(payload, draft.id, editing),
       onTest: (payload, signal, onProgress) => this.testConnectionForm(
         payload,
         draft.id,
@@ -270,6 +270,22 @@ export class ConnectionCommands {
     };
   }
 
+  private async saveConnectionFormWithFeedback(
+    payload: unknown,
+    id: string,
+    editing?: KxConnection
+  ): Promise<void> {
+    try {
+      await this.saveConnectionForm(payload, id, editing);
+    } catch (error) {
+      this.tree.refresh();
+      this.showFailure(editing
+        ? `Save connection "${editing.name}"`
+        : 'Add KX connection', error);
+      throw error;
+    }
+  }
+
   private async saveConnectionForm(
     payload: unknown,
     id: string,
@@ -292,6 +308,12 @@ export class ConnectionCommands {
         parsed.connection,
         typeof parsed.passwordUpdate === 'string' ? parsed.passwordUpdate : undefined
       );
+      const saved = this.store.connection(parsed.connection.id);
+      if (!saved) {
+        throw new Error(
+          `KX connection "${parsed.connection.name}" was not found after VS Code reported saving it.`
+        );
+      }
       this.tree.refresh();
       vscode.window.showInformationMessage(
         `Added KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}).`
