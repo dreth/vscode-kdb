@@ -818,24 +818,24 @@
 <span class="nb">tables</span><span class="w"> </span><span class="ss">`</span><span class="o">.</span><span class="n">analytics</span>
 </code></pre></div>
 <h2 id="standalone-status">Standalone status</h2>
-<p>The current <code>0.2.4</code> release polishes <strong>KX q (Direct IPC)</strong> and the inline NotebookRenderer. q no-value/generic empty results are compact qText while schema-bearing zero-row tables remain tables; saved and live grids use compact natural sizing, vertical resize, stable two-axis scrolling, range selection/copy, and multi-series chart controls. The separate Python/IPython <code>%%q</code> helper remains available when a Python kernel must own execution. The release also retains the explicit one-shot bridge for importing legacy KDB profiles already saved in VS Code settings. There is no SQLTools runtime/UI dependency, private Jupyter integration, session-file behavior, or ongoing synchronization.</p>
+<p>The current <code>0.2.5</code> release supports both q-only and mixed Python/q notebooks. Select <strong>KX q (Direct IPC)</strong> for native q-only Run, or keep Python selected and use <strong>Run q Cell (KX)</strong> on q cells without switching controllers. Mixed output is committed as an undoable notebook edit after q finishes, so the notebook becomes dirty until saved; Python cells remain untouched. Inline output uses compact KX Results controls, all six real chart types/column capabilities, and shared result settings; hidden legend series remain hidden across chart refreshes. Query responses default to 30 minutes independently of the 30-second connect/handshake default. The separate Python/IPython <code>%%q</code> helper remains available only when a Python-kernel evaluator must own q execution.</p>
 <p>Implemented foundations include:</p>
 <ul>
 <li>direct q IPC connections managed through one responsive <strong>KX Connection</strong> form, with extension-owned safe metadata, VS Code SecretStorage, and a temporary unsaved-value <strong>Test Connection</strong> path;</li>
 <li>a KX-owned <strong>Import SQLTools KDB Connections</strong> review for exact legacy driver aliases, scoped configuration discovery, safe skip/rename conflicts, explicit one-time password transfer, and no overwrite or sync;</li>
-<li>optional per-profile connect/handshake and query timeout overrides with bounded global defaults;</li>
+<li>optional per-profile connect/handshake and query timeout overrides with independent 30-second and 30-minute global defaults;</li>
 <li>exact current-line, selection, and whole-document q execution;</li>
-<li>a supported <code>vscode.notebooks.createNotebookController</code> for ordinary Jupyter notebooks, q syntax and normal complete-cell Run, active-profile/session/namespace continuity, actionable connection errors, live first-party result views, shared result settings, bounded portable output, and no private Jupyter API;</li>
+<li>a supported <code>vscode.notebooks.createNotebookController</code> for q-only Jupyter notebooks plus a q-scoped <strong>Run q Cell (KX)</strong> action/shortcut for mixed Python notebooks, with shared complete-cell execution, active-profile/session/namespace continuity, actionable connection errors, bounded live/portable output, and no private Jupyter API;</li>
 <li>actual q <code>TextDocument.languageId</code> editing aids, safe restore-to-notebook-default, a separate durable Python <code>%%q</code> preparation route, and a real VS Code NotebookRenderer for <code>application/vnd.kx.result+json</code> v1; direct output stores KX MIME plus <code>text/plain</code>, while the Python helper can add static HTML/text fallbacks;</li>
 <li>a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand <code>meta</code>, confirmed bounded table/variable previews, and metadata-only functions/projections;</li>
 <li>disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;</li>
 <li>grid and q-text results, correct q no-value/empty classification, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;</li>
-<li>compact/resizable notebook tables with stable two-axis scrolling, bounded range copy, and line/scatter/step/bar multi-series charts below the table;</li>
-<li>panel line, scatter, step, bar, box, and candlestick charts with original-domain Reset zoom;</li>
+<li>compact/resizable notebook tables with stable two-axis scrolling, Search keyboard navigation, selection-only Tools copy, and capability-valid line/scatter/step/bar/box/candlestick controls;</li>
+<li>panel and notebook charts with original-domain Reset zoom and legend-hidden state preserved across refreshes;</li>
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>
-<p>This is not a full KDB-X or q Professional compatibility claim. Standalone owns its TextMate q grammar, native direct q controller, opt-in qText result presentation, focused Server Explorer, local Query History, and NotebookRenderer, but it does not claim a q LSP, lint engine, source-document formatter, remote Jupyter kernel, or complete editor/notebook parity. Server exploration is deliberately limited to the active direct profile and configured namespace. The extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, Python-controller interception, persisted full-result recovery, or server-side notebook interruption. Live direct results exist only in the current extension-host session; reopened output is the bounded saved snapshot. Deterministic provider/model/renderer/source guards are not visual or real Extension Host E2E. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a>.</p>
+<p>This is not a full KDB-X or q Professional compatibility claim. Standalone owns its TextMate q grammar, native direct q controller, explicit mixed-notebook q action, opt-in qText result presentation, focused Server Explorer, local Query History, and NotebookRenderer, but it does not claim a q LSP, lint engine, source-document formatter, remote Jupyter kernel, or complete editor/notebook parity. Public VS Code APIs select one notebook controller; built-in Python Run is never rerouted to KX. The extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, persisted full-result recovery, or server-side notebook interruption. Live direct results exist only in the current extension-host session; reopened output is the bounded saved snapshot. Deterministic provider/model/renderer/source guards are not visual or real Extension Host E2E. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a>.</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>VS Code <code>1.96.0</code> or newer.</li>
@@ -851,7 +851,7 @@
 <li>Test it, set it active, and connect; a run can also connect on demand.</li>
 <li>Open a <code>.q</code> file and run the current line, an exact selection, or the whole document.</li>
 <li>Inspect, chart, copy, or export the result in <strong>KX Results</strong>.</li>
-<li>In an ordinary Jupyter notebook, choose <strong>KX q (Direct IPC)</strong> from the normal kernel/controller selector, make the intended code cells q, and use normal Run. A saved disconnected active profile may connect on the first Run because selecting the direct controller was explicit.</li>
+<li>In a q-only notebook, choose <strong>KX q (Direct IPC)</strong> and use normal Run. In a mixed notebook, keep Python selected and use <strong>Run q Cell (KX)</strong> only on q-language code cells.</li>
 <li>Open <strong>View &gt; Output</strong> and select <strong>KX</strong> when diagnosing lifecycle or IPC failures.</li>
 <li>Optionally enable Server Explorer or Query History in Settings; both default off to avoid surprise metadata queries or query-text persistence.</li>
 </ol>
@@ -860,7 +860,7 @@
 <li><a href="installation/">Installation</a>: requirements, local development, and first connection.</li>
 <li><a href="connections/">Connections &amp; SecretStorage</a>: direct IPC, namespaces, authentication, and lifecycle.</li>
 <li><a href="running-q/">Running q</a>: exact editor semantics and cancellation boundaries.</li>
-<li><a href="notebooks/">Jupyter/IPython Notebooks</a>: native Direct IPC controller, active-session routing, live result lifetime, bounded persistence, and the separate Python <code>%%q</code> route.</li>
+<li><a href="notebooks/">Jupyter/IPython Notebooks</a>: q-only and mixed modes, active-session routing, live result lifetime, bounded persistence, and the separate Python <code>%%q</code> route.</li>
 <li><a href="results-viewer/">Results Viewer</a>: grids, q text, selection, search, sort, and column controls.</li>
 <li><a href="charting/">Charting</a>: chart types, controls, sampling, and PNG export.</li>
 <li><a href="copy-export/">Copy &amp; Export</a>: formats and safety prompts.</li>

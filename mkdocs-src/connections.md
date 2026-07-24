@@ -13,7 +13,7 @@ KX for VS Code owns its direct q IPC connections. They appear in the **KX Connec
 | Username | Optional q IPC username. |
 | Password | Optional secret combined with the username for the q IPC handshake. It is a password input and is stored only in SecretStorage. |
 | Connect / handshake timeout | Optional per-connection millisecond override in **Advanced direct q IPC**. Blank inherits the global default. |
-| Query timeout | Optional per-connection millisecond override in **Advanced direct q IPC**. Blank inherits the global default. |
+| Query response timeout | Optional per-connection millisecond override in **Advanced direct q IPC**. Blank inherits the global query default. |
 
 Namespaces are normalized to a leading dot. Invalid hosts, ports, namespaces, duplicate names, unsupported username characters, and timeout values are rejected before storage. Timeout overrides must be whole numbers from `0` through `2147483647`; `0` disables the corresponding deadline.
 
@@ -107,9 +107,9 @@ Connection changes use rollback handling so a failed settings or secret write do
 
 `vscode-kdb.connectionTimeoutMs` defaults to `30000`. It is the global direct q IPC connect/handshake deadline. TCP connect gets the full budget, and after TCP succeeds the q IPC handshake gets a new full budget.
 
-`vscode-kdb.queryTimeoutMs` defaults to `null`. Null inherits `connectionTimeoutMs`, preserving the behavior of profiles created before the split query setting. A numeric value sets a distinct global query-response timeout. A blank profile override inherits the corresponding resolved global value; specifically, a blank query override uses the global query value, which under the default `null` is the global `connectionTimeoutMs` value.
+`vscode-kdb.queryTimeoutMs` defaults to `1800000` milliseconds (30 minutes), independently of `connectionTimeoutMs`. A blank profile query override—including an existing profile with no `queryTimeoutMs` field—inherits this global query value; it never copies either the global or per-profile connect/handshake timeout.
 
-All global values and profile overrides accept only integers from `0` through `2147483647`; `0` disables that deadline. Query queue wait is not timed. The query deadline starts when that connection makes the query active and sends it, and runs until the response completes. On expiry the uncertain socket is discarded. Errors identify the `connect`, `handshake`, or `query` phase and direct endpoint without including credentials or query contents.
+All global values and profile overrides accept only integers from `0` through `2147483647`; `0` disables only the corresponding deadline. Thus `queryTimeoutMs: 0` does not disable the TCP connect or q IPC handshake deadlines, and `connectionTimeoutMs: 0` does not disable the query response deadline. Query queue wait is not timed. The query deadline starts when that connection makes the query active and sends it, and runs until the response completes. On expiry the uncertain socket is discarded. Diagnostics identify the `connect`, `handshake`, or `query` phase, effective phase timeout, and direct endpoint without including credentials or query contents.
 
 ## Active and connected state
 
@@ -125,7 +125,7 @@ Both the form button and the saved-profile **KX: Test Connection** command use t
 
 The native **KX q (Direct IPC)** NotebookController uses this same connection manager. It routes complete q cells through the active profile's existing client and configured namespace, so notebook cells and normal editor runs preserve one q session's assignments and state. A saved disconnected active profile may connect on demand only after the user intentionally selects that direct controller. No per-cell or per-notebook connection is created.
 
-The Python `kx_notebook` / `%%q` helper is separate: it calls only the evaluator configured inside that Python kernel, and optional PyKX uses that kernel's existing object. The extension does not intercept Python-controller Run or imply state sharing between the routes. A direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
+Both **KX q (Direct IPC)** and mixed-notebook **Run q Cell (KX)** use the active profile and its existing q process/session. The latter is an explicit q-cell action while Python remains selected; normal Python-controller Run is never intercepted. The Python `kx_notebook` / `%%q` helper is separate: it calls only the evaluator configured inside that Python kernel, and optional PyKX uses that kernel's existing object. A first-party direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
 
 Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection.
 

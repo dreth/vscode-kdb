@@ -103,10 +103,16 @@ def static_text(payload: Mapping[str, Any]) -> str:
     chart = payload.get("chart")
     if chart:
         chart_title = f" ({chart['title']})" if chart.get("title") else ""
-        lines.append(
-            f"Static chart{chart_title}: {chart['type']}; x={chart['xColumn']}; "
-            f"y={','.join(chart['yColumns'])} (see the HTML/SVG fallback)"
-        )
+        if chart["type"] in {"box", "candlestick"} or chart.get("groupByColumn"):
+            lines.append(
+                f"Interactive chart{chart_title}: {chart['type']}; "
+                "open this notebook in VS Code to use the KX renderer"
+            )
+        else:
+            lines.append(
+                f"Static chart{chart_title}: {chart['type']}; x={chart['xColumn']}; "
+                f"y={','.join(chart['yColumns'])} (see the HTML/SVG fallback)"
+            )
     lines.append("\t".join(str(column["name"]) for column in columns))
     lines.extend("\t".join(_plain_cell_text(cell) for cell in row) for row in rows)
     if not rows:
@@ -167,6 +173,17 @@ def _number_text(value: Any) -> str:
 
 def _static_svg(payload: Mapping[str, Any]) -> str:
     chart = payload["chart"]
+    if chart["type"] in {"box", "candlestick"} or chart.get("groupByColumn"):
+        mode = (
+            f"grouped {chart['type']}"
+            if chart.get("groupByColumn")
+            else str(chart["type"])
+        )
+        return (
+            f'<div class="kx-notice">Static {html.escape(mode)} chart rendering '
+            "is unavailable; open this notebook in VS Code to use the interactive "
+            "KX renderer.</div>"
+        )
     columns = [column["name"] for column in payload["schema"]["columns"]]
     rows = payload["data"]["rows"]
     x_index = columns.index(chart["xColumn"])

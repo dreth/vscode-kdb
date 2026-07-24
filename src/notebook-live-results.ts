@@ -64,6 +64,7 @@ export interface LiveNotebookResultView {
   rowCount: number;
   chartXColumns: string[];
   chartYColumns: string[];
+  chartGroupColumns: string[];
   text?: string;
   table?: ColumnarPanelResult;
 }
@@ -98,6 +99,11 @@ export interface LiveNotebookChartRequest {
   chartType: ChartType | string;
   xColumn: string;
   yColumns: string[];
+  groupByColumn?: string;
+  openColumn?: string;
+  highColumn?: string;
+  lowColumn?: string;
+  closeColumn?: string;
   maxPoints: number;
   maxSourceRows?: number;
 }
@@ -109,6 +115,7 @@ export interface LiveNotebookCopyRequest {
   endColumn: number;
   format: 'tsv' | 'csv';
   includeHeaders: boolean;
+  includeRowIndex: boolean;
   sortColumn?: string;
   sortDirection?: 'asc' | 'desc';
 }
@@ -133,15 +140,38 @@ export class LiveNotebookResultStore {
   public register(registration: LiveNotebookResultRegistration): string {
     this.removeCell(registration.notebookUri, registration.cellUri);
     const id = this.uniqueId();
+    this.bind(id, registration);
+    return id;
+  }
+
+  public stage(registration: LiveNotebookResultRegistration): string {
+    const id = this.uniqueId();
     this.records.set(id, {
       ...registration,
       id,
       createdAt: Date.now(),
       sortOrders: new Map<string, number[]>(),
     });
-    this.cellResults.set(cellKey(registration.notebookUri, registration.cellUri), id);
-    this.evictOldest();
     return id;
+  }
+
+  public rebind(id: string, registration: LiveNotebookResultRegistration): void {
+    if (!/^[A-Za-z0-9_-]{32,128}$/.test(id)) {
+      throw new Error('Live KX notebook result identifier is invalid.');
+    }
+    this.bind(id, registration);
+  }
+
+  public remove(id: string, notebookUri: string): void {
+    const record = this.records.get(id);
+    if (!record || record.notebookUri !== notebookUri) {
+      return;
+    }
+    const key = cellKey(record.notebookUri, record.cellUri);
+    if (this.cellResults.get(key) === id) {
+      this.cellResults.delete(key);
+    }
+    this.records.delete(id);
   }
 
   public removeCell(notebookUri: string, cellUri: string): void {
@@ -207,6 +237,7 @@ export class LiveNotebookResultStore {
         rowCount: 0,
         chartXColumns: [],
         chartYColumns: [],
+        chartGroupColumns: [],
         text: converted.text,
       };
     }
@@ -223,6 +254,7 @@ export class LiveNotebookResultStore {
       rowCount: converted.result.rowCount,
       chartXColumns: chartOptions.xColumns.map(option => option.columnName),
       chartYColumns: chartOptions.yColumns.map(option => option.columnName),
+      chartGroupColumns: chartOptions.groupColumns.map(option => option.columnName),
       table: converted.result,
     };
   }
@@ -379,6 +411,11 @@ export class LiveNotebookResultStore {
       chartType,
       xColumn: request.xColumn,
       yColumns: request.yColumns.slice(0, 16),
+      groupByColumn: request.groupByColumn,
+      openColumn: request.openColumn,
+      highColumn: request.highColumn,
+      lowColumn: request.lowColumn,
+      closeColumn: request.closeColumn,
       width: 720,
       maxSourceRows: safePositiveInteger(request.maxSourceRows, CHART_MAX_SOURCE_ROWS),
       maxSampledPoints: safePositiveInteger(request.maxPoints, 2_500),
@@ -437,6 +474,7 @@ export class LiveNotebookResultStore {
       endColumn,
     }, {
       includeHeaders: request.includeHeaders,
+      includeRowIndex: request.includeRowIndex,
     });
     if (text.length > MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS) {
       throw new Error(
@@ -477,6 +515,28 @@ export class LiveNotebookResultStore {
       }
     }
     throw new Error('Could not allocate a safe live notebook result identifier.');
+  }
+
+  private bind(id: string, registration: LiveNotebookResultRegistration): void {
+    const previous = this.records.get(id);
+    if (previous) {
+      this.cellResults.delete(cellKey(previous.notebookUri, previous.cellUri));
+    }
+    const targetKey = cellKey(registration.notebookUri, registration.cellUri);
+    const replacedId = this.cellResults.get(targetKey);
+    if (replacedId && replacedId !== id) {
+      this.records.delete(replacedId);
+    }
+    this.records.set(id, {
+      ...registration,
+      id,
+      createdAt: previous?.createdAt ?? Date.now(),
+      viewKey: previous?.viewKey,
+      converted: previous?.converted,
+      sortOrders: previous?.sortOrders ?? new Map<string, number[]>(),
+    });
+    this.cellResults.set(targetKey, id);
+    this.evictOldest();
   }
 
   private evictOldest(): void {

@@ -91,7 +91,7 @@ export function parseConnectionFormPayload(
     throw formError(error, 'connectTimeoutMs');
   }
   try {
-    queryTimeoutMs = parseOptionalTimeout(queryTimeoutText, 'Query timeout');
+    queryTimeoutMs = parseOptionalTimeout(queryTimeoutText, 'Query response timeout');
   } catch (error) {
     throw formError(error, 'queryTimeoutMs');
   }
@@ -185,7 +185,7 @@ function validationField(error: unknown): ConnectionFormField | undefined {
   if (/connect \/ handshake timeout/i.test(message)) {
     return 'connectTimeoutMs';
   }
-  if (/query timeout/i.test(message)) {
+  if (/query (?:response )?timeout/i.test(message)) {
     return 'queryTimeoutMs';
   }
   return undefined;

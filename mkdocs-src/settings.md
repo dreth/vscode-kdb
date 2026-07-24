@@ -6,7 +6,9 @@ Connection records are application-scoped user metadata. Other settings can be s
 
 ## Notebook language and results
 
-Notebook cell language is not a `vscode-kdb` setting. Select **KX q (Direct IPC)** from VS Code's normal notebook kernel/controller selector; it advertises q and owns normal Run for q cells. For existing mixed-language cells, use the q cell-toolbar action, notebook cell context menu, or **KX: Set Notebook Cell Language to q**. It applies VS Code's supported document-language setter to every selected code cell, skips Markdown, and reports changed/already-q/failure counts.
+Notebook cell language is not a `vscode-kdb` setting. For a q-only notebook, select **KX q (Direct IPC)** and use normal Run. For a mixed notebook, keep the Python controller selected, set only the intended q code cells to language q, and use **Run q Cell (KX)**. Python cells retain normal Jupyter Run.
+
+Use the q cell-toolbar action, notebook cell context menu, or **KX: Set Notebook Cell Language to q**. It applies VS Code's supported document-language setter to every selected code cell, skips Markdown, and reports changed/already-q/failure counts. A q cell's KX status shows the active connection name and namespace without credentials.
 
 VS Code's built-in Jupyter serializer stores a non-default q cell as raw `metadata.vscode.languageId: "q"`. The controller appears in the kernel/controller selector, not the Python controller's per-cell language picker.
 
@@ -20,11 +22,13 @@ VS Code's built-in Jupyter serializer stores a non-default q cell as raw `metada
 
 **KX: Tag Notebook Cell as q** first sets actual q language mode, then persists the current row/byte values in one durable `%%q` marker and nested `vscode-kdb` metadata. It preserves an existing marker, cell code, and unrelated metadata. A q-language cell without the marker exposes **Prepare this q cell for the active Python kernel**, which performs only the marker/metadata preparation.
 
-These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, tokens, connection objects, recoverable IPC handles, and unbounded data. A direct result's full value is transient extension-host state only: bound to notebook/cell URI, removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.
+These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, tokens, connection objects, recoverable IPC handles, and unbounded data. A direct result's full value is transient extension-host state only: bound to the notebook/current-cell URI (and rebound after a mixed output edit), removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.
 
-The direct controller rejects a leading `%%q`; remove it and run ordinary q. A normal Python Jupyter controller instead requires the separate configured helper: keep `%%q`, restore the notebook default/Python language, and then use normal Run. The extension does not intercept Python-controller Run or claim the routes share state.
+The direct controller and mixed **Run q Cell (KX)** action reject a leading `%%q`; they run ordinary complete-cell q through the active direct KX session. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, its guarded `Ctrl+Enter` / `Cmd+Enter` shortcut runs the KX action; Python, Markdown, cell-container, and output focus keep normal notebook behavior.
 
-`inline` is the default Python-helper experience. For helper output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and renderer-only per-result sort/search/selection and chart type/X/Y/point cap/zoom state persist only for that rendered result in the current notebook session. Supported density/sizing, display strategies, qText/array formatting, elapsed-time, chart decimal, and chart source-row preferences use the same durable `vscode-kdb.results.*` configuration as the panel, and settings messages update/broadcast that common source of truth.
+The optional Python `%%q` helper is a distinct Python-kernel-owned evaluator route: keep its marker, restore the notebook default/Python language, and use normal Run. It does not share the direct KX q session by implication.
+
+`inline` is the default Python-helper experience. For helper output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable `vscode-kdb.results.*` configuration as the panel; Settings messages update and broadcast that common source of truth.
 
 ## Feature Controls
 
@@ -55,10 +59,10 @@ The imported `connectionTimeout` is interpreted as seconds and maps to the new p
 | --- | --- | --- |
 | `vscode-kdb.connections` | `[]` | Safe standalone connection metadata. Manage it through the **KX Connection** form; passwords are stored separately in SecretStorage. |
 | `vscode-kdb.connectionTimeoutMs` | `30000` | Global direct q IPC connect/handshake timeout in milliseconds. TCP connect and q IPC handshake each receive this full budget. `0` disables both phase deadlines. |
-| `vscode-kdb.queryTimeoutMs` | `null` | Global query-response timeout in milliseconds. `null` inherits `connectionTimeoutMs` for compatibility; `0` disables the query deadline. |
+| `vscode-kdb.queryTimeoutMs` | `1800000` | Independent global query-response timeout in milliseconds (30 minutes). `0` disables only the query deadline. |
 | `vscode-kdb.performance.trace` | `false` | Add safe operation timings, sizes, and counts to **Output > KX**. Query text/values, credentials, and local-server tokens are omitted or redacted. |
 
-Timeout settings accept integers from `0` through `2147483647`. The query deadline begins when queued work becomes active and is sent, so time waiting behind another query is excluded. A query timeout discards the uncertain client.
+Timeout settings accept integers from `0` through `2147483647`. Connect/handshake and query response deadlines are independent: setting either global or per-profile value to `0` does not disable the other deadline. The query deadline begins when queued work becomes active and is sent, so time waiting behind another query is excluded. A query timeout discards the uncertain client.
 
 Each object in `vscode-kdb.connections` has these safe fields:
 
@@ -73,7 +77,7 @@ Each object in `vscode-kdb.connections` has these safe fields:
 | `connectTimeoutMs` | No | Per-connection connect/handshake override. Omit (leave blank in the form) to inherit the global connect default; `0` disables both deadlines. |
 | `queryTimeoutMs` | No | Per-connection query override. Omit (leave blank in the form) to inherit the resolved global query default; `0` disables it. |
 
-Existing connection objects without either override remain valid and need no migration. The default global `queryTimeoutMs: null` resolves to the global `connectionTimeoutMs` value. A blank per-connection query override inherits that resolved global query value; it does not copy a per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; **Clear saved password** removes it explicitly.
+Existing connection objects without either override remain valid and need no migration. A blank or omitted per-connection query override inherits the global `queryTimeoutMs` value, whose default is 30 minutes; it does not copy a global or per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; **Clear saved password** removes it explicitly.
 
 The `KX` Output channel always receives connection/query lifecycle diagnostics. Performance trace adds detail only when explicitly enabled. The extension does not enable it for you.
 
@@ -151,7 +155,7 @@ Array display examples:
   "vscode-kdb.notebook.maxOutputRows": 1000,
   "vscode-kdb.notebook.maxOutputBytes": 1000000,
   "vscode-kdb.connectionTimeoutMs": 30000,
-  "vscode-kdb.queryTimeoutMs": null,
+  "vscode-kdb.queryTimeoutMs": 1800000,
   "vscode-kdb.performance.trace": false,
   "vscode-kdb.results.viewer.arrayDisplayFormat": "space",
   "vscode-kdb.results.viewer.functionDisplayStrategy": "qText",

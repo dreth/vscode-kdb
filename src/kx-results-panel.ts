@@ -21,6 +21,11 @@ import {
 } from './chart-zoom';
 export { chartRangeIsZoomed } from './chart-zoom';
 import {
+  chartLegendToggleKey,
+  chartSeriesVisible,
+  updateHiddenChartSeriesKeys,
+} from './chart-series-state';
+import {
   ArrayDisplayFormat,
   CellRange,
   CellTextOptions,
@@ -141,9 +146,12 @@ export interface SharedKxResultSettings {
   fontSize: number;
   density: KxPanelDensity;
   showRowIndex: boolean;
+  includeHeaders: boolean;
+  includeRowIndex: boolean;
   elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
   chartDecimalPlaces: number;
   chartMaxSourceRows: number;
+  chartZoomMaxSampledPoints: number;
   qTextSyntaxHighlighting: boolean;
   qTextDisplayFormatting: boolean;
   arrayDisplayFormat: ArrayDisplayFormat;
@@ -2835,6 +2843,8 @@ export class KxResultsPanel {
       let chartDataIsRefinement = false;
       let chartZoomStateSuspended = false;
       let chartControlsDirty = false;
+      let chartHiddenSeriesKeys = [];
+      let chartRenderedSeriesKeys = [];
       let chartResizeState = null;
       let chartHeight = 280;
       let chartAutoRenderPending = false;
@@ -2849,6 +2859,9 @@ export class KxResultsPanel {
       ${chartZoomDataAfterResponse.toString()}
       ${planChartZoomReset.toString()}
       ${chartRangeIsZoomed.toString()}
+      ${chartLegendToggleKey.toString()}
+      ${chartSeriesVisible.toString()}
+      ${updateHiddenChartSeriesKeys.toString()}
       window.addEventListener('message', event => {
         const msg = event.data || {};
         if (msg.type === 'loading') {
@@ -3008,6 +3021,12 @@ export class KxResultsPanel {
       refineChartZoomButton.addEventListener('click', refineChartZoom);
       closeChart.addEventListener('click', closeChartPanel);
       chartCanvasWrap.addEventListener('mouseleave', hideChartTooltip);
+      chartCanvasWrap.addEventListener('dblclick', event => {
+        if (chartZoomed && chartCanExport()) {
+          event.preventDefault();
+          resetChartZoom();
+        }
+      });
       chartSplitter.addEventListener('mousedown', startChartResize);
       viewport.addEventListener('scroll', requestRender);
       viewport.addEventListener('contextmenu', () => {
@@ -3538,6 +3557,8 @@ export class KxResultsPanel {
         chartOptions = { xColumns: [], yColumns: [], groupColumns: [], warnings: [] };
         chartData = null;
         chartRendered = null;
+        chartHiddenSeriesKeys = [];
+        chartRenderedSeriesKeys = [];
         chartControlsDirty = false;
         chartAutoRenderPending = false;
         chartLastAutoRefineKey = '';
@@ -4269,10 +4290,13 @@ export class KxResultsPanel {
           return;
         }
 
+        const nextSeriesKeys = chartSeriesKeys(chartData);
         chartZoomStateSuspended = true;
         destroyChartPlot();
+        chartRenderedSeriesKeys = nextSeriesKeys;
         try {
           chartUPlot = new window.uPlot(chartUPlotOptions(dimensions), chartAlignedData(), chartPlot);
+          decorateChartLegendAccessibility(chartUPlot);
           chartRendered = { version: chartData.version, requestId: chartData.requestId };
           chartFullXRange = captureChartFullXRange(
             chartFullXRange,
@@ -4334,6 +4358,7 @@ export class KxResultsPanel {
           const candleColors = chartCandlestickColors();
           series.push({
             label: 'OHLC',
+            show: chartSeriesVisible(chartHiddenSeriesKeys, chartRenderedSeriesKeys[0]),
             stroke: candleColors.up,
             width: 0,
             spanGaps: false,
@@ -4350,6 +4375,7 @@ export class KxResultsPanel {
             const color = colors[index % colors.length];
             const config = {
               label: item.columnName,
+              show: chartSeriesVisible(chartHiddenSeriesKeys, chartRenderedSeriesKeys[index]),
               stroke: color,
               width: type === 'scatter' || type === 'bar' || type === 'box' ? 0 : 1.5,
               spanGaps: false,
@@ -4424,9 +4450,101 @@ export class KxResultsPanel {
               : (type === 'bar' ? [drawChartBars] : (type === 'box' ? [drawChartBoxes] : [])),
             setCursor: [updateChartTooltipFromUPlot],
             setScale: [updateChartZoomState],
-            setSeries: [() => updateChartControls()]
+            setSeries: [self => {
+              captureChartSeriesVisibility(self);
+              syncChartLegendAccessibility(self);
+              updateChartControls();
+            }]
           }
         };
+      }
+
+      function chartSeriesKeys(value) {
+        if (!value) {
+          return [];
+        }
+        if (value.chartType === 'candlestick') {
+          const roles = value.ohlcColumns || {};
+          return ['candlestick\\u0000' +
+            String(roles.open || '') + '\\u0000' +
+            String(roles.high || '') + '\\u0000' +
+            String(roles.low || '') + '\\u0000' +
+            String(roles.close || '')];
+        }
+        return (Array.isArray(value.series) ? value.series : []).map(series => {
+          return String(series.sourceColumnName || series.columnName || '') + '\\u0000' +
+            String(series.groupValue || '') + '\\u0000' +
+            String(series.columnName || '');
+        });
+      }
+
+      function captureChartSeriesVisibility(self) {
+        if (!self || chartRenderedSeriesKeys.length === 0) {
+          return;
+        }
+        const hiddenRenderedKeys = [];
+        chartRenderedSeriesKeys.forEach((key, index) => {
+          const series = self.series && self.series[index + 1];
+          if (series && series.show === false) {
+            hiddenRenderedKeys.push(key);
+          }
+        });
+        chartHiddenSeriesKeys = updateHiddenChartSeriesKeys(
+          chartHiddenSeriesKeys,
+          chartRenderedSeriesKeys,
+          hiddenRenderedKeys
+        );
+      }
+
+      function decorateChartLegendAccessibility(self) {
+        if (!self || !chartLegend) {
+          return;
+        }
+        const labels = Array.from(chartLegend.querySelectorAll('.u-series > th'));
+        const offset = labels.length === self.series.length ? 0 : 1;
+        labels.forEach((label, labelIndex) => {
+          const seriesIndex = labelIndex + offset;
+          if (seriesIndex < 1 || seriesIndex >= self.series.length) {
+            return;
+          }
+          label.tabIndex = 0;
+          label.setAttribute('role', 'button');
+          label.setAttribute(
+            'aria-label',
+            'Toggle chart series ' + String(self.series[seriesIndex].label || seriesIndex)
+          );
+          label.dataset.kxSeriesIndex = String(seriesIndex);
+          if (label.dataset.kxKeyboardToggle !== 'true') {
+            label.dataset.kxKeyboardToggle = 'true';
+            label.addEventListener('keydown', event => {
+              if (!chartLegendToggleKey(event.key)) {
+                return;
+              }
+              event.preventDefault();
+              event.stopPropagation();
+              const index = Number(label.dataset.kxSeriesIndex);
+              if (Number.isSafeInteger(index) && index > 0 && index < self.series.length) {
+                self.setSeries(index, { show: self.series[index].show === false });
+              }
+            });
+          }
+        });
+        syncChartLegendAccessibility(self);
+      }
+
+      function syncChartLegendAccessibility(self) {
+        if (!self || !chartLegend) {
+          return;
+        }
+        chartLegend.querySelectorAll('.u-series > th').forEach(label => {
+          const seriesIndex = Number(label.dataset.kxSeriesIndex);
+          if (Number.isSafeInteger(seriesIndex) && seriesIndex > 0 && seriesIndex < self.series.length) {
+            label.setAttribute(
+              'aria-pressed',
+              self.series[seriesIndex].show === false ? 'false' : 'true'
+            );
+          }
+        });
       }
 
       function chartSeriesPoints(type, color) {
@@ -5105,6 +5223,7 @@ export class KxResultsPanel {
       }
 
       function destroyChartPlot() {
+        captureChartSeriesVisibility(chartUPlot);
         if (chartUPlot && typeof chartUPlot.destroy === 'function') {
           try {
             chartUPlot.destroy();
@@ -5113,6 +5232,7 @@ export class KxResultsPanel {
           }
         }
         chartUPlot = null;
+        chartRenderedSeriesKeys = [];
         chartZoomed = false;
         clearChartAutoRefineTimer();
         if (chartPlot) {
@@ -6789,9 +6909,12 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     fontSize: settings.fontSize,
     density: settings.density,
     showRowIndex: settings.showRowIndex,
+    includeHeaders: settings.includeHeaders,
+    includeRowIndex: settings.includeRowIndex,
     elapsedTimeDisplay: settings.elapsedTimeDisplay,
     chartDecimalPlaces: settings.chartDecimalPlaces,
     chartMaxSourceRows: chartMaxSourceRowsSetting(),
+    chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
     qTextDisplayFormatting: settings.qTextDisplayFormatting,
     arrayDisplayFormat: settings.arrayDisplayFormat,

@@ -15,6 +15,7 @@ import { KxPanelResult, KxResultsPanel, KxResultsPanelRunMode } from './kx-resul
 import {
   NotebookIntegration,
   PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND,
+  RUN_Q_NOTEBOOK_CELL_COMMAND,
 } from './notebook-integration';
 import {
   DirectQNotebookBridge,
@@ -236,13 +237,17 @@ function qEditor(): vscode.TextEditor | undefined {
     return undefined;
   }
   if (editor.document.uri.scheme === 'vscode-notebook-cell') {
+    const runWithKx = 'Run q Cell (KX)';
     const prepare = 'Prepare this q cell for the active Python kernel';
     void vscode.window.showInformationMessage(
-      'KX editor commands do not execute notebook cells through a separate q IPC connection. Prepare adds %%q; restore the notebook default language before normal Run with the current Python controller.',
+      'Notebook editor commands do not run a selection through KX. Run q Cell (KX) sends the complete q cell through the active KX connection without changing the selected Python controller. Prepare adds %%q for the separate kx_notebook Python route.',
+      runWithKx,
       prepare
-    ).then(choice => choice === prepare
-      ? vscode.commands.executeCommand(PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND)
-      : undefined
+    ).then(choice => choice === runWithKx
+      ? vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND)
+      : choice === prepare
+        ? vscode.commands.executeCommand(PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND)
+        : undefined
     ).then(undefined, error => {
       const detail = error instanceof Error ? error.message : String(error);
       void vscode.window.showErrorMessage(`KX notebook preparation failed: ${detail}`);

@@ -43,9 +43,9 @@ Notebook row/byte options constrain serialization, not q execution. Apply a q-si
 
 ## Timeout and queue behavior
 
-`vscode-kdb.connectionTimeoutMs` defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. `vscode-kdb.queryTimeoutMs` defaults to `null`, which inherits that global connect value for compatibility; set it to an integer for a separate global query-response deadline.
+`vscode-kdb.connectionTimeoutMs` defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. The independent `vscode-kdb.queryTimeoutMs` defaults to 1,800,000 milliseconds (30 minutes).
 
-The **KX Connection** form's **Advanced direct q IPC** section accepts optional per-profile `connectTimeoutMs` and `queryTimeoutMs` overrides. Blank inherits the corresponding resolved global value. Every timeout is a whole number from `0` through `2147483647` milliseconds; use `0` only when an unbounded phase wait is intentional.
+The **KX Connection** form's **Advanced direct q IPC** section accepts optional per-profile `connectTimeoutMs` and `queryTimeoutMs` overrides. Blank inherits the corresponding global value, including for existing profiles whose query override is omitted. Every timeout is a whole number from `0` through `2147483647` milliseconds; use `0` only when an unbounded phase wait is intentional. Zero disables only the corresponding connect/handshake or query response deadline.
 
 The query timer starts when queued work becomes active and the client sends it, not when it first enters the per-connection queue. It runs until the response completes. Expiry destroys and drops the uncertain socket so a later query reconnects instead of reusing it.
 
@@ -53,7 +53,7 @@ A connection serializes its q query requests. Local panel or direct-notebook can
 
 ## Diagnostics
 
-Open **View > Output** and select **KX**. Lifecycle events are always available there for connection, handshake, query, cancellation, disconnect, and close transitions. They include the phase and direct `host:port` where useful.
+Open **View > Output** and select **KX**. Lifecycle events are always available there for connection, handshake, query, cancellation, disconnect, and close transitions. They include the phase, effective timeout/disabled state for connect, handshake, and active queries, and direct `host:port` where useful.
 
 For safe timing detail, explicitly enable:
 

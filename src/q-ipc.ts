@@ -402,7 +402,11 @@ export class KdbIpcClient {
 
     const connectStartedMs = Date.now();
     const timeoutMs = this.connectTimeoutMs();
-    this.writeDiagnostic('connect', 'start');
+    const timeoutDetails = {
+      timeoutMs,
+      timeoutDisabled: timeoutMs === 0,
+    };
+    this.writeDiagnostic('connect', 'start', undefined, undefined, false, timeoutDetails);
     const connectPromise = new Promise<void>((resolve, reject) => {
       const socket = net.createConnection({
         host: this.options.host,
@@ -426,7 +430,7 @@ export class KdbIpcClient {
           return;
         }
         settled = true;
-        this.writeDiagnostic(phase, 'failed', phaseStartedMs, error, true);
+        this.writeDiagnostic(phase, 'failed', phaseStartedMs, error, true, timeoutDetails);
         const wrapped = this.phaseError(phase, error);
         cleanup();
         if (destroy && !socket.destroyed) {
@@ -459,10 +463,10 @@ export class KdbIpcClient {
       };
 
       const onConnect = () => {
-        this.writeDiagnostic('connect', 'success', phaseStartedMs);
+        this.writeDiagnostic('connect', 'success', phaseStartedMs, undefined, false, timeoutDetails);
         phase = 'handshake';
         phaseStartedMs = Date.now();
-        this.writeDiagnostic('handshake', 'start');
+        this.writeDiagnostic('handshake', 'start', undefined, undefined, false, timeoutDetails);
         armPhaseTimer();
         socket.write(createHandshake(this.options), error => {
           if (error) {
@@ -493,6 +497,7 @@ export class KdbIpcClient {
         this.intentionalClose = false;
         this.writeDiagnostic('handshake', 'success', phaseStartedMs, undefined, false, {
           protocolVersion: version,
+          ...timeoutDetails,
         });
 
         if (chunk.length > 1) {
@@ -653,16 +658,18 @@ export class KdbIpcClient {
 
     this.pending = pending;
     pending.startedAtMs = Date.now();
+    const timeoutMs = this.queryTimeoutMs();
     this.writeDiagnostic('query', 'start', undefined, undefined, false, {
       queryId: pending.queryId,
       queryChars: pending.query.length,
       queryBytes: Buffer.byteLength(pending.query, 'utf8'),
       queuedMs: pending.startedAtMs - pending.queuedAtMs,
+      timeoutMs,
+      timeoutDisabled: timeoutMs === 0,
     });
     if (pending.perf) {
       perfMark('q-ipc.query.start', queryPerfDetails(pending.perf));
     }
-    const timeoutMs = this.queryTimeoutMs();
     if (timeoutMs > 0) {
       pending.timeout = setTimeout(() => {
         this.rejectPending(this.phaseError('query', new KdbIpcError(`timed out after ${timeoutMs} ms`)));
@@ -955,6 +962,8 @@ export class KdbIpcClient {
         queryChars: pending.query.length,
         queryBytes: Buffer.byteLength(pending.query, 'utf8'),
         queued: pending.startedAtMs === undefined,
+        timeoutMs: this.queryTimeoutMs(),
+        timeoutDisabled: this.queryTimeoutMs() === 0,
       }
     );
   }

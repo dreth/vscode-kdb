@@ -58,11 +58,11 @@ That is expected after a failed open, transport error, remote close, or explicit
 
 ## Query timed out
 
-`vscode-kdb.queryTimeoutMs` controls the global query deadline. Its default is `null`, which inherits the 30-second `vscode-kdb.connectionTimeoutMs` value for compatibility. The connection form's **Advanced direct q IPC** section can override either timeout for one profile; blank means use the corresponding global default.
+`vscode-kdb.queryTimeoutMs` controls the global query response deadline and defaults to `1800000` milliseconds (30 minutes). It is independent of the 30-second `vscode-kdb.connectionTimeoutMs` TCP connect/q IPC handshake default. The connection form's **Advanced direct q IPC** section can override either timeout for one profile; blank means use the corresponding global default, including for existing profiles whose query override is omitted.
 
 The query timer begins only when this connection makes the queued query active and sends it. Time waiting behind an earlier query is not included. A query timeout drops the failed client so later work does not reuse an uncertain socket. Increase it only when the expected q workload justifies it, and inspect q-side performance first.
 
-Every timeout must be an integer from `0` through `2147483647` milliseconds. Setting one to `0` disables that deadline. Errors identify the `query` phase and direct endpoint but omit query contents and credentials.
+Every timeout must be an integer from `0` through `2147483647` milliseconds. Setting `queryTimeoutMs` to `0` disables only query response timing; setting `connectionTimeoutMs` to `0` disables only TCP connect and q IPC handshake timing. Diagnostics identify the phase, effective timeout/disabled state, and direct endpoint but omit query contents and credentials.
 
 ## Edited connection is disconnected
 
@@ -149,7 +149,21 @@ The helper deliberately has no implicit q connection. If no callback is configur
 
 Open an ordinary Jupyter `.ipynb`, then use its top-right kernel selector or **Notebook: Select Notebook Kernel**. The native entry is **KX q (Direct IPC)**. It is a controller/kernel choice, not an entry in the Python controller's per-cell language picker.
 
-Confirm KX for VS Code 0.2.4 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
+Confirm KX for VS Code 0.2.5 is enabled and VS Code is 1.96 or newer. The extension activates through `onNotebook:jupyter-notebook` and registers the controller dynamically through the public NotebookController API.
+
+## Run q Cell (KX) is missing
+
+The mixed-notebook action appears only for a q-language code cell while **KX q (Direct IPC)** is not selected. Set the intended cell language with **KX: Set Notebook Cell Language to q** and keep the Python controller selected.
+
+After a successful mixed run the notebook becomes dirty because KX commits the finished output as one supported, undoable notebook edit while Python remains selected. This replaces that q cell's internal handle but preserves its source, q language, metadata, and sibling cells. If the q cell or its output changes while the query is running, KX leaves the newer state alone and reports that it did not overwrite it.
+
+If `Ctrl+Enter` / `Cmd+Enter` runs a customized action instead, use the visible **Run q Cell (KX)** toolbar/context command. User and keymap-extension bindings can override extension defaults. **Developer: Toggle Keyboard Shortcuts Troubleshooting** shows which rule VS Code selected.
+
+The KX `Ctrl+Enter` / `Cmd+Enter` binding applies only while the q cell editor itself has text focus. With focus on the cell container or output, use the visible play/context action. Python and Markdown cells deliberately retain normal Jupyter shortcuts.
+
+## Normal Run did not execute q through KX
+
+That is expected while a Python controller is selected. Public notebook APIs select one controller for normal Run, so KX does not reroute Jupyter's action. Use **Run q Cell (KX)** for a q-language cell, or select **KX q (Direct IPC)** for a q-only notebook where normal Run should belong to KX.
 
 ## An existing cell is not q
 
@@ -167,7 +181,7 @@ If a q-language cell has no marker, use its **Prepare for Python kernel** status
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.4 or the matching `kx_notebook` 0.2.4 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.5 or the matching `kx_notebook` 0.2.5 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
 Direct-controller output includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
 
@@ -185,16 +199,16 @@ For a newly run direct q cell, **Open in KX Results** can use the full decoded v
 
 ## Notebook chart changes did not persist
 
-Chart type/column/point-cap changes and zoom made only in the VS Code renderer are session state. Direct-controller output does not persist a chart specification or HTML fallback. On the separate Python-helper route, persist a `kx_notebook.Chart` specification when emitting the output, then rerun the cell; its static HTML/PDF fallback uses that specification to draw a network-free SVG. Neither route preserves interactive uPlot state.
+Chart configuration and zoom made only in the VS Code renderer are session state. Direct output does not persist a chart specification or HTML fallback. Configuration changes intentionally leave the previous rendered chart visible until **Render** is pressed. On the separate Python-helper route, persist a compatible `kx_notebook.Chart` specification when emitting the output, then rerun the cell; its static HTML/PDF fallback uses that specification to draw a network-free SVG. Neither route preserves interactive uPlot state.
 
 ## Notebook q used a different session than the `.q` editor
 
 Check the selected notebook controller.
 
-- **KX q (Direct IPC)** uses the active profile's existing extension client and namespace, exactly like `.q` editor runs. It creates no per-cell/per-notebook connection.
+- **KX q (Direct IPC)** and mixed-mode **Run q Cell (KX)** use the active profile's existing extension client and namespace, exactly like `.q` editor runs. They create no per-cell/per-notebook connection and share q assignments.
 - A Python controller plus `%%q` uses only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not borrow the extension client, and helper output never receives a Direct IPC live-result identity. A user callback may independently target the same server, but that is not extension-managed state sharing.
 
-Choose the intended route explicitly. KX never intercepts Python-controller Run.
+Choose the intended route explicitly. KX never intercepts Python-controller Run; the q-cell action is a separate visible gesture.
 
 ## Query History is missing or incomplete
 
