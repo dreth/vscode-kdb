@@ -177,7 +177,7 @@ async function editorAndNamespaceCases(ctx) {
     area: 'namespace and multiline wrapper surface',
     mode: 'deterministic',
     expectedStatus: 'DIFFERENT_BY_DESIGN',
-    rationale: 'Standalone owns strict-root Server Explorer execution and a .Q.ld script wrapper; SQLTools exposes its legacy raw namespace wrapper through the driver. Semantic common behavior is tested live below.',
+    rationale: 'Standalone owns strict-root Server Explorer execution and client-side complete-source grouping; SQLTools exposes its legacy raw namespace wrapper through the driver. Semantic common behavior is tested live below.',
   }, t => {
     const query = 'answer';
     const left = standalone.namespace.queryInNamespace(query, '.analytics');
@@ -707,9 +707,9 @@ async function liveQCases(ctx) {
       mode: 'live-q',
       expectedStatus: 'GAP',
       rank: 2,
-      action: 'Backport a compatible q-native script-grouping adapter to the SQLTools driver without changing its UI/session ownership.',
+      action: 'Backport a compatible script-grouping adapter to the SQLTools driver without changing its UI/session ownership.',
       signoff: 'The shared LF and CRLF script fixtures return 30 and 5 through both adapters and restore the root namespace after success/error.',
-      detail: 'The standalone .Q.ld wrapper succeeds; the pinned reference raw value wrapper raises a genuine q error for the same multiline source.',
+      detail: 'The standalone compatibility grouper succeeds without .Q.ld; the pinned reference raw value wrapper raises a genuine q error for the same multiline source.',
     }, async t => {
       await leftClient.query('system "d .standaloneParityScript";system "d ."');
       await rightClient.query('system "d .referenceParityScript";system "d ."');
@@ -859,10 +859,10 @@ async function boundaryCases(ctx) {
     area: 'VSIX install and Marketplace publication',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.6 archive inventory and hashes must be verified separately by the release gate.',
+    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.7 archive inventory and hashes must be verified separately by the release gate.',
     signoff: 'Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.',
   }, t => {
-    t.equal(standalone.packageJson.version, '0.2.6');
+    t.equal(standalone.packageJson.version, '0.2.7');
     t.equal(reference.packageJson.version, '0.3.17');
   });
 

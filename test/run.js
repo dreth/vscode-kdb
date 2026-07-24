@@ -7,6 +7,10 @@ const net = require('net');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
+const {
+  LEGACY_NOTEBOOK_FIXTURE,
+  SCRIPT_GROUPING_CASES,
+} = require('./fixtures/legacy-q-script');
 
 const {
   KdbIpcClient,
@@ -46,6 +50,7 @@ const {
   connectionEndpoint,
   normalizeNamespace,
   parseOptionalTimeout,
+  qScriptGroups,
   qScriptInNamespace,
   qString,
   queryInNamespace,
@@ -240,6 +245,7 @@ const tests = [
   ['notebook renderer sizing, selection, copy, and chart model', testNotebookRendererModel],
   ['live notebook result registry bounds and lifecycle', testLiveNotebookResultStore],
   ['native direct q notebook controller provider', testDirectQNotebookController],
+  ['legacy q direct notebook request compatibility', testLegacyQDirectNotebookRequest],
   ['mixed q notebook command and status routing', testMixedQNotebookCommandIntegration],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
@@ -1586,13 +1592,42 @@ function testConnections() {
 
   const singleCharacter = queryInNamespace('1', '.analytics');
   assert.ok(singleCharacter.includes('src:$[-10h=type src;enlist src;src]'));
+  for (const fixture of SCRIPT_GROUPING_CASES) {
+    assert.deepStrictEqual(
+      qScriptGroups(fixture.source),
+      [...fixture.expected],
+      `legacy-compatible q script grouping failed for ${fixture.id}`
+    );
+  }
+
   const script = 'a:1\r\nb:2\r\na+b';
   const scriptWrapper = qScriptInNamespace(script, '.analytics');
-  assert.ok(scriptWrapper.includes('.Q.ld'));
-  assert.ok(scriptWrapper.includes('{[unused;expression] value expression}/[::;groups]'));
-  assert.ok(scriptWrapper.includes('q 4.0 2023.03.28 or newer'));
-  assert.ok(scriptWrapper.includes(qString(script)));
+  assert.ok(!scriptWrapper.includes('.Q.ld'));
+  assert.ok(!scriptWrapper.includes('`ld in key `.Q'));
+  assert.ok(!scriptWrapper.includes('2023.03.28'));
+  assert.ok(scriptWrapper.includes('value $[-10h=type expression;enlist expression;expression]'));
+  assert.ok(scriptWrapper.includes(`(${[
+    qString('a:1'),
+    qString('b:2'),
+    qString('a+b'),
+  ].join(';')})`));
   assert.ok(scriptWrapper.includes(qString('.analytics')));
+  assert.ok(scriptWrapper.includes('previous:string system "d"'));
+  assert.ok(scriptWrapper.includes('system "d ",previous'));
+  assert.ok(scriptWrapper.includes('if[not first outcome;\'last outcome]'));
+  assert.ok(
+    qScriptInNamespace('1', '.analytics').includes(`enlist ${qString('1')}`),
+    'a single one-character group must remain a q char vector inside a group list'
+  );
+  assert.ok(
+    qScriptInNamespace('1\n2', '.analytics')
+      .includes(`(${qString('1')};${qString('2')})`),
+    'multiple one-character source groups must remain distinct expressions'
+  );
+  assert.ok(
+    qScriptInNamespace('  ignored:1', '.analytics').includes(';()]'),
+    'a script without a top-level expression must send an empty q group list'
+  );
 }
 
 function testSqlToolsMigrationParsing() {
@@ -7856,6 +7891,197 @@ async function testDirectQNotebookController() {
   assert.strictEqual(directController.isSelected(notebook), false);
 }
 
+async function testLegacyQDirectNotebookRequest() {
+  const runtime = createNotebookControllerRuntime();
+  const requests = [];
+  const requestSignals = [];
+  const createdClients = [];
+  const passwordReads = [];
+  const processState = {};
+  let issuedCount = 0;
+
+  class LegacyKdbIpcError extends Error {}
+
+  class LegacyKdbIpcClient {
+    constructor(options) {
+      this.options = options;
+      this.closed = false;
+      this.canceled = false;
+      createdClients.push(this);
+    }
+
+    async connect() {}
+
+    async close() {
+      this.closed = true;
+      this.options.onDidClose?.();
+    }
+
+    cancel() {
+      this.canceled = true;
+      this.closed = true;
+    }
+
+    async query(query, onIssued, signal) {
+      assert.ok(!signal?.aborted, 'the direct notebook request must not arrive pre-canceled');
+      for (const forbidden of [
+        /\.Q\.ld/,
+        /`ld\s+in\s+key\s+`\.Q/,
+        /\bkey\s+`\.Q\b/,
+        /2023\.03\.28/,
+      ]) {
+        assert.ok(
+          !forbidden.test(query),
+          `a simulated legacy q process cannot accept capability/source ${forbidden}`
+        );
+      }
+      assert.ok(!query.includes(LEGACY_NOTEBOOK_FIXTURE.username));
+      assert.ok(!query.includes(LEGACY_NOTEBOOK_FIXTURE.password));
+
+      const cellIndex = requests.length;
+      const cellFixture = LEGACY_NOTEBOOK_FIXTURE.cells[cellIndex];
+      assert.ok(cellFixture, `unexpected legacy notebook request ${cellIndex + 1}`);
+      assert.strictEqual(
+        query,
+        qScriptInNamespace(cellFixture.source, LEGACY_NOTEBOOK_FIXTURE.namespace),
+        'the actual ConnectionManager must issue the complete grouped cell request'
+      );
+      requests.push(query);
+      requestSignals.push(signal);
+      onIssued?.();
+      issuedCount += 1;
+
+      if (cellIndex === 0) {
+        assert.strictEqual(processState.legacyValue, undefined);
+      } else {
+        assert.strictEqual(
+          processState.legacyValue,
+          LEGACY_NOTEBOOK_FIXTURE.cells[cellIndex - 1].result,
+          'the second cell must observe state from the same fake legacy q process/session'
+        );
+      }
+      processState.legacyValue = cellFixture.result;
+      return processState.legacyValue;
+    }
+  }
+
+  const { ConnectionManager } = requireOutWithMocks('connection-manager', {
+    vscode: runtime.vscode,
+    './q-ipc': {
+      KdbIpcClient: LegacyKdbIpcClient,
+      KdbIpcError: LegacyKdbIpcError,
+      KdbQError,
+      KdbQueryCanceledError,
+    },
+  });
+  const { KxQNotebookController } = requireOutWithMocks('notebook-controller', {
+    vscode: runtime.vscode,
+  });
+  const connection = validateConnection({
+    id: 'legacy-notebook-q',
+    name: 'Legacy notebook q',
+    host: '127.0.0.1',
+    port: 5017,
+    database: LEGACY_NOTEBOOK_FIXTURE.namespace,
+    username: LEGACY_NOTEBOOK_FIXTURE.username,
+  });
+  const manager = new ConnectionManager({
+    async password(connectionId) {
+      passwordReads.push(connectionId);
+      assert.strictEqual(connectionId, connection.id);
+      return LEGACY_NOTEBOOK_FIXTURE.password;
+    },
+  });
+  let liveId = 0;
+  const liveResults = new LiveNotebookResultStore(
+    8,
+    () => `legacy-compat-live-result-${String(++liveId).padStart(16, '0')}`
+  );
+  const bridge = {
+    activeConnection: () => connection,
+    connections: () => [connection],
+    connectionById: connectionId => connectionId === connection.id ? connection : undefined,
+    isConnected: connectionId => manager.isConnected(connectionId),
+    executeScript: (target, source, onIssued, signal) =>
+      manager.executeScript(target, source, onIssued, signal),
+    errorMessage: async error => {
+      const message = error instanceof Error ? error.message : String(error);
+      return message
+        .split(LEGACY_NOTEBOOK_FIXTURE.username).join('[redacted]')
+        .split(LEGACY_NOTEBOOK_FIXTURE.password).join('[redacted]');
+    },
+    onDidChangeState: listener => manager.onDidChangeState(listener),
+  };
+  const controller = new KxQNotebookController(bridge, liveResults);
+  const registered = runtime.controllers[0];
+  const notebook = runtime.notebook('file:///workspace/legacy-direct-q.ipynb');
+  const cells = LEGACY_NOTEBOOK_FIXTURE.cells.map((fixture, index) => runtime.cell({
+    languageId: 'q',
+    source: fixture.source,
+    uri: `vscode-notebook-cell:///legacy-direct-q/${index}`,
+  }));
+
+  try {
+    for (const fixture of LEGACY_NOTEBOOK_FIXTURE.cells) {
+      assert.deepStrictEqual(qScriptGroups(fixture.source), [...fixture.expectedGroups]);
+    }
+    registered.selectionEmitter.fire({ notebook, selected: true });
+    await registered.executeHandler(cells, notebook, registered);
+
+    assert.strictEqual(createdClients.length, 1, 'both cells must reuse one ConnectionManager client');
+    assert.deepStrictEqual(passwordReads, [connection.id]);
+    assert.strictEqual(createdClients[0].options.username, LEGACY_NOTEBOOK_FIXTURE.username);
+    assert.strictEqual(createdClients[0].options.password, LEGACY_NOTEBOOK_FIXTURE.password);
+    assert.strictEqual(requests.length, LEGACY_NOTEBOOK_FIXTURE.cells.length);
+    assert.strictEqual(issuedCount, LEGACY_NOTEBOOK_FIXTURE.cells.length);
+    assert.strictEqual(processState.legacyValue, 42);
+    assert.strictEqual(manager.isConnected(connection.id), true);
+    assert.ok(requestSignals.every(signal => signal instanceof AbortSignal));
+    assert.notStrictEqual(requestSignals[0], requestSignals[1]);
+
+    requests.forEach((request, index) => {
+      assert.ok(request.includes(qString(LEGACY_NOTEBOOK_FIXTURE.namespace)));
+      assert.ok(request.includes('previous:string system "d"'));
+      assert.ok(request.includes('system "d ",previous'));
+      assert.ok(request.includes('if[not first outcome;\'last outcome]'));
+      assert.ok(!request.includes('.Q.ld'));
+      assert.ok(!request.includes('`ld in key `.Q'));
+      assert.ok(!request.includes(LEGACY_NOTEBOOK_FIXTURE.username));
+      assert.ok(!request.includes(LEGACY_NOTEBOOK_FIXTURE.password));
+      assert.strictEqual(
+        request,
+        qScriptInNamespace(
+          LEGACY_NOTEBOOK_FIXTURE.cells[index].source,
+          LEGACY_NOTEBOOK_FIXTURE.namespace
+        )
+      );
+    });
+
+    cells.forEach((cell, index) => {
+      const execution = runtime.executionFor(cell);
+      assert.ok(execution);
+      assert.deepStrictEqual(execution.endCalls.map(call => call.success), [true]);
+      const payload = notebookOutputItem(execution.output, KX_NOTEBOOK_MIME).value;
+      assert.strictEqual(
+        payload.data.rows[0][0].value,
+        LEGACY_NOTEBOOK_FIXTURE.cells[index].result
+      );
+      const serializedOutput = JSON.stringify(execution.output);
+      assert.ok(!serializedOutput.includes(LEGACY_NOTEBOOK_FIXTURE.username));
+      assert.ok(!serializedOutput.includes(LEGACY_NOTEBOOK_FIXTURE.password));
+    });
+  } finally {
+    controller.dispose();
+    await manager.disconnectAll();
+    liveResults.clear();
+    manager.dispose();
+  }
+
+  assert.strictEqual(createdClients[0].closed, true);
+  assert.strictEqual(createdClients[0].canceled, false);
+  assert.strictEqual(manager.isConnected(connection.id), false);
+}
+
 async function testMixedQNotebookCommandIntegration() {
   const runtime = createNotebookIntegrationRuntime();
   const {
@@ -8179,15 +8405,15 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.6');
+  assert.strictEqual(manifest.version, '0.2.7');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.6');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.6');
+  assert.strictEqual(packageLock.version, '0.2.7');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.7');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
   );
-  assert.match(pythonNotebookPyproject, /^version = "0\.2\.6"$/m);
+  assert.match(pythonNotebookPyproject, /^version = "0\.2\.7"$/m);
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);

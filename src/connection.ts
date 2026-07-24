@@ -298,26 +298,125 @@ export function queryInNamespaceStrict(query: string, namespace?: string): strin
 }[${qString(normalized)};${qString(query)}]`;
 }
 
+// Mirror q's physical script-line grouping on the client so complete source can
+// use ordinary `value` without requiring a newer runtime helper.
+export function qScriptGroups(script: string): string[] {
+  const lines = script
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n')
+    .split('\n');
+  if (lines[0]?.startsWith('#!')) {
+    lines.shift();
+  }
+  const groups: string[] = [];
+  let current: string[] | undefined;
+  let pending: string[] = [];
+  let blockCommentDepth = 0;
+
+  const flushCurrent = (): void => {
+    if (current) {
+      groups.push(current.join('\n'));
+      current = undefined;
+    }
+  };
+  const flushPending = (): void => {
+    groups.push(...pending);
+    pending = [];
+  };
+
+  for (const originalLine of lines) {
+    const line = normalizeQScriptIndent(originalLine);
+
+    if (blockCommentDepth > 0) {
+      if (/^\/[ \t]*$/.test(line)) {
+        groups.push('/');
+        blockCommentDepth += 1;
+        continue;
+      }
+      if (/^\\[ \t]*$/.test(line)) {
+        groups.push('/');
+        blockCommentDepth -= 1;
+      } else {
+        groups.push(/^[ \t]*$/.test(line) ? '/' : `/${line}`);
+      }
+      continue;
+    }
+
+    if (/^\/[ \t]*$/.test(line)) {
+      flushCurrent();
+      flushPending();
+      groups.push('/');
+      blockCommentDepth = 1;
+      continue;
+    }
+
+    // A singleton backslash outside a block comment starts q's trailing
+    // script comment, so the remaining physical lines are not executable.
+    if (/^\\[ \t]*$/.test(line)) {
+      flushCurrent();
+      flushPending();
+      break;
+    }
+
+    const blank = /^[ \t]*$/.test(line);
+    const topLevelLineComment = line.startsWith('/');
+    if (blank || topLevelLineComment) {
+      pending.push(blank ? '' : line);
+      continue;
+    }
+
+    if (/^[ \t]/.test(line)) {
+      if (current) {
+        current.push(...pending, line);
+      }
+      pending = [];
+      continue;
+    }
+
+    flushCurrent();
+    flushPending();
+    current = [line];
+  }
+
+  flushCurrent();
+  flushPending();
+  return groups;
+}
+
 export function qScriptInNamespace(script: string, namespace?: string): string {
   const normalized = normalizeNamespace(namespace);
-  return `{[ns;src]
-  src:$[-10h=type src;enlist src;src];
+  const groups = qScriptGroups(script);
+  return `{[ns;groups]
   previous:string system "d";
   system "d ",ns;
-  outcome:@[{[src]
-    if[not \`ld in key \`.Q;'"KX Run q Script requires q 4.0 2023.03.28 or newer."];
-    normalized:ssr[ssr[src;"\\r\\n";"\\n"];"\\r";"\\n"];
-    groups:last .Q.ld "\\n" vs normalized;
-    result:$[count groups;{[unused;expression] value expression}/[::;groups];::];
+  outcome:@[{[groups]
+    result:$[count groups;{[unused;expression]
+      value $[-10h=type expression;enlist expression;expression]
+    }/[::;groups];::];
     (1b;result)
-  };src;{(0b;x)}];
+  };groups;{(0b;x)}];
   system "d ",previous;
   if[not first outcome;'last outcome];
   last outcome
-}[${qString(normalized)};${qString(script)}]`;
+}[${qString(normalized)};${qStringList(groups)}]`;
 }
 
 export function connectionEndpoint(connection: Pick<KxConnection, 'host' | 'port'>): string {
   const host = connection.host.includes(':') ? `[${connection.host}]` : connection.host;
   return `${host}:${connection.port}`;
+}
+
+function normalizeQScriptIndent(line: string): string {
+  const leading = /^[ \t]*/.exec(line)?.[0] ?? '';
+  return leading.replace(/\t/g, ' ') + line.slice(leading.length);
+}
+
+function qStringList(values: readonly string[]): string {
+  if (values.length === 0) {
+    return '()';
+  }
+  if (values.length === 1) {
+    return `enlist ${qString(values[0])}`;
+  }
+  return `(${values.map(qString).join(';')})`;
 }

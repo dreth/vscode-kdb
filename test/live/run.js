@@ -40,8 +40,11 @@ const {
   const processState = startQ(qPath, port);
   try {
     await waitForPort(port, processState, 15000);
-    await runAssertions(port);
-    console.log(`Live direct q IPC test passed using ${qPath}`);
+    const evidence = await runAssertions(port);
+    console.log(
+      `Live direct q IPC test passed using ${qPath} (.z.K ${evidence.qVersion}); ` +
+      'complete-source cases ran with .Q.ld poisoned, but this is not an old-q runtime.'
+    );
   } finally {
     await stopQ(processState.child);
   }
@@ -54,6 +57,7 @@ async function runAssertions(port) {
   const client = new KdbIpcClient({ host: '127.0.0.1', port, timeoutMs: 2000 });
   try {
     await client.connect();
+    const qVersion = await client.query('.z.K');
     assert.ok(client.getProtocolVersion() >= 1);
     assert.strictEqual(await client.query('1+1'), 2);
     const assignment = await client.query('rootVector:rootVector');
@@ -199,18 +203,83 @@ async function runAssertions(port) {
 
     assert.strictEqual(await client.query(queryInNamespace('answer', '.analytics')), 42);
     assert.strictEqual(await client.query(queryInNamespace('1', '.analytics')), 1);
+    await client.query('.Q.ld:{\'"live compatibility test: .Q.ld must not be called"}');
+    const completeSourceRequest = qScriptInNamespace(
+      'scriptA:1\nscriptB:2\nscriptA+scriptB',
+      '.analytics'
+    );
     assert.strictEqual(
-      await client.query(qScriptInNamespace('scriptA:1\nscriptB:2\nscriptA+scriptB', '.analytics')),
+      completeSourceRequest.includes('.Q.ld'),
+      false,
+      'the complete-source request must not depend on the poisoned modern helper'
+    );
+    assert.strictEqual(
+      await client.query(completeSourceRequest),
       3
     );
     assert.strictEqual(
+      await client.query(qScriptInNamespace('scriptA', '.analytics')),
+      1,
+      'later complete-source requests must retain state in the same q process/namespace'
+    );
+    assert.strictEqual(await client.query('`scriptA in key `.analytics'), true);
+    assert.strictEqual(await client.query('`scriptA in key `.'), false);
+    assert.strictEqual(
       await client.query(qScriptInNamespace('selectionA:10\nselectionB:20\nselectionA+selectionB', '.analytics')),
       30,
-      'the q-native grouping used for multiline selections must evaluate every selected line'
+      'compatibility grouping used for multiline selections must evaluate every selected line'
     );
+    const multilineQuery = await client.query(qScriptInNamespace(
+      'select\n sym,size\n from quote',
+      '.analytics'
+    ));
+    assert.strictEqual(multilineQuery.qtype, 'table');
+    assert.deepStrictEqual(multilineQuery.columns, ['sym', 'size']);
+    assert.strictEqual(multilineQuery.rowCount, 3);
     assert.strictEqual(
       await client.query(qScriptInNamespace('scriptFn:{[x]\r\n x+1\r\n }\r\nscriptFn 4', '.analytics')),
       5
+    );
+    assert.strictEqual(
+      await client.query(qScriptInNamespace(
+        'controlValue:0\nif[1b;\n controlValue:41;\n controlValue+:1]\ncontrolValue',
+        '.analytics'
+      )),
+      42
+    );
+    assert.strictEqual(
+      await client.query(qScriptInNamespace('1\n2', '.analytics')),
+      2,
+      'one-character groups must remain distinct q expressions'
+    );
+    assert.strictEqual(
+      await client.query(qScriptInNamespace(
+        'quotedText:"line one\\nline two \\"quoted\\""\nquotedText',
+        '.analytics'
+      )),
+      'line one\nline two "quoted"'
+    );
+    assert.strictEqual(
+      await client.query(qScriptInNamespace(
+        'blockCommentValue:1\n/\nblockCommentValue:99\n\\\nblockCommentValue+:1\nblockCommentValue',
+        '.analytics'
+      )),
+      2,
+      'q block-comment source must remain non-executable under client-side grouping'
+    );
+    assert.strictEqual(
+      await client.query(qScriptInNamespace(
+        'nestedBlockValue:1\n/\n/\nnestedBlockValue:99\n\\\nnestedBlockValue:98\n\\\n' +
+          'nestedBlockValue+:1\nnestedBlockValue',
+        '.analytics'
+      )),
+      2,
+      'nested q block comments must retain loader-compatible depth'
+    );
+    assert.deepStrictEqual(
+      await client.query(qScriptInNamespace('1+1\n/ trailing result-changing comment\n\\', '.analytics')),
+      { qtype: 'generalNull' },
+      'a pending line comment before the script terminator must remain the final group'
     );
     assert.deepStrictEqual(
       await client.query(qScriptInNamespace('stoppedBefore:1\n\\\nstoppedAfter:1', '.analytics')),
@@ -218,16 +287,49 @@ async function runAssertions(port) {
     );
     assert.strictEqual(await client.query('`stoppedBefore in key `.analytics'), true);
     assert.strictEqual(await client.query('`stoppedAfter in key `.analytics'), false);
+    assert.strictEqual(
+      await client.query(qScriptInNamespace(
+        '\\d .scriptCommandTarget\nsystemCommandValue:40\nsystemCommandValue+:2\nsystemCommandValue',
+        '.analytics'
+      )),
+      42,
+      'a source system command must affect later groups in the same script'
+    );
+    assert.strictEqual(await client.query('string system "d"'), '.');
+    assert.strictEqual(await client.query('`systemCommandValue in key `.scriptCommandTarget'), true);
+    assert.strictEqual(await client.query('`systemCommandValue in key `.analytics'), false);
+    await assert.rejects(
+      () => client.query(qScriptInNamespace(
+        '\\d .scriptCommandError\nsystemCommandBeforeError:1\nmissingAfterSystemCommand',
+        '.analytics'
+      )),
+      error => error && error.name === 'KdbQError' && /missingAfterSystemCommand/.test(error.message)
+    );
+    assert.strictEqual(
+      await client.query('string system "d"'),
+      '.',
+      'a q error after a source system command must restore the pre-run namespace'
+    );
+    assert.strictEqual(
+      await client.query('`systemCommandBeforeError in key `.scriptCommandError'),
+      true
+    );
     assert.strictEqual(await client.query('string system "d"'), '.');
     await assert.rejects(
       () => client.query(qScriptInNamespace('beforeFailure:1\nmissingScriptName', '.analytics')),
       error => error && error.name === 'KdbQError' && /missingScriptName/.test(error.message)
     );
     assert.strictEqual(await client.query('string system "d"'), '.', 'script errors must restore the prior namespace');
+    assert.strictEqual(
+      await client.query(qScriptInNamespace('beforeFailure', '.analytics')),
+      1,
+      'q side effects before a later expression error must remain in the configured namespace'
+    );
     await assert.rejects(
       () => client.query('missingSymbolForVscodeKdbLiveTest'),
       error => error && error.name === 'KdbQError' && /missingSymbolForVscodeKdbLiveTest/.test(error.message)
     );
+    return { qVersion };
   } finally {
     await client.close();
   }

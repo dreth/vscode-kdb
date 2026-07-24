@@ -1037,7 +1037,7 @@
 
 
 <h1 id="jupyteripython-notebooks">Jupyter/IPython Notebooks</h1>
-<p>KX for VS Code 0.2.6 supports two clear first-party notebook modes:</p>
+<p>KX for VS Code 0.2.7 supports two clear first-party notebook modes:</p>
 <table>
 <thead>
 <tr>
@@ -1062,7 +1062,7 @@
 </table>
 <p>VS Code selects one controller for the notebook. KX does not patch Jupyter or pretend built-in Run can dispatch cells through multiple selected controllers. The mixed action is an explicit second execution gesture for q-language cells; it leaves the Python controller and Python cells untouched.</p>
 <h2 id="mode-1-q-only-direct-ipc-controller">Mode 1: q-only Direct IPC controller</h2>
-<p>Version 0.2.6 includes:</p>
+<p>Version 0.2.7 includes:</p>
 <ul>
 <li>controller ID <code>vscode-kdb.q-notebook-controller</code>;</li>
 <li>notebook type <code>jupyter-notebook</code>;</li>
@@ -1099,9 +1099,11 @@
 </ul>
 <p>It cannot match Python, Markdown, an ordinary source editor, output focus, or a cell container without editor focus. In those other focus states VS Code's normal notebook shortcut remains in charge; use the visible KX action for q execution. Extension default bindings outrank the built-in notebook rule when this exact guard matches, while later user/keymap rules can still override any default shortcut. If <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> was customized, use the toolbar/context/Command Palette action or inspect <strong>Developer: Toggle Keyboard Shortcuts Troubleshooting</strong>. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.</p>
 <h2 id="active-connection-and-shared-q-session">Active connection and shared q session</h2>
-<p>The q-only controller uses the active profile in <strong>KX Connections</strong>. Mixed cells use the notebook's explicit q target. Both reuse the profile-keyed <code>ConnectionManager</code> client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target. Every q cell uses the same script/namespace wrapper and requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer).</p>
+<p>The q-only controller uses the active profile in <strong>KX Connections</strong>. Mixed cells use the notebook's explicit q target. Both reuse the profile-keyed <code>ConnectionManager</code> client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target.</p>
+<p>Every direct q cell uses the same complete-source path as <strong>Run q Script</strong>. The extension groups physical q lines on the client, including indentation continuations, comments, top-level system commands, and q's bare-<code>\</code> trailing-script-comment convention, then evaluates the groups in order through ordinary q <code>value</code>. It saves the process's current namespace, enters the profile's configured namespace, and restores the saved namespace after success or q error. A source system command retains normal q semantics and can affect later groups within that run; the outer wrapper still restores the pre-run namespace afterward.</p>
+<p>This path has no <code>.Q.ld</code> or q release-date gate. Deterministic tests simulate missing <code>.Q.ld</code> through the full direct-cell request, while the available live test uses the installed modern q runtime. Version 0.2.7 does not state an exact minimum q version or claim a live historical-q run.</p>
 <p>A saved but disconnected target may connect on demand after an explicit KX execution gesture. Its profile/global connect and query timeouts apply. A missing mixed target stays actionable rather than falling through. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.</p>
-<p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; the selected q controller completes its native execution, while mixed mode writes a cancellation result only if the q cell is still unchanged. q work or side effects already sent may continue on the server. Version 0.2.6 does not claim server-side interruption.</p>
+<p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; the selected q controller completes its native execution, while mixed mode writes a cancellation result only if the q cell is still unchanged. q work or side effects already sent may continue on the server. Version 0.2.7 does not claim server-side interruption.</p>
 <h2 id="live-kx-result-and-saved-snapshot">Live KX result and saved snapshot</h2>
 <p>A successful result from either first-party KX mode has two representations:</p>
 <ol>

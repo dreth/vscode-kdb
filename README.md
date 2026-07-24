@@ -2,7 +2,7 @@
 
 KX for VS Code is a standalone extension for working with kdb+/q directly in Visual Studio Code. It provides q language support, extension-owned direct q IPC connections, exact editor execution, a native q controller for ordinary Jupyter notebooks, portable notebook snapshots, optional first-party server exploration and local query history, and a high-performance native result viewer.
 
-Version 0.2.6 makes mixed Python/q execution visible where notebook users already work. With Python still selected, non-q code cells show **Make q Cell (KX)**, q cells show a leading **Run q Cell (KX)** play action, and q-cell status shows `KX: <notebook target> · Ctrl+Enter` (`Cmd+Enter` on macOS). Each notebook has an explicit saved q target backed by a KX profile; only its stable ID and display name enter the `.ipynb`. Connection saves now verify persistence and show every profile with an unambiguous `ACTIVE` marker. Persisted table previews default to 20 rows while the current live result remains full and virtualized.
+Version 0.2.7 restores direct complete-source execution on compatible older q processes that do not provide `.Q.ld`, while retaining the mixed Python/q actions, explicit notebook q target, verified connection persistence, and 20-row-default portable previews introduced in 0.2.6. Complete q cells, multiline selections, and scripts are grouped client-side and evaluated through ordinary q `value` in the selected profile's existing process/session.
 
 Documentation: [standalone user guide](mkdocs-src/index.md), [source-backed parity matrix](PARITY.md), [checked pre-0.2.0 cross-extension evidence](PARITY_RUN.md), and [parity rerun instructions](test/parity/README.md). The generated site is tracked under `docs/`; no Pages deployment is implied.
 
@@ -120,11 +120,13 @@ The extension contributes minimal q language support for `.q` files and these ed
 | **KX: Run q Script** | `Ctrl+Alt+Enter` | `Cmd+Alt+Enter` | Runs the complete active `.q` document. |
 | **KX: Run Selection in New Result** | `Ctrl+Shift+Enter` | `Cmd+Shift+Enter` | Runs the exact selection, or the exact current physical line when there is no selection, in a new result panel. |
 
-Multiline selections are preserved as selected and evaluated using q's own script-line grouping. There is no SQL parser, extension-owned statement splitter, current-block inference, or hidden session-file behavior.
+Multiline selections are preserved as selected and use a small client-side q script-line grouper. There is no SQL parser, current-block inference, or hidden session-file behavior.
 
 The extension owns its `.q` language contribution and TextMate grammar. Since 0.2.2 it recognizes a leading `%%q` line as a notebook directive while retaining normal q highlighting below it; ordinary `.q` token rules remain unchanged. `.k` is not associated with q: broadening that file association without a demonstrated, testable need could conflict with other VS Code language support. This basic language support is not a claim of a q language server, lint engine, source-document formatter, or full editor parity.
 
-Whole-document runs and multiline selections use [q's own documented script-line grouping](https://code.kx.com/q/ref/dotq/#ld-load-and-group), including q indentation and script termination rules; they require q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer). Single-line selections and current-line execution remain raw q queries and do not use this grouping helper.
+Whole-document runs, multiline selections, and direct notebook cells normalize line endings and group physical source lines on the client. An unindented source line starts a group and indented lines continue it; blank lines, line comments, `/` ... `\` block comments, top-level q system-command lines, and a bare `\` that begins q's trailing script comment retain their script meaning. The resulting groups execute in order through ordinary q `value`, and the final group supplies the result. Normal q indentation and source validity still belong to q. Single-line selections and current-line execution remain raw q queries.
+
+For a script or complete cell, KX saves the process's current namespace, enters the configured namespace, evaluates the groups in the existing session, restores the saved namespace after success or q error, and rethrows genuine q errors. A system command inside the source still has normal q semantics and can affect later groups in that same run; the outer wrapper restores the pre-run namespace afterward. The generated request has no `.Q.ld` dependency and does not reject a process by q release date. Deterministic compatibility coverage simulates a process without `.Q.ld`, but the available live-q release check uses the installed modern q runtime. Version 0.2.7 therefore states no exact minimum q version and does not claim a live run against an historical q binary.
 
 Queries use the active connection. A normal run replaces the active result panel; **Run Selection in New Result** keeps the existing panel and opens another.
 
@@ -156,7 +158,7 @@ While the q cell editor itself has text focus, the contributed default `Ctrl+Ent
 
 The q-only controller uses the active profile in **KX Connections**. Mixed q cells use the notebook's explicit q target. Both paths share the same full-cell query/error/snapshot core and profile-keyed `ConnectionManager` sessions, so assignments and namespace state continue across q cells on the same target. The mixed status shows only the safe profile display name; host, username, password, and other credentials are never notebook status or target metadata.
 
-Connection, timeout, q, and decode failures are sanitized. Cancel before dispatch prevents the request. Cancel after synchronous IPC dispatch ends the local wait and reports that server work or side effects may continue; 0.2.6 does not claim server-side interruption. The shared script wrapper requires q 4.0 dated 2023-03-28 or newer (or q 4.1t dated 2022-11-01 or newer).
+Connection, timeout, q, and decode failures are sanitized. Cancel before dispatch prevents the request. Cancel after synchronous IPC dispatch ends the local wait and reports that server work or side effects may continue; 0.2.7 does not claim server-side interruption. Both direct notebook modes use the same client-side complete-source grouping, configured-namespace restoration, and ordinary q `value` execution as **Run q Script**.
 
 Normal Run with a Python controller selected remains owned by Jupyter—even on a q-language cell—and is not a second KX trigger. Use the clearly labelled KX action for direct IPC. This avoids duplicate hidden routing and preserves normal Python-controller behavior.
 
@@ -265,7 +267,7 @@ The setting is opt-in and is never changed automatically. Performance tracing ad
 
 ## Focused standalone scope
 
-Version 0.2.6 keeps extension-owned execution direct-q-IPC-only and includes both the selected q `NotebookController` and an explicit q-cell command for mixed notebooks. Public VS Code APIs still select one controller for the notebook; KX does not make built-in Python Run dispatch to a second controller. Standalone owns its TextMate q grammar, live in-memory notebook result adapter, bounded NotebookRenderer output, focused Server Explorer, local Query History, and KX Results panel. These are bounded first-party features, not full LSP, lint, source-formatter, Jupyter-kernel, KDB-X, or q Professional parity. SSH setup, TLS termination, gateway or broker configuration, broad namespace browsing, remote orchestration, Python-kernel interception, persisted full-result recovery, and server-side interruption remain outside this release. The SQLTools settings reader is an intentional migration ingress only, not a runtime/session dependency.
+Version 0.2.7 keeps extension-owned execution direct-q-IPC-only and includes both the selected q `NotebookController` and an explicit q-cell command for mixed notebooks. Public VS Code APIs still select one controller for the notebook; KX does not make built-in Python Run dispatch to a second controller. Standalone owns its TextMate q grammar, live in-memory notebook result adapter, bounded NotebookRenderer output, focused Server Explorer, local Query History, and KX Results panel. These are bounded first-party features, not full LSP, lint, source-formatter, Jupyter-kernel, KDB-X, or q Professional parity. SSH setup, TLS termination, gateway or broker configuration, broad namespace browsing, remote orchestration, Python-kernel interception, persisted full-result recovery, and server-side interruption remain outside this release. The SQLTools settings reader is an intentional migration ingress only, not a runtime/session dependency.
 
 ## Development and verification
 
@@ -286,7 +288,7 @@ VSCODE_KDB_LIVE_REQUIRED=1 \
 
 `npm test` is the focused harness for q IPC serialization/deserialization/cancellation, q-text selection/current-line extraction, native-controller and mixed q-cell routing through their shared query/result core, full-cell/session/error/cancellation behavior, live notebook result slicing/search/sort/copy/chart/settings contracts, chart capability and hidden-series state, cell language/default/marker behavior, notebook MIME validation/bounds/fallbacks, independent timeout defaults, connection lifecycle, migration, SecretStorage, namespace wrapping, Server Explorer, Query History, diagnostics/redaction, and grammar/manifest/source/webview guards. The isolated Python suite verifies the companion serializer, MIME fallbacks, static chart, escaping, callback magic, and optional PyKX boundary. The scoped Extension Host smoke verifies activation, commands, isolated two-profile configuration/active selection, and actual notebook language conversion/restoration. It does not automate the connection webview, kernel selector, toolbar/status layout, target QuickPick, or q execution; no standalone visual UI E2E is claimed.
 
-For the 0.2.6 release, run `npm run test:parity:self`; do not run the full cross-repository gate when the pinned reference checkout must remain untouched. The checked report predates 0.2.0 and contains 63 classified cases and 381 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. It remains historical evidence, is not mixed-notebook or visual evidence, and does not establish complete functional or visual parity. See [the evidence report](PARITY_RUN.md) and [parity runner documentation](test/parity/README.md).
+For the 0.2.7 release, run `npm run test:parity:self`; do not run the full cross-repository gate when the pinned reference checkout must remain untouched. The checked report predates 0.2.0 and contains 63 classified cases and 381 assertions: 49 `PASS`, 5 `DIFFERENT_BY_DESIGN`, 3 `GAP`, and 6 `NOT_TESTABLE_HERE`, split into 38 deterministic, 14 live-q, and 11 boundary cases. It remains historical evidence, is not legacy-q, mixed-notebook, or visual evidence, and does not establish complete functional or visual parity. See [the evidence report](PARITY_RUN.md) and [parity runner documentation](test/parity/README.md).
 
 If a local q executable is available at `~/.kx/bin/q`, run the optional live IPC test:
 
@@ -314,16 +316,16 @@ Package the extension with either the project script or an explicit artifact pat
 
 ```sh
 npm run package
-npx @vscode/vsce package --out vscode-kdb-0.2.6.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.7.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.6.vsix")
-with ZipFile("vscode-kdb-0.2.6-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.7.vsix")
+with ZipFile("vscode-kdb-0.2.7-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.6.vsix vscode-kdb-0.2.6-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.7.vsix vscode-kdb-0.2.7-vsix.zip
 ```
 
 The wrapper contains exactly one file: the byte-identical VSIX. The release auditor checks both archives' paths, duplicates, encryption flags, symlinks, CRCs, manifest/assets, compiled/runtime inventory, nested archives, credential indicators, forbidden sources, raw embedded bytes, names, versions, and SHA-256 hashes. The VSIX is assembled through `.vscodeignore`; development dependencies, tests, caches, source maps, prompt files, archives, and local secrets are excluded from the release artifact.
@@ -332,7 +334,7 @@ The wrapper contains exactly one file: the byte-identical VSIX. The release audi
 
 [q Professional / `jshinonome/vscode-k-pro` at `fc9afacaeaf5e90eb013eb34426488841cc24f2a`](https://github.com/jshinonome/vscode-k-pro/tree/fc9afacaeaf5e90eb013eb34426488841cc24f2a) documents a formatter and informed product-level readability research only. Its public repository license is all-rights-reserved, so no source code, logic, or assets were copied.
 
-[KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected as an Apache-2.0 reference. Its `kdb.ls.q.lint` command is qlint integration—linting, not a general qText result pretty-printer. Version 0.2.6 adapts no source code, logic, or assets from it or q Professional, so `THIRD_PARTY_NOTICES.md` needs no new entry. SQLTools remains absent as a runtime or UI dependency; the one-time configuration importer is KX-owned. See [PARITY.md](PARITY.md) for the bounded competitive audit; these references do not imply full KDB-X or q Professional parity.
+[KX's `KxSystems/kx-vscode` at `1c745bf0221dd3cca85dce925c4d432d80bb5ef5`](https://github.com/KxSystems/kx-vscode/tree/1c745bf0221dd3cca85dce925c4d432d80bb5ef5) was inspected as an Apache-2.0 reference. Its `kdb.ls.q.lint` command is qlint integration—linting, not a general qText result pretty-printer. Version 0.2.7 adapts no source code, logic, or assets from it or q Professional, so `THIRD_PARTY_NOTICES.md` needs no new entry. SQLTools remains absent as a runtime or UI dependency; the one-time configuration importer is KX-owned. See [PARITY.md](PARITY.md) for the bounded competitive audit; these references do not imply full KDB-X or q Professional parity.
 
 ## License
 
