@@ -8,6 +8,7 @@ const CONNECTIONS_SETTING = 'connections';
 const SET_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
 const RESTORE_LANGUAGE_COMMAND = 'vscode-kdb.restoreNotebookCellLanguage';
 const SET_ACTIVE_CONNECTION_COMMAND = 'vscode-kdb.setActiveConnection';
+const DIRECT_CONTROLLER_SETTING = 'enableDirectController';
 
 function kxExtension() {
   return vscode.extensions.getExtension(EXTENSION_ID) ||
@@ -31,23 +32,53 @@ function connectionProfiles() {
       id: 'e2e-profile-two',
       name: 'Extension Host Two',
       host: '127.0.0.1',
-      port: 5012,
+      port: 5005,
       database: '.research',
       username: '',
     },
   ];
 }
 
-async function exerciseConnectionSettings() {
+async function waitFor(label, predicate, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() <= deadline) {
+    if (predicate()) {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+async function exerciseConnectionStore(testApi) {
   const configuration = vscode.workspace.getConfiguration('vscode-kdb');
   const previous = configuration.inspect(CONNECTIONS_SETTING)?.globalValue;
   const profiles = connectionProfiles();
+  const passwords = {
+    [profiles[0].id]: ['extension', 'host', 'secret', 'one'].join('-'),
+    [profiles[1].id]: ['extension', 'host', 'secret', 'two'].join('-'),
+  };
   try {
-    await configuration.update(
-      CONNECTIONS_SETTING,
-      profiles,
-      vscode.ConfigurationTarget.Global
+    await testApi.addConnection(profiles[0], passwords[profiles[0].id]);
+    assert.deepStrictEqual(
+      testApi.connections().map(profile => profile.id),
+      [profiles[0].id],
+      'the first resolved store add must be visible immediately'
     );
+    assert.strictEqual(testApi.activeConnectionId(), profiles[0].id);
+
+    await testApi.addConnection(profiles[1], passwords[profiles[1].id]);
+    assert.deepStrictEqual(
+      testApi.connections().map(profile => profile.id),
+      profiles.map(profile => profile.id),
+      'the second resolved store add must retain the first profile'
+    );
+    await waitFor('two effective application-scoped profiles', () => {
+      const effective = vscode.workspace
+        .getConfiguration('vscode-kdb')
+        .get(CONNECTIONS_SETTING);
+      return Array.isArray(effective) && effective.length === 2;
+    });
     const persisted = vscode.workspace
       .getConfiguration('vscode-kdb')
       .inspect(CONNECTIONS_SETTING)?.globalValue;
@@ -60,6 +91,8 @@ async function exerciseConnectionSettings() {
         'connection settings must not contain passwords'
       );
     }
+    assert.strictEqual(await testApi.hasPassword(profiles[0].id), true);
+    assert.strictEqual(await testApi.hasPassword(profiles[1].id), true);
 
     const selected = await vscode.commands.executeCommand(
       SET_ACTIVE_CONNECTION_COMMAND,
@@ -71,14 +104,133 @@ async function exerciseConnectionSettings() {
       profiles[1].id,
       'active selection must honor the requested profile ID, not list order'
     );
+    assert.strictEqual(testApi.activeConnectionId(), profiles[1].id);
+
+    const expected = testApi.connection(profiles[1].id);
+    assert.strictEqual(expected.port, 5005);
+    const edited = { ...expected, port: 5000 };
+    await testApi.updateConnection(edited, undefined, expected);
+    assert.strictEqual(
+      testApi.connection(profiles[1].id).port,
+      5000,
+      'editing the same stable profile ID must be visible immediately'
+    );
+    assert.strictEqual(
+      testApi.connections().length,
+      2,
+      'editing one profile must retain both profiles'
+    );
+    await waitFor('edited profile port 5000 in global settings', () => {
+      const effective = vscode.workspace
+        .getConfiguration('vscode-kdb')
+        .get(CONNECTIONS_SETTING);
+      return Array.isArray(effective) &&
+        effective.length === 2 &&
+        effective.find(profile => profile.id === edited.id)?.port === 5000;
+    });
+
+    const targetMetadata = {
+      metadata: {
+        'vscode-kdb': {
+          version: 1,
+          qTarget: {
+            id: edited.id,
+            name: edited.name,
+          },
+        },
+      },
+    };
+    assert.deepStrictEqual(
+      Object.keys(targetMetadata.metadata['vscode-kdb'].qTarget).sort(),
+      ['id', 'name'],
+      'notebook target metadata must contain only stable safe identity fields'
+    );
+    const resolved = testApi.resolveNotebookTarget(targetMetadata);
+    assert(resolved, 'the saved notebook target ID must resolve through the current store');
+    assert.strictEqual(resolved.id, edited.id);
+    assert.strictEqual(resolved.port, 5000);
+
+    await vscode.commands.executeCommand(
+      SET_ACTIVE_CONNECTION_COMMAND,
+      profiles[0].id
+    );
+    assert.strictEqual(testApi.activeConnectionId(), profiles[0].id);
+    assert.strictEqual(
+      testApi.resolveNotebookTarget(targetMetadata).port,
+      5000,
+      'changing the global active profile must not override an explicit notebook target ID'
+    );
+    assert.strictEqual(testApi.resolveNotebookTarget({
+      metadata: {
+        'vscode-kdb': {
+          version: 1,
+          qTarget: { id: 'e2e-removed-profile', name: 'Removed profile' },
+        },
+      },
+    }), undefined, 'a missing notebook target must not fall back to the active or first profile');
+
     assert.strictEqual(
       vscode.workspace.getConfiguration('vscode-kdb').get(CONNECTIONS_SETTING).length,
       2,
       'selecting an active profile must not discard another profile'
     );
   } finally {
+    for (const profile of profiles) {
+      await testApi.removeConnection(profile.id).catch(() => undefined);
+    }
+    await testApi.setActiveConnection(undefined);
+    for (const profile of profiles) {
+      assert.strictEqual(
+        await testApi.hasPassword(profile.id),
+        false,
+        `Extension Host cleanup must delete the test secret for ${profile.id}`
+      );
+    }
     await configuration.update(
       CONNECTIONS_SETTING,
+      previous,
+      vscode.ConfigurationTarget.Global
+    );
+  }
+}
+
+async function exerciseDirectControllerLifecycle(testApi) {
+  const configuration = vscode.workspace.getConfiguration('vscode-kdb.notebook');
+  const previous = configuration.inspect(DIRECT_CONTROLLER_SETTING)?.globalValue;
+  try {
+    assert.strictEqual(
+      configuration.get(DIRECT_CONTROLLER_SETTING),
+      false,
+      'the optional KX q-only controller setting must default to false'
+    );
+    assert.strictEqual(
+      testApi.isDirectControllerRegistered(),
+      false,
+      'KX q Direct IPC must not register as a kernel candidate by default'
+    );
+
+    await configuration.update(
+      DIRECT_CONTROLLER_SETTING,
+      true,
+      vscode.ConfigurationTarget.Global
+    );
+    await waitFor(
+      'opt-in direct controller registration',
+      () => testApi.isDirectControllerRegistered()
+    );
+
+    await configuration.update(
+      DIRECT_CONTROLLER_SETTING,
+      false,
+      vscode.ConfigurationTarget.Global
+    );
+    await waitFor(
+      'direct controller disposal',
+      () => !testApi.isDirectControllerRegistered()
+    );
+  } finally {
+    await configuration.update(
+      DIRECT_CONTROLLER_SETTING,
       previous,
       vscode.ConfigurationTarget.Global
     );
@@ -145,8 +297,13 @@ async function exerciseNotebookCellLanguageCommands() {
 async function run() {
   const extension = kxExtension();
   assert(extension, `development extension ${EXTENSION_ID} was not loaded`);
-  await extension.activate();
+  const extensionExports = await extension.activate();
   assert.strictEqual(extension.isActive, true, 'development extension must activate');
+  const testApi = extensionExports?.extensionHostTest;
+  assert(
+    testApi,
+    'the isolated Extension Host run must enable the narrow real-store test API'
+  );
 
   const commands = new Set(await vscode.commands.getCommands(true));
   for (const command of [
@@ -157,10 +314,11 @@ async function run() {
     assert(commands.has(command), `activated extension must register ${command}`);
   }
 
-  await exerciseConnectionSettings();
+  await exerciseConnectionStore(testApi);
+  await exerciseDirectControllerLifecycle(testApi);
   await exerciseNotebookCellLanguageCommands();
   console.log(
-    'KX Extension Host assertions passed: activation, commands, two profiles, exact active selection, q conversion, and restoration.'
+    'KX Extension Host assertions passed: activation, real-store add/edit/remove, two-profile persistence, current notebook target resolution, active selection, default-off controller lifecycle, q conversion, and restoration.'
   );
 }
 

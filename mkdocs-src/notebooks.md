@@ -1,50 +1,31 @@
 # Jupyter/IPython Notebooks
 
-KX for VS Code 0.2.7 supports two clear first-party notebook modes:
+KX for VS Code 0.2.8 is Python-first by default. Keep the normal Python Jupyter kernel selected, use KX to make only the intended cells q, choose a saved KX profile explicitly, and run those q cells through Direct IPC. KX does not register its optional q-only controller by default, so **KX q (Direct IPC)** is absent from VS Code's kernel candidates. The notebook's top-right Jupyter kernel selector itself remains visible and owned by VS Code/Jupyter.
 
 | Selected notebook kernel + cell | Use |
 | --- | --- |
 | Python selected + Python cell | normal Run |
 | Python selected + q cell | **Run q Cell (KX)** / `Ctrl+Enter` |
-| KX q selected + q cell | normal Run |
+| Optional KX q selected + q cell | normal Run, only after enabling `vscode-kdb.notebook.enableDirectController` |
 
-VS Code selects one controller for the notebook. KX does not patch Jupyter or pretend built-in Run can dispatch cells through multiple selected controllers. The mixed action is an explicit second execution gesture for q-language cells; it leaves the Python controller and Python cells untouched.
+VS Code selects one controller for the notebook. KX does not patch Jupyter or pretend built-in Run can dispatch cells through multiple selected controllers. **Run q Cell (KX)** is an explicit Direct IPC gesture for q-language cells; it leaves the Python controller and Python cells untouched.
 
-## Mode 1: q-only Direct IPC controller
-
-Version 0.2.7 includes:
-
-- controller ID `vscode-kdb.q-notebook-controller`;
-- notebook type `jupyter-notebook`;
-- label **KX q (Direct IPC)**; and
-- `supportedLanguages = ["q"]`.
-
-Open an ordinary `.ipynb`, use the notebook's top-right kernel/controller selector or **Notebook: Select Notebook Kernel**, and choose **KX q (Direct IPC)**. This is VS Code's native controller/kernel surface, analogous to choosing another language kernel. It is not an entry in the Python controller's per-cell language picker and does not masquerade as a Python kernel.
-
-The controller is registered dynamically through `vscode.notebooks.createNotebookController`. The manifest's `onNotebook:jupyter-notebook` activation event ensures the extension activates for an ordinary Jupyter notebook. No private Jupyter API, `ms-toolsai.jupyter` runtime import, or hidden command interception is used.
-
-### Run complete q cells normally
-
-With the direct controller selected, use normal **Run Cell**, **Run All**, or `Ctrl+Enter` / `Cmd+Enter`. VS Code calls the controller execution handler with the complete cell source. No selection or alternate KX run gesture is required. The mixed-mode KX shortcut and inline action stand down while this controller is selected. A leading `%%q` is rejected; remove it, or use the separate Python helper route.
-
-The controller advertises q, so q-language code cells use the extension's TextMate grammar. If an existing code cell still has another language, use VS Code's normal cell-language picker to choose q. Mixed-mode Make/Run controls remain suppressed while the native KX controller is selected. **KX: Restore Notebook Cell Language** remains a secondary editing aid.
-
-Markdown is ignored. A non-q code cell is never dispatched to q and receives a clear output that the direct controller supports q only.
-
-## Mode 2: mixed Python and q
+## Default Python-first mixed workflow
 
 Keep the normal Python Jupyter controller selected. Python cells continue to use Jupyter's Run commands, execution order, variables, and outputs. KX never changes their language, controller, or source.
 
 For each intended q cell:
 
 1. Click the leading **Make q Cell (KX)** action. It changes the complete code cell's language to q without changing the selected Python kernel.
-2. Choose the visible notebook-level `q default` target from saved KX profiles.
+2. Use the visible notebook-level `q default` item or **KX: Choose Notebook q Target** to select one saved KX profile.
 3. Use the leading **Run q Cell (KX)** play action or focused-cell `Ctrl+Enter` / `Cmd+Enter`.
 4. Read the route from status: `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS).
 
 The action sends the complete cell source through the selected notebook target's direct KX session. It does not require `%%q`, select the KX controller, or mutate the Python controller. **KX: Restore Notebook Cell Language** restores the notebook's declared default language.
 
-Only safe `{id, name}` profile identity/display metadata is saved in the `.ipynb`; host, namespace, username, password, and connection objects are excluded. The globally active KX profile is offered first as a convenience, never used as an invisible fallback. A renamed profile resolves by stable ID. A removed profile shows **Select connection** and must be replaced explicitly, so mixed q never routes to list order or another profile by accident.
+Only safe `{id, name}` profile identity/display metadata is saved in the `.ipynb`; host, port, namespace, username, password, credentials, and connection objects are excluded. Every run resolves that stable ID against current `ConnectionStore` data. If the same profile is edited from port `5005` to `5000`, the next run uses `5000`; the connection manager disconnects a client whose runtime endpoint is stale and reconnects as needed. A rename still resolves by ID. Changing the globally active profile does not override the notebook target.
+
+The globally active profile is offered first as a labelled convenience, never used as an invisible fallback. An unselected, removed, or otherwise missing target shows **Select connection** and prompts for explicit selection, so mixed q never routes to list order or another profile by accident.
 
 Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. **Run q Cell (KX)** leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.
 
@@ -57,25 +38,38 @@ While the q cell editor itself has text focus, the contributed default `Ctrl+Ent
 - code cell type;
 - language exactly `q`;
 - resource scheme `vscode-notebook-cell`; and
-- **KX q (Direct IPC)** not selected.
+- the optional **KX q (Direct IPC)** controller not selected.
 
 It cannot match Python, Markdown, an ordinary source editor, output focus, or a cell container without editor focus. In those other focus states VS Code's normal notebook shortcut remains in charge; use the visible KX action for q execution. Extension default bindings outrank the built-in notebook rule when this exact guard matches, while later user/keymap rules can still override any default shortcut. If `Ctrl+Enter` / `Cmd+Enter` was customized, use the toolbar/context/Command Palette action or inspect **Developer: Toggle Keyboard Shortcuts Troubleshooting**. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.
 
+## Optional q-only Direct IPC controller
+
+Set the application-scoped `vscode-kdb.notebook.enableDirectController` setting to `true` only when a q-only native-controller workflow is wanted. KX then registers:
+
+- controller ID `vscode-kdb.q-notebook-controller`;
+- notebook type `jupyter-notebook`;
+- label **KX q (Direct IPC)**; and
+- `supportedLanguages = ["q"]`.
+
+The controller is created dynamically through the public `vscode.notebooks.createNotebookController` API and appears in VS Code's normal kernel picker. With it selected, normal **Run Cell**, **Run All**, or notebook shortcuts send the complete q cell through the active KX profile. Markdown is ignored. A non-q code cell is not dispatched to q, and a leading `%%q` is rejected because it belongs to the separate Python helper route.
+
+Turning the setting off disposes the controller. A notebook that previously saved KX as its selected controller cannot keep forcing or restore that selection while KX is unregistered. This setting controls only the KX candidate; it does not remove or modify VS Code's top-right Jupyter selector. The manifest's `onNotebook:jupyter-notebook` event still activates the mixed runner for ordinary notebooks. No proposed/private affinity API, private Jupyter API, `ms-toolsai.jupyter` runtime import, or hidden command interception is used.
+
 ## Active connection and shared q session
 
-The q-only controller uses the active profile in **KX Connections**. Mixed cells use the notebook's explicit q target. Both reuse the profile-keyed `ConnectionManager` client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target.
+Mixed cells use the notebook's explicit q target. The optional q-only controller uses the active profile only while it is enabled and selected. Both Direct IPC routes reuse the profile-keyed `ConnectionManager` client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target.
 
 Every direct q cell uses the same complete-source path as **Run q Script**. The extension groups physical q lines on the client, including indentation continuations, comments, top-level system commands, and q's bare-`\` trailing-script-comment convention, then evaluates the groups in order through ordinary q `value`. It saves the process's current namespace, enters the profile's configured namespace, and restores the saved namespace after success or q error. A source system command retains normal q semantics and can affect later groups within that run; the outer wrapper still restores the pre-run namespace afterward.
 
-This path has no `.Q.ld` or q release-date gate. Deterministic tests simulate missing `.Q.ld` through the full direct-cell request, while the available live test uses the installed modern q runtime. Version 0.2.7 does not state an exact minimum q version or claim a live historical-q run.
+This path has no `.Q.ld` or q release-date gate. Deterministic tests simulate missing `.Q.ld` through the full direct-cell request, while the available live test uses the installed modern q runtime. Version 0.2.8 does not state an exact minimum q version or claim a live historical-q run.
 
 A saved but disconnected target may connect on demand after an explicit KX execution gesture. Its profile/global connect and query timeouts apply. A missing mixed target stays actionable rather than falling through. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.
 
-Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; the selected q controller completes its native execution, while mixed mode writes a cancellation result only if the q cell is still unchanged. q work or side effects already sent may continue on the server. Version 0.2.7 does not claim server-side interruption.
+Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; mixed mode writes a cancellation result only if the q cell is still unchanged, while the optional selected controller completes its native execution. q work or side effects already sent may continue on the server. Version 0.2.8 does not claim server-side interruption.
 
 ## Live KX result and saved snapshot
 
-A successful result from either first-party KX mode has two representations:
+A successful Direct IPC result from the default mixed runner or optional controller has two representations:
 
 1. an extension-host live result backed by the decoded q value; and
 2. a safe bounded `application/vnd.kx.result+json` version 1 snapshot plus `text/plain` fallback stored in notebook output.
@@ -217,6 +211,6 @@ That serializer-owned field is separate from the helper's nested `metadata.vscod
 
 ## Evidence boundary
 
-Focused pure/provider tests cover controller identity/type/label/language, registration/disposal, mixed action/toolbar/context/keybinding guards, native-controller preservation, native active-profile routing, mixed explicit-target resolution, namespace/session continuity, complete-cell dispatch, Python-cell isolation, race/error/cancellation handling, live result lifetime, bounded snapshots, shared settings messages, helper-route separation, and bans on private Jupyter/SQLTools runtime coupling.
+Focused pure/provider tests cover default non-registration and opt-in controller registration/disposal, mixed action/toolbar/context/keybinding guards, q language assignment without a controller switch, current stable-ID target routing after same-profile endpoint edits and active changes, missing-target prompts, namespace/session continuity, complete-cell dispatch, Python-cell isolation, race/error/cancellation handling, live result lifetime, bounded snapshots, shared settings messages, helper-route separation, and bans on private Jupyter/SQLTools runtime coupling.
 
-The scoped real Extension Host smoke adds activation, contributed-command, isolated multi-profile configuration/active-selection, and actual notebook language conversion/restoration evidence. It does not automate the connection webview, kernel selector, toolbar/status layout, target QuickPick, or q execution, so there is no standalone visual UI E2E claim.
+The scoped real Extension Host smoke uses isolated VS Code user data and the actual `ConnectionStore` to add two application/global profiles, set active selection, edit the same targeted ID from port `5005` to `5000`, confirm both profiles remain, resolve the notebook target to current port `5000`, verify the optional controller is not registered by default, and clean up its settings, secrets, and global state. It also covers actual notebook language conversion/restoration. It does not visually automate the connection webview, top-right kernel selector, toolbar/status layout, target QuickPick, or q execution, so there is no visual UI E2E claim.

@@ -19,9 +19,10 @@ import {
 } from './notebook-integration';
 import {
   DirectQNotebookBridge,
-  KxQNotebookController,
+  KxQNotebookRunner,
 } from './notebook-controller';
 import { LiveNotebookResultStore } from './notebook-live-results';
+import { resolveNotebookQTarget } from './notebook-q-target';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 import {
@@ -35,7 +36,28 @@ import { qSelectionExecutionKind, selectedTextOrCurrentLine } from './q-text';
 
 let activeConnectionManager: ConnectionManager | undefined;
 
-export function activate(context: vscode.ExtensionContext): void {
+export interface KxExtensionHostTestApi {
+  connections(): readonly KxConnection[];
+  connection(id: string): KxConnection | undefined;
+  activeConnectionId(): string | undefined;
+  addConnection(connection: KxConnection, password?: string): Promise<void>;
+  updateConnection(
+    connection: KxConnection,
+    password?: string | null,
+    expected?: KxConnection
+  ): Promise<void>;
+  removeConnection(id: string, expected?: KxConnection): Promise<void>;
+  setActiveConnection(id: string | undefined): Promise<void>;
+  hasPassword(id: string): Promise<boolean>;
+  resolveNotebookTarget(metadata: unknown): KxConnection | undefined;
+  isDirectControllerRegistered(): boolean;
+}
+
+export interface KxExtensionExports {
+  readonly extensionHostTest?: KxExtensionHostTestApi;
+}
+
+export function activate(context: vscode.ExtensionContext): KxExtensionExports | undefined {
   const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
   const diagnostics = new KxDiagnostics(output);
   configurePerfOutput(value => output.appendLine(value));
@@ -44,12 +66,12 @@ export function activate(context: vscode.ExtensionContext): void {
   const tree = new ConnectionsTreeProvider(store, manager);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
   const liveNotebookResults = new LiveNotebookResultStore();
-  const notebookController = new KxQNotebookController(
+  const notebookRunner = new KxQNotebookRunner(
     directQNotebookBridge(store, manager, tree),
     liveNotebookResults
   );
   const notebookIntegration = new NotebookIntegration(context, {
-    directController: notebookController,
+    directRunner: notebookRunner,
     liveResults: liveNotebookResults,
   });
   activeConnectionManager = manager;
@@ -107,7 +129,7 @@ export function activate(context: vscode.ExtensionContext): void {
     tree,
     treeView,
     output,
-    notebookController,
+    notebookRunner,
     notebookIntegration,
     { dispose: () => liveNotebookResults.clear() },
     vscode.workspace.onDidCloseNotebookDocument(notebook =>
@@ -160,6 +182,43 @@ export function activate(context: vscode.ExtensionContext): void {
       tree.refresh();
     })
   );
+
+  if (context.extensionMode !== vscode.ExtensionMode.Test ||
+      process.env.VSCODE_KDB_EXTENSION_HOST_TEST !== '1') {
+    return undefined;
+  }
+  const safeConnection = (connection: KxConnection | undefined): KxConnection | undefined =>
+    connection ? { ...connection } : undefined;
+  return Object.freeze({
+    extensionHostTest: Object.freeze({
+      connections: () => store.connections().map(connection => ({ ...connection })),
+      connection: (id: string) => safeConnection(store.connection(id)),
+      activeConnectionId: () => store.activeConnectionId(),
+      addConnection: (connection: KxConnection, password?: string) =>
+        store.add(connection, password),
+      updateConnection: (
+        connection: KxConnection,
+        password?: string | null,
+        expected?: KxConnection
+      ) => store.update(connection, password, expected),
+      removeConnection: (id: string, expected?: KxConnection) =>
+        store.remove(id, expected),
+      setActiveConnection: (id: string | undefined) =>
+        store.setActiveConnection(id),
+      hasPassword: (id: string) => store.hasPassword(id),
+      resolveNotebookTarget: (metadata: unknown) => {
+        const resolution = resolveNotebookQTarget(
+          metadata,
+          notebookRunner.connectionProfiles()
+        );
+        return resolution.kind === 'resolved'
+          ? safeConnection(store.connection(resolution.profile.id))
+          : undefined;
+      },
+      isDirectControllerRegistered: () =>
+        notebookRunner.isDirectControllerRegistered(),
+    }),
+  });
 }
 
 export async function deactivate(): Promise<void> {

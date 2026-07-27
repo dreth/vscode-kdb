@@ -1,8 +1,8 @@
 {
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
-  "description": "Native direct q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.7",
+  "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
+  "version": "0.2.8",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -89,8 +89,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.7.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.7.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.8.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.8.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -308,7 +308,7 @@
         "command": "vscode-kdb.runQNotebookCell",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
-        "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && notebookKernel != 'DanielAlonso.vscode-kdb/vscode-kdb.q-notebook-controller' && !vscode-kdb.notebookDirectQControllerSelected"
+        "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
         "command": "vscode-kdb.runSelectionOrCurrentLine",
@@ -590,7 +590,13 @@
             "panel",
             "both"
           ],
-          "description": "Automatic presentation for Python-helper KX MIME output: inline, saved-preview panel, or both. Direct-controller results always stay inline beneath the cell; use Open full result in KX Results for an explicit live handoff. Saved or reopened output is the bounded portable snapshot only and cannot recover omitted rows."
+          "description": "Automatic presentation for Python-helper KX MIME output: inline, saved-preview panel, or both. Direct IPC output from Run q Cell (KX) or the optional controller always stays inline beneath the cell; use Open full result in KX Results for an explicit live handoff. Saved or reopened output is the bounded portable snapshot only and cannot recover omitted rows."
+        },
+        "vscode-kdb.notebook.enableDirectController": {
+          "type": "boolean",
+          "scope": "application",
+          "default": false,
+          "description": "Register the optional legacy q-only KX q (Direct IPC) notebook controller and offer it in VS Code's kernel picker. Disabled by default for the Python-first mixed workflow: Make q Cell (KX), Choose Notebook q Target, and Run q Cell (KX) remain available without registering or switching to a KX kernel. While disabled, a previously saved KX controller selection cannot be restored because that controller is not registered."
         },
         "vscode-kdb.notebook.maxOutputRows": {
           "type": "integer",
@@ -598,7 +604,7 @@
           "default": 20,
           "minimum": 1,
           "maximum": 10000,
-          "description": "Maximum rows persisted in a new KX notebook snapshot (20 by default). Direct IPC controller output and newly tagged %%q cells use this bound; the tag command writes it into the magic and kx_notebook validates its explicit limit. A live direct result can expose more rows only while its in-memory result record exists."
+          "description": "Maximum rows persisted in a new KX notebook snapshot (20 by default). Direct IPC mixed-runner or optional-controller output and newly tagged %%q cells use this bound; the tag command writes it into the magic and kx_notebook validates its explicit limit. A live direct result can expose more rows only while its in-memory result record exists."
         },
         "vscode-kdb.notebook.maxOutputBytes": {
           "type": "integer",
@@ -606,7 +612,7 @@
           "default": 1000000,
           "minimum": 16384,
           "maximum": 10000000,
-          "description": "Maximum portable MIME snapshot bytes for new direct-controller output and newly tagged %%q cells. Direct output also carries a bounded text/plain fallback; the Python helper applies its explicit budget across rich JSON and static HTML/plain fallbacks. No credentials, connection objects, or recoverable IPC handles are stored."
+          "description": "Maximum portable MIME snapshot bytes for new Direct IPC mixed-runner or optional-controller output and newly tagged %%q cells. Direct output also carries a bounded text/plain fallback; the Python helper applies its explicit budget across rich JSON and static HTML/plain fallbacks. No credentials, connection objects, or recoverable IPC handles are stored."
         },
         "vscode-kdb.features.serverExplorer": {
           "type": "boolean",

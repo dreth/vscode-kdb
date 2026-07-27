@@ -9,15 +9,16 @@ bridge.
 The KX for VS Code VSIX carries this installable source tree for offline handoff,
 but the extension never changes a selected kernel environment automatically.
 
-This package is the separate **Python-controller route**. Keep the normal
-Python/IPython controller selected and use `%%q` only when Python must own the q
-evaluator inside that kernel. KX for VS Code 0.2.7 also provides a native
-**KX q (Direct IPC)** controller for q-only notebooks and **Run q Cell (KX)**
-for direct q execution while a Python controller remains selected. Both direct
-paths need no Python package or `%%q` marker. The native controller uses the
-active profile; mixed mode uses the notebook's explicit q target. No extension-managed variables,
-namespace state, session identity, or live-result identity are shared between
-this helper and either direct route.
+This package is the separate **Python-controller evaluator route**. Keep the
+normal Python/IPython controller selected and use `%%q` only when Python must
+own the q evaluator inside that kernel. KX for VS Code 0.2.8 defaults to a
+different Python-first workflow for Direct IPC: **Make q Cell (KX)** supplies q
+language/highlighting, an explicit saved profile supplies the current target,
+and **Run q Cell (KX)** executes without changing the selected Python kernel.
+That Direct IPC route needs no Python package or `%%q` marker. The optional
+q-only **KX q (Direct IPC)** controller is disabled by default. No
+extension-managed variables, namespace state, session identity, or live-result
+identity are shared between this helper and either direct route.
 A user-supplied Python evaluator may independently target the same external
 process, but helper output never receives a Direct IPC live-result identity.
 
@@ -114,9 +115,10 @@ affect only the saved notebook output; they do not change or cap the evaluator's
 execution unless the configured evaluator applies its own server-side limit.
 
 Normal Run is owned by the selected Python controller. KX for VS Code does not
-intercept it or silently substitute the direct IPC controller. Conversely,
-selecting **KX q (Direct IPC)** makes the native controller the execution owner;
-ordinary q cells then run without this magic.
+intercept it or silently substitute Direct IPC. Use the explicit **Run q Cell
+(KX)** action for the default direct route. If the optional q-only controller is
+explicitly enabled and selected, it owns normal Run and ordinary q cells execute
+without this magic.
 
 For local tests and examples, `FixtureEvaluator` maps exact source strings to
 fixed table-like values. It is deliberately not a q parser:
