@@ -16,7 +16,9 @@ A live result from either **KX q (Direct IPC)** or mixed-mode **Run q Cell (KX)*
 
 Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until **Render** is pressed. The chart stays below the table and adds no chart height while hidden.
 
-There is no redundant notebook-only visible Point cap control. Live requests honor common `vscode-kdb.results.*` source/sampling settings and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, keyboard-reachable legend toggles, crosshair selection, drag zoom, live-handle sample refinement, **Reset zoom**, and **Export PNG** through the extension save dialog. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.
+There is no redundant notebook-only visible Point cap control. Live requests honor common `vscode-kdb.results.*` source/sampling settings and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation uses VS Code theme tokens for readable axis/tick text and restrained grid/tick contrast in light, dark, and high-contrast themes. Multi-series charts keep a visible legend with a color swatch for every plotted label. Each legend button supports pointer and **Enter**/**Space** toggling, exposes its current pressed state, and visibly distinguishes a hidden series. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.
+
+The Y-series selector repeats the same swatches beside selected and available series, so names map directly to plotted lines. Its overlay is width-contained and vertically scrollable instead of covering the full notebook output at narrow widths.
 
 Separately installed `kx-notebook==0.1.0` can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.
 
@@ -30,7 +32,7 @@ Once a direct result's bound live record is absent, notebook charting uses only 
 2. Press the top-level **Chart** button.
 3. Select a chart type and eligible columns.
 4. Press **Render**.
-5. Use the tooltip/crosshair, legend toggles, drag zoom, **Refine zoom**, or **Reset zoom**.
+5. Use the tooltip/crosshair, pointer or keyboard legend toggles, drag zoom, **Refine zoom**, or **Reset zoom**.
 6. After rendering, use **Export PNG** to save the chart canvas.
 
 Changing controls does not silently rerender the existing chart. The panel marks settings as changed until **Render** is pressed. Compatible chart selections are remembered for that result shape.
@@ -59,8 +61,8 @@ Rows at the same x value are aggregated into an OHLC candle. Further reduction u
 The bundled uPlot assets run locally under the VS Code webview content security policy. The chart supports:
 
 - cursor/crosshair values and OHLC-aware tooltips;
-- readable numeric and temporal axes;
-- legend series toggling;
+- readable numeric and temporal axes using VS Code theme colors;
+- a persistent color-keyed legend with pointer and **Enter**/**Space** series toggling;
 - drag-select zoom;
 - automatic and explicit refinement of the current zoom range;
 - reset to the original x domain;

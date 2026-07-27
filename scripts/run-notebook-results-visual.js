@@ -293,7 +293,9 @@ function validateArtifacts() {
     'live-columns-overlay',
     'shared-settings-overlay',
     'live-chart-controls-persistence',
+    'light-chart-legend-visible',
     'saved-range-search-chart',
+    'dark-chart-accessibility',
     'saved-all-null-chart-guards',
     'saved-chart-families',
     'saved-qtext-copy-status-a11y',
@@ -308,6 +310,8 @@ function validateArtifacts() {
   }
   const interaction = name =>
     report.interactions.find(candidate => candidate.name === name);
+  const screenshot = name =>
+    report.screenshots.find(candidate => path.basename(candidate.file) === name);
   const live = interaction('live-range-selection-search');
   if (live.selectedCells !== 6 || live.summary !== '3 rows × 2 columns (6 cells)' ||
       !/^1\/\d+$/.test(live.firstMatch) ||
@@ -334,8 +338,38 @@ function validateArtifacts() {
   const settings = interaction('shared-settings-overlay');
   if (settings.open !== true || settings.settingCount < 18 ||
       settings.focusedSetting !== 'Density' ||
-      settings.contained !== true) {
+      settings.contained !== true ||
+      settings.initial?.auto?.value !== '' ||
+      settings.initial?.auto?.placeholder !== 'Auto (VS Code default)' ||
+      settings.initial?.auto?.ariaValueText !== 'Auto (VS Code default)' ||
+      settings.initial?.closeVisible !== true ||
+      settings.initial?.headerVisible !== true ||
+      settings.initial?.scrollable !== true ||
+      settings.escapeDismissal?.open !== false ||
+      settings.escapeDismissal?.focusedSummary !== true ||
+      settings.closeDismissal?.open !== false ||
+      settings.closeDismissal?.focusedSummary !== true ||
+      settings.closeVisible !== true ||
+      settings.headerVisible !== true ||
+      settings.scrollable !== true ||
+      settings.scroll?.scrollHeight <= settings.scroll?.clientHeight ||
+      settings.screenshot?.auto?.value !== '' ||
+      settings.screenshot?.auto?.placeholder !== 'Auto (VS Code default)' ||
+      settings.screenshot?.auto?.ariaValueText !== 'Auto (VS Code default)' ||
+      settings.screenshot?.contained !== true) {
     throw new Error('Visual acceptance report has invalid settings/focus evidence.');
+  }
+  const settingsScreenshot = screenshot('light-settings-overlay.png')?.acceptance;
+  if (settingsScreenshot?.auto?.value !== '' ||
+      settingsScreenshot?.auto?.placeholder !== 'Auto (VS Code default)' ||
+      settingsScreenshot?.auto?.ariaValueText !== 'Auto (VS Code default)' ||
+      settingsScreenshot?.closeVisible !== true ||
+      settingsScreenshot?.headerVisible !== true ||
+      settingsScreenshot?.scrollable !== true ||
+      settingsScreenshot?.contained !== true ||
+      settingsScreenshot?.scroll?.scrollHeight <=
+        settingsScreenshot?.scroll?.clientHeight) {
+    throw new Error('Light Settings screenshot is missing Auto/close/scroll evidence.');
   }
   const liveChart = interaction('live-chart-controls-persistence');
   if (liveChart.beforeDraw.exportPngDisabled !== true ||
@@ -357,7 +391,17 @@ function validateArtifacts() {
   const zoomSpan = chart.zoomDomainTicks.maximum - chart.zoomDomainTicks.minimum;
   const resetSpan = chart.resetDomainTicks.maximum - chart.resetDomainTicks.minimum;
   if (chart.selection.selectedCells !== 9 ||
+      chart.legendInteractions?.pointerToggle?.pressed !== 'false' ||
+      chart.legendInteractions?.pointerToggle?.off !== true ||
+      chart.legendInteractions?.enterToggle?.pressed !== 'true' ||
+      chart.legendInteractions?.enterToggle?.off !== false ||
+      chart.legendInteractions?.enterToggle?.focused !== true ||
+      chart.legendInteractions?.spaceToggle?.pressed !== 'false' ||
+      chart.legendInteractions?.spaceToggle?.off !== true ||
+      chart.legendInteractions?.spaceToggle?.focused !== true ||
       chart.hiddenAfterRender !== 'false' ||
+      chart.hiddenAfterRenderState?.label !== chart.hiddenSeries ||
+      chart.hiddenAfterRenderState?.off !== true ||
       chart.afterSetting.hidden !== 'false' ||
       chart.afterSetting.settingsOpen !== true ||
       chart.afterSetting.focusedSetting !== 'Density' ||
@@ -375,6 +419,48 @@ function validateArtifacts() {
       !(zoomSpan < fullSpan) ||
       !(resetSpan >= fullSpan * 0.75)) {
     throw new Error('Visual acceptance report has invalid chart persistence/zoom evidence.');
+  }
+  if (!validLegendEvidence(chart.hiddenLegendAfterSetting, chart.hiddenSeries)) {
+    throw new Error('Hidden-series screenshot state lacks visible color-keyed legend evidence.');
+  }
+  const lightLegend = interaction('light-chart-legend-visible');
+  if (!validLegendEvidence(lightLegend) ||
+      !validLegendEvidence(screenshot('light-chart.png')?.acceptance)) {
+    throw new Error('Light chart screenshot lacks visible color-keyed legend evidence.');
+  }
+  if (!validLegendEvidence(
+    screenshot('light-chart-zoom-settings.png')?.acceptance,
+    chart.hiddenSeries
+  )) {
+    throw new Error('Light hidden-series screenshot lacks accurate legend evidence.');
+  }
+  const darkChart = interaction('dark-chart-accessibility');
+  if (!validLegendEvidence(darkChart.legend, chart.hiddenSeries) ||
+      darkChart.selector?.themeProbe !== 'in-place-light-to-dark' ||
+      darkChart.selector?.paletteChangedFromLight !== true ||
+      darkChart.selector?.mappingValid !== true ||
+      !Array.isArray(darkChart.selector?.selectedOptions) ||
+      darkChart.selector.selectedOptions.length < 2 ||
+      darkChart.selector.selectedOptions.some(option =>
+        !Array.isArray(option.swatches) || option.swatches.length < 1) ||
+      darkChart.ticks?.canvasTextCalls < 2 ||
+      darkChart.contrast?.numericTextCalls < 2 ||
+      !(darkChart.contrast?.axis?.contrast >= 4.5) ||
+      !(darkChart.contrast?.grid?.contrast <=
+        darkChart.contrast?.axis?.contrast * 0.6) ||
+      !(darkChart.contrast?.grid?.lineWidth <= 0.5)) {
+    throw new Error('Visual acceptance report has invalid dark chart contrast/legend evidence.');
+  }
+  const darkScreenshot = screenshot('dark-chart.png')?.acceptance;
+  if (!validLegendEvidence(darkScreenshot?.legend, chart.hiddenSeries) ||
+      darkScreenshot?.selector?.themeProbe !== 'in-place-light-to-dark' ||
+      darkScreenshot?.selector?.paletteChangedFromLight !== true ||
+      darkScreenshot?.selector?.mappingValid !== true ||
+      !(darkScreenshot?.contrast?.axis?.contrast >= 4.5) ||
+      !(darkScreenshot?.contrast?.grid?.contrast <=
+        darkScreenshot?.contrast?.axis?.contrast * 0.6) ||
+      !(darkScreenshot?.contrast?.grid?.lineWidth <= 0.5)) {
+    throw new Error('Dark chart screenshot lacks readable-axis/restrained-grid evidence.');
   }
   const nullChart = interaction('saved-all-null-chart-guards');
   if (nullChart.initial?.renderDisabled !== true ||
@@ -464,8 +550,33 @@ function validateArtifacts() {
       narrowChart.overlay?.open !== true ||
       narrowChart.overlay?.optionCount < 2 ||
       narrowChart.overlay?.focusedTag !== 'INPUT' ||
-      narrowChart.overlay?.contained !== true) {
+      narrowChart.overlay?.contained !== true ||
+      narrowChart.overlay?.scrollable !== true ||
+      !['auto', 'scroll'].includes(narrowChart.overlay?.overflowY) ||
+      !(narrowChart.overlay?.dimensions?.scrollHeight >
+        narrowChart.overlay?.dimensions?.clientHeight) ||
+      !(narrowChart.overlay?.dimensions?.scrollTop > 0) ||
+      !(narrowChart.overlay?.dimensions?.panelArea <
+        narrowChart.overlay?.dimensions?.rootArea * 0.65) ||
+      !Array.isArray(narrowChart.overlay?.options) ||
+      narrowChart.overlay.options.some(option =>
+        !Array.isArray(option.swatches) ||
+        option.swatches.length < 1 ||
+        option.swatches.some(swatch => swatch.visible !== true))) {
     throw new Error('Visual acceptance report has invalid narrow chart-overlay evidence.');
+  }
+  const narrowScreenshot = screenshot('narrow-chart-overlay.png')?.acceptance;
+  if (narrowScreenshot?.contained !== true ||
+      narrowScreenshot?.scrollable !== true ||
+      !(narrowScreenshot?.dimensions?.scrollHeight >
+        narrowScreenshot?.dimensions?.clientHeight) ||
+      !(narrowScreenshot?.dimensions?.scrollTop > 0) ||
+      !Array.isArray(narrowScreenshot?.options) ||
+      narrowScreenshot.options.some(option =>
+        !Array.isArray(option.swatches) ||
+        option.swatches.length < 1 ||
+        option.swatches.some(swatch => swatch.visible !== true))) {
+    throw new Error('Narrow chart screenshot lacks swatch/containment evidence.');
   }
   if (!Array.isArray(report.nonAutomatedBoundaries) ||
       report.nonAutomatedBoundaries.length !== 4) {
@@ -478,6 +589,35 @@ function validateArtifacts() {
       )) {
     throw new Error('Visual acceptance report must distinguish live and saved chart evidence.');
   }
+}
+
+function validLegendEvidence(evidence, hiddenLabel = '') {
+  if (!evidence || evidence.legendVisible !== true ||
+      evidence.ariaLabel !== 'Chart series legend' ||
+      !Array.isArray(evidence.items) ||
+      evidence.items.length < 2 ||
+      new Set(evidence.items.map(item => item.swatch?.color)).size < 2 ||
+      evidence.items.some(item =>
+        item.visible !== true ||
+        item.inResult !== true ||
+        item.inViewport !== true ||
+        item.swatch?.visible !== true ||
+        item.role !== 'button' ||
+        item.tabIndex !== 0 ||
+        !/^(true|false)$/.test(item.pressed) ||
+        item.off !== (item.pressed === 'false') ||
+        (item.pressed !== 'false' && !(item.textContrast >= 4.5)))) {
+    return false;
+  }
+  if (!hiddenLabel) {
+    return true;
+  }
+  const hidden = evidence.items.find(item => item.label === hiddenLabel);
+  return hidden?.pressed === 'false' &&
+    hidden.off === true &&
+    (hidden.opacity < 0.8 ||
+      evidence.items.some(item =>
+        item.pressed === 'true' && item.opacity > hidden.opacity));
 }
 
 async function main() {

@@ -10,6 +10,7 @@ import {
 } from '../src/charting';
 import {
   chartLegendToggleKey,
+  chartSeriesColorIndexes,
   chartSeriesVisible,
   updateHiddenChartSeriesKeys,
 } from '../src/chart-series-state';
@@ -179,6 +180,7 @@ interface OutputState {
   plotData?: NotebookLiveChartData;
   plotViewport?: PlotViewportState;
   plotResizeObserver?: ResizeObserver;
+  plotThemeObserver?: MutationObserver;
   savedPreparedChart?: SavedPreparedChartState;
   panelOpened: boolean;
   liveId?: string;
@@ -1480,7 +1482,8 @@ function renderLiveChart(
         renderState(context, state);
       },
       open => { state.liveChartYOpen = open; },
-      'chart:live:y'
+      'chart:live:y',
+      seriesSelectorSwatches(controlModel.yColumns, chart.data, root)
     ));
   }
   if (capabilities.supportsGroupBy) {
@@ -2602,7 +2605,8 @@ function renderSavedChartControls(
         renderState(context, state);
       },
       open => { state.savedChartYOpen = open; },
-      'chart:saved:y'
+      'chart:saved:y',
+      seriesSelectorSwatches(controlModel.yColumns, prepared, root)
     ));
   }
   if (capabilities.supportsGroupBy) {
@@ -2720,12 +2724,16 @@ function drawNotebookChart(
     host.append(node('div', 'kx-notice', 'Chart has no finite sampled points.'));
     return;
   }
-  const colors = chartColors();
+  const colors = chartColors(host);
+  const plotHost = node('div', 'kx-chart-canvas');
+  const legendHost = node('div', 'kx-chart-legend');
+  host.append(plotHost, legendHost);
   const keys = notebookChartSeriesKeys(data);
   state.plotSeriesKeys = keys;
   const series: uPlot.Series[] = [{ label: data.xColumn }];
   if (data.chartType === 'candlestick') {
-    const color = cssColor(host, '--vscode-charts-green', '#2ea043');
+    const color = (): CanvasRenderingContext2D['strokeStyle'] =>
+      cssColor(host, '--vscode-charts-green', '#2ea043');
     series.push({
       label: 'OHLC',
       show: chartSeriesVisible(state.hiddenChartSeriesKeys, keys[0]),
@@ -2744,7 +2752,9 @@ function drawNotebookChart(
     });
   } else {
     data.series.forEach((item, index) => {
-      const color = colors[index % colors.length];
+      const colorIndex = index % colors.length;
+      const color = (): CanvasRenderingContext2D['strokeStyle'] =>
+        chartColors(host)[colorIndex];
       const config: uPlot.Series = {
         label: item.columnName,
         show: chartSeriesVisible(state.hiddenChartSeriesKeys, keys[index]),
@@ -2768,7 +2778,7 @@ function drawNotebookChart(
       if (data.chartType === 'step' && uPlot.paths.stepped) {
         config.paths = uPlot.paths.stepped({ align: 1 });
       } else if (data.chartType === 'bar') {
-        config.fill = alphaColor(color, 0.5);
+        config.fill = () => alphaColor(String(color()), 0.5);
       }
       series.push(config);
     });
@@ -2793,9 +2803,9 @@ function drawNotebookChart(
     ] as uPlot.AlignedData;
   createPlot(
     state,
-    host,
+    plotHost,
     notebookPlotOptions(
-      host,
+      plotHost,
       data.chartType,
       data.xKind === 'temporal',
       series,
@@ -2803,7 +2813,8 @@ function drawNotebookChart(
       colors,
       280,
       data,
-      state
+      state,
+      legendHost
     ),
     aligned,
     data
@@ -2860,6 +2871,15 @@ function createPlot(
       }
     });
     state.plotResizeObserver.observe(host);
+    state.plotThemeObserver = new MutationObserver(() => {
+      state.plot?.redraw();
+    });
+    for (const target of [document.documentElement, document.body]) {
+      state.plotThemeObserver.observe(target, {
+        attributes: true,
+        attributeFilter: ['class', 'style', 'data-vscode-theme-id', 'data-vscode-theme-kind'],
+      });
+    }
   } catch {
     destroyPlot(state);
     host.replaceChildren(node('div', 'kx-notice', 'Chart rendering failed; the result table remains available.'));
@@ -2867,9 +2887,9 @@ function createPlot(
 }
 
 function decoratePlotLegendAccessibility(plot: uPlot): void {
-  const labels = Array.from(
-    plot.root.querySelectorAll<HTMLElement>('.u-legend .u-series > th')
-  );
+  const legend = plotLegendElement(plot);
+  legend?.setAttribute('aria-label', 'Chart series legend');
+  const labels = plotLegendLabels(plot);
   const offset = labels.length === plot.series.length ? 0 : 1;
   labels.forEach((label, labelIndex) => {
     const seriesIndex = labelIndex + offset;
@@ -2895,16 +2915,48 @@ function decoratePlotLegendAccessibility(plot: uPlot): void {
       });
     }
   });
+  syncPlotLegendColors(plot);
   syncPlotLegendAccessibility(plot);
 }
 
 function syncPlotLegendAccessibility(plot: uPlot): void {
-  plot.root.querySelectorAll<HTMLElement>('.u-legend .u-series > th').forEach(label => {
+  plotLegendLabels(plot).forEach(label => {
     const seriesIndex = Number(label.dataset.kxSeriesIndex);
     if (Number.isSafeInteger(seriesIndex) && seriesIndex > 0 && seriesIndex < plot.series.length) {
-      label.setAttribute('aria-pressed', plot.series[seriesIndex].show === false ? 'false' : 'true');
+      const hidden = plot.series[seriesIndex].show === false;
+      label.setAttribute('aria-pressed', hidden ? 'false' : 'true');
+      label.closest('.u-series')?.classList.toggle('kx-series-hidden', hidden);
     }
   });
+}
+
+function syncPlotLegendColors(plot: uPlot): void {
+  const labels = plotLegendLabels(plot);
+  const offset = labels.length === plot.series.length ? 0 : 1;
+  labels.forEach((label, labelIndex) => {
+    const seriesIndex = labelIndex + offset;
+    const stroke = plot.series[seriesIndex]?.stroke;
+    const color = typeof stroke === 'function'
+      ? String(stroke(plot, seriesIndex))
+      : String(stroke || '');
+    const marker = label.querySelector<HTMLElement>('.u-marker');
+    if (marker && color) {
+      marker.style.backgroundColor = color;
+      marker.style.borderColor = color;
+    }
+  });
+}
+
+function plotLegendElement(plot: uPlot): HTMLElement | null {
+  return plot.root.closest('.kx-chart-host')
+    ?.querySelector<HTMLElement>('.u-legend') || null;
+}
+
+function plotLegendLabels(plot: uPlot): HTMLElement[] {
+  return Array.from(
+    plotLegendElement(plot)
+      ?.querySelectorAll<HTMLElement>('.u-series > th') || []
+  );
 }
 
 function resetPlotZoom(state: OutputState): void {
@@ -2998,21 +3050,49 @@ function notebookPlotOptions(
   colors: string[],
   height: number,
   data: NotebookLiveChartData,
-  state: OutputState
+  state: OutputState,
+  legendHost: HTMLElement
 ): uPlot.Options {
-  const axisColor = cssColor(host, '--vscode-descriptionForeground', '#999');
-  const gridColor = cssColor(host, '--vscode-panel-border', '#555');
+  const axisColor = (): CanvasRenderingContext2D['strokeStyle'] => {
+    const foreground = getComputedStyle(host).color;
+    return firstCssColor(
+      host,
+      [
+        '--vscode-charts-foreground',
+        '--vscode-editor-foreground',
+        '--vscode-foreground',
+      ],
+      foreground
+    );
+  };
+  const gridColor = (): CanvasRenderingContext2D['strokeStyle'] =>
+    firstCssColor(
+      host,
+      [
+        '--vscode-editorIndentGuide-background1',
+        '--vscode-charts-lines',
+        '--vscode-editorRuler-foreground',
+        '--vscode-panel-border',
+      ],
+      String(axisColor())
+    );
   const paddedX =
     chartType === 'bar' || chartType === 'box' || chartType === 'candlestick';
   const customY =
     chartType === 'bar' || chartType === 'box' || chartType === 'candlestick';
   const drawHook = chartType === 'bar'
-    ? (plot: uPlot) => drawClusteredBars(plot, colors)
+    ? (plot: uPlot) => drawClusteredBars(plot, chartColors(host))
     : chartType === 'box'
-      ? (plot: uPlot) => drawNotebookBoxes(plot, data, colors)
+      ? (plot: uPlot) => drawNotebookBoxes(plot, data, chartColors(host))
       : chartType === 'candlestick'
         ? (plot: uPlot) => drawNotebookCandlesticks(plot, data, host)
         : undefined;
+  const seriesColor = (plot: uPlot, seriesIndex: number): string => {
+    const stroke = series[seriesIndex]?.stroke;
+    return typeof stroke === 'function'
+      ? String(stroke(plot, seriesIndex))
+      : String(stroke || chartColors(host)[(seriesIndex - 1) % colors.length]);
+  };
   return {
     width: Math.max(1, Math.floor(host.getBoundingClientRect().width || 720)),
     height,
@@ -3053,14 +3133,14 @@ function notebookPlotOptions(
       {
         scale: 'x',
         stroke: axisColor,
-        grid: { stroke: gridColor, width: 1 },
-        ticks: { stroke: gridColor, width: 1 },
+        grid: { stroke: gridColor, width: 0.5 },
+        ticks: { stroke: gridColor, width: 0.5 },
       },
       {
         scale: 'y',
         stroke: axisColor,
-        grid: { stroke: gridColor, width: 1 },
-        ticks: { stroke: gridColor, width: 1 },
+        grid: { stroke: gridColor, width: 0.5 },
+        ticks: { stroke: gridColor, width: 0.5 },
       },
     ],
     cursor: {
@@ -3071,9 +3151,24 @@ function notebookPlotOptions(
       drag: { setScale: true, x: true, y: false, dist: 5 },
       focus: { prox: 24 },
     },
-    legend: { show: true, live: true, isolate: false },
+    legend: {
+      show: true,
+      live: false,
+      isolate: false,
+      mount: (_plot, table) => legendHost.append(table),
+      markers: {
+        width: 2,
+        stroke: seriesColor,
+        fill: seriesColor,
+      },
+    },
     hooks: {
-      ...(drawHook ? { draw: [drawHook] } : {}),
+      draw: [
+        (plot: uPlot) => {
+          drawHook?.(plot);
+          syncPlotLegendColors(plot);
+        },
+      ],
       setSeries: [
         (plot: uPlot) => {
           capturePlotSeriesVisibility(state, plot);
@@ -3349,6 +3444,21 @@ function cssColor(host: HTMLElement, property: string, fallback: string): string
   return getComputedStyle(host).getPropertyValue(property).trim() || fallback;
 }
 
+function firstCssColor(
+  host: HTMLElement,
+  properties: readonly string[],
+  fallback: string
+): string {
+  const style = getComputedStyle(host);
+  for (const property of properties) {
+    const value = style.getPropertyValue(property).trim();
+    if (value) {
+      return value;
+    }
+  }
+  return fallback;
+}
+
 function alphaColor(color: string, alpha: number): string {
   const match = /^#([0-9a-f]{6})$/i.exec(color);
   if (!match) {
@@ -3615,6 +3725,28 @@ function resultSettingsControl(
   summary.setAttribute('aria-label', 'Result settings');
   details.append(summary);
   const panel = node('div', 'kx-settings-panel');
+  panel.setAttribute('role', 'group');
+  panel.setAttribute('aria-label', 'Results Settings');
+  const dismiss = (): void => {
+    details.open = false;
+    summary.focus({ preventScroll: true });
+  };
+  const panelHeader = node('div', 'kx-settings-header');
+  panelHeader.append(node('strong', '', 'Results Settings'));
+  const close = button('Close', dismiss);
+  close.classList.add('kx-settings-close');
+  close.title = 'Close Results Settings';
+  close.setAttribute('aria-label', 'Close Results Settings');
+  withFocusKey(close, 'settings:close');
+  panelHeader.append(close);
+  panel.append(panelHeader);
+  details.addEventListener('keydown', event => {
+    if (details.open && event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+    }
+  });
   KX_RESULT_SETTING_DEFINITIONS.forEach(definition => {
     const value = resultSettings[definition.key];
     if (definition.control === 'checkbox' && typeof value === 'boolean') {
@@ -3639,7 +3771,9 @@ function resultSettingsControl(
         definition.key,
         value,
         definition.minimum ?? 0,
-        definition.maximum
+        definition.maximum,
+        definition.autoValue,
+        definition.autoLabel
       ));
     }
   });
@@ -3686,7 +3820,9 @@ function settingNumber(
   key: NotebookResultSettingKey,
   value: number,
   minimum: number,
-  maximum?: number
+  maximum?: number,
+  autoValue?: number,
+  autoLabel?: string
 ): HTMLLabelElement {
   const wrapper = node('label', 'kx-control');
   wrapper.append(node('span', '', label));
@@ -3697,10 +3833,22 @@ function settingNumber(
     input.max = String(maximum);
   }
   input.step = '1';
-  input.value = String(value);
+  const auto = autoValue !== undefined && value === autoValue;
+  input.value = auto ? '' : String(value);
+  if (autoValue !== undefined && autoLabel) {
+    input.placeholder = autoLabel;
+    input.title = `${autoLabel}; enter a number from ${minimum}` +
+      `${maximum === undefined ? '' : ` to ${maximum}`}.`;
+    if (auto) {
+      input.setAttribute('aria-valuetext', autoLabel);
+      wrapper.classList.add('is-auto');
+    }
+  }
   withFocusKey(input, `settings:${key}`);
   input.addEventListener('change', () => {
-    const next = Number(input.value);
+    const next = input.value.trim() === '' && autoValue !== undefined
+      ? autoValue
+      : Number(input.value);
     if (Number.isSafeInteger(next) && next >= minimum &&
       (maximum === undefined || next <= maximum)) {
       updateResultSetting(context, key, next);
@@ -4469,8 +4617,28 @@ function gridCellId(state: OutputState, row: number, column: number): string {
   return `${state.domIdPrefix}-r${row}-c${column}`;
 }
 
-function chartColors(): string[] {
-  return ['#4da3ff', '#f07178', '#7bd88f', '#c792ea', '#ffcb6b', '#89ddff', '#ff9cac', '#82aaff'];
+function cssVariableColor(properties: readonly string[], fallback: string): string {
+  return properties.reduceRight(
+    (value, property) => `var(${property}, ${value})`,
+    fallback
+  );
+}
+
+function chartColors(host: HTMLElement, preserveCssVariables = false): string[] {
+  const color = (properties: readonly string[], fallback: string): string =>
+    preserveCssVariables
+      ? cssVariableColor(properties, fallback)
+      : firstCssColor(host, properties, fallback);
+  return [
+    color(['--vscode-charts-blue', '--vscode-terminal-ansiBlue'], '#4da3ff'),
+    color(['--vscode-charts-red', '--vscode-terminal-ansiRed'], '#f07178'),
+    color(['--vscode-charts-green', '--vscode-terminal-ansiGreen'], '#7bd88f'),
+    color(['--vscode-charts-purple', '--vscode-terminal-ansiMagenta'], '#c792ea'),
+    color(['--vscode-charts-yellow', '--vscode-terminal-ansiYellow'], '#ffcb6b'),
+    color(['--vscode-charts-orange', '--vscode-terminal-ansiBrightRed'], '#ff9cac'),
+    color(['--vscode-terminal-ansiCyan', '--vscode-charts-blue'], '#89ddff'),
+    color(['--vscode-terminal-ansiBrightMagenta', '--vscode-charts-purple'], '#82aaff'),
+  ];
 }
 
 function statusNode(root: HTMLElement): HTMLElement {
@@ -4500,6 +4668,8 @@ function destroyPlot(state: OutputState): void {
   capturePlotSeriesVisibility(state);
   state.plotResizeObserver?.disconnect();
   state.plotResizeObserver = undefined;
+  state.plotThemeObserver?.disconnect();
+  state.plotThemeObserver = undefined;
   state.plot?.destroy();
   state.plot = undefined;
   state.plotData = undefined;
@@ -4649,9 +4819,23 @@ function keepDetailsPanelInsideResult(
     const rootRect = root.getBoundingClientRect();
     const inset = 4;
     panel.style.boxSizing = 'border-box';
+    panel.style.maxHeight = '';
     panel.style.maxWidth = `${Math.max(1, Math.floor(rootRect.width - inset * 2))}px`;
     panel.style.transform = '';
     const panelRect = panel.getBoundingClientRect();
+    const cssMaxHeight = Number.parseFloat(getComputedStyle(panel).maxHeight);
+    const availableHeight = Math.floor(
+      Math.min(rootRect.bottom, window.innerHeight - inset) - panelRect.top - inset
+    );
+    if (availableHeight > 0) {
+      panel.style.maxHeight = `${Math.max(
+        1,
+        Math.min(
+          availableHeight,
+          Number.isFinite(cssMaxHeight) ? cssMaxHeight : availableHeight
+        )
+      )}px`;
+    }
     const minimumLeft = rootRect.left + inset;
     const maximumRight = rootRect.right - inset;
     const shift = panelRect.left < minimumLeft
@@ -4667,6 +4851,7 @@ function keepDetailsPanelInsideResult(
     if (details.open) {
       window.requestAnimationFrame(position);
     } else {
+      panel.style.maxHeight = '';
       panel.style.transform = '';
     }
   };
@@ -4784,7 +4969,8 @@ function multiColumnControl(
   open: boolean,
   onChange: (column: string, checked: boolean) => void,
   onToggle: (open: boolean) => void,
-  focusKeyPrefix?: string
+  focusKeyPrefix?: string,
+  swatches: ReadonlyMap<string, readonly string[]> = new Map()
 ): HTMLDetailsElement {
   const details = document.createElement('details');
   details.className = 'kx-series-control';
@@ -4806,7 +4992,14 @@ function multiColumnControl(
       withFocusKey(input, `${focusKeyPrefix}:column:${value}`);
     }
     input.addEventListener('change', () => onChange(value, input.checked));
-    wrapper.append(input, node('span', '', value));
+    const colorKey = node('span', 'kx-series-swatches');
+    colorKey.setAttribute('aria-hidden', 'true');
+    (swatches.get(value) || []).forEach(color => {
+      const swatch = node('span', 'kx-series-swatch');
+      swatch.style.backgroundColor = color;
+      colorKey.append(swatch);
+    });
+    wrapper.append(input, colorKey, node('span', 'kx-series-name', value));
     list.append(wrapper);
   });
   if (values.length === 0) {
@@ -4814,7 +5007,25 @@ function multiColumnControl(
   }
   details.append(list);
   details.addEventListener('toggle', () => onToggle(details.open));
+  keepDetailsPanelInsideResult(details, list);
   return details;
+}
+
+function seriesSelectorSwatches(
+  columns: readonly string[],
+  data: NotebookLiveChartData | undefined,
+  host: HTMLElement
+): ReadonlyMap<string, readonly string[]> {
+  const palette = chartColors(host, true);
+  return new Map(columns.map(column => [
+    column,
+    chartSeriesColorIndexes(
+      column,
+      columns,
+      data?.series,
+      palette.length
+    ).map(index => palette[index]),
+  ]));
 }
 
 async function copyText(value: string): Promise<void> {
@@ -4906,8 +5117,8 @@ const rendererCss = `
 .kx-qtext{white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:8px;border:1px solid var(--vscode-panel-border,#555)}.kx-q-comment{color:var(--vscode-editorCodeLens-foreground)}.kx-q-string,.kx-q-symbol{color:var(--vscode-debugTokenExpression-string)}.kx-q-number,.kx-q-temporal{color:var(--vscode-debugTokenExpression-number)}.kx-q-keyword,.kx-q-command{color:var(--vscode-debugTokenExpression-name);font-weight:600}.kx-q-builtin,.kx-q-system,.kx-q-namespace{color:var(--vscode-symbolIcon-functionForeground)}.kx-q-operator{color:var(--vscode-symbolIcon-operatorForeground)}
 .kx-live-viewport{position:relative;overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;contain:strict;box-sizing:border-box;outline:none}.kx-live-viewport:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-live-canvas{position:relative;min-width:100%}.kx-live-row{position:absolute;left:0}.kx-live-header-row{z-index:3}.kx-live-cell,.kx-live-empty{box-sizing:border-box;position:absolute;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 7px;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);user-select:none}.kx-live-empty{color:var(--vscode-descriptionForeground)}button.kx-live-cell{text-align:left;border-radius:0}.kx-live-header{z-index:3;font-weight:600;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-row-index{z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-corner{z-index:4}.kx-live-cell.is-loading{color:transparent;background:linear-gradient(90deg,var(--vscode-editor-background),var(--vscode-editorWidget-background),var(--vscode-editor-background))}.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{color:var(--vscode-list-activeSelectionForeground,var(--vscode-editor-foreground));background:var(--vscode-list-activeSelectionBackground,#094771);box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-live-cell.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}
 .kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;min-width:100%;width:max-content;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}
-.kx-control{display:flex;flex-direction:column;gap:2px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-control select,.kx-control input{color:var(--vscode-foreground);min-width:90px}.kx-series-control{position:relative;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-series-control>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-series-list{position:absolute;z-index:15;top:100%;left:0;display:grid;gap:4px;max-height:220px;min-width:180px;max-width:min(360px,80vw);overflow:auto;padding:7px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}.kx-series-option{display:flex;align-items:center;gap:5px;white-space:nowrap}.kx-series-option span{overflow:hidden;text-overflow:ellipsis}.kx-chart-panel{border-top:1px solid var(--vscode-panel-border,#555);padding-top:7px;margin-top:7px}.kx-chart-host{width:100%;height:280px;margin-top:6px;overflow:hidden;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);box-sizing:border-box}.kx-chart-host .uplot{font-family:var(--vscode-font-family,system-ui,sans-serif);color:var(--vscode-editor-foreground);background:var(--vscode-editor-background)}.kx-chart-host .u-wrap{background:var(--vscode-editor-background)}.kx-chart-host .u-axis,.kx-chart-host .u-legend{color:var(--vscode-descriptionForeground)}.kx-chart-host .u-select{background:var(--vscode-list-activeSelectionBackground,rgba(80,140,220,.22))}.kx-chart-host .u-cursor-x,.kx-chart-host .u-cursor-y{border-color:var(--vscode-focusBorder,#607d8b)}.kx-chart-host .u-legend{margin:0;text-align:left;font:inherit}.kx-status{min-height:1.2em;margin-top:5px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-empty{padding:8px;color:var(--vscode-descriptionForeground)}
-.kx-settings{position:relative}.kx-settings>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-settings-panel{position:absolute;right:0;z-index:25;display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:7px;width:min(430px,80vw);max-height:min(520px,75vh);overflow:auto;padding:9px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px #0006}.kx-setting-checkbox{display:flex;align-items:center;gap:5px;font-size:.9em}
+.kx-control{display:flex;flex-direction:column;gap:2px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-control select,.kx-control input{color:var(--vscode-foreground);min-width:90px}.kx-control.is-auto input::placeholder{color:var(--vscode-input-placeholderForeground,var(--vscode-descriptionForeground));opacity:1}.kx-series-control{position:relative;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-series-control>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-series-list{position:absolute;z-index:15;top:calc(100% + 2px);left:0;display:grid;gap:4px;max-height:min(220px,45vh);min-width:180px;max-width:min(320px,80vw);overflow:auto;padding:7px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}.kx-series-option{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}.kx-series-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.kx-series-swatches{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto;overflow:visible!important}.kx-series-swatch{display:inline-block;width:10px;height:10px;flex:0 0 10px;border:1px solid var(--vscode-contrastBorder,var(--vscode-panel-border,transparent));border-radius:2px;box-sizing:border-box}.kx-chart-panel{border-top:1px solid var(--vscode-panel-border,#555);padding-top:7px;margin-top:7px}.kx-chart-host{width:100%;height:auto;margin-top:6px;overflow:hidden;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);box-sizing:border-box}.kx-chart-canvas{width:100%;height:280px;overflow:hidden}.kx-chart-host .uplot{max-width:100%;font-family:var(--vscode-font-family,system-ui,sans-serif);color:var(--vscode-editor-foreground);background:var(--vscode-editor-background)}.kx-chart-host .u-wrap{background:var(--vscode-editor-background)}.kx-chart-host .u-axis,.kx-chart-host .u-legend{color:var(--vscode-charts-foreground,var(--vscode-editor-foreground))}.kx-chart-host .u-select{background:var(--vscode-list-activeSelectionBackground,rgba(80,140,220,.22))}.kx-chart-host .u-cursor-x,.kx-chart-host .u-cursor-y{border-color:var(--vscode-focusBorder,#607d8b)}.kx-chart-legend{max-height:96px;overflow:auto;border-top:1px solid var(--vscode-charts-lines,var(--vscode-panel-border,#555));background:var(--vscode-editor-background)}.kx-chart-host .u-legend{display:block;width:100%;margin:0;padding:3px 5px;text-align:left;font:inherit}.kx-chart-host .u-legend tbody{display:flex;align-items:center;gap:2px 10px;flex-wrap:wrap}.kx-chart-host .u-legend .u-series{display:block;margin:0}.kx-chart-host .u-legend .u-series>th{display:flex;align-items:center;max-width:min(240px,75vw);padding:3px 4px;border-radius:2px;outline-offset:-1px;color:var(--vscode-editor-foreground)!important}.kx-chart-host .u-legend .u-marker{width:14px;height:10px;flex:0 0 14px;margin-right:5px;border-radius:2px;box-shadow:0 0 0 1px var(--vscode-contrastBorder,var(--vscode-editor-foreground))}.kx-chart-host .u-legend .kx-series-hidden>th{text-decoration:line-through;opacity:.48}.kx-chart-host .u-legend .kx-series-hidden .u-marker{filter:grayscale(1)}.kx-status{min-height:1.2em;margin-top:5px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-empty{padding:8px;color:var(--vscode-descriptionForeground)}
+.kx-settings{position:relative}.kx-settings>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-settings-panel{position:absolute;top:calc(100% + 2px);right:0;z-index:25;display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:7px;width:min(430px,80vw);max-height:min(360px,60vh);overflow:auto;padding:9px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px var(--vscode-widget-shadow,transparent)}.kx-settings-header{position:sticky;top:-9px;z-index:2;grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-9px -9px 2px;padding:8px 9px;border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background)}.kx-settings-close{margin-left:auto}.kx-setting-checkbox{display:flex;align-items:center;gap:5px;font-size:.9em}
 .kx-density-compact :where(.kx-primary-toolbar,.kx-header){padding-block:3px}.kx-density-compact :where(button,select,input){padding-block:2px}.kx-density-comfortable :where(.kx-primary-toolbar,.kx-header){padding-block:8px}
-@media (max-width:560px){.kx-root{padding-inline:5px}.kx-header,.kx-primary-toolbar{margin-inline:-5px;padding-inline:5px}.kx-primary-toolbar{align-items:flex-start}.kx-output-group{flex:1 1 100%}.kx-selection-summary{order:10;margin-left:0;flex:1 1 100%}.kx-live-tools input[type=search]{min-width:0;flex:1 1 140px}.kx-settings-panel,.kx-columns-panel{right:0;width:min(360px,92vw);max-width:none}.kx-toolbar-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}}
+@media (max-width:560px){.kx-root{padding-inline:5px}.kx-header,.kx-primary-toolbar{margin-inline:-5px;padding-inline:5px}.kx-primary-toolbar{align-items:flex-start}.kx-output-group{flex:1 1 100%}.kx-selection-summary{order:10;margin-left:0;flex:1 1 100%}.kx-live-tools input[type=search]{min-width:0;flex:1 1 140px}.kx-settings-panel,.kx-columns-panel{right:0;width:min(360px,92vw);max-width:none}.kx-settings-panel{grid-template-columns:minmax(0,1fr);max-height:min(320px,55vh)}.kx-series-list{max-height:min(132px,38vh);max-width:calc(100vw - 16px)}.kx-toolbar-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}}
 `;

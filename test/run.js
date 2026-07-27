@@ -40,6 +40,7 @@ const {
 const { buildChartData } = requireOut('charting');
 const {
   chartLegendToggleKey,
+  chartSeriesColorIndexes,
   chartSeriesVisible,
   updateHiddenChartSeriesKeys,
 } = requireOut('chart-series-state');
@@ -475,6 +476,55 @@ function testChartZoomLifecycle() {
   assert.strictEqual(chartLegendToggleKey(' '), true);
   assert.strictEqual(chartLegendToggleKey('Spacebar'), true);
   assert.strictEqual(chartLegendToggleKey('ArrowRight'), false);
+  const groupedColorSeries = [
+    { columnName: 'price [AAPL]', sourceColumnName: 'price' },
+    { columnName: 'size [AAPL]', sourceColumnName: 'size' },
+    { columnName: 'price [MSFT]', sourceColumnName: 'price' },
+    { columnName: 'size [MSFT]', sourceColumnName: 'size' },
+  ];
+  assert.deepStrictEqual(
+    chartSeriesColorIndexes(
+      'price',
+      ['price', 'size', 'volume'],
+      groupedColorSeries,
+      4
+    ),
+    [0, 2],
+    'a grouped source selector must expose every plotted color assigned to that source'
+  );
+  assert.deepStrictEqual(
+    chartSeriesColorIndexes(
+      'volume',
+      ['price', 'size', 'volume'],
+      groupedColorSeries,
+      4
+    ),
+    [2],
+    'an available but unrendered series must receive its deterministic palette fallback'
+  );
+  assert.deepStrictEqual(
+    chartSeriesColorIndexes(
+      'price',
+      ['price'],
+      [
+        { columnName: 'price [A]', sourceColumnName: 'price' },
+        { columnName: 'size [A]', sourceColumnName: 'size' },
+        { columnName: 'size [B]', sourceColumnName: 'size' },
+        { columnName: 'price [B]', sourceColumnName: 'price' },
+        { columnName: 'size [C]', sourceColumnName: 'size' },
+        { columnName: 'size [D]', sourceColumnName: 'size' },
+        { columnName: 'price [C]', sourceColumnName: 'price' },
+      ],
+      3
+    ),
+    [0],
+    'palette wrapping must deduplicate repeated swatch colors for one source'
+  );
+  assert.deepStrictEqual(
+    chartSeriesColorIndexes('missing', ['price'], undefined, 0),
+    [0],
+    'invalid palette sizes and unknown available columns must retain a safe first-color fallback'
+  );
 
   const panelSource = readSource('kx-results-panel.ts');
   const zoomSource = readSource('chart-zoom.ts');
@@ -6373,6 +6423,19 @@ function testKxResultsUiParityContract() {
     'chartZoomMinSampledPoints',
     'chartZoomMaxSampledPoints',
   ]);
+  const fontSizeDefinition = KX_RESULT_SETTING_DEFINITIONS.find(
+    definition => definition.key === 'fontSize'
+  );
+  assert(fontSizeDefinition, 'the shared settings schema must retain fontSize');
+  assert.strictEqual(fontSizeDefinition.control, 'number');
+  assert.strictEqual(fontSizeDefinition.minimum, 0);
+  assert.strictEqual(fontSizeDefinition.maximum, 32);
+  assert.strictEqual(
+    fontSizeDefinition.autoValue,
+    0,
+    'Auto presentation must retain the numeric zero storage and message contract'
+  );
+  assert.strictEqual(fontSizeDefinition.autoLabel, 'Auto (VS Code default)');
   assert.strictEqual(kxResultSelectionSummary(undefined), 'No cells selected');
   assert.strictEqual(
     kxResultSelectionSummary({
@@ -6446,6 +6509,36 @@ function testKxResultsUiParityContract() {
   assert.match(panelSource, /copyExportConfirmCellThreshold:\s*positiveIntegerSettingUpdate/);
   assert.match(panelSource, /chartZoomMinSampledPoints:\s*positiveIntegerSettingUpdate/);
   assert.match(panelSource, /chartZoomMaxSampledPoints:\s*positiveIntegerSettingUpdate/);
+  assert.match(
+    panelSource,
+    /id="settingsFontSize"[^>]*type="number"[^>]*min="0"[^>]*max="32"[^>]*placeholder="Auto \(VS Code default\)"[^>]*aria-label="Font size, Auto uses the VS Code default"/,
+    'the panel must present stored fontSize zero as an understandable Auto state'
+  );
+  const panelSettingsSyncSource = sourceSection(
+    panelSource,
+    '      function syncSettingsControls() {',
+    '      function updateSetting(key, value) {'
+  );
+  assert.match(
+    panelSettingsSyncSource,
+    /settingsFontSize\.value = settings\.fontSize > 0 \? String\(settings\.fontSize\) : ''/
+  );
+  assert.match(
+    panelSettingsSyncSource,
+    /settingsFontSize\.setAttribute\([\s\S]*?'aria-valuetext'[\s\S]*?'Auto \(VS Code default\)'/
+  );
+  assert.match(
+    panelSource,
+    /settingsFontSize\.addEventListener\('change', \(\) => updateNumberSetting\('fontSize', settingsFontSize, 0, 32\)\)/,
+    'clearing the panel font-size input must continue through the numeric zero update path'
+  );
+  const panelNumberSettingSource = sourceSection(
+    panelSource,
+    '      function updateNumberSetting(key, input, min, max) {',
+    '      function updatePositiveIntegerSetting(key, input) {'
+  );
+  assert.match(panelNumberSettingSource, /const value = Number\(input\.value\)/);
+  assert.match(panelNumberSettingSource, /updateSetting\(key, clampInteger\(value, min, max\)\)/);
   assert.match(rendererSource, /KX_RESULT_SETTING_DEFINITIONS\.forEach\(/);
   assert.match(messageSource, /NotebookSharedKxResultSettings = SharedKxResultSettings/);
   assert.match(panelSource, /qTextRenderModel\(/);
@@ -7565,6 +7658,20 @@ function testNotebookContract() {
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
       type: 'updateResultSetting',
+      key: 'fontSize',
+      value: 0,
+    }),
+    { type: 'updateResultSetting', key: 'fontSize', value: 0 },
+    'the renderer must keep Auto font size wire-compatible with stored numeric zero'
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'updateResultSetting',
+    key: 'fontSize',
+    value: '0',
+  }), undefined, 'the fontSize message contract must not coerce string zero');
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'updateResultSetting',
       key: 'includeHeaders',
       value: false,
     }),
@@ -8358,6 +8465,262 @@ function testNotebookContract() {
     rendererSource,
     /function openPreview\([\s\S]*?state\.hostActionRequestId = requestId;[\s\S]*?type: 'openPreview'[\s\S]*?requestId/,
     'open-preview requests must correlate their host acknowledgement to the originating output'
+  );
+  const notebookChartDrawSource = sourceSection(
+    rendererSource,
+    'function drawNotebookChart(',
+    'function notebookChartSeriesKeys('
+  );
+  assert.match(notebookChartDrawSource, /node\('div', 'kx-chart-canvas'\)/);
+  assert.match(notebookChartDrawSource, /node\('div', 'kx-chart-legend'\)/);
+  assert.match(
+    notebookChartDrawSource,
+    /host\.append\(plotHost, legendHost\)[\s\S]*?createPlot\([\s\S]*?plotHost,[\s\S]*?notebookPlotOptions\([\s\S]*?legendHost/,
+    'the real uPlot legend must mount outside the fixed-height canvas while remaining in its chart host'
+  );
+  assert.match(
+    notebookChartDrawSource,
+    /show:\s*chartSeriesVisible\(state\.hiddenChartSeriesKeys,\s*keys\[(?:0|index)\]\)/,
+    'new plots must derive series visibility from the canonical stable-key state'
+  );
+
+  const notebookPlotOptionsSource = sourceSection(
+    rendererSource,
+    'function notebookPlotOptions(',
+    'function drawClusteredBars('
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /legend:\s*\{[\s\S]*?show:\s*true,[\s\S]*?live:\s*false,[\s\S]*?mount:\s*\([^)]*table\)\s*=>\s*legendHost\.append\(table\)/,
+    'the persistent legend must use uPlot as its only interaction/state owner'
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /markers:\s*\{[\s\S]*?width:\s*2,[\s\S]*?stroke:[\s\S]*?fill:/,
+    'legend markers must remain color keyed even for width-zero chart series'
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /setSeries:\s*\[[\s\S]*?capturePlotSeriesVisibility\(state, plot\)[\s\S]*?syncPlotLegendAccessibility\(plot\)/,
+    'pointer and keyboard setSeries changes must flow into canonical hidden state and ARIA'
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /--vscode-charts-foreground[\s\S]*?--vscode-editor-foreground[\s\S]*?--vscode-foreground/,
+    'axis labels must prefer the semantic VS Code chart/editor foreground chain'
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /--vscode-editorIndentGuide-background1[\s\S]*?--vscode-charts-lines[\s\S]*?--vscode-editorRuler-foreground[\s\S]*?--vscode-panel-border/,
+    'grid and ticks must prefer restrained semantic VS Code chart line tokens'
+  );
+  assert.match(notebookPlotOptionsSource, /grid:\s*\{\s*stroke:\s*gridColor,\s*width:\s*0\.5\s*\}/);
+  assert.match(notebookPlotOptionsSource, /ticks:\s*\{\s*stroke:\s*gridColor,\s*width:\s*0\.5\s*\}/);
+  assert.match(notebookPlotOptionsSource, /const foreground = getComputedStyle\(host\)\.color/);
+  assert.match(
+    notebookPlotOptionsSource,
+    /const axisColor = \(\): CanvasRenderingContext2D\['strokeStyle'\] =>[\s\S]*?const gridColor = \(\): CanvasRenderingContext2D\['strokeStyle'\] =>/,
+    'axis and grid callbacks must re-resolve theme tokens after a live VS Code theme change'
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /drawClusteredBars\(plot, chartColors\(host\)\)[\s\S]*?drawNotebookBoxes\(plot, data, chartColors\(host\)\)/,
+    'custom chart drawing must re-resolve the current theme palette'
+  );
+  assert.match(
+    notebookPlotOptionsSource,
+    /const seriesColor = \(plot: uPlot, seriesIndex: number\)[\s\S]*?stroke: seriesColor,[\s\S]*?fill: seriesColor/,
+    'legend markers must resolve the current plotted-series color'
+  );
+
+  const notebookPaletteSource = sourceSection(
+    rendererSource,
+    'function cssVariableColor(',
+    'function statusNode('
+  );
+  for (const colorToken of [
+    '--vscode-charts-blue',
+    '--vscode-charts-red',
+    '--vscode-charts-green',
+    '--vscode-charts-purple',
+    '--vscode-charts-yellow',
+    '--vscode-charts-orange',
+  ]) {
+    assert.ok(
+      notebookPaletteSource.includes(colorToken),
+      `chart series and selector swatches must consume ${colorToken}`
+    );
+  }
+  assert.match(
+    notebookPaletteSource,
+    /function cssVariableColor\([\s\S]*?properties\.reduceRight\([\s\S]*?`var\(\$\{property\}, \$\{value\}\)`/,
+    'selector swatches must retain live VS Code variable fallback chains'
+  );
+  assert.match(
+    notebookPaletteSource,
+    /function chartColors\(host: HTMLElement, preserveCssVariables = false\)[\s\S]*?preserveCssVariables[\s\S]*?\? cssVariableColor\(properties, fallback\)[\s\S]*?: firstCssColor\(host, properties, fallback\)/,
+    'the plotted and selector palettes must share one theme-token source'
+  );
+
+  const notebookLegendSource = sourceSection(
+    rendererSource,
+    'function decoratePlotLegendAccessibility(',
+    'function resetPlotZoom('
+  );
+  assert.match(
+    notebookLegendSource,
+    /function plotLegendElement\([\s\S]*?closest\('\.kx-chart-host'\)[\s\S]*?querySelector<HTMLElement>\('\.u-legend'\)/,
+    'legend accessibility must target the externally mounted uPlot table'
+  );
+  assert.match(notebookLegendSource, /setAttribute\('aria-pressed', hidden \? 'false' : 'true'\)/);
+  assert.match(
+    notebookLegendSource,
+    /classList\.toggle\('kx-series-hidden', hidden\)/,
+    'the visible hidden-series treatment must be driven by uPlot show state'
+  );
+
+  const notebookDestroyPlotSource = sourceSection(
+    rendererSource,
+    'function destroyPlot(',
+    'function captureViewportState('
+  );
+  assert(
+    notebookDestroyPlotSource.indexOf('capturePlotSeriesVisibility(state)') <
+      notebookDestroyPlotSource.indexOf('state.plot?.destroy()'),
+    'rerenders/settings changes must capture canonical hidden state before destroying uPlot'
+  );
+
+  const notebookSeriesSelectorSource = sourceSection(
+    rendererSource,
+    'function multiColumnControl(',
+    'async function copyText('
+  );
+  assert.match(notebookSeriesSelectorSource, /node\('span', 'kx-series-swatches'\)/);
+  assert.match(notebookSeriesSelectorSource, /node\('span', 'kx-series-swatch'\)/);
+  assert.match(notebookSeriesSelectorSource, /swatch\.style\.backgroundColor = color/);
+  assert.match(
+    notebookSeriesSelectorSource,
+    /chartSeriesColorIndexes\([\s\S]*?column,[\s\S]*?columns,[\s\S]*?data\?\.series,[\s\S]*?palette\.length/,
+    'selector swatches must project the same grouped-series palette mapping used by plotted lines'
+  );
+  assert.match(
+    notebookSeriesSelectorSource,
+    /const palette = chartColors\(host, true\)/,
+    'selector swatches must update in place when VS Code theme variables change'
+  );
+  assert.match(
+    notebookSeriesSelectorSource,
+    /keepDetailsPanelInsideResult\(details, list\)/,
+    'the series selector must use the shared narrow-output containment path'
+  );
+  assert.ok(
+    liveChartControlsSource.includes('seriesSelectorSwatches('),
+    'the live Y selector must receive swatches from the shared projection'
+  );
+  assert.ok(
+    savedChartControlsSource.includes('seriesSelectorSwatches('),
+    'the saved Y selector must receive swatches from the shared projection'
+  );
+
+  const notebookSettingsSource = sourceSection(
+    rendererSource,
+    'function resultSettingsControl(',
+    'function settingCheckbox('
+  );
+  assert.match(notebookSettingsSource, /panel\.setAttribute\('aria-label', 'Results Settings'\)/);
+  assert.match(
+    notebookSettingsSource,
+    /const dismiss = \(\): void => \{[\s\S]*?details\.open = false;[\s\S]*?summary\.focus\(\{ preventScroll: true \}\)/,
+    'both settings dismissal paths must close the overlay and restore focus to its toggle'
+  );
+  assert.match(notebookSettingsSource, /const close = button\('Close', dismiss\)/);
+  assert.match(notebookSettingsSource, /close\.setAttribute\('aria-label', 'Close Results Settings'\)/);
+  assert.match(notebookSettingsSource, /withFocusKey\(close, 'settings:close'\)/);
+  assert.match(
+    notebookSettingsSource,
+    /details\.addEventListener\('keydown', event => \{[\s\S]*?event\.key === 'Escape'[\s\S]*?event\.preventDefault\(\);[\s\S]*?dismiss\(\)/,
+    'Escape must dismiss Results Settings without losing keyboard focus'
+  );
+  assert.match(notebookSettingsSource, /keepDetailsPanelInsideResult\(details, panel\)/);
+
+  const notebookNumberSettingSource = sourceSection(
+    rendererSource,
+    'function settingNumber(',
+    'function updateResultSetting('
+  );
+  assert.match(
+    notebookNumberSettingSource,
+    /const auto = autoValue !== undefined && value === autoValue;[\s\S]*?input\.value = auto \? '' : String\(value\)/
+  );
+  assert.match(notebookNumberSettingSource, /input\.placeholder = autoLabel/);
+  assert.match(notebookNumberSettingSource, /input\.setAttribute\('aria-valuetext', autoLabel\)/);
+  assert.match(
+    notebookNumberSettingSource,
+    /input\.value\.trim\(\) === '' && autoValue !== undefined[\s\S]*?\? autoValue[\s\S]*?: Number\(input\.value\)/,
+    'an empty Auto presentation must still post the numeric zero-compatible value'
+  );
+
+  const notebookContainmentSource = sourceSection(
+    rendererSource,
+    'function keepDetailsPanelInsideResult(',
+    'function withFocusKey'
+  );
+  assert.match(
+    notebookContainmentSource,
+    /panel\.style\.maxHeight = ''[\s\S]*?window\.innerHeight[\s\S]*?availableHeight[\s\S]*?panel\.style\.maxHeight =/,
+    'settings and selector overlays must be vertically bounded as well as horizontally contained'
+  );
+  assert.match(
+    rendererSource,
+    /\.kx-settings-panel\{[^}]*max-height:min\(360px,60vh\)[^}]*overflow:auto/,
+    'Results Settings must remain scrollable within notebook output height'
+  );
+  assert.match(rendererSource, /\.kx-settings-header\{[^}]*position:sticky/);
+  assert.match(
+    rendererSource,
+    /\.kx-series-list\{[^}]*max-height:min\(220px,45vh\)[^}]*overflow:auto/
+  );
+  assert.match(
+    rendererSource,
+    /@media \(max-width:560px\)\{[\s\S]*?\.kx-series-list\{max-height:min\(132px,38vh\)/,
+    'narrow series selectors must expose a real, bounded scroll region'
+  );
+  assert.match(rendererSource, /\.kx-series-swatch\{[^}]*width:10px[^}]*height:10px/);
+  assert.match(rendererSource, /\.kx-chart-canvas\{[^}]*height:280px[^}]*overflow:hidden/);
+  assert.match(rendererSource, /\.kx-chart-legend\{[^}]*max-height:96px[^}]*overflow:auto/);
+  assert.match(rendererSource, /\.kx-chart-host \.u-legend\{[^}]*display:block/);
+  assert.match(
+    rendererSource,
+    /\.kx-chart-host \.u-legend \.kx-series-hidden>th\{[^}]*text-decoration:line-through/,
+    'hidden legend rows must have a persistent visual state beyond ARIA alone'
+  );
+  assert.match(
+    rendererSource,
+    /\.kx-chart-host \.u-legend \.u-series>th\{[^}]*color:var\(--vscode-editor-foreground\)!important/,
+    'legend text must remain readable independently of each series swatch color'
+  );
+  assert.match(
+    rendererSource,
+    /\.kx-chart-host \.u-legend \.u-marker\{[^}]*--vscode-contrastBorder[^}]*--vscode-editor-foreground/,
+    'legend swatches must retain a theme-aware contrast outline'
+  );
+  assert.match(
+    rendererSource,
+    /plotThemeObserver = new MutationObserver\([\s\S]*?state\.plot\?\.redraw\(\)[\s\S]*?data-vscode-theme-id/,
+    'live VS Code theme changes must redraw canvas and legend colors'
+  );
+  assert.match(
+    rendererSource,
+    /state\.plotThemeObserver\?\.disconnect\(\)[\s\S]*?state\.plotThemeObserver = undefined/,
+    'chart theme observers must be released with their plots'
+  );
+  assert.match(
+    rendererSource,
+    /\.kx-chart-host \.u-axis,\.kx-chart-host \.u-legend\{[^}]*--vscode-charts-foreground/
+  );
+  assert.match(
+    rendererSource,
+    /\.kx-chart-legend\{[^}]*--vscode-charts-lines/
   );
   assert.match(rendererSource, /function decoratePlotLegendAccessibility\(plot: uPlot\)/);
   assert.match(rendererSource, /label\.tabIndex = 0/);

@@ -119,6 +119,8 @@ async function run() {
   let narrowChartNotebook;
   let liveCaseEvidence;
   let liveResultRecord;
+  let savedChartEvidence;
+  let lightThemeSelectorEvidence;
   const screenshots = [];
   const interactions = [];
   try {
@@ -187,7 +189,8 @@ async function run() {
           interaction: 'live-column-hide-overlay-focus',
         }
       ));
-      interactions.push(await exerciseSettingsOverlay(liveRenderer));
+      const settingsEvidence = await exerciseSettingsOverlay(liveRenderer);
+      interactions.push(settingsEvidence);
       console.log('Notebook visual interaction: shared Settings passed');
       screenshots.push(await captureScreenshot(
         artifactDirectory,
@@ -198,6 +201,7 @@ async function run() {
           caseId: 'live-full-result',
           widthMode: 'wide',
           interaction: 'shared-settings-overlay-focus',
+          acceptance: settingsEvidence.screenshot,
         }
       ));
       interactions.push(await exerciseLiveChartControls(liveRenderer));
@@ -212,18 +216,38 @@ async function run() {
     await showNotebookCase(savedInteractionNotebook, 0);
     const savedRenderer = await connectNotebookRenderer(cdpPort, 'Line chart gallery');
     await scrollNotebookChartIntoView(savedRenderer, cdpPort);
+    const lightLegendEvidence = await inspectVisibleChartLegend(savedRenderer);
+    interactions.push({
+      name: 'light-chart-legend-visible',
+      ...lightLegendEvidence,
+    });
     screenshots.push(await captureScreenshot(
       artifactDirectory,
       'light-chart.png',
       screenSize,
-      { theme: LIGHT_THEME, caseId: 'chart-line', widthMode: 'wide' }
+      {
+        theme: LIGHT_THEME,
+        caseId: 'chart-line',
+        widthMode: 'wide',
+        acceptance: lightLegendEvidence,
+      }
     ));
     console.log('Notebook visual interaction: line-chart baseline captured');
     try {
       console.log('Notebook visual interaction: saved line renderer connected');
-      interactions.push(await exerciseSavedSelectionSearchAndChart(
+      savedChartEvidence = await exerciseSavedSelectionSearchAndChart(
         savedRenderer,
-        async () => {
+        async hiddenSeriesLabel => {
+          await closeResultOverlays(savedRenderer);
+          await scrollNotebookChartIntoView(savedRenderer, cdpPort);
+          lightThemeSelectorEvidence = await inspectChartSeriesSelectorColors(
+            savedRenderer,
+            'in-place-light-to-dark'
+          );
+          const hiddenLegendEvidence = await inspectVisibleChartLegend(
+            savedRenderer,
+            hiddenSeriesLabel
+          );
           screenshots.push(await captureScreenshot(
             artifactDirectory,
             'light-chart-zoom-settings.png',
@@ -233,13 +257,16 @@ async function run() {
               caseId: 'chart-line',
               widthMode: 'wide',
               interaction: 'saved-hidden-series-zoom-preserved-after-density-setting',
+              acceptance: hiddenLegendEvidence,
             }
           ));
           console.log('Notebook visual interaction: zoom/settings persistence captured');
+          return hiddenLegendEvidence;
         },
         () => dragNotebookChartInRenderer(savedRenderer),
         cdpPort
-      ));
+      );
+      interactions.push(savedChartEvidence);
       console.log('Notebook visual interaction: saved selection/search/chart passed');
       screenshots.push(await captureScreenshot(
         artifactDirectory,
@@ -261,11 +288,51 @@ async function run() {
     await showNotebookCase(savedInteractionNotebook, 0);
     const darkSavedRenderer = await connectNotebookRenderer(cdpPort, 'Line chart gallery');
     await scrollNotebookChartIntoView(darkSavedRenderer, cdpPort);
+    await closeResultOverlays(darkSavedRenderer);
+    const darkLegendEvidence = await inspectVisibleChartLegend(
+      darkSavedRenderer,
+      savedChartEvidence?.hiddenSeries
+    );
+    const darkSelectorEvidence = await inspectChartSeriesSelectorColors(darkSavedRenderer);
+    assert.strictEqual(
+      darkSelectorEvidence.themeProbe,
+      lightThemeSelectorEvidence?.themeProbe,
+      'dark selector must be the same renderer instance that was inspected in light theme'
+    );
+    const lightSelectorColors = lightThemeSelectorEvidence?.selectedOptions
+      .map(option => `${option.name}:${option.swatches.join(',')}`) || [];
+    const darkSelectorColors = darkSelectorEvidence.selectedOptions
+      .map(option => `${option.name}:${option.swatches.join(',')}`);
+    assert.notDeepStrictEqual(
+      darkSelectorColors,
+      lightSelectorColors,
+      'in-place theme change must update selector swatch colors'
+    );
+    darkSelectorEvidence.paletteChangedFromLight = true;
+    await installCanvasTextRecorder(darkSavedRenderer);
+    await clearCanvasTextRecorder(darkSavedRenderer);
+    await forceChartRedraw(darkSavedRenderer);
+    const darkTicks = await waitForCanvasTicks('dark chart axis ticks', darkSavedRenderer);
+    const darkContrastEvidence = await inspectChartCanvasContrast(darkSavedRenderer);
+    await restoreCanvasTextRecorder(darkSavedRenderer);
+    const darkChartEvidence = {
+      name: 'dark-chart-accessibility',
+      legend: darkLegendEvidence,
+      selector: darkSelectorEvidence,
+      ticks: darkTicks,
+      contrast: darkContrastEvidence,
+    };
+    interactions.push(darkChartEvidence);
     screenshots.push(await captureScreenshot(
       artifactDirectory,
       'dark-chart.png',
       screenSize,
-      { theme: DARK_THEME, caseId: 'chart-line', widthMode: 'wide' }
+      {
+        theme: DARK_THEME,
+        caseId: 'chart-line',
+        widthMode: 'wide',
+        acceptance: darkChartEvidence,
+      }
     ));
     darkSavedRenderer.close();
     allNullChartNotebook = await openSavedCaseNotebook(
@@ -380,7 +447,8 @@ async function run() {
     const narrowChartRenderer = await connectNotebookRenderer(cdpPort, 'Line chart gallery');
     try {
       await scrollNotebookChartIntoView(narrowChartRenderer, cdpPort);
-      interactions.push(await assertNarrowChartOverlay(narrowChartRenderer));
+      const narrowChartEvidence = await assertNarrowChartOverlay(narrowChartRenderer);
+      interactions.push(narrowChartEvidence);
       screenshots.push(await captureScreenshot(
         artifactDirectory,
         'narrow-chart-overlay.png',
@@ -390,6 +458,7 @@ async function run() {
           caseId: 'chart-line',
           widthMode: 'split-editor',
           interaction: 'narrow-saved-chart-y-series-overlay',
+          acceptance: narrowChartEvidence.overlay,
         }
       ));
     } finally {
@@ -1097,12 +1166,102 @@ async function exerciseColumnsOverlay(renderer) {
 }
 
 async function exerciseSettingsOverlay(renderer) {
-  const change = await renderer.evaluate(root => {
-    const view = root.ownerDocument.defaultView;
+  const initial = await renderer.evaluate(root => {
     const columns = root.querySelector('details.kx-columns');
     if (columns) {
       columns.open = false;
     }
+    const details = root.querySelector('details.kx-settings');
+    if (!details) {
+      throw new Error('Results Settings control missing');
+    }
+    details.open = true;
+    const fontSize = [...details.querySelectorAll('label')]
+      .find(label => label.textContent?.trim().startsWith('Font size'))
+      ?.querySelector('input[type="number"]');
+    if (!fontSize) {
+      throw new Error('Font size setting missing');
+    }
+    fontSize.focus();
+    const panel = details.querySelector('.kx-settings-panel');
+    const close = details.querySelector('.kx-settings-close');
+    const view = root.ownerDocument.defaultView;
+    const panelStyle = panel ? view.getComputedStyle(panel) : undefined;
+    return {
+      auto: {
+        value: fontSize.value,
+        placeholder: fontSize.getAttribute('placeholder') || '',
+        ariaValueText: fontSize.getAttribute('aria-valuetext') || '',
+      },
+      closeVisible:
+        !!close &&
+        close.getBoundingClientRect().width > 0 &&
+        close.getBoundingClientRect().height > 0,
+      headerVisible:
+        !!details.querySelector('.kx-settings-header') &&
+        details.querySelector('.kx-settings-header').getBoundingClientRect().height > 0,
+      scrollable:
+        !!panel &&
+        ['auto', 'scroll'].includes(panelStyle?.overflowY || '') &&
+        panel.scrollHeight > panel.clientHeight,
+      focusedSetting: root.ownerDocument.activeElement === fontSize ? 'Font size' : '',
+    };
+  });
+  assert.deepStrictEqual(initial.auto, {
+    value: '',
+    placeholder: 'Auto (VS Code default)',
+    ariaValueText: 'Auto (VS Code default)',
+  });
+  assert.strictEqual(initial.closeVisible, true);
+  assert.strictEqual(initial.headerVisible, true);
+  assert.strictEqual(initial.scrollable, true);
+  assert.strictEqual(initial.focusedSetting, 'Font size');
+
+  await renderer.pressKey('Escape');
+  const escapeDismissal = await waitForRenderer(
+    'Results Settings Escape dismissal',
+    renderer,
+    root => {
+      const details = root.querySelector('details.kx-settings');
+      return {
+        open: details?.open === true,
+        focusedSummary:
+          root.ownerDocument.activeElement === details?.querySelector(':scope > summary'),
+      };
+    },
+    value => !value.open && value.focusedSummary
+  );
+
+  await renderer.evaluate(root => {
+    const details = root.querySelector('details.kx-settings');
+    if (!details) {
+      throw new Error('Results Settings control missing after Escape');
+    }
+    details.open = true;
+    const close = details.querySelector('.kx-settings-close');
+    if (!close) {
+      throw new Error('Results Settings close button missing');
+    }
+    close.focus();
+    close.click();
+    return true;
+  });
+  const closeDismissal = await waitForRenderer(
+    'Results Settings close-button dismissal',
+    renderer,
+    root => {
+      const details = root.querySelector('details.kx-settings');
+      return {
+        open: details?.open === true,
+        focusedSummary:
+          root.ownerDocument.activeElement === details?.querySelector(':scope > summary'),
+      };
+    },
+    value => !value.open && value.focusedSummary
+  );
+
+  const change = await renderer.evaluate(root => {
+    const view = root.ownerDocument.defaultView;
     const details = root.querySelector('details.kx-settings');
     if (details) {
       details.open = true;
@@ -1130,42 +1289,97 @@ async function exerciseSettingsOverlay(renderer) {
       const density = [...(details?.querySelectorAll('label') || [])]
         .find(label => label.textContent?.trim().startsWith('Density'))
         ?.querySelector('select');
+      const fontSize = [...(details?.querySelectorAll('label') || [])]
+        .find(label => label.textContent?.trim().startsWith('Font size'))
+        ?.querySelector('input[type="number"]');
       const rootRect = root.getBoundingClientRect();
-      const panelRect = details?.querySelector('.kx-settings-panel')?.getBoundingClientRect();
+      const panel = details?.querySelector('.kx-settings-panel');
+      const panelRect = panel?.getBoundingClientRect();
+      const panelStyle = panel
+        ? root.ownerDocument.defaultView.getComputedStyle(panel)
+        : undefined;
+      if (panel) {
+        panel.scrollTop = 0;
+      }
       return {
-      open: details?.open === true,
-      panelVisible: !!details?.querySelector('.kx-settings-panel'),
-      settingCount: details?.querySelectorAll('.kx-settings-panel > label').length || 0,
-      focusedTag: root.ownerDocument.activeElement?.tagName || '',
-      focusedSetting: root.ownerDocument.activeElement === density ? 'Density' : '',
+        open: details?.open === true,
+        panelVisible: !!panel,
+        settingCount: panel?.querySelectorAll('label').length || 0,
+        focusedTag: root.ownerDocument.activeElement?.tagName || '',
+        focusedSetting: root.ownerDocument.activeElement === density ? 'Density' : '',
         density: density?.value || '',
         compact: root.classList.contains('kx-density-compact'),
+        auto: {
+          value: fontSize?.value ?? '',
+          placeholder: fontSize?.getAttribute('placeholder') || '',
+          ariaValueText: fontSize?.getAttribute('aria-valuetext') || '',
+        },
+        closeVisible:
+          !!details?.querySelector('.kx-settings-close') &&
+          details.querySelector('.kx-settings-close').getBoundingClientRect().width > 0,
+        headerVisible:
+          !!details?.querySelector('.kx-settings-header') &&
+          details.querySelector('.kx-settings-header').getBoundingClientRect().height > 0,
+        scrollable:
+          !!panel &&
+          ['auto', 'scroll'].includes(panelStyle?.overflowY || '') &&
+          panel.scrollHeight > panel.clientHeight,
+        scroll: {
+          clientHeight: panel?.clientHeight || 0,
+          scrollHeight: panel?.scrollHeight || 0,
+          scrollTop: panel?.scrollTop || 0,
+        },
         contained:
           !!panelRect &&
           panelRect.left >= rootRect.left - 1 &&
-          panelRect.right <= rootRect.right + 1,
+          panelRect.right <= rootRect.right + 1 &&
+          panelRect.top >= rootRect.top - 1 &&
+          panelRect.bottom <= rootRect.bottom + 1,
         bounds: {
           rootLeft: Math.round(rootRect.left),
           rootRight: Math.round(rootRect.right),
+          rootTop: Math.round(rootRect.top),
+          rootBottom: Math.round(rootRect.bottom),
           panelLeft: Math.round(panelRect?.left || 0),
           panelRight: Math.round(panelRect?.right || 0),
+          panelTop: Math.round(panelRect?.top || 0),
+          panelBottom: Math.round(panelRect?.bottom || 0),
         },
       };
     },
     value => value.open && value.focusedSetting === 'Density' &&
       value.density === change.next &&
       value.compact === (change.next === 'compact') &&
-      value.contained
+      value.contained && value.closeVisible && value.headerVisible &&
+      value.scrollable &&
+      value.auto.value === '' &&
+      value.auto.placeholder === 'Auto (VS Code default)' &&
+      value.auto.ariaValueText === 'Auto (VS Code default)'
   );
   assert.strictEqual(overlay.open, true);
   assert.strictEqual(overlay.panelVisible, true);
   assert(overlay.settingCount >= 18, 'shared settings overlay must expose the shared schema');
   assert.strictEqual(overlay.focusedTag, 'SELECT');
   assert.strictEqual(overlay.focusedSetting, 'Density');
+  assert.strictEqual(overlay.closeVisible, true);
+  assert.strictEqual(overlay.headerVisible, true);
+  assert.strictEqual(overlay.scrollable, true);
   return {
     name: 'shared-settings-overlay',
+    initial,
+    escapeDismissal,
+    closeDismissal,
     change,
     ...overlay,
+    screenshot: {
+      auto: overlay.auto,
+      closeVisible: overlay.closeVisible,
+      headerVisible: overlay.headerVisible,
+      scrollable: overlay.scrollable,
+      scroll: overlay.scroll,
+      contained: overlay.contained,
+      bounds: overlay.bounds,
+    },
   };
 }
 
@@ -1593,23 +1807,75 @@ async function exerciseSavedSelectionSearchAndChart(
   console.log('Notebook visual interaction: chart tick recorder installed');
   const fullDomainTicks = await waitForCanvasTicks('full chart domain ticks', renderer);
   console.log('Notebook visual interaction: chart rendered and full ticks captured');
-  const hidden = await renderer.evaluate(root => {
-    const view = root.ownerDocument.defaultView;
+  const legendTarget = await renderer.evaluate(root => {
     const legend = root.querySelector('[aria-label^="Toggle chart series "]');
-    legend?.focus();
-    legend?.dispatchEvent(new view.KeyboardEvent('keydown', {
-      key: 'Enter',
-      bubbles: true,
-    }));
+    if (!legend) {
+      throw new Error('visible chart legend toggle missing');
+    }
+    const rect = legend.getBoundingClientRect();
+    let x = rect.left + rect.width / 2;
+    let y = rect.top + rect.height / 2;
+    let frameView = legend.ownerDocument.defaultView;
+    const visitedViews = new Set();
+    for (let depth = 0; frameView && depth < 8 && !visitedViews.has(frameView); depth += 1) {
+      visitedViews.add(frameView);
+      const frame = frameView.frameElement;
+      if (!frame) {
+        break;
+      }
+      const frameRect = frame.getBoundingClientRect();
+      x += frameRect.left + frame.clientLeft;
+      y += frameRect.top + frame.clientTop;
+      const parentView = frame.ownerDocument.defaultView;
+      if (!parentView || parentView === frameView) {
+        break;
+      }
+      frameView = parentView;
+    }
     return {
-      label: legend?.getAttribute('aria-label') || '',
-      pressed: legend?.getAttribute('aria-pressed') || '',
-      focused: root.ownerDocument.activeElement === legend,
+      label: legend.getAttribute('aria-label') || '',
+      pressed: legend.getAttribute('aria-pressed') || '',
+      x,
+      y,
     };
   });
-  assert.match(hidden.label, /^Toggle chart series /);
-  assert.strictEqual(hidden.pressed, 'false');
-  assert.strictEqual(hidden.focused, true);
+  assert.match(legendTarget.label, /^Toggle chart series /);
+  assert.strictEqual(legendTarget.pressed, 'true');
+
+  await renderer.click(legendTarget.x, legendTarget.y);
+  const pointerToggle = await waitForLegendState(
+    renderer,
+    legendTarget.label,
+    'false',
+    'trusted pointer legend hide',
+    false
+  );
+
+  await focusLegendToggle(renderer, legendTarget.label);
+  await renderer.pressKey('Enter');
+  const enterToggle = await waitForLegendState(
+    renderer,
+    legendTarget.label,
+    'true',
+    'trusted Enter legend show'
+  );
+
+  await focusLegendToggle(renderer, legendTarget.label);
+  await renderer.pressKey(' ');
+  const spaceToggle = await waitForLegendState(
+    renderer,
+    legendTarget.label,
+    'false',
+    'trusted Space legend hide'
+  );
+  const hidden = {
+    label: legendTarget.label,
+    pointerToggle,
+    enterToggle,
+    spaceToggle,
+    pressed: spaceToggle.pressed,
+    focused: spaceToggle.focused,
+  };
 
   await renderer.evaluate(root => {
     const render = [...root.querySelectorAll('.kx-chart-controls button')]
@@ -1617,13 +1883,14 @@ async function exerciseSavedSelectionSearchAndChart(
     render?.click();
     return true;
   });
-  const hiddenAfterRender = await waitForRenderer(
-    'hidden chart series persistence',
+  const hiddenAfterRenderState = await waitForLegendState(
     renderer,
-    root => root.querySelector('[aria-label^="Toggle chart series "]')
-      ?.getAttribute('aria-pressed') || '',
-    value => value === 'false'
+    hidden.label,
+    'false',
+    'hidden chart series persistence',
+    false
   );
+  const hiddenAfterRender = hiddenAfterRenderState.pressed;
   console.log('Notebook visual interaction: hidden series persisted across Render');
 
   await installCanvasTextRecorder(renderer);
@@ -1667,7 +1934,7 @@ async function exerciseSavedSelectionSearchAndChart(
   const afterSetting = await waitForRenderer(
     'chart settings broadcast rerender',
     renderer,
-    root => ({
+    (root, hiddenLabel) => ({
       compact: root.classList.contains('kx-density-compact'),
       settingsOpen: root.querySelector('details.kx-settings')?.open === true,
       focusedSetting: (() => {
@@ -1683,7 +1950,8 @@ async function exerciseSavedSelectionSearchAndChart(
           .find(label => label.textContent?.trim().startsWith('Density'))
           ?.querySelector('select')?.value || '';
       })(),
-      hidden: root.querySelector('[aria-label^="Toggle chart series "]')
+      hidden: [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
+        .find(legend => legend.getAttribute('aria-label') === hiddenLabel)
         ?.getAttribute('aria-pressed') || '',
       canvases: root.querySelectorAll('.kx-chart-host canvas').length,
       selectionSummary: root.querySelector('.kx-selection-summary')?.textContent || '',
@@ -1692,7 +1960,9 @@ async function exerciseSavedSelectionSearchAndChart(
     value => value.density === settingChange.next &&
       value.compact === (settingChange.next === 'compact') &&
       value.settingsOpen && value.focusedSetting === 'Density' &&
-      value.hidden === 'false' && value.canvases > 0
+      value.hidden === 'false' && value.canvases > 0,
+    8_000,
+    [hidden.label]
   );
   assert.strictEqual(afterSetting.selectionSummary, '3 rows × 3 columns (9 cells)');
   assert.strictEqual(afterSetting.selectedCells, 9);
@@ -1710,7 +1980,7 @@ async function exerciseSavedSelectionSearchAndChart(
     'ordinary settings rerender must preserve the zoomed x-axis domain'
   );
   await scrollNotebookChartIntoView(renderer, cdpPort);
-  await captureZoomAfterSetting();
+  const hiddenLegendAfterSetting = await captureZoomAfterSetting(hidden.label);
 
   await clearCanvasTextRecorder(renderer);
   await renderer.evaluate(root => {
@@ -1746,8 +2016,11 @@ async function exerciseSavedSelectionSearchAndChart(
     savedYChange,
     savedYPersistence,
     rendered,
+    legendInteractions: hidden,
     hiddenSeries: hidden.label,
     hiddenAfterRender,
+    hiddenAfterRenderState,
+    hiddenLegendAfterSetting,
     fullDomainTicks,
     zoomDomainTicks,
     settingChange,
@@ -1761,19 +2034,369 @@ async function exerciseSavedSelectionSearchAndChart(
   return evidence;
 }
 
+async function closeResultOverlays(renderer) {
+  await renderer.evaluate(root => {
+    root.querySelectorAll(
+      'details.kx-series-control, details.kx-settings, details.kx-columns'
+    ).forEach(details => {
+      details.open = false;
+    });
+    return true;
+  });
+  await waitForRenderer(
+    'chart overlays closed',
+    renderer,
+    root => [...root.querySelectorAll(
+      'details.kx-series-control, details.kx-settings, details.kx-columns'
+    )].every(details => details.open === false),
+    Boolean
+  );
+}
+
+async function inspectVisibleChartLegend(renderer, expectedHiddenLabel) {
+  await renderer.movePointer(5, 5);
+  const evidence = await renderer.evaluate((root, hiddenLabel) => {
+    const view = root.ownerDocument.defaultView;
+    const rootRect = root.getBoundingClientRect();
+    const legend = root.querySelector('.kx-chart-legend .u-legend, .u-legend');
+    const legendRect = legend?.getBoundingClientRect();
+    const colorCanvas = root.ownerDocument.createElement('canvas');
+    colorCanvas.width = 1;
+    colorCanvas.height = 1;
+    const colorContext = colorCanvas.getContext('2d', { willReadFrequently: true });
+    const resolveColor = value => {
+      if (!colorContext || !value || /^\[object /.test(String(value))) {
+        return undefined;
+      }
+      colorContext.clearRect(0, 0, 1, 1);
+      colorContext.fillStyle = '#000';
+      try {
+        colorContext.fillStyle = String(value);
+      } catch {
+        return undefined;
+      }
+      colorContext.fillRect(0, 0, 1, 1);
+      const [red, green, blue, alpha] = colorContext.getImageData(0, 0, 1, 1).data;
+      return { red, green, blue, alpha: alpha / 255 };
+    };
+    const legendBackground =
+      resolveColor(view.getComputedStyle(legend?.closest('.kx-chart-legend') || root)
+        .backgroundColor) ||
+      resolveColor(view.getComputedStyle(root).backgroundColor) ||
+      { red: 255, green: 255, blue: 255, alpha: 1 };
+    const channel = value => {
+      const normalized = value / 255;
+      return normalized <= 0.04045
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = color =>
+      0.2126 * channel(color.red) +
+      0.7152 * channel(color.green) +
+      0.0722 * channel(color.blue);
+    const contrast = (left, right) => {
+      const first = luminance(left);
+      const second = luminance(right);
+      return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+    };
+    const textContrast = (value, opacity) => {
+      const foreground = resolveColor(value);
+      if (!foreground) {
+        return 0;
+      }
+      const alpha = Math.max(0, Math.min(1, foreground.alpha * opacity));
+      const effective = {
+        red: foreground.red * alpha + legendBackground.red * (1 - alpha),
+        green: foreground.green * alpha + legendBackground.green * (1 - alpha),
+        blue: foreground.blue * alpha + legendBackground.blue * (1 - alpha),
+      };
+      return contrast(effective, legendBackground);
+    };
+    const transparent = value =>
+      !value ||
+      value === 'transparent' ||
+      /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(value);
+    const items = [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
+      .map(label => {
+        const rect = label.getBoundingClientRect();
+        const style = view.getComputedStyle(label);
+        const marker = label.querySelector('.u-marker');
+        const markerRect = marker?.getBoundingClientRect();
+        const markerStyle = marker ? view.getComputedStyle(marker) : undefined;
+        const row = label.closest('.u-series');
+        const markerBackground = markerStyle?.backgroundColor || '';
+        const markerBorder = markerStyle?.borderColor || '';
+        const swatchColor = transparent(markerBackground)
+          ? markerBorder
+          : markerBackground;
+        const labelOpacity = Number(style.opacity || '1');
+        const rowOpacity = Number(row ? view.getComputedStyle(row).opacity || '1' : '1');
+        const opacity = labelOpacity * rowOpacity;
+        const pressed = label.getAttribute('aria-pressed') || '';
+        const off =
+          row?.classList.contains('u-off') === true ||
+          row?.classList.contains('kx-series-hidden') === true;
+        return {
+          label: label.getAttribute('aria-label') || '',
+          text: label.textContent?.trim() || '',
+          pressed,
+          role: label.getAttribute('role') || '',
+          tabIndex: label.tabIndex,
+          off,
+          opacity,
+          labelOpacity,
+          rowOpacity,
+          foreground: style.color,
+          textContrast: textContrast(style.color, opacity),
+          visible:
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            opacity > 0,
+          inResult:
+            rect.left >= rootRect.left - 1 &&
+            rect.right <= rootRect.right + 1 &&
+            rect.top >= rootRect.top - 1 &&
+            rect.bottom <= rootRect.bottom + 1,
+          inViewport:
+            rect.right > 0 &&
+            rect.bottom > 0 &&
+            rect.left < view.innerWidth &&
+            rect.top < view.innerHeight,
+          swatch: {
+            width: Math.round(markerRect?.width || 0),
+            height: Math.round(markerRect?.height || 0),
+            background: markerBackground,
+            border: markerBorder,
+            color: swatchColor,
+            visible:
+              !!markerRect &&
+              markerRect.width >= 6 &&
+              markerRect.height >= 6 &&
+              !transparent(swatchColor),
+          },
+        };
+      });
+    return {
+      ariaLabel: legend?.getAttribute('aria-label') || '',
+      legendVisible:
+        !!legendRect &&
+        legendRect.width > 0 &&
+        legendRect.height > 0 &&
+        view.getComputedStyle(legend).display !== 'none' &&
+        view.getComputedStyle(legend).visibility !== 'hidden',
+      legendBounds: {
+        left: Math.round(legendRect?.left || 0),
+        right: Math.round(legendRect?.right || 0),
+        top: Math.round(legendRect?.top || 0),
+        bottom: Math.round(legendRect?.bottom || 0),
+      },
+      rootBounds: {
+        left: Math.round(rootRect.left),
+        right: Math.round(rootRect.right),
+        top: Math.round(rootRect.top),
+        bottom: Math.round(rootRect.bottom),
+      },
+      expectedHiddenLabel: hiddenLabel || '',
+      items,
+    };
+  }, expectedHiddenLabel || '');
+  assert.strictEqual(evidence.ariaLabel, 'Chart series legend');
+  assert.strictEqual(evidence.legendVisible, true);
+  assert(evidence.items.length >= 2, 'chart legend must expose at least two series');
+  assert(
+    evidence.items.every(item =>
+      item.visible &&
+      item.inResult &&
+      item.inViewport &&
+      item.swatch.visible &&
+      item.role === 'button' &&
+      item.tabIndex === 0 &&
+      /^(true|false)$/.test(item.pressed) &&
+      item.off === (item.pressed === 'false') &&
+      (item.pressed === 'false' || item.textContrast >= 4.5)
+    ),
+    'chart legend items must be visible, readable, color keyed, keyboard reachable, and state accurate: ' +
+      JSON.stringify(evidence.items)
+  );
+  assert(
+    new Set(evidence.items.map(item => item.swatch.color)).size >= 2,
+    'chart legend must display at least two distinct series colors'
+  );
+  if (expectedHiddenLabel) {
+    const hidden = evidence.items.find(item => item.label === expectedHiddenLabel);
+    assert(hidden, `hidden legend item ${expectedHiddenLabel} must remain present`);
+    assert.strictEqual(hidden.pressed, 'false');
+    assert.strictEqual(hidden.off, true);
+    assert(
+      hidden.opacity < 0.8 ||
+      evidence.items.some(item => item.pressed === 'true' && item.opacity > hidden.opacity),
+      'hidden legend item must be visually distinguished'
+    );
+  }
+  return evidence;
+}
+
+async function inspectChartSeriesSelectorColors(renderer, themeProbe = '') {
+  await renderer.evaluate((root, probe) => {
+    const view = root.ownerDocument.defaultView;
+    if (probe) {
+      view.__kxVisualSeriesThemeProbe = probe;
+    }
+    const details = root.querySelector(
+      '.kx-chart-controls details.kx-series-control'
+    );
+    if (!details) {
+      throw new Error('chart Y-series selector missing for theme inspection');
+    }
+    details.open = true;
+    return true;
+  }, themeProbe);
+  const evidence = await waitForRenderer(
+    'chart Y-series selector plotted-color mapping',
+    renderer,
+    root => {
+      const view = root.ownerDocument.defaultView;
+      const details = root.querySelector(
+        '.kx-chart-controls details.kx-series-control'
+      );
+      const transparent = value =>
+        !value ||
+        value === 'transparent' ||
+        /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(value);
+      const elementColor = element => {
+        const style = element ? view.getComputedStyle(element) : undefined;
+        return transparent(style?.backgroundColor || '')
+          ? style?.borderColor || ''
+          : style?.backgroundColor || '';
+      };
+      const selectedOptions = [...root.querySelectorAll('.kx-series-option')]
+        .filter(option => option.querySelector('input[type="checkbox"]')?.checked === true)
+        .map(option => ({
+          name: option.querySelector('.kx-series-name')?.textContent?.trim() || '',
+          swatches: [...option.querySelectorAll('.kx-series-swatch')]
+            .map(elementColor)
+            .filter(color => !transparent(color)),
+        }));
+      const legendSeries = [
+        ...root.querySelectorAll('[aria-label^="Toggle chart series "]'),
+      ].map(label => ({
+        name: (label.getAttribute('aria-label') || '')
+          .replace(/^Toggle chart series /, ''),
+        color: elementColor(label.querySelector('.u-marker')),
+      }));
+      const mappingValid = selectedOptions.every(option => {
+        const selectorColors = new Set(option.swatches);
+        const plottedColors = new Set(
+          legendSeries
+            .filter(series =>
+              series.name === option.name ||
+              series.name.startsWith(`${option.name} [`)
+            )
+            .map(series => series.color)
+        );
+        return selectorColors.size > 0 &&
+          selectorColors.size === plottedColors.size &&
+          [...selectorColors].every(color => plottedColors.has(color));
+      });
+      return {
+        open: details?.open === true,
+        themeProbe: view.__kxVisualSeriesThemeProbe || '',
+        selectedOptions,
+        legendSeries,
+        mappingValid,
+      };
+    },
+    value =>
+      value.open === true &&
+      value.selectedOptions.length >= 2 &&
+      value.selectedOptions.every(option => option.swatches.length >= 1) &&
+      value.mappingValid === true
+  );
+  await renderer.evaluate(root => {
+    const details = root.querySelector(
+      '.kx-chart-controls details.kx-series-control'
+    );
+    if (details) {
+      details.open = false;
+    }
+    return true;
+  });
+  await waitForRenderer(
+    'chart Y-series selector closed after theme inspection',
+    renderer,
+    root => root.querySelector(
+      '.kx-chart-controls details.kx-series-control'
+    )?.open === false,
+    Boolean
+  );
+  return evidence;
+}
+
+async function focusLegendToggle(renderer, label) {
+  const focused = await renderer.evaluate((root, targetLabel) => {
+    const legend = [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
+      .find(candidate => candidate.getAttribute('aria-label') === targetLabel);
+    legend?.focus();
+    return root.ownerDocument.activeElement === legend;
+  }, label);
+  assert.strictEqual(focused, true, `chart legend focus failed for ${label}`);
+}
+
+async function waitForLegendState(
+  renderer,
+  label,
+  pressed,
+  description,
+  requireFocus = true
+) {
+  return waitForRenderer(
+    description,
+    renderer,
+    (root, targetLabel) => {
+      const legend = [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
+        .find(candidate => candidate.getAttribute('aria-label') === targetLabel);
+      const row = legend?.closest('.u-series');
+      const style = legend
+        ? root.ownerDocument.defaultView.getComputedStyle(legend)
+        : undefined;
+      return {
+        label: legend?.getAttribute('aria-label') || '',
+        pressed: legend?.getAttribute('aria-pressed') || '',
+        focused: root.ownerDocument.activeElement === legend,
+        off:
+          row?.classList.contains('u-off') === true ||
+          row?.classList.contains('kx-series-hidden') === true,
+        opacity: Number(style?.opacity || '0'),
+      };
+    },
+    value =>
+      value.label === label &&
+      value.pressed === pressed &&
+      (!requireFocus || value.focused) &&
+      value.off === (pressed === 'false') &&
+      (pressed === 'true' || value.opacity < 0.8),
+    8_000,
+    [label]
+  );
+}
+
 async function installCanvasTextRecorder(renderer) {
   await renderer.evaluate(root => {
     const view = root.ownerDocument.defaultView;
     if (!view.__kxVisualCanvasTextRecorder) {
-      view.__kxVisualCanvasTextRecorder = { records: [], patches: [] };
+      view.__kxVisualCanvasTextRecorder = { records: [], strokes: [], patches: [] };
     }
     const recorder = view.__kxVisualCanvasTextRecorder;
+    recorder.strokes ||= [];
     root.querySelectorAll('.kx-chart-host canvas').forEach(canvas => {
       const context = canvas.getContext('2d');
       if (!context || context.__kxVisualFillTextPatched === true) {
         return;
       }
-      const original = context.fillText;
+      const originalFillText = context.fillText;
+      const originalStroke = context.stroke;
       context.__kxVisualFillTextPatched = true;
       context.fillText = function (...args) {
         const recorder = view.__kxVisualCanvasTextRecorder;
@@ -1783,12 +2406,24 @@ async function installCanvasTextRecorder(renderer) {
           y: Number(args[2]),
           width: this.canvas.width,
           height: this.canvas.height,
+          fillStyle: String(this.fillStyle),
+          globalAlpha: Number(this.globalAlpha),
         });
-        return original.apply(this, args);
+        return originalFillText.apply(this, args);
       };
-      recorder.patches.push({ context, original });
+      context.stroke = function (...args) {
+        const recorder = view.__kxVisualCanvasTextRecorder;
+        recorder?.strokes.push({
+          strokeStyle: String(this.strokeStyle),
+          lineWidth: Number(this.lineWidth),
+          globalAlpha: Number(this.globalAlpha),
+        });
+        return originalStroke.apply(this, args);
+      };
+      recorder.patches.push({ context, originalFillText, originalStroke });
     });
     recorder.records.length = 0;
+    recorder.strokes.length = 0;
     return !!root.querySelector('.kx-chart-panel');
   });
 }
@@ -1798,6 +2433,7 @@ async function clearCanvasTextRecorder(renderer) {
     const view = root.ownerDocument.defaultView;
     if (view.__kxVisualCanvasTextRecorder) {
       view.__kxVisualCanvasTextRecorder.records.length = 0;
+      view.__kxVisualCanvasTextRecorder.strokes.length = 0;
     }
     return true;
   });
@@ -1808,7 +2444,8 @@ async function restoreCanvasTextRecorder(renderer) {
     const view = root.ownerDocument.defaultView;
     const recorder = view.__kxVisualCanvasTextRecorder;
     recorder?.patches.forEach(patch => {
-      patch.context.fillText = patch.original;
+      patch.context.fillText = patch.originalFillText;
+      patch.context.stroke = patch.originalStroke;
       try {
         delete patch.context.__kxVisualFillTextPatched;
       } catch {
@@ -1851,12 +2488,181 @@ async function waitForCanvasTicks(label, renderer) {
         minimum: values[0],
         maximum: values[values.length - 1],
         canvasTextCalls: records.length,
+        fillStyles: [...new Set(records.map(record => record.fillStyle).filter(Boolean))],
       };
     },
     value => value.tickTexts.length >= 2 &&
       Number.isFinite(value.minimum) &&
       Number.isFinite(value.maximum)
   );
+}
+
+async function inspectChartCanvasContrast(renderer) {
+  const evidence = await renderer.evaluate(root => {
+    const view = root.ownerDocument.defaultView;
+    const recorder = view.__kxVisualCanvasTextRecorder;
+    const records = recorder?.records || [];
+    const strokes = recorder?.strokes || [];
+    const colorCanvas = root.ownerDocument.createElement('canvas');
+    colorCanvas.width = 1;
+    colorCanvas.height = 1;
+    const colorContext = colorCanvas.getContext('2d', { willReadFrequently: true });
+    const resolveColor = value => {
+      if (!colorContext || !value || /^\[object /.test(String(value))) {
+        return undefined;
+      }
+      colorContext.clearRect(0, 0, 1, 1);
+      colorContext.fillStyle = '#000';
+      try {
+        colorContext.fillStyle = String(value);
+      } catch {
+        return undefined;
+      }
+      colorContext.fillRect(0, 0, 1, 1);
+      const [red, green, blue, alpha] = colorContext.getImageData(0, 0, 1, 1).data;
+      return { red, green, blue, alpha: alpha / 255 };
+    };
+    const chartHost = root.querySelector('.kx-chart-host');
+    const rootBackground = resolveColor(view.getComputedStyle(root).backgroundColor) || {
+      red: 30,
+      green: 30,
+      blue: 30,
+      alpha: 1,
+    };
+    const rawBackground = resolveColor(
+      chartHost ? view.getComputedStyle(chartHost).backgroundColor : ''
+    ) || rootBackground;
+    const composite = (foreground, background, additionalAlpha = 1) => {
+      const alpha = Math.max(0, Math.min(1, foreground.alpha * additionalAlpha));
+      return {
+        red: foreground.red * alpha + background.red * (1 - alpha),
+        green: foreground.green * alpha + background.green * (1 - alpha),
+        blue: foreground.blue * alpha + background.blue * (1 - alpha),
+        alpha: 1,
+      };
+    };
+    const background = rawBackground.alpha < 1
+      ? composite(rawBackground, rootBackground)
+      : rawBackground;
+    const channel = value => {
+      const normalized = value / 255;
+      return normalized <= 0.04045
+        ? normalized / 12.92
+        : ((normalized + 0.055) / 1.055) ** 2.4;
+    };
+    const luminance = color =>
+      0.2126 * channel(color.red) +
+      0.7152 * channel(color.green) +
+      0.0722 * channel(color.blue);
+    const contrast = (left, right) => {
+      const first = luminance(left);
+      const second = luminance(right);
+      return (Math.max(first, second) + 0.05) / (Math.min(first, second) + 0.05);
+    };
+    const displayColor = color =>
+      `rgb(${Math.round(color.red)}, ${Math.round(color.green)}, ${Math.round(color.blue)})`;
+    const effective = (value, globalAlpha) => {
+      const parsed = resolveColor(value);
+      return parsed ? composite(parsed, background, globalAlpha) : undefined;
+    };
+    const dominant = (values, keyFor) => {
+      const counts = new Map();
+      values.forEach(value => {
+        const key = keyFor(value);
+        if (!key) {
+          return;
+        }
+        const current = counts.get(key) || { key, count: 0, values: [] };
+        current.count += 1;
+        current.values.push(value);
+        counts.set(key, current);
+      });
+      return [...counts.values()].sort((left, right) => right.count - left.count)[0];
+    };
+    const numericRecords = records.filter(record =>
+      /^-?\d+(?:\.\d+)?$/.test(String(record.text).trim())
+    );
+    const axisGroup = dominant(
+      numericRecords,
+      record => `${record.fillStyle}\0${record.globalAlpha}`
+    );
+    const axisSample = axisGroup?.values[0];
+    const axisColor = axisSample
+      ? effective(axisSample.fillStyle, axisSample.globalAlpha)
+      : undefined;
+    const seriesColorKeys = new Set(
+      [...root.querySelectorAll('.u-marker')]
+        .flatMap(marker => {
+          const style = view.getComputedStyle(marker);
+          return [style.backgroundColor, style.borderColor];
+        })
+        .map(value => effective(value, 1))
+        .filter(Boolean)
+        .map(displayColor)
+    );
+    const strokeGroups = new Map();
+    strokes.forEach(stroke => {
+      const color = effective(stroke.strokeStyle, stroke.globalAlpha);
+      if (!color) {
+        return;
+      }
+      const colorKey = displayColor(color);
+      if (seriesColorKeys.has(colorKey)) {
+        return;
+      }
+      const key = `${colorKey}\0${stroke.lineWidth}`;
+      const current = strokeGroups.get(key) || {
+        color,
+        colorKey,
+        lineWidth: stroke.lineWidth,
+        count: 0,
+      };
+      current.count += 1;
+      strokeGroups.set(key, current);
+    });
+    const gridGroup = [...strokeGroups.values()]
+      .sort((left, right) =>
+        right.count - left.count ||
+        left.lineWidth - right.lineWidth)[0];
+    return {
+      background: displayColor(background),
+      numericTextCalls: numericRecords.length,
+      totalTextCalls: records.length,
+      strokeCalls: strokes.length,
+      axis: axisColor
+        ? {
+          color: displayColor(axisColor),
+          raw: String(axisSample.fillStyle),
+          calls: axisGroup.count,
+          contrast: contrast(axisColor, background),
+        }
+        : undefined,
+      grid: gridGroup
+        ? {
+          color: gridGroup.colorKey,
+          calls: gridGroup.count,
+          lineWidth: gridGroup.lineWidth,
+          contrast: contrast(gridGroup.color, background),
+        }
+        : undefined,
+    };
+  });
+  assert(evidence.numericTextCalls >= 2, 'dark chart must draw numeric axis labels');
+  assert(evidence.axis, 'dark chart axis text color was not recorded');
+  assert(evidence.grid, 'dark chart grid/tick stroke color was not recorded');
+  assert(
+    evidence.axis.contrast >= 4.5,
+    `dark chart axis contrast ${evidence.axis.contrast.toFixed(2)} is below 4.5:1`
+  );
+  assert(
+    evidence.grid.contrast <= evidence.axis.contrast * 0.6,
+    `dark chart grid contrast ${evidence.grid.contrast.toFixed(2)} must be materially below axis contrast`
+  );
+  assert(
+    evidence.grid.lineWidth <= 0.5,
+    `dark chart grid/tick width ${evidence.grid.lineWidth} must remain restrained`
+  );
+  return evidence;
 }
 
 async function scrollNotebookChartIntoView(renderer, _cdpPort) {
@@ -2415,27 +3221,116 @@ async function assertNarrowChartOverlay(renderer) {
       const panel = details?.querySelector('.kx-series-list');
       const rootRect = root.getBoundingClientRect();
       const panelRect = panel?.getBoundingClientRect();
+      const view = root.ownerDocument.defaultView;
+      const panelStyle = panel ? view.getComputedStyle(panel) : undefined;
+      if (panel && panel.scrollHeight > panel.clientHeight) {
+        panel.scrollTop = Math.min(40, panel.scrollHeight - panel.clientHeight);
+      }
+      const transparent = value =>
+        !value ||
+        value === 'transparent' ||
+        /^rgba\([^)]*,\s*0(?:\.0+)?\s*\)$/.test(value);
+      const options = [...(panel?.querySelectorAll('.kx-series-option') || [])]
+        .map(option => {
+          const checkbox = option.querySelector('input[type="checkbox"]');
+          const name = option.querySelector('.kx-series-name')?.textContent?.trim() ||
+            option.textContent?.trim() || '';
+          const swatches = [...option.querySelectorAll('.kx-series-swatch')].map(swatch => {
+            const rect = swatch.getBoundingClientRect();
+            const style = view.getComputedStyle(swatch);
+            const color = transparent(style.backgroundColor)
+              ? style.borderColor
+              : style.backgroundColor;
+            return {
+              color,
+              visible:
+                rect.width >= 6 &&
+                rect.height >= 6 &&
+                !transparent(color),
+            };
+          });
+          return {
+            name,
+            checked: checkbox?.checked === true,
+            swatches,
+          };
+        });
+      const legend = [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
+        .map(label => {
+          const marker = label.querySelector('.u-marker');
+          const style = marker ? view.getComputedStyle(marker) : undefined;
+          return {
+            label: label.getAttribute('aria-label') || '',
+            color: transparent(style?.backgroundColor || '')
+              ? style?.borderColor || ''
+              : style?.backgroundColor || '',
+          };
+        });
       return {
         open: details?.open === true,
-        optionCount: panel?.querySelectorAll('.kx-series-option').length || 0,
+        optionCount: options.length,
         focusedTag: root.ownerDocument.activeElement?.tagName || '',
+        overflowY: panelStyle?.overflowY || '',
+        scrollable:
+          !!panel &&
+          ['auto', 'scroll'].includes(panelStyle?.overflowY || '') &&
+          panel.scrollHeight > panel.clientHeight &&
+          panel.scrollTop > 0,
+        dimensions: {
+          clientHeight: panel?.clientHeight || 0,
+          scrollHeight: panel?.scrollHeight || 0,
+          scrollTop: panel?.scrollTop || 0,
+          panelArea: (panelRect?.width || 0) * (panelRect?.height || 0),
+          rootArea: rootRect.width * rootRect.height,
+        },
+        options,
+        legend,
         contained:
           !!panelRect &&
           panelRect.left >= rootRect.left - 1 &&
-          panelRect.right <= rootRect.right + 1,
+          panelRect.right <= rootRect.right + 1 &&
+          panelRect.top >= rootRect.top - 1 &&
+          panelRect.bottom <= rootRect.bottom + 1,
         bounds: {
           rootLeft: Math.round(rootRect.left),
           rootRight: Math.round(rootRect.right),
+          rootTop: Math.round(rootRect.top),
+          rootBottom: Math.round(rootRect.bottom),
           panelLeft: Math.round(panelRect?.left || 0),
           panelRight: Math.round(panelRect?.right || 0),
+          panelTop: Math.round(panelRect?.top || 0),
+          panelBottom: Math.round(panelRect?.bottom || 0),
         },
       };
     },
     value => value.open &&
       value.optionCount >= 2 &&
       value.focusedTag === 'INPUT' &&
-      value.contained
+      value.contained &&
+      value.scrollable &&
+      value.options.every(option =>
+        option.swatches.length >= 1 &&
+        option.swatches.every(swatch => swatch.visible)
+      ) &&
+      value.dimensions.panelArea < value.dimensions.rootArea * 0.65
   );
+  const selectedOptions = overlay.options.filter(option => option.checked);
+  assert(selectedOptions.length >= 2, 'narrow chart must retain selected Y series');
+  for (const option of selectedOptions) {
+    const plottedColors = new Set(
+      overlay.legend
+        .filter(item =>
+          item.label === `Toggle chart series ${option.name}` ||
+          item.label.startsWith(`Toggle chart series ${option.name} [`)
+        )
+        .map(item => item.color)
+    );
+    assert(plottedColors.size > 0, `selected series ${option.name} must appear in the legend`);
+    assert(
+      option.swatches.every(swatch => plottedColors.has(swatch.color)),
+      `selector swatches for ${option.name} must match its plotted legend colors`
+    );
+  }
   return {
     name: 'narrow-saved-chart-overlay',
     initial,
@@ -2570,9 +3465,10 @@ class NotebookRendererCdp {
     this.contextId = contextId;
   }
 
-  evaluate(action) {
+  evaluate(action, ...args) {
     const source = String(action);
     const marker = JSON.stringify(this.marker);
+    const serializedArgs = JSON.stringify(args);
     return this.session.evaluate(`(() => {
       const matches = ${KX_ROOT_QUERY_EXPRESSION}
         .map((candidate, index) => {
@@ -2595,7 +3491,7 @@ class NotebookRendererCdp {
       if (!root) {
         throw new Error('KX result root not found for marker ' + ${marker});
       }
-      return (${source})(root);
+      return (${source})(root, ...${serializedArgs});
     })()`, this.contextId);
   }
 
@@ -2618,6 +3514,17 @@ class NotebookRendererCdp {
       buttons: 0,
       clickCount: 1,
       modifiers,
+    });
+    await delay(100);
+  }
+
+  async movePointer(x, y) {
+    await this.session.send('Input.dispatchMouseEvent', {
+      type: 'mouseMoved',
+      x,
+      y,
+      button: 'none',
+      buttons: 0,
     });
     await delay(100);
   }
@@ -2660,6 +3567,44 @@ class NotebookRendererCdp {
       deltaX: 0,
       deltaY,
     });
+  }
+
+  async pressKey(key) {
+    const keys = {
+      Enter: {
+        key: 'Enter',
+        code: 'Enter',
+        windowsVirtualKeyCode: 13,
+        nativeVirtualKeyCode: 13,
+      },
+      ' ': {
+        key: ' ',
+        code: 'Space',
+        text: ' ',
+        unmodifiedText: ' ',
+        windowsVirtualKeyCode: 32,
+        nativeVirtualKeyCode: 32,
+      },
+      Escape: {
+        key: 'Escape',
+        code: 'Escape',
+        windowsVirtualKeyCode: 27,
+        nativeVirtualKeyCode: 27,
+      },
+    };
+    const descriptor = keys[key];
+    assert(descriptor, `unsupported visual-test key ${String(key)}`);
+    await this.session.send('Input.dispatchKeyEvent', {
+      type: 'keyDown',
+      ...descriptor,
+    });
+    await this.session.send('Input.dispatchKeyEvent', {
+      type: 'keyUp',
+      ...descriptor,
+      text: undefined,
+      unmodifiedText: undefined,
+    });
+    await delay(100);
   }
 
   close() {
@@ -2734,13 +3679,20 @@ async function connectNotebookRenderer(cdpPort, marker) {
   );
 }
 
-async function waitForRenderer(label, renderer, action, predicate, timeoutMs = 8_000) {
+async function waitForRenderer(
+  label,
+  renderer,
+  action,
+  predicate,
+  timeoutMs = 8_000,
+  actionArgs = []
+) {
   const deadline = Date.now() + timeoutMs;
   let value;
   let lastError;
   while (Date.now() <= deadline) {
     try {
-      value = await renderer.evaluate(action);
+      value = await renderer.evaluate(action, ...actionArgs);
       if (predicate(value)) {
         return value;
       }
