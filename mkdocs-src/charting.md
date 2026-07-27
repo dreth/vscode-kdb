@@ -6,7 +6,7 @@ The standalone extension does not currently contribute a run-and-auto-chart `.q`
 
 ## Notebook charts
 
-A live result from either **KX q (Direct IPC)** or mixed-mode **Run q Cell (KX)** can issue bounded chart requests against its full in-memory value and can open that value in the standard KX Results panel. The renderer is a compact adaptation of the panel's real chart configuration model:
+A live result from either **KX q (Direct IPC)** or mixed-mode **Run q Cell (KX)** issues bounded chart requests against its full in-memory value and can hand that exact value to the standard KX Results panel. Both surfaces consume one chart-family/capability contract:
 
 - line, scatter, step, bar, box, and candlestick;
 - an eligible X column;
@@ -16,13 +16,13 @@ A live result from either **KX q (Direct IPC)** or mixed-mode **Run q Cell (KX)*
 
 Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until **Render** is pressed. The chart stays below the table and adds no chart height while hidden.
 
-There is no notebook-only visible Point cap. Live requests still honor common `vscode-kdb.results.*` source/sampling settings and safe built-in limits; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, legend toggles, crosshair selection, drag zoom, and Reset zoom.
+There is no redundant notebook-only visible Point cap control. Live requests honor common `vscode-kdb.results.*` source/sampling settings and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, keyboard-reachable legend toggles, crosshair selection, drag zoom, live-handle sample refinement, **Reset zoom**, and **Export PNG** through the extension save dialog. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.
 
-The separate Python helper can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.
+Separately installed `kx-notebook==0.1.0` can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.
 
-On the Python-helper route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the helper result with the desired `kx_notebook.Chart` specification to persist a changed selection. Its escaped `text/html` fallback renders a network-free static SVG from the emitted specification. Direct IPC output from the mixed runner or optional controller has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
+On the released-companion route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the companion result with the desired `kx_notebook.Chart` specification to persist a changed selection. Its escaped `text/html` fallback renders a network-free static SVG from the emitted specification. Direct IPC output from the mixed runner or optional controller has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
 
-Once a direct result's bound live record is absent, notebook charting uses only the bounded rows saved in the MIME payload. Opening that snapshot in the full KX Results panel does not restore missing data.
+Once a direct result's bound live record is absent, notebook charting uses only the bounded rows saved in the MIME payload. It can reset zoom within that preview but cannot refine into omitted rows. Opening that snapshot in the full KX Results panel does not restore missing data. The panel additionally has an editor-sized draggable table/chart splitter; inline output deliberately keeps the chart below the table.
 
 ## Open and render
 

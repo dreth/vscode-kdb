@@ -17,7 +17,10 @@ import {
   LiveNotebookResultRegistration,
   LiveNotebookResultStore,
 } from './notebook-live-results';
-import { NOTEBOOK_LIVE_RESULT_METADATA_KEY } from './notebook-message';
+import {
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
+  NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
+} from './notebook-message';
 import { NotebookQTargetProfile } from './notebook-q-target';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 
@@ -25,6 +28,8 @@ export const KX_Q_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.q-notebook-controller';
 export const KX_Q_NOTEBOOK_TYPE = 'jupyter-notebook';
 export const KX_Q_NOTEBOOK_CONTROLLER_LABEL = 'KX q (Direct IPC)';
 export const KX_NOTEBOOK_LIVE_METADATA_KEY = NOTEBOOK_LIVE_RESULT_METADATA_KEY;
+export const KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY =
+  NOTEBOOK_OUTPUT_BINDING_METADATA_KEY;
 export const ENABLE_DIRECT_NOTEBOOK_CONTROLLER_SETTING =
   'vscode-kdb.notebook.enableDirectController';
 
@@ -33,6 +38,7 @@ const CANCELED_AFTER_ISSUE_SUFFIX =
 
 export type DirectQCellRunResult =
   | 'executed'
+  | 'canceled'
   | 'busy'
   | 'not-q'
   | 'unsupported-notebook'
@@ -292,12 +298,12 @@ export class KxQNotebookRunner implements vscode.Disposable {
             'notebook'
           );
           if (prepared.canceled === 'before-issue') {
-            return 'executed';
+            return 'canceled';
           }
           const cancellationPrepared = prepared.canceled === 'after-issue';
           if (!cancellationPrepared &&
             (token.isCancellationRequested || abortController.signal.aborted)) {
-            return 'executed';
+            return 'canceled';
           }
           const current = matchingMixedCell(snapshot);
           if (!current) {
@@ -320,7 +326,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
             if (liveResultId) {
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
             }
-            return 'executed';
+            return 'canceled';
           }
           if (written.status !== 'executed' || !written.cell) {
             if (liveResultId) {
@@ -347,7 +353,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
               return 'write-failed';
             }
           }
-          return 'executed';
+          return cancellationPrepared ? 'canceled' : 'executed';
         } catch {
           if (liveResultId) {
             this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
@@ -805,6 +811,10 @@ export function liveResultOutputMetadata(id: string): { [key: string]: unknown }
     throw new Error('Live KX notebook result identifier is invalid.');
   }
   return {
+    [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+      version: 1,
+      id,
+    },
     [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
       version: 1,
       id,

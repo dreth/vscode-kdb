@@ -1,4 +1,9 @@
-import { allCellsRange, createColumnarPanelResult } from './kx-results';
+import {
+  CellTextOptions,
+  allCellsRange,
+  cellValueToText,
+  createColumnarPanelResult,
+} from './kx-results';
 
 export const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
 export const KX_NOTEBOOK_CONTRACT_VERSION = 1;
@@ -19,6 +24,8 @@ export const MAX_NOTEBOOK_LABEL_CHARS = 200;
 export const MAX_NOTEBOOK_Q_SOURCE_CHARS = 4000;
 export const STATIC_NOTEBOOK_TABLE_ROW_LIMIT = 100;
 export const STATIC_NOTEBOOK_CHART_POINT_LIMIT = 240;
+const MAX_PORTABLE_JSON_DEPTH = 128;
+const MAX_PORTABLE_JSON_NODES = 20_000;
 
 export type NotebookResultMarker = '%%q' | 'direct-ipc';
 
@@ -85,6 +92,15 @@ export type NotebookTruncationReason =
   | 'cellValueLimit'
   | 'columnLimit'
   | 'sourcePreview';
+
+const NOTEBOOK_TRUNCATION_REASON_LABELS:
+Record<NotebookTruncationReason, string> = {
+  rowLimit: 'row limit',
+  byteLimit: 'byte limit',
+  cellValueLimit: 'long cell-value limit',
+  columnLimit: 'column limit',
+  sourcePreview: 'source preview limit',
+};
 
 export interface PortableKxTableResult {
   version: 1;
@@ -570,17 +586,61 @@ export function portableCellValue(cell: PortableCell): unknown {
   if (cell.kind === 'null') {
     return null;
   }
+  if (cell.kind === 'json') {
+    try {
+      const parsed = JSON.parse(cell.value);
+      return portableJsonShapeIsSafe(parsed) ? parsed : cell.value;
+    } catch {
+      return cell.value;
+    }
+  }
   return cell.value;
 }
 
-export function portableCellText(cell: PortableCell): string {
+export function portableCellText(
+  cell: PortableCell,
+  options: CellTextOptions = {}
+): string {
   if (cell.kind === 'null') {
     return '';
   }
   if (cell.kind === 'boolean') {
     return cell.value ? 'true' : 'false';
   }
+  if (cell.kind === 'json') {
+    return cellValueToText(portableCellValue(cell), options);
+  }
   return String(cell.value);
+}
+
+function portableJsonShapeIsSafe(value: unknown): boolean {
+  const pending: Array<{ value: unknown; depth: number }> = [{ value, depth: 0 }];
+  let nodes = 0;
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    nodes++;
+    if (nodes > MAX_PORTABLE_JSON_NODES || current.depth > MAX_PORTABLE_JSON_DEPTH) {
+      return false;
+    }
+    if (current.value === null || typeof current.value !== 'object') {
+      continue;
+    }
+    if (Array.isArray(current.value)) {
+      for (let index = 0; index < current.value.length; index++) {
+        pending.push({ value: current.value[index], depth: current.depth + 1 });
+      }
+      continue;
+    }
+    for (const key in current.value as { [key: string]: unknown }) {
+      if (Object.prototype.hasOwnProperty.call(current.value, key)) {
+        pending.push({
+          value: (current.value as { [key: string]: unknown })[key],
+          depth: current.depth + 1,
+        });
+      }
+    }
+  }
+  return true;
 }
 
 export function notebookResultToCsv(value: PortableKxTableResult): string {
@@ -590,6 +650,27 @@ export function notebookResultToCsv(value: PortableKxTableResult): string {
     (rowIndex, columnIndex) => portableCellValue(value.data.rows[rowIndex][columnIndex])
   );
   return table.toText('csv', allCellsRange(table.rowCount, table.columns.length), true);
+}
+
+export function notebookTruncationReasonSummary(
+  reasons: readonly NotebookTruncationReason[]
+): string {
+  return reasons.map(reason => NOTEBOOK_TRUNCATION_REASON_LABELS[reason]).join(', ') ||
+    'notebook output limit';
+}
+
+export function notebookSavedPreviewNotice(value: PortableKxResult): string {
+  const reasons = notebookTruncationReasonSummary(value.result.truncationReasons);
+  if (value.kind === 'qText') {
+    return `Saved preview was shortened by the ${reasons}. ` +
+      'Omitted content is not stored in this notebook.';
+  }
+  const rows = value.result.previewRowCount < value.result.rowCount
+    ? `showing ${value.result.previewRowCount.toLocaleString()} of ` +
+      `${value.result.rowCount.toLocaleString()} rows`
+    : `contains ${value.result.previewRowCount.toLocaleString()} saved rows`;
+  return `Saved preview ${rows}; bounded by the ${reasons}. ` +
+    'Omitted content is not stored in this notebook.';
 }
 
 export function notebookResultStaticHtml(value: PortableKxResult): string {
@@ -614,11 +695,7 @@ export function notebookResultStaticHtml(value: PortableKxResult): string {
     }
     parts.push('</div><pre>', escapeHtml(result.data.text), '</pre>');
     if (result.result.truncated) {
-      parts.push(
-        '<div>Output truncated at the notebook limit (',
-        String(result.result.byteLimit),
-        ' bytes).</div>'
-      );
+      parts.push('<div>', escapeHtml(notebookSavedPreviewNotice(result)), '</div>');
     }
     parts.push('</div>');
     return parts.join('');
@@ -656,9 +733,9 @@ export function notebookResultStaticHtml(value: PortableKxResult): string {
   );
   if (result.result.truncated) {
     parts.push(
-      '<div class="kx-note"><strong>Showing a bounded result.</strong> Reasons: ',
-      escapeHtml(result.result.truncationReasons.join(', ') || 'preview limit'),
-      '.</div>'
+      '<div class="kx-note"><strong>Showing a bounded result.</strong> ',
+      escapeHtml(notebookSavedPreviewNotice(result)),
+      '</div>'
     );
   }
   if (result.chart?.visible) {
@@ -698,7 +775,7 @@ export function notebookResultPlainText(value: PortableKxResult): string {
   const result = validation.value;
   if (result.kind === 'qText') {
     return result.result.truncated
-      ? `${result.data.text}\n... [truncated to notebook output limit]`
+      ? `${result.data.text}\n... [${notebookSavedPreviewNotice(result)}]`
       : result.data.text;
   }
   const lines = [
@@ -708,9 +785,7 @@ export function notebookResultPlainText(value: PortableKxResult): string {
       `limits: ${result.result.rowLimit} rows / ${result.result.byteLimit} bytes`,
   ];
   if (result.result.truncated) {
-    lines.push(
-      `Bounded output (${result.result.truncationReasons.join(', ') || 'output limit'}).`
-    );
+    lines.push(notebookSavedPreviewNotice(result));
   }
   const plainRows = result.data.rows.slice(0, 20);
   if (result.schema.columns.length > 0) {

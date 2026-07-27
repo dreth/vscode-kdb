@@ -226,7 +226,7 @@ export function rowsToJson(
   }
 
   const options = normalizeExportOptions(optionsOrIncludeHeaders, false);
-  return stringifyJson(selectedRows(rows, columns, clamped, options.includeRowIndex));
+  return kxResultJsonStringify(selectedRows(rows, columns, clamped, options.includeRowIndex));
 }
 
 export function rowsToNdjson(
@@ -241,7 +241,9 @@ export function rowsToNdjson(
   }
 
   const options = normalizeExportOptions(optionsOrIncludeHeaders, false);
-  return selectedRows(rows, columns, clamped, options.includeRowIndex).map(row => stringifyJson(row)).join('\n');
+  return selectedRows(rows, columns, clamped, options.includeRowIndex)
+    .map(row => kxResultJsonStringify(row))
+    .join('\n');
 }
 
 export function rowsToHtml(
@@ -600,7 +602,9 @@ function columnarToJson(result: ColumnarPanelResult, range: CellRange, options: 
     return '[]';
   }
 
-  return stringifyJson(selectedColumnarRows(result, clamped, options.includeRowIndex));
+  return kxResultJsonStringify(
+    selectedColumnarRows(result, clamped, options.includeRowIndex)
+  );
 }
 
 function columnarToNdjson(result: ColumnarPanelResult, range: CellRange, options: NormalizedExportOptions): string {
@@ -609,7 +613,9 @@ function columnarToNdjson(result: ColumnarPanelResult, range: CellRange, options
     return '';
   }
 
-  return selectedColumnarRows(result, clamped, options.includeRowIndex).map(row => stringifyJson(row)).join('\n');
+  return selectedColumnarRows(result, clamped, options.includeRowIndex)
+    .map(row => kxResultJsonStringify(row))
+    .join('\n');
 }
 
 function columnarToHtml(result: ColumnarPanelResult, range: CellRange, options: NormalizedExportOptions): string {
@@ -722,6 +728,45 @@ export function cellValueToText(value: unknown, options?: CellTextOptions): stri
   return sanitizeTsvCell(cellValueToReadableText(value, options));
 }
 
+export interface BoundedCellText {
+  text: string;
+  truncated: boolean;
+}
+
+interface BoundedReadableTextState {
+  chunks: string[];
+  length: number;
+  limit: number;
+  truncated: boolean;
+  skipLfAfterCr: boolean;
+  stack: Set<object>;
+  options: NormalizedCellTextOptions;
+}
+
+export function cellValueToBoundedText(
+  value: unknown,
+  maxChars: number,
+  options?: CellTextOptions
+): BoundedCellText {
+  const limit = Number.isFinite(maxChars)
+    ? Math.max(0, Math.floor(maxChars))
+    : 0;
+  const state: BoundedReadableTextState = {
+    chunks: [],
+    length: 0,
+    limit,
+    truncated: false,
+    skipLfAfterCr: false,
+    stack: new Set<object>(),
+    options: normalizeCellTextOptions(options),
+  };
+  appendBoundedReadableValue(state, value, true, 0);
+  return {
+    text: state.chunks.join(''),
+    truncated: state.truncated,
+  };
+}
+
 export function visibleIndexRange(
   scrollOffset: number,
   viewportSize: number,
@@ -822,6 +867,236 @@ function readableValueText(value: unknown, topLevel: boolean, options: Normalize
   }
 
   return cellValueToExportText(value);
+}
+
+function appendBoundedReadableValue(
+  state: BoundedReadableTextState,
+  value: unknown,
+  topLevel: boolean,
+  depth: number
+): void {
+  if (state.truncated) {
+    return;
+  }
+  if (depth > 512) {
+    state.truncated = true;
+    return;
+  }
+  if (value === null || value === undefined) {
+    return;
+  }
+  if (typeof value === 'string') {
+    appendBoundedSanitizedText(state, value);
+    return;
+  }
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    appendBoundedSanitizedText(state, String(value));
+    return;
+  }
+  if (Array.isArray(value)) {
+    appendBoundedReadableArray(state, value, topLevel, depth);
+    return;
+  }
+  if (isPlainObject(value)) {
+    appendBoundedReadableObject(state, value, depth);
+    return;
+  }
+
+  let estimated: number | undefined;
+  try {
+    estimated = kxResultJsonCharacterLength(
+      value,
+      Math.max(0, state.limit - state.length)
+    );
+  } catch {
+    estimated = undefined;
+  }
+  if (estimated === undefined) {
+    state.truncated = true;
+    return;
+  }
+  appendBoundedSanitizedText(state, cellValueToExportText(value));
+}
+
+function appendBoundedReadableArray(
+  state: BoundedReadableTextState,
+  value: unknown[],
+  topLevel: boolean,
+  depth: number
+): void {
+  if (state.stack.has(value)) {
+    state.truncated = true;
+    return;
+  }
+  state.stack.add(value);
+  try {
+    const bracketed = !topLevel || state.options.arrayDisplayFormat === 'raw';
+    if (bracketed) {
+      appendBoundedSanitizedText(state, '[');
+    }
+    const separator = arrayDisplaySeparator(state.options.arrayDisplayFormat);
+    for (let index = 0; index < value.length && !state.truncated; index++) {
+      if (index > 0) {
+        appendBoundedSanitizedText(state, separator);
+      }
+      appendBoundedReadableValue(state, value[index], false, depth + 1);
+    }
+    if (bracketed && !state.truncated) {
+      appendBoundedSanitizedText(state, ']');
+    }
+  } finally {
+    state.stack.delete(value);
+  }
+}
+
+function appendBoundedReadableObject(
+  state: BoundedReadableTextState,
+  value: { [key: string]: unknown },
+  depth: number
+): void {
+  if (state.stack.has(value)) {
+    state.truncated = true;
+    return;
+  }
+  state.stack.add(value);
+  try {
+    appendBoundedSanitizedText(state, '{');
+    let properties = 0;
+    for (const key in value) {
+      if (state.truncated ||
+        !Object.prototype.hasOwnProperty.call(value, key)) {
+        continue;
+      }
+      if (properties > 0) {
+        appendBoundedSanitizedText(state, ', ');
+      }
+      appendBoundedJsonString(state, key);
+      appendBoundedSanitizedText(state, ': ');
+      appendBoundedReadableValue(state, value[key], false, depth + 1);
+      properties++;
+    }
+    if (!state.truncated) {
+      appendBoundedSanitizedText(state, '}');
+    }
+  } finally {
+    state.stack.delete(value);
+  }
+}
+
+function appendBoundedJsonString(
+  state: BoundedReadableTextState,
+  value: string
+): void {
+  appendBoundedSanitizedText(state, '"');
+  for (let index = 0; index < value.length && !state.truncated; index++) {
+    const code = value.charCodeAt(index);
+    switch (code) {
+      case 0x08:
+        appendBoundedSanitizedText(state, '\\b');
+        break;
+      case 0x09:
+        appendBoundedSanitizedText(state, '\\t');
+        break;
+      case 0x0a:
+        appendBoundedSanitizedText(state, '\\n');
+        break;
+      case 0x0c:
+        appendBoundedSanitizedText(state, '\\f');
+        break;
+      case 0x0d:
+        appendBoundedSanitizedText(state, '\\r');
+        break;
+      case 0x22:
+        appendBoundedSanitizedText(state, '\\"');
+        break;
+      case 0x5c:
+        appendBoundedSanitizedText(state, '\\\\');
+        break;
+      default:
+        if (code <= 0x1f ||
+          (code >= 0xd800 && code <= 0xdfff &&
+            !(code <= 0xdbff &&
+              index + 1 < value.length &&
+              value.charCodeAt(index + 1) >= 0xdc00 &&
+              value.charCodeAt(index + 1) <= 0xdfff))) {
+          appendBoundedSanitizedText(
+            state,
+            `\\u${code.toString(16).padStart(4, '0')}`
+          );
+        } else if (code >= 0xd800 && code <= 0xdbff) {
+          appendBoundedSanitizedText(state, value.slice(index, index + 2));
+          index++;
+        } else {
+          appendBoundedSanitizedText(state, value.charAt(index));
+        }
+    }
+  }
+  if (!state.truncated) {
+    appendBoundedSanitizedText(state, '"');
+  }
+}
+
+function appendBoundedSanitizedText(
+  state: BoundedReadableTextState,
+  value: string
+): void {
+  if (state.truncated || value.length === 0) {
+    return;
+  }
+  let index = 0;
+  if (state.skipLfAfterCr) {
+    state.skipLfAfterCr = false;
+    if (value.charCodeAt(0) === 0x0a) {
+      index = 1;
+    }
+  }
+  while (index < value.length && !state.truncated) {
+    const start = index;
+    while (index < value.length) {
+      const code = value.charCodeAt(index);
+      if (code === 0x09 || code === 0x0a || code === 0x0d) {
+        break;
+      }
+      index++;
+    }
+    if (index > start) {
+      appendBoundedRawText(state, value.slice(start, index));
+    }
+    if (index >= value.length || state.truncated) {
+      break;
+    }
+    const code = value.charCodeAt(index++);
+    appendBoundedRawText(state, ' ');
+    if (code === 0x0d) {
+      if (index < value.length && value.charCodeAt(index) === 0x0a) {
+        index++;
+      } else if (index === value.length) {
+        state.skipLfAfterCr = true;
+      }
+    }
+  }
+}
+
+function appendBoundedRawText(
+  state: BoundedReadableTextState,
+  value: string
+): void {
+  if (state.truncated || value.length === 0) {
+    return;
+  }
+  const remaining = state.limit - state.length;
+  if (remaining <= 0) {
+    state.truncated = true;
+    return;
+  }
+  if (value.length <= remaining) {
+    state.chunks.push(value);
+    state.length += value.length;
+    return;
+  }
+  state.chunks.push(value.slice(0, remaining));
+  state.length += remaining;
+  state.truncated = true;
 }
 
 function isPlainObject(value: unknown): value is { [key: string]: unknown } {
@@ -941,9 +1216,99 @@ function arrayDisplaySeparator(format: ArrayDisplayFormat): string {
   return format === 'commaSpace' ? ', ' : ' ';
 }
 
-function stringifyJson(value: unknown): string {
+export function kxResultJsonStringify(value: unknown): string {
   const json = JSON.stringify(value, jsonReplacer);
   return json === undefined ? 'null' : json;
+}
+
+export function kxResultJsonCharacterLength(
+  value: unknown,
+  maxChars = Number.MAX_SAFE_INTEGER
+): number | undefined {
+  const limit = safeJsonLengthLimit(maxChars);
+  return jsonValueCharacterLength(value, '', limit, new Set<object>(), 0);
+}
+
+export function kxResultJsonStringCharacterLength(
+  value: string,
+  maxChars = Number.MAX_SAFE_INTEGER
+): number | undefined {
+  const limit = safeJsonLengthLimit(maxChars);
+  let chars = 2;
+  if (chars > limit) {
+    return undefined;
+  }
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    let added: number;
+    if (code === 0x22 || code === 0x5c ||
+      code === 0x08 || code === 0x09 || code === 0x0a ||
+      code === 0x0c || code === 0x0d) {
+      added = 2;
+    } else if (code <= 0x1f) {
+      added = 6;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : -1;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        added = 2;
+        index++;
+      } else {
+        added = 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      added = 6;
+    } else {
+      added = 1;
+    }
+    if (added > limit - chars) {
+      return undefined;
+    }
+    chars += added;
+  }
+  return chars;
+}
+
+export function kxResultJsonStringUtf8ByteLength(
+  value: string,
+  maxBytes = Number.MAX_SAFE_INTEGER
+): number | undefined {
+  const limit = safeJsonLengthLimit(maxBytes);
+  let bytes = 2;
+  if (bytes > limit) {
+    return undefined;
+  }
+  for (let index = 0; index < value.length; index++) {
+    const code = value.charCodeAt(index);
+    let added: number;
+    if (code === 0x22 || code === 0x5c ||
+      code === 0x08 || code === 0x09 || code === 0x0a ||
+      code === 0x0c || code === 0x0d) {
+      added = 2;
+    } else if (code <= 0x1f) {
+      added = 6;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = index + 1 < value.length ? value.charCodeAt(index + 1) : -1;
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        added = 4;
+        index++;
+      } else {
+        added = 6;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      added = 6;
+    } else if (code <= 0x7f) {
+      added = 1;
+    } else if (code <= 0x7ff) {
+      added = 2;
+    } else {
+      added = 3;
+    }
+    if (added > limit - bytes) {
+      return undefined;
+    }
+    bytes += added;
+  }
+  return bytes;
 }
 
 function jsonReplacer(_key: string, value: unknown): unknown {
@@ -956,6 +1321,199 @@ function jsonReplacer(_key: string, value: unknown): unknown {
   }
 
   return value;
+}
+
+function jsonValueCharacterLength(
+  input: unknown,
+  key: string,
+  limit: number,
+  stack: Set<object>,
+  depth: number
+): number | undefined {
+  if (depth > 512) {
+    throw new RangeError('KX result JSON nesting exceeds the safe depth limit');
+  }
+  let value = input;
+  if ((typeof value === 'object' && value !== null) ||
+    typeof value === 'function' ||
+    typeof value === 'bigint') {
+    const toJSON = (value as { toJSON?: unknown }).toJSON;
+    if (typeof toJSON === 'function') {
+      value = toJSON.call(value, key);
+    }
+  }
+  value = jsonReplacer(key, value);
+
+  if (value === null) {
+    return boundedJsonPrimitiveLength(4, limit);
+  }
+  switch (typeof value) {
+    case 'string':
+      return kxResultJsonStringCharacterLength(value, limit);
+    case 'number':
+      return boundedJsonPrimitiveLength(
+        Number.isFinite(value) ? String(value).length : 4,
+        limit
+      );
+    case 'boolean':
+      return boundedJsonPrimitiveLength(value ? 4 : 5, limit);
+    case 'undefined':
+    case 'function':
+    case 'symbol':
+      return boundedJsonPrimitiveLength(4, limit);
+    case 'bigint':
+      return kxResultJsonStringCharacterLength(String(value), limit);
+  }
+
+  const object = value as object;
+  if (object instanceof Number) {
+    const number = Number.prototype.valueOf.call(object);
+    return boundedJsonPrimitiveLength(
+      Number.isFinite(number) ? String(number).length : 4,
+      limit
+    );
+  }
+  if (object instanceof String) {
+    return kxResultJsonStringCharacterLength(
+      String.prototype.valueOf.call(object),
+      limit
+    );
+  }
+  if (object instanceof Boolean) {
+    return boundedJsonPrimitiveLength(
+      Boolean.prototype.valueOf.call(object) ? 4 : 5,
+      limit
+    );
+  }
+  if (object instanceof BigInt) {
+    BigInt.prototype.valueOf.call(object);
+    throw new TypeError('Do not know how to serialize a BigInt');
+  }
+  if (stack.has(object)) {
+    throw new TypeError('Converting circular structure to JSON');
+  }
+
+  stack.add(object);
+  try {
+    if (Array.isArray(object)) {
+      return jsonArrayCharacterLength(object, limit, stack, depth);
+    }
+    return jsonObjectCharacterLength(
+      object as { [key: string]: unknown },
+      limit,
+      stack,
+      depth
+    );
+  } finally {
+    stack.delete(object);
+  }
+}
+
+function jsonArrayCharacterLength(
+  value: unknown[],
+  limit: number,
+  stack: Set<object>,
+  depth: number
+): number | undefined {
+  let chars = 2;
+  if (chars > limit) {
+    return undefined;
+  }
+  const length = safeJsonArrayLength(value.length);
+  for (let index = 0; index < length; index++) {
+    if (index > 0) {
+      const withSeparator = addJsonLength(chars, 1, limit);
+      if (withSeparator === undefined) {
+        return undefined;
+      }
+      chars = withSeparator;
+    }
+    const remaining = limit - chars;
+    const itemChars = jsonValueCharacterLength(
+      value[index],
+      String(index),
+      remaining,
+      stack,
+      depth + 1
+    );
+    if (itemChars === undefined) {
+      return undefined;
+    }
+    chars += itemChars;
+  }
+  return chars;
+}
+
+function jsonObjectCharacterLength(
+  value: { [key: string]: unknown },
+  limit: number,
+  stack: Set<object>,
+  depth: number
+): number | undefined {
+  let chars = 2;
+  let properties = 0;
+  if (chars > limit) {
+    return undefined;
+  }
+  for (const property in value) {
+    if (!Object.prototype.hasOwnProperty.call(value, property)) {
+      continue;
+    }
+    const keyChars = kxResultJsonStringCharacterLength(
+      property,
+      limit - chars
+    );
+    if (keyChars === undefined) {
+      return undefined;
+    }
+    const withKey = addJsonLength(
+      chars,
+      keyChars + 1 + (properties > 0 ? 1 : 0),
+      limit
+    );
+    if (withKey === undefined) {
+      return undefined;
+    }
+    chars = withKey;
+    const itemChars = jsonValueCharacterLength(
+      value[property],
+      property,
+      limit - chars,
+      stack,
+      depth + 1
+    );
+    if (itemChars === undefined) {
+      return undefined;
+    }
+    chars += itemChars;
+    properties++;
+  }
+  return chars;
+}
+
+function addJsonLength(
+  current: number,
+  added: number,
+  limit: number
+): number | undefined {
+  return added <= limit - current ? current + added : undefined;
+}
+
+function boundedJsonPrimitiveLength(length: number, limit: number): number | undefined {
+  return length <= limit ? length : undefined;
+}
+
+function safeJsonLengthLimit(value: number): number {
+  return Number.isSafeInteger(value) && value >= 0
+    ? value
+    : Number.MAX_SAFE_INTEGER;
+}
+
+function safeJsonArrayLength(value: number): number {
+  if (!Number.isFinite(value) || value <= 0) {
+    return 0;
+  }
+  return Math.min(Number.MAX_SAFE_INTEGER, Math.floor(value));
 }
 
 function escapeCsvCell(value: string): string {

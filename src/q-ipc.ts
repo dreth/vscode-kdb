@@ -92,7 +92,7 @@ interface NormalizedQResultDisplayOptions {
   objectDisplayStrategy: QResultDisplayStrategy;
 }
 
-interface QTextFormatOptions {
+export interface QTextFormatOptions {
   maxDepth?: number;
   maxItems?: number;
   maxChars?: number;

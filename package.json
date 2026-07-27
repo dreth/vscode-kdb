@@ -71,6 +71,8 @@
     "onCommand:vscode-kdb.tagNotebookCellAsQ",
     "onCommand:vscode-kdb.prepareNotebookCellForPythonKernel",
     "onCommand:vscode-kdb.runQNotebookCell",
+    "onCommand:vscode-kdb.runQNotebookCellAndSelectBelow",
+    "onCommand:vscode-kdb.runQNotebookCellAndInsertBelow",
     "onCommand:vscode-kdb.selectNotebookQTarget",
     "onCommand:vscode-kdb.openNotebookPreviewInResults"
   ],
@@ -85,6 +87,7 @@
     "test:notebook-python": "uv run --python 3.9 --no-project --with-editable ./python/kx_notebook python -m unittest discover -s python/kx_notebook/tests -v",
     "test:notebook-cross": "npm run compile && node scripts/check-notebook-contract.js",
     "test:extension-host": "npm run compile && node scripts/run-extension-host-test.js",
+    "test:notebook-results-visual": "npm run compile && node scripts/run-notebook-results-visual.js",
     "test:live-q": "npm run compile && node test/live/run.js",
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
@@ -291,6 +294,16 @@
         "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
+        "command": "vscode-kdb.runQNotebookCellAndSelectBelow",
+        "title": "Run q Cell and Select Below (KX)",
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
+        "command": "vscode-kdb.runQNotebookCellAndInsertBelow",
+        "title": "Run q Cell and Insert Below (KX)",
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
         "command": "vscode-kdb.selectNotebookQTarget",
         "title": "KX: Choose Notebook q Target",
         "icon": "$(server-process)",
@@ -308,6 +321,18 @@
         "command": "vscode-kdb.runQNotebookCell",
         "key": "ctrl+enter",
         "mac": "cmd+enter",
+        "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
+        "command": "vscode-kdb.runQNotebookCellAndSelectBelow",
+        "key": "shift+enter",
+        "mac": "shift+enter",
+        "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
+        "command": "vscode-kdb.runQNotebookCellAndInsertBelow",
+        "key": "alt+enter",
+        "mac": "alt+enter",
         "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
@@ -499,6 +524,14 @@
         {
           "command": "vscode-kdb.runQNotebookCell",
           "when": "notebookType == 'jupyter-notebook' && editorLangId == q && !vscode-kdb.notebookDirectQControllerSelected"
+        },
+        {
+          "command": "vscode-kdb.runQNotebookCellAndSelectBelow",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.runQNotebookCellAndInsertBelow",
+          "when": "false"
         },
         {
           "command": "vscode-kdb.selectNotebookQTarget",

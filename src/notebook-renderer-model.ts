@@ -140,6 +140,25 @@ export function notebookSelectionForCell(
   };
 }
 
+export function notebookSelectionForColumn(
+  previous: NotebookCellSelection | undefined,
+  column: number,
+  rowCount: number,
+  extend: boolean
+): NotebookCellSelection | undefined {
+  const rows = nonNegativeInteger(rowCount);
+  if (rows < 1) {
+    return undefined;
+  }
+  const focusColumn = nonNegativeInteger(column);
+  return {
+    anchorRow: 0,
+    anchorColumn: extend && previous ? previous.anchorColumn : focusColumn,
+    focusRow: rows - 1,
+    focusColumn,
+  };
+}
+
 export function notebookMoveSelection(
   previous: NotebookCellSelection | undefined,
   rowDelta: number,

@@ -1,7 +1,6 @@
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import JSZip = require('jszip');
 import {
   CHART_MAX_SOURCE_ROWS,
   CHART_ZOOM_MAX_SAMPLED_POINTS,
@@ -35,14 +34,23 @@ import {
   VisibleIndexRange,
   allCellsRange,
   applyColumnarRowOrder,
-  cellValueToText,
   clampCellRange,
-  exportShape,
   filterColumnarPanelResult,
-  rowIndexColumnName,
   sortedColumnarRowOrder,
   validateXlsxSheetLimits,
 } from './kx-results';
+import {
+  CHART_PNG_DATA_URL_PREFIX,
+  CopyExportEstimate,
+  chartPngBytesFromDataUrl,
+  columnarToXlsx as sharedColumnarToXlsx,
+  estimateCopyExport,
+  kxResultExportFileExtension,
+  kxResultExportSaveFilters,
+  largeCopyExportConfirmationMessage,
+  normalizeKxResultExportFormat,
+  normalizeKxResultTextExportFormat,
+} from './kx-results-export';
 import {
   LOCAL_DATA_SERVER_FULL_EXPORT_CELL_LIMIT,
   LocalDataServer,
@@ -53,6 +61,17 @@ import {
 } from './local-data-server';
 import { endPerfSpan, isPerfTraceEnabled, perfSpan } from './perf';
 import { QTextRenderModel, qTextRenderModel } from './q-text';
+import {
+  KX_RESULT_CHART_TYPE_OPTIONS,
+  KX_RESULT_EXPORT_FORMATS,
+  KX_RESULT_UI_LABELS,
+  KX_RESULTS_SHARED_CSS,
+  KxQResultDisplayStrategy,
+  KxResultDensity,
+  KxResultElapsedTimeDisplay,
+  SharedKxResultSettings,
+} from './results-ui-contract';
+export { SharedKxResultSettings } from './results-ui-contract';
 
 type KxPanelResultMode = 'table' | 'text';
 
@@ -104,9 +123,9 @@ interface KxPanelMetadata {
   chartAutoOpen?: boolean;
 }
 
-export type KxPanelDensity = 'compact' | 'standard' | 'comfortable';
-export type KxPanelElapsedTimeDisplay = 'auto' | 'milliseconds';
-export type KxPanelQResultDisplayStrategy = 'grid' | 'qText';
+export type KxPanelDensity = KxResultDensity;
+export type KxPanelElapsedTimeDisplay = KxResultElapsedTimeDisplay;
+export type KxPanelQResultDisplayStrategy = KxQResultDisplayStrategy;
 type KxPanelSortDirection = 'asc' | 'desc';
 export type KxResultsPanelRunMode = 'replace' | 'new';
 
@@ -115,50 +134,10 @@ interface KxPanelSortState {
   direction: KxPanelSortDirection;
 }
 
-interface KxPanelSettings {
-  cellWidth: number;
-  rowHeight: number;
-  fontSize: number;
-  density: KxPanelDensity;
-  showRowIndex: boolean;
-  includeHeaders: boolean;
-  includeRowIndex: boolean;
+interface KxPanelSettings extends SharedKxResultSettings {
   hideLargeResultWarnings: boolean;
   hideLargeSortWarnings: boolean;
-  copyExportConfirmCellThreshold: number;
   localDataServerFullExportCellLimit: number;
-  elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
-  chartDecimalPlaces: number;
-  chartZoomMinSampledPoints: number;
-  chartZoomMaxSampledPoints: number;
-  qTextSyntaxHighlighting: boolean;
-  qTextDisplayFormatting: boolean;
-  arrayDisplayFormat: ArrayDisplayFormat;
-  functionDisplayStrategy: KxPanelQResultDisplayStrategy;
-  dictionaryDisplayStrategy: KxPanelQResultDisplayStrategy;
-  listDisplayStrategy: KxPanelQResultDisplayStrategy;
-  objectDisplayStrategy: KxPanelQResultDisplayStrategy;
-}
-
-export interface SharedKxResultSettings {
-  cellWidth: number;
-  rowHeight: number;
-  fontSize: number;
-  density: KxPanelDensity;
-  showRowIndex: boolean;
-  includeHeaders: boolean;
-  includeRowIndex: boolean;
-  elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
-  chartDecimalPlaces: number;
-  chartMaxSourceRows: number;
-  chartZoomMaxSampledPoints: number;
-  qTextSyntaxHighlighting: boolean;
-  qTextDisplayFormatting: boolean;
-  arrayDisplayFormat: ArrayDisplayFormat;
-  functionDisplayStrategy: KxPanelQResultDisplayStrategy;
-  dictionaryDisplayStrategy: KxPanelQResultDisplayStrategy;
-  listDisplayStrategy: KxPanelQResultDisplayStrategy;
-  objectDisplayStrategy: KxPanelQResultDisplayStrategy;
 }
 
 interface SavedChartSelection {
@@ -176,36 +155,20 @@ interface KxPanelShowOptions {
   autoChart?: boolean;
 }
 
-interface CopyExportEstimate {
-  selectedRows: number;
-  selectedColumns: number;
-  outputRows: number;
-  outputColumns: number;
-  selectedCells: number;
-  outputCells: number;
-  estimatedBytes: number;
-}
-
 const COPY_WARNING_BYTES = 15 * 1024 * 1024;
 const LARGE_RESULT_WARNING_CELL_THRESHOLD = 5 * 1000 * 1000;
 const LARGE_RESULT_WARNING_ROW_THRESHOLD = 1000000;
 const LARGE_RESULT_WARNING_COLUMN_THRESHOLD = 500;
 const COPY_EXPORT_CONFIRM_CELL_THRESHOLD = 1000000;
-const COPY_EXPORT_CONFIRM_BYTES = 50 * 1024 * 1024;
-const COPY_EXPORT_SAMPLE_ROWS = 32;
-const COPY_EXPORT_SAMPLE_COLUMNS = 12;
 const SORT_CONFIRM_ROW_THRESHOLD = 250000;
 const SEARCH_MATCH_CAP = 1000;
 const SEARCH_YIELD_CELL_INTERVAL = 10000;
 const SEARCH_SCAN_CELL_LIMIT = 2000000;
 const SEARCH_SCAN_MS_LIMIT = 1500;
-const CHART_PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
-const CHART_EXPORT_MAX_BYTES = 50 * 1024 * 1024;
 const CHART_DECIMAL_PLACES_DEFAULT = 4;
 const CHART_DECIMAL_PLACES_MIN = 0;
 const CHART_DECIMAL_PLACES_MAX = 12;
 const CHART_SELECTION_STATE_PREFIX = 'vscode-kdb.results.viewer.chartSelection.v1.';
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   cellWidth: 160,
   rowHeight: 28,
@@ -220,6 +183,7 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   localDataServerFullExportCellLimit: LOCAL_DATA_SERVER_FULL_EXPORT_CELL_LIMIT,
   elapsedTimeDisplay: 'auto',
   chartDecimalPlaces: CHART_DECIMAL_PLACES_DEFAULT,
+  chartMaxSourceRows: CHART_MAX_SOURCE_ROWS,
   chartZoomMinSampledPoints: CHART_ZOOM_MIN_SAMPLED_POINTS,
   chartZoomMaxSampledPoints: CHART_ZOOM_MAX_SAMPLED_POINTS,
   qTextSyntaxHighlighting: false,
@@ -664,7 +628,7 @@ export class KxResultsPanel {
       await this.copyRange(
         message.version,
         message.range,
-        textExportFormat(message.format),
+        normalizeKxResultTextExportFormat(message.format),
         message.includeHeaders === true,
         message.includeRowIndex === true
       );
@@ -675,7 +639,7 @@ export class KxResultsPanel {
       await this.exportRange(
         message.version,
         message.range,
-        exportFormat(message.format),
+        normalizeKxResultExportFormat(message.format),
         message.includeHeaders === true,
         message.includeRowIndex === true
       );
@@ -1528,7 +1492,7 @@ export class KxResultsPanel {
 
     const uri = await vscode.window.showSaveDialog({
       defaultUri: defaultExportUri(format),
-      filters: saveFilters(format),
+      filters: kxResultExportSaveFilters(format),
       saveLabel: 'Export',
     });
     if (!this.isCurrentVersion(requestVersion)) {
@@ -1789,6 +1753,7 @@ export class KxResultsPanel {
   <title>KX Results</title>
   <link rel="stylesheet" href="${uplotStyleUri}">
   <style nonce="${nonce}">
+    ${KX_RESULTS_SHARED_CSS}
     :root {
       --header-height: 32px;
       --row-height: 28px;
@@ -2506,29 +2471,23 @@ export class KxResultsPanel {
     }
   </style>
 </head>
-<body>
+<body class="kx-results-surface kx-results-panel-host">
   <div id="resultsToolbar" class="toolbar">
     <div id="outputControls" class="toolbar-group output-group" role="group" aria-labelledby="outputControlsLabel">
-      <span id="outputControlsLabel" class="toolbar-group-label">Output:</span>
-      <select id="actionFormat" aria-label="Copy/export format" disabled>
-        <option value="csv">CSV</option>
-        <option value="xlsx">XLSX</option>
-        <option value="tsv">TSV</option>
-        <option value="json">JSON</option>
-        <option value="ndjson">NDJSON</option>
-        <option value="html">HTML</option>
-        <option value="markdown">Markdown</option>
+      <span id="outputControlsLabel" class="toolbar-group-label">${KX_RESULT_UI_LABELS.output}</span>
+      <select id="actionFormat" aria-label="${KX_RESULT_UI_LABELS.format}" disabled>
+        ${kxResultExportOptionsHtml()}
       </select>
       <span id="inlineOutputOptions" class="output-options-slot">
-        <label id="includeHeadersLabel" class="checkbox" title="Include column headers in copied/exported output"><input id="includeHeaders" type="checkbox" checked>Headers</label>
-        <label id="includeRowIndexLabel" class="checkbox" title="Include row numbers in copied/exported output"><input id="includeRowIndex" type="checkbox" checked>Row #</label>
+        <label id="includeHeadersLabel" class="checkbox" title="Include column headers in copied/exported output"><input id="includeHeaders" type="checkbox" checked>${KX_RESULT_UI_LABELS.headers}</label>
+        <label id="includeRowIndexLabel" class="checkbox" title="Include row numbers in copied/exported output"><input id="includeRowIndex" type="checkbox" checked>${KX_RESULT_UI_LABELS.rowIndex}</label>
       </span>
-      <button id="copy" disabled>Copy</button>
-      <button id="export" disabled>Export</button>
+      <button id="copy" disabled>${KX_RESULT_UI_LABELS.copy}</button>
+      <button id="export" disabled>${KX_RESULT_UI_LABELS.export}</button>
     </div>
-    <button id="openChart" class="chart-open-button" disabled title="Open chart" aria-label="Open chart">Chart</button>
+    <button id="openChart" class="chart-open-button" disabled title="Open chart" aria-label="Open chart">${KX_RESULT_UI_LABELS.chart}</button>
     <details id="settingsMenu" class="settings">
-      <summary id="settingsSummary" aria-label="Settings menu">Settings</summary>
+      <summary id="settingsSummary" aria-label="Settings menu">${KX_RESULT_UI_LABELS.settings}</summary>
       <div class="settings-panel" role="group" aria-label="Settings controls">
         <div class="settings-compact-actions">
           <button id="expandSettingsSections" type="button">Expand all</button>
@@ -2571,6 +2530,9 @@ export class KxResultsPanel {
           <label class="settings-row"><span>Copy/export confirm cells</span><input id="settingsCopyExportConfirmCellThreshold" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Local server current.* cell limit</span><input id="settingsLocalDataServerFullExportCellLimit" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Chart decimals</span><input id="settingsChartDecimalPlaces" type="number" min="0" max="12" step="1" title="Decimal places for chart numeric labels, 0-12"></label>
+          <label class="settings-row"><span>Chart source rows</span><input id="settingsChartMaxSourceRows" type="number" min="1" step="1"></label>
+          <label class="settings-row"><span>Zoom minimum points</span><input id="settingsChartZoomMinSampledPoints" type="number" min="1" step="1"></label>
+          <label class="settings-row"><span>Zoom maximum points</span><input id="settingsChartZoomMaxSampledPoints" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Elapsed time</span><select id="settingsElapsedTimeDisplay">
             <option value="auto">Auto</option>
             <option value="milliseconds">Milliseconds</option>
@@ -2639,12 +2601,7 @@ export class KxResultsPanel {
   <div id="chartPanel" class="chart-panel" hidden>
     <div class="chart-toolbar">
       <label class="chart-field"><span>Chart type</span><select id="chartType" aria-label="Chart type">
-        <option value="line">Line</option>
-        <option value="scatter">Scatter</option>
-        <option value="step">Step</option>
-        <option value="bar">Bar</option>
-        <option value="box">Box</option>
-        <option value="candlestick">Candlestick</option>
+        ${kxResultChartTypeOptionsHtml()}
       </select></label>
       <label class="chart-field"><span>X</span><select id="chartXColumn" disabled></select></label>
       <label id="chartGroupField" class="chart-field"><span>Group by</span><select id="chartGroupColumn" aria-label="Group by column" disabled>
@@ -2657,11 +2614,11 @@ export class KxResultsPanel {
         <label class="chart-field"><span>Low</span><select id="chartLowColumn" aria-label="Low column" disabled></select></label>
         <label class="chart-field"><span>Close</span><select id="chartCloseColumn" aria-label="Close column" disabled></select></label>
       </div>
-      <button id="renderChart" disabled>Render</button>
-      <button id="exportChart" hidden disabled>Export PNG</button>
-      <button id="resetChartZoom" disabled>Reset zoom</button>
-      <button id="refineChartZoom" disabled>Refine zoom</button>
-      <button id="closeChart">Close</button>
+      <button id="renderChart" disabled>${KX_RESULT_UI_LABELS.renderChart}</button>
+      <button id="exportChart" hidden disabled>${KX_RESULT_UI_LABELS.exportChartPng}</button>
+      <button id="resetChartZoom" disabled>${KX_RESULT_UI_LABELS.resetZoom}</button>
+      <button id="refineChartZoom" disabled>${KX_RESULT_UI_LABELS.refineZoom}</button>
+      <button id="closeChart">${KX_RESULT_UI_LABELS.closeChart}</button>
       <span id="chartStatus" class="status"></span>
     </div>
     <div id="chartCanvasWrap" class="chart-canvas-wrap">
@@ -2708,6 +2665,7 @@ export class KxResultsPanel {
         localDataServerFullExportCellLimit: 1000000,
         elapsedTimeDisplay: 'auto',
         chartDecimalPlaces: 4,
+        chartMaxSourceRows: ${CHART_MAX_SOURCE_ROWS},
         chartZoomMinSampledPoints: ${CHART_ZOOM_MIN_SAMPLED_POINTS},
         chartZoomMaxSampledPoints: ${CHART_ZOOM_MAX_SAMPLED_POINTS},
         qTextSyntaxHighlighting: false,
@@ -2750,6 +2708,9 @@ export class KxResultsPanel {
       const settingsCopyExportConfirmCellThreshold = document.getElementById('settingsCopyExportConfirmCellThreshold');
       const settingsLocalDataServerFullExportCellLimit = document.getElementById('settingsLocalDataServerFullExportCellLimit');
       const settingsChartDecimalPlaces = document.getElementById('settingsChartDecimalPlaces');
+      const settingsChartMaxSourceRows = document.getElementById('settingsChartMaxSourceRows');
+      const settingsChartZoomMinSampledPoints = document.getElementById('settingsChartZoomMinSampledPoints');
+      const settingsChartZoomMaxSampledPoints = document.getElementById('settingsChartZoomMaxSampledPoints');
       const settingsElapsedTimeDisplay = document.getElementById('settingsElapsedTimeDisplay');
       const settingsArrayDisplayFormat = document.getElementById('settingsArrayDisplayFormat');
       const settingsQTextSyntaxHighlighting = document.getElementById('settingsQTextSyntaxHighlighting');
@@ -2850,7 +2811,7 @@ export class KxResultsPanel {
       let chartAutoRenderPending = false;
       let chartAutoRefineTimer = 0;
       let chartLastAutoRefineKey = '';
-      const CHART_PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
+      const CHART_PNG_DATA_URL_PREFIX = '${CHART_PNG_DATA_URL_PREFIX}';
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
       const CHART_AUTO_REFINE_DELAY_MS = 450;
@@ -2962,6 +2923,9 @@ export class KxResultsPanel {
       settingsCopyExportConfirmCellThreshold.addEventListener('change', () => updatePositiveIntegerSetting('copyExportConfirmCellThreshold', settingsCopyExportConfirmCellThreshold));
       settingsLocalDataServerFullExportCellLimit.addEventListener('change', () => updatePositiveIntegerSetting('localDataServerFullExportCellLimit', settingsLocalDataServerFullExportCellLimit));
       settingsChartDecimalPlaces.addEventListener('change', () => updateNumberSetting('chartDecimalPlaces', settingsChartDecimalPlaces, 0, 12));
+      settingsChartMaxSourceRows.addEventListener('change', () => updatePositiveIntegerSetting('chartMaxSourceRows', settingsChartMaxSourceRows));
+      settingsChartZoomMinSampledPoints.addEventListener('change', () => updatePositiveIntegerSetting('chartZoomMinSampledPoints', settingsChartZoomMinSampledPoints));
+      settingsChartZoomMaxSampledPoints.addEventListener('change', () => updatePositiveIntegerSetting('chartZoomMaxSampledPoints', settingsChartZoomMaxSampledPoints));
       expandSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(true));
       collapseSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(false));
       settingsElapsedTimeDisplay.addEventListener('change', () => updateSetting('elapsedTimeDisplay', String(settingsElapsedTimeDisplay.value || 'auto')));
@@ -5520,6 +5484,10 @@ export class KxResultsPanel {
           localDataServerFullExportCellLimit: positiveIntegerSetting(value.localDataServerFullExportCellLimit, DEFAULT_SETTINGS.localDataServerFullExportCellLimit),
           elapsedTimeDisplay: normalizeElapsedTimeDisplay(value.elapsedTimeDisplay),
           chartDecimalPlaces: boundedSetting(value.chartDecimalPlaces, DEFAULT_SETTINGS.chartDecimalPlaces, 0, 12),
+          chartMaxSourceRows: positiveIntegerSetting(
+            value.chartMaxSourceRows,
+            DEFAULT_SETTINGS.chartMaxSourceRows
+          ),
           chartZoomMinSampledPoints,
           chartZoomMaxSampledPoints,
           qTextSyntaxHighlighting: typeof value.qTextSyntaxHighlighting === 'boolean'
@@ -5547,6 +5515,9 @@ export class KxResultsPanel {
         settingsCopyExportConfirmCellThreshold.value = String(settings.copyExportConfirmCellThreshold);
         settingsLocalDataServerFullExportCellLimit.value = String(settings.localDataServerFullExportCellLimit);
         settingsChartDecimalPlaces.value = String(settings.chartDecimalPlaces);
+        settingsChartMaxSourceRows.value = String(settings.chartMaxSourceRows);
+        settingsChartZoomMinSampledPoints.value = String(settings.chartZoomMinSampledPoints);
+        settingsChartZoomMaxSampledPoints.value = String(settings.chartZoomMaxSampledPoints);
         settingsElapsedTimeDisplay.value = settings.elapsedTimeDisplay;
         settingsArrayDisplayFormat.value = settings.arrayDisplayFormat;
         settingsQTextSyntaxHighlighting.checked = settings.qTextSyntaxHighlighting;
@@ -5576,6 +5547,7 @@ export class KxResultsPanel {
           localDataServerFullExportCellLimit: settings.localDataServerFullExportCellLimit,
           elapsedTimeDisplay: settings.elapsedTimeDisplay,
           chartDecimalPlaces: settings.chartDecimalPlaces,
+          chartMaxSourceRows: settings.chartMaxSourceRows,
           chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
           chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
           qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
@@ -6841,6 +6813,18 @@ export class KxResultsPanel {
   }
 }
 
+function kxResultExportOptionsHtml(): string {
+  return KX_RESULT_EXPORT_FORMATS
+    .map(format => `<option value="${format.value}">${format.label}</option>`)
+    .join('');
+}
+
+function kxResultChartTypeOptionsHtml(): string {
+  return KX_RESULT_CHART_TYPE_OPTIONS
+    .map(option => `<option value="${option.value}">${option.label}</option>`)
+    .join('');
+}
+
 function yieldToEventLoop(): Promise<void> {
   return new Promise<void>(resolve => setTimeout(resolve, 0));
 }
@@ -6884,6 +6868,9 @@ function panelSettings(): KxPanelSettings {
     ),
     elapsedTimeDisplay: panelElapsedTimeDisplay(config.get<string>('elapsedTimeDisplay')),
     chartDecimalPlaces: chartDecimalPlacesSettingValue(config.get<number>('viewer.chartDecimalPlaces')),
+    chartMaxSourceRows: chartMaxSourceRowsSettingValue(
+      config.get<number>('viewer.chartMaxSourceRows')
+    ),
     ...chartZoomSamplePointSettings(config),
     qTextSyntaxHighlighting: booleanSetting(
       config.get<boolean>('qText.syntaxHighlighting'),
@@ -6913,7 +6900,9 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     includeRowIndex: settings.includeRowIndex,
     elapsedTimeDisplay: settings.elapsedTimeDisplay,
     chartDecimalPlaces: settings.chartDecimalPlaces,
-    chartMaxSourceRows: chartMaxSourceRowsSetting(),
+    chartMaxSourceRows: settings.chartMaxSourceRows,
+    copyExportConfirmCellThreshold: settings.copyExportConfirmCellThreshold,
+    chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
     chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
     qTextDisplayFormatting: settings.qTextDisplayFormatting,
@@ -7031,6 +7020,8 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
     key === 'arrayDisplayFormat' ||
     key === 'chartMaxSourceRows' ||
     key === 'chartDecimalPlaces' ||
+    key === 'chartZoomMinSampledPoints' ||
+    key === 'chartZoomMaxSampledPoints' ||
     key === 'functionDisplayStrategy' ||
     key === 'dictionaryDisplayStrategy' ||
     key === 'listDisplayStrategy' ||
@@ -7086,6 +7077,8 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   elapsedTimeDisplay: elapsedTimeDisplaySettingUpdate,
   chartDecimalPlaces: value => numberSettingUpdate(value, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX),
   chartMaxSourceRows: positiveIntegerSettingUpdate,
+  chartZoomMinSampledPoints: positiveIntegerSettingUpdate,
+  chartZoomMaxSampledPoints: positiveIntegerSettingUpdate,
   arrayDisplayFormat: arrayDisplayFormatSettingUpdate,
   functionDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'qText'),
   dictionaryDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
@@ -7413,33 +7406,6 @@ function integerOrNull(value: any): number | null {
   return Number.isFinite(number) ? Math.floor(number) : null;
 }
 
-function textExportFormat(value: any): TextExportFormat {
-  switch (value) {
-    case 'csv':
-    case 'json':
-    case 'ndjson':
-    case 'html':
-    case 'markdown':
-    case 'tsv':
-      return value;
-  }
-  return 'csv';
-}
-
-function exportFormat(value: any): ExportFormat {
-  switch (value) {
-    case 'csv':
-    case 'xlsx':
-    case 'json':
-    case 'ndjson':
-    case 'html':
-    case 'markdown':
-    case 'tsv':
-      return value;
-  }
-  return 'csv';
-}
-
 function localDataServerEndpoint(value: any): LocalDataServerEndpoint {
   switch (value) {
     case 'metadata.json':
@@ -7455,30 +7421,11 @@ function localDataServerEndpoint(value: any): LocalDataServerEndpoint {
   return 'current.csv';
 }
 
-function saveFilters(format: ExportFormat): { [name: string]: string[] } {
-  switch (format) {
-    case 'csv':
-      return { CSV: ['csv'] };
-    case 'xlsx':
-      return { XLSX: ['xlsx'] };
-    case 'json':
-      return { JSON: ['json'] };
-    case 'ndjson':
-      return { NDJSON: ['ndjson'] };
-    case 'html':
-      return { HTML: ['html', 'htm'] };
-    case 'markdown':
-      return { Markdown: ['md', 'markdown'] };
-    case 'tsv':
-      return { TSV: ['tsv'] };
-  }
-}
-
 function defaultExportUri(format: ExportFormat): vscode.Uri {
   const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
     ? vscode.workspace.workspaceFolders[0].uri.fsPath
     : os.homedir();
-  const extension = format === 'markdown' ? 'md' : format;
+  const extension = kxResultExportFileExtension(format);
   return vscode.Uri.file(path.join(folder, `kx-results.${extension}`));
 }
 
@@ -7494,34 +7441,6 @@ function defaultChartExportUri(): vscode.Uri {
     ? vscode.workspace.workspaceFolders[0].uri.fsPath
     : os.homedir();
   return vscode.Uri.file(path.join(folder, 'kx-chart.png'));
-}
-
-function chartPngBytesFromDataUrl(value: any): Uint8Array {
-  if (typeof value !== 'string' || !value.startsWith(CHART_PNG_DATA_URL_PREFIX)) {
-    throw new Error('Chart export requires a PNG data URL.');
-  }
-
-  const base64 = value.slice(CHART_PNG_DATA_URL_PREFIX.length);
-  if (base64.length === 0 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
-    throw new Error('Invalid chart PNG data URL.');
-  }
-
-  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
-  const decodedBytes = base64.length / 4 * 3 - padding;
-  if (decodedBytes > CHART_EXPORT_MAX_BYTES) {
-    throw new Error(`Chart PNG export is too large: ${formatBytes(decodedBytes)}.`);
-  }
-
-  const content = Buffer.from(base64, 'base64');
-  if (content.length < PNG_SIGNATURE.length) {
-    throw new Error('Invalid chart PNG data.');
-  }
-  for (let index = 0; index < PNG_SIGNATURE.length; index++) {
-    if (content[index] !== PNG_SIGNATURE[index]) {
-      throw new Error('Invalid chart PNG data.');
-    }
-  }
-  return content;
 }
 
 function formatBytes(bytes: number): string {
@@ -7546,159 +7465,6 @@ function resultSizeGuardrailMessage(rowCount: number, columnCount: number): stri
     `(${formatCount(cells)} cells). Viewing is not blocked, but copy/export/search/sort may take longer.`;
 }
 
-function estimateCopyExport(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  format: ExportFormat,
-  includeHeaders: boolean,
-  includeRowIndex: boolean,
-  cellTextOptions: CellTextOptions = {}
-): CopyExportEstimate {
-  const shape = exportShape(range, { includeHeaders, includeRowIndex });
-  const averageCellBytes = estimateAverageCellBytes(result, range, shape.selectedRows, shape.selectedColumns, cellTextOptions);
-  const estimatedDataBytes = shape.selectedCells * (averageCellBytes + formatCellOverhead(format));
-  const estimatedHeaderBytes = includeHeaders
-    ? estimateHeaderBytes(result, range, includeRowIndex) + shape.outputColumns * formatCellOverhead(format)
-    : 0;
-  const estimatedRowIndexBytes = includeRowIndex ? estimateRowIndexBytes(range, shape.selectedRows) : 0;
-  const estimatedBytes = Math.ceil(
-    estimatedDataBytes +
-    estimatedHeaderBytes +
-    estimatedRowIndexBytes +
-    shape.outputRows * formatRowOverhead(format) +
-    formatDocumentOverhead(format)
-  );
-
-  return {
-    selectedRows: shape.selectedRows,
-    selectedColumns: shape.selectedColumns,
-    outputRows: shape.outputRows,
-    outputColumns: shape.outputColumns,
-    selectedCells: shape.selectedCells,
-    outputCells: shape.outputCells,
-    estimatedBytes,
-  };
-}
-
-function largeCopyExportConfirmationMessage(
-  action: 'copy' | 'export',
-  format: ExportFormat,
-  estimate: CopyExportEstimate,
-  confirmCellThreshold = COPY_EXPORT_CONFIRM_CELL_THRESHOLD
-): string | undefined {
-  if (
-    estimate.selectedCells < confirmCellThreshold &&
-    estimate.estimatedBytes < COPY_EXPORT_CONFIRM_BYTES
-  ) {
-    return undefined;
-  }
-
-  const actionLabel = action === 'copy' ? 'Copy' : 'Export';
-  return `${actionLabel} ${format.toUpperCase()} selection is large: ` +
-    `${formatCount(estimate.selectedRows)} rows x ${formatCount(estimate.selectedColumns)} columns ` +
-    `(${formatCount(estimate.selectedCells)} cells; estimated ${formatBytes(estimate.estimatedBytes)}). ` +
-    `Continue?`;
-}
-
-function estimateAverageCellBytes(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  selectedRows: number,
-  selectedColumns: number,
-  cellTextOptions: CellTextOptions = {}
-): number {
-  if (selectedRows <= 0 || selectedColumns <= 0) {
-    return 4;
-  }
-
-  const sampledRows = Math.min(selectedRows, COPY_EXPORT_SAMPLE_ROWS);
-  const sampledColumns = Math.min(selectedColumns, COPY_EXPORT_SAMPLE_COLUMNS);
-  const rowStep = Math.max(1, Math.floor(selectedRows / sampledRows));
-  const columnStep = Math.max(1, Math.floor(selectedColumns / sampledColumns));
-  let sampledCells = 0;
-  let sampledBytes = 0;
-
-  for (let rowOffset = 0; rowOffset < selectedRows && sampledCells < sampledRows * sampledColumns; rowOffset += rowStep) {
-    const rowIndex = Math.min(range.endRow, range.startRow + rowOffset);
-    for (let columnOffset = 0; columnOffset < selectedColumns && sampledCells < sampledRows * sampledColumns; columnOffset += columnStep) {
-      const columnIndex = Math.min(range.endColumn, range.startColumn + columnOffset);
-      sampledBytes += Buffer.byteLength(result.cellText(rowIndex, columnIndex, cellTextOptions), 'utf8');
-      sampledCells += 1;
-    }
-  }
-
-  return sampledCells > 0 ? Math.max(4, sampledBytes / sampledCells) : 4;
-}
-
-function estimateHeaderBytes(result: ColumnarPanelResult, range: CellRange, includeRowIndex: boolean): number {
-  let bytes = includeRowIndex ? Buffer.byteLength(rowIndexColumnName(result.columns, range), 'utf8') : 0;
-  for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-    bytes += Buffer.byteLength(result.columns[columnIndex], 'utf8');
-  }
-  return bytes;
-}
-
-function estimateRowIndexBytes(range: CellRange, selectedRows: number): number {
-  if (selectedRows <= 0) {
-    return 0;
-  }
-  const first = range.startRow + 1;
-  const last = range.endRow + 1;
-  const averageDigits = (String(first).length + String(last).length) / 2;
-  return Math.ceil(selectedRows * averageDigits);
-}
-
-function formatCellOverhead(format: ExportFormat): number {
-  switch (format) {
-    case 'html':
-      return 18;
-    case 'json':
-    case 'ndjson':
-      return 10;
-    case 'markdown':
-      return 4;
-    case 'xlsx':
-      return 64;
-    case 'csv':
-    case 'tsv':
-      return 2;
-  }
-}
-
-function formatRowOverhead(format: ExportFormat): number {
-  switch (format) {
-    case 'html':
-      return 12;
-    case 'markdown':
-      return 4;
-    case 'json':
-      return 4;
-    case 'xlsx':
-      return 18;
-    case 'csv':
-    case 'tsv':
-    case 'ndjson':
-      return 1;
-  }
-}
-
-function formatDocumentOverhead(format: ExportFormat): number {
-  switch (format) {
-    case 'html':
-      return 64;
-    case 'markdown':
-      return 32;
-    case 'xlsx':
-      return 2048;
-    case 'json':
-      return 2;
-    case 'csv':
-    case 'tsv':
-    case 'ndjson':
-      return 0;
-  }
-}
-
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -7710,151 +7476,5 @@ async function columnarToXlsx(
   includeRowIndex: boolean,
   cellTextOptions: CellTextOptions = {}
 ): Promise<Uint8Array> {
-  const limitError = validateXlsxSheetLimits(range, { includeHeaders, includeRowIndex });
-  if (limitError) {
-    throw new Error(limitError);
-  }
-
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', xmlDeclaration() +
-    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
-    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
-    '<Default Extension="xml" ContentType="application/xml"/>' +
-    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
-    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
-    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
-    '</Types>');
-  zip.file('_rels/.rels', xmlDeclaration() +
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
-    '</Relationships>');
-  zip.file('xl/workbook.xml', xmlDeclaration() +
-    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
-    '<sheets><sheet name="Results" sheetId="1" r:id="rId1"/></sheets>' +
-    '</workbook>');
-  zip.file('xl/_rels/workbook.xml.rels', xmlDeclaration() +
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
-    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
-    '</Relationships>');
-  zip.file('xl/styles.xml', stylesXml());
-  zip.file('xl/worksheets/sheet1.xml', sheetXml(result, range, includeHeaders, includeRowIndex, cellTextOptions));
-  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-}
-
-function sheetXml(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  includeHeaders: boolean,
-  includeRowIndex: boolean,
-  cellTextOptions: CellTextOptions
-): string {
-  const selectedRows = range.endRow - range.startRow + 1;
-  const selectedColumns = range.endColumn - range.startColumn + 1 + (includeRowIndex ? 1 : 0);
-  const outputRows = selectedRows + (includeHeaders ? 1 : 0);
-  const dimension = `A1:${excelColumnName(selectedColumns - 1)}${Math.max(outputRows, 1)}`;
-  return xmlDeclaration() +
-    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    `<dimension ref="${dimension}"/>` +
-    '<sheetData>' +
-    sheetRowsXml(result, range, includeHeaders, includeRowIndex, cellTextOptions) +
-    '</sheetData>' +
-    '</worksheet>';
-}
-
-function sheetRowsXml(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  includeHeaders: boolean,
-  includeRowIndex: boolean,
-  cellTextOptions: CellTextOptions
-): string {
-  const parts: string[] = [];
-  let outputRow = 1;
-  if (includeHeaders) {
-    const headers: string[] = [];
-    if (includeRowIndex) {
-      headers.push(cellValueToText(rowIndexColumnName(result.columns, range)));
-    }
-    for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      headers.push(cellValueToText(result.columns[columnIndex]));
-    }
-    parts.push(sheetRowXml(outputRow, headers));
-    outputRow += 1;
-  }
-
-  for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
-    const values: string[] = [];
-    if (includeRowIndex) {
-      values.push(String(rowIndex + 1));
-    }
-    for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      values.push(result.cellText(rowIndex, columnIndex, cellTextOptions));
-    }
-    parts.push(sheetRowXml(outputRow, values));
-    outputRow += 1;
-  }
-  return parts.join('');
-}
-
-function sheetRowXml(rowNumber: number, values: string[]): string {
-  const parts = [`<row r="${rowNumber}">`];
-  for (let columnIndex = 0; columnIndex < values.length; columnIndex++) {
-    parts.push(textCellXml(excelCellRef(columnIndex, rowNumber), values[columnIndex]));
-  }
-  parts.push('</row>');
-  return parts.join('');
-}
-
-function textCellXml(ref: string, value: string): string {
-  return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(value)}</t></is></c>`;
-}
-
-function excelCellRef(columnIndex: number, rowNumber: number): string {
-  return `${excelColumnName(columnIndex)}${rowNumber}`;
-}
-
-function excelColumnName(columnIndex: number): string {
-  let value = columnIndex + 1;
-  let name = '';
-  while (value > 0) {
-    const modulo = (value - 1) % 26;
-    name = String.fromCharCode(65 + modulo) + name;
-    value = Math.floor((value - modulo) / 26);
-  }
-  return name;
-}
-
-function stylesXml(): string {
-  return xmlDeclaration() +
-    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>' +
-    '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>' +
-    '<borders count="1"><border/></borders>' +
-    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-    '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>' +
-    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
-    '</styleSheet>';
-}
-
-function xmlDeclaration(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-}
-
-function escapeXml(value: string): string {
-  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F&<>"']/g, char => {
-    switch (char) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      case '\'':
-        return '&apos;';
-    }
-    return '';
-  });
+  return sharedColumnarToXlsx(result, range, includeHeaders, includeRowIndex, cellTextOptions);
 }

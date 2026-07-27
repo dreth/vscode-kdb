@@ -37,6 +37,7 @@ npm run test:parity
 npm run test:notebook-python
 npm run test:notebook-cross
 npm run test:extension-host
+npm run test:notebook-results-visual
 ```
 
 For a release candidate, require the live IPC check instead of allowing it to skip:
@@ -52,7 +53,7 @@ tree rather than the protected checkout.
 
 Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default location.
 
-The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, current notebook, complete functional, or visual parity evidence. Pure/provider/source tests cover detailed routing and UI contracts. `npm run test:extension-host` uses isolated VS Code user data and the actual store for two application/global profiles, exact active selection, same-ID port `5005`→`5000` edit/current target resolution, default controller non-registration, cleanup, and real notebook language conversion/restoration. It does not visually automate the connection webview, top-right kernel selector, toolbar/status layout, QuickPick interaction, or q execution.
+The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, current notebook, or complete functional/visual parity evidence. Pure/provider/source tests cover detailed routing and UI contracts. `npm run test:notebook-cross` installs exactly `kx-notebook==0.1.0`, imports `kx_notebook`, and validates the released MIME contract. `npm run test:extension-host` uses isolated VS Code user data and the actual store for two application/global profiles, exact active selection, same-ID port `5005`→`5000` edit/current target resolution, default controller non-registration, cleanup, and real q-language/KX metadata persistence through save, close, and reopen; that smoke is non-visual. `npm run test:notebook-results-visual` separately executes real q in VS Code under Xvfb and records 12 validated screenshots covering light/dark tables and charts, opt-in qText, tracked-file reopen, live-full state, all chart families, narrow live/saved layouts, and a narrow overlay.
 
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
