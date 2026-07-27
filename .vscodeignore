@@ -7,11 +7,13 @@ mkdocs.yml
 PARITY.md
 PARITY_RUN.md
 PARITY_RUN.json
+NOTEBOOK_RESULTS_PARITY_MATRIX.md
 .vscode/**
 .vscode-test/**
 src/**
 test/**
 scripts/**
+python/**
 tmp/**
 temp/**
 source/**

@@ -37,6 +37,7 @@ const {
   chartRangeIsZoomed,
   planChartZoomReset,
 } = requireOut('chart-zoom');
+const { buildChartData } = requireOut('charting');
 const {
   chartLegendToggleKey,
   chartSeriesVisible,
@@ -102,9 +103,42 @@ const {
   perfMark,
 } = requireOut('perf');
 const {
+  cellValueToBoundedText,
+  compareColumnarCellText,
   createColumnarPanelResult,
+  kxResultJsonCharacterLength,
+  kxResultJsonStringCharacterLength,
+  kxResultJsonStringUtf8ByteLength,
+  kxResultJsonStringify,
   rowsToColumnarPanelResult,
+  sortedColumnarRowOrder,
 } = requireOut('kx-results');
+const {
+  CHART_EXPORT_MAX_BYTES,
+  CHART_PNG_DATA_URL_PREFIX,
+  COPY_EXPORT_CONFIRM_BYTES,
+  KX_RESULT_EXPORT_FORMATS,
+  chartPngBytesFromDataUrl,
+  columnarToXlsx,
+  estimateCopyExport,
+  kxResultExportFileExtension,
+  kxResultExportSaveFilters,
+  largeCopyExportConfirmationMessage,
+  normalizeKxResultExportFormat,
+  normalizeKxResultTextExportFormat,
+} = requireOut('kx-results-export');
+const {
+  KX_RESULT_CHART_TYPE_OPTIONS,
+  KX_RESULT_CHART_TYPES,
+  KX_RESULT_EXPORT_FORMATS: SHARED_KX_RESULT_EXPORT_FORMATS,
+  KX_RESULT_SETTING_DEFINITIONS,
+  KX_RESULT_UI_LABELS,
+  KX_RESULTS_SHARED_CSS,
+  kxLiveResultSummary,
+  kxResultSelectionSummary,
+  kxSavedPreviewSummary,
+  moveKxResultColumn,
+} = requireOut('results-ui-contract');
 const {
   DEFAULT_NOTEBOOK_BYTE_LIMIT,
   DEFAULT_NOTEBOOK_ROW_LIMIT,
@@ -117,8 +151,12 @@ const {
   createPortableKxResult,
   createPortableKxTextResult,
   notebookResultPlainText,
+  notebookSavedPreviewNotice,
   notebookResultStaticHtml,
+  notebookTruncationReasonSummary,
   notebookResultToCsv,
+  portableCellText,
+  portableCellValue,
   portableKxResultBytes,
   validatePortableKxResult,
 } = requireOut('notebook-contract');
@@ -135,6 +173,7 @@ const {
   notebookSelectionCellCount,
   notebookSelectionCopyAllowed,
   notebookSelectionForCell,
+  notebookSelectionForColumn,
   notebookSelectionRange,
   notebookSearchEnterAction,
   notebookSelectionToolsState,
@@ -152,6 +191,7 @@ const {
 const {
   LiveNotebookResultStore,
   MAX_LIVE_NOTEBOOK_COPY_CELLS,
+  MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS,
   MAX_LIVE_NOTEBOOK_SEARCH_MATCHES,
   MAX_LIVE_NOTEBOOK_SLICE_CELLS,
   MAX_LIVE_NOTEBOOK_SLICE_COLUMNS,
@@ -181,8 +221,11 @@ const {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
   MAX_NOTEBOOK_LIVE_SLICE_TEXT_CHARS,
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
+  NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
   notebookRendererSettingsMessage,
   parseNotebookLiveResultReference,
+  parseNotebookOutputBindingReference,
   parseNotebookRendererHostMessage,
   parseNotebookRendererMessage,
 } = requireOut('notebook-message');
@@ -239,6 +282,8 @@ const tests = [
   ['connection manager lifecycle races', testConnectionManagerLifecycle],
   ['chart zoom baseline and reset lifecycle', testChartZoomLifecycle],
   ['columnar result windows and exports', testColumnarResults],
+  ['shared KX Results panel/notebook UI parity contract', testKxResultsUiParityContract],
+  ['shared result export metadata, PNG validation, and XLSX generation', testKxResultsExport],
   ['actual notebook cell language provider and q preparation', testNotebookCellLanguage],
   ['safe notebook q target metadata and resolution', testNotebookQTargetMetadata],
   ['portable notebook MIME contract and static fallbacks', testNotebookContract],
@@ -247,6 +292,7 @@ const tests = [
   ['native direct q notebook controller provider', testDirectQNotebookController],
   ['legacy q direct notebook request compatibility', testLegacyQDirectNotebookRequest],
   ['mixed q notebook command and status routing', testMixedQNotebookCommandIntegration],
+  ['notebook renderer host output authorization and guarded actions', testNotebookRendererHostActions],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
 ];
@@ -385,6 +431,23 @@ function testChartZoomLifecycle() {
   hiddenSeries = updateHiddenChartSeriesKeys(hiddenSeries, ['price', 'size'], ['price']);
   assert.deepStrictEqual(hiddenSeries, ['price']);
   assert.strictEqual(chartSeriesVisible(hiddenSeries, 'price'), false);
+  assert.throws(
+    () => buildChartData(
+      rowsToColumnarPanelResult([
+        { x: 1, y: 10 },
+        { x: 2, y: 20 },
+        { x: 3, y: 30 },
+      ], ['x', 'y']),
+      {
+        chartType: 'line',
+        xColumn: 'x',
+        yColumns: ['y'],
+        maxSourceRows: 2,
+      }
+    ),
+    /Chart source has 3 rows; limit the q result .* above 2 rows\./,
+    'saved inline chart preparation must retain the actionable shared source-limit error'
+  );
   const hiddenRefreshPaths = [
     'zoom',
     'reset zoom',
@@ -439,7 +502,10 @@ function testChartZoomLifecycle() {
   assert.match(panelSource, /chartLegendToggleKey\(event\.key\)/);
   assert.match(panelSource, /self\.setSeries\(index, \{ show: self\.series\[index\]\.show === false \}\)/);
   assert.match(panelSource, /chartCanvasWrap\.addEventListener\('dblclick'/);
-  assert.match(panelSource, /<button id="resetChartZoom" disabled>Reset zoom<\/button>/);
+  assert.match(
+    panelSource,
+    /<button id="resetChartZoom" disabled>\$\{KX_RESULT_UI_LABELS\.resetZoom\}<\/button>/
+  );
   assert.match(panelSource, /resetChartZoomButton\.addEventListener\('click', resetChartZoom\)/);
   assert.match(panelSource, /setScale: \[updateChartZoomState\]/);
   assert.match(panelSource, /chartFullXRange = captureChartFullXRange\([\s\S]*?chartDataIsRefinement \|\| !!chartFullXRange[\s\S]*?\);/);
@@ -6104,6 +6170,771 @@ function testColumnarResults() {
     result.toText('markdown', { startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 }, true),
     '| sym | note |\n| --- | --- |\n| AAPL | line<br>break |'
   );
+
+  const stableSort = values => createColumnarPanelResult(
+    ['value'],
+    values.length,
+    row => values[row]
+  );
+  const numeric = stableSort([10, 2, null, 2]);
+  assert.deepStrictEqual(sortedColumnarRowOrder(numeric, 0, 'asc'), [1, 3, 0, 2]);
+  assert.deepStrictEqual(sortedColumnarRowOrder(numeric, 0, 'desc'), [0, 1, 3, 2]);
+  const booleans = stableSort([true, false, null, false]);
+  assert.deepStrictEqual(sortedColumnarRowOrder(booleans, 0, 'asc'), [1, 3, 0, 2]);
+  assert.deepStrictEqual(sortedColumnarRowOrder(booleans, 0, 'desc'), [0, 1, 3, 2]);
+  const text = stableSort(['b', 'a', '', null, 'a']);
+  assert.deepStrictEqual(sortedColumnarRowOrder(text, 0, 'asc'), [1, 4, 0, 2, 3]);
+  assert.deepStrictEqual(sortedColumnarRowOrder(text, 0, 'desc'), [0, 1, 4, 2, 3]);
+  assert.strictEqual(compareColumnarCellText('', 'value', 'desc') > 0, true);
+
+  const sparse = [];
+  sparse.length = 3;
+  sparse[1] = undefined;
+  sparse[2] = 'tail';
+  const customJson = {
+    value: 42,
+    toJSON(key) {
+      return { key, value: this.value };
+    },
+  };
+  const jsonLengthCases = [
+    null,
+    undefined,
+    () => 1,
+    Symbol('value'),
+    true,
+    false,
+    NaN,
+    Infinity,
+    -0,
+    42n,
+    'quote" slash\\ control\0 lone\ud800 pair😀',
+    [1, null, undefined, () => 1, Symbol('value')],
+    sparse,
+    { a: undefined, b: () => 1, c: Symbol('value'), nested: [1, 2] },
+    new Date(0),
+    new Date(NaN),
+    customJson,
+    new Number(2),
+    new String('boxed'),
+    new Boolean(false),
+    new Uint8Array([1, 2]),
+  ];
+  for (const value of jsonLengthCases) {
+    const serialized = kxResultJsonStringify(value);
+    assert.strictEqual(
+      kxResultJsonCharacterLength(value, serialized.length),
+      serialized.length,
+      `capped JSON length must match shared serialization for ${Object.prototype.toString.call(value)}`
+    );
+    assert.strictEqual(
+      kxResultJsonCharacterLength(value, Math.max(0, serialized.length - 1)),
+      undefined
+    );
+  }
+  const escapedJsonKey = 'ascii"\\\0\u07ff\u0800\ud800😀';
+  const serializedJsonKey = JSON.stringify(escapedJsonKey);
+  assert.strictEqual(
+    kxResultJsonStringCharacterLength(escapedJsonKey, serializedJsonKey.length),
+    serializedJsonKey.length
+  );
+  assert.strictEqual(
+    kxResultJsonStringUtf8ByteLength(
+      escapedJsonKey,
+      Buffer.byteLength(serializedJsonKey, 'utf8')
+    ),
+    Buffer.byteLength(serializedJsonKey, 'utf8')
+  );
+  assert.strictEqual(
+    kxResultJsonStringUtf8ByteLength(
+      escapedJsonKey,
+      Buffer.byteLength(serializedJsonKey, 'utf8') - 1
+    ),
+    undefined
+  );
+  assert.throws(
+    () => kxResultJsonCharacterLength(Object(1n), 100),
+    /BigInt/
+  );
+  const jsonCycle = {};
+  jsonCycle.self = jsonCycle;
+  assert.throws(
+    () => kxResultJsonCharacterLength(jsonCycle, 100),
+    /circular structure/i
+  );
+  let tooDeep = 0;
+  for (let index = 0; index < 514; index++) {
+    tooDeep = [tooDeep];
+  }
+  assert.throws(
+    () => kxResultJsonCharacterLength(tooDeep, 10_000),
+    /safe depth limit/
+  );
+
+  const readableValue = {
+    text: 'line\r\nbreak',
+    values: [1, [2, 3]],
+  };
+  const fullReadable = rowsToColumnarPanelResult(
+    [{ value: readableValue }],
+    ['value']
+  ).cellText(0, 0);
+  assert.deepStrictEqual(
+    cellValueToBoundedText(readableValue, fullReadable.length),
+    { text: fullReadable, truncated: false }
+  );
+  const boundedReadableItem = ['x'.repeat(100), { nested: true }];
+  const boundedReadable = cellValueToBoundedText(
+    Array(100_000).fill(boundedReadableItem),
+    1_000
+  );
+  assert.strictEqual(boundedReadable.text.length, 1_000);
+  assert.strictEqual(boundedReadable.truncated, true);
+  const readableCycle = [];
+  readableCycle.push(readableCycle);
+  assert.strictEqual(
+    cellValueToBoundedText(readableCycle, 1_000).truncated,
+    true
+  );
+}
+
+function testKxResultsUiParityContract() {
+  assert.strictEqual(
+    KX_RESULT_EXPORT_FORMATS,
+    SHARED_KX_RESULT_EXPORT_FORMATS,
+    'the export module must re-export the one shared panel/notebook format contract'
+  );
+  assert.deepStrictEqual(
+    [...KX_RESULT_CHART_TYPES],
+    ['line', 'scatter', 'step', 'bar', 'box', 'candlestick'],
+    'panel and notebook chart families must retain one ordered capability contract'
+  );
+  assert.deepStrictEqual(
+    [...KX_RESULT_CHART_TYPE_OPTIONS],
+    [
+      { value: 'line', label: 'Line' },
+      { value: 'scatter', label: 'Scatter' },
+      { value: 'step', label: 'Step' },
+      { value: 'bar', label: 'Bar' },
+      { value: 'box', label: 'Box' },
+      { value: 'candlestick', label: 'Candlestick' },
+    ],
+    'chart vocabulary must share user-facing labels across both surfaces'
+  );
+  assert.deepStrictEqual(KX_RESULT_UI_LABELS, {
+    title: 'KX Results',
+    output: 'Output:',
+    format: 'Copy/export format',
+    headers: 'Headers',
+    rowIndex: 'Row #',
+    copy: 'Copy',
+    export: 'Export',
+    chart: 'Chart',
+    settings: 'Settings',
+    columns: 'Columns',
+    search: 'Search',
+    searchRows: 'Search rows',
+    previousMatch: 'Prev',
+    nextMatch: 'Next',
+    renderChart: 'Render',
+    exportChartPng: 'Export PNG',
+    resetZoom: 'Reset zoom',
+    refineZoom: 'Refine zoom',
+    closeChart: 'Close',
+    openFullResult: 'Open in KX Results',
+    openSavedPreview: 'Open saved preview',
+    rerunCell: 'Rerun cell',
+    selectAllColumns: 'Select all',
+    deselectAllColumns: 'Deselect all',
+    resetColumns: 'Reset columns',
+  });
+
+  const settingKeys = KX_RESULT_SETTING_DEFINITIONS.map(definition => definition.key);
+  assert.strictEqual(new Set(settingKeys).size, settingKeys.length, 'shared setting keys must be unique');
+  assert.deepStrictEqual(settingKeys, [
+    'density',
+    'cellWidth',
+    'rowHeight',
+    'fontSize',
+    'showRowIndex',
+    'includeHeaders',
+    'includeRowIndex',
+    'copyExportConfirmCellThreshold',
+    'elapsedTimeDisplay',
+    'arrayDisplayFormat',
+    'qTextSyntaxHighlighting',
+    'qTextDisplayFormatting',
+    'functionDisplayStrategy',
+    'dictionaryDisplayStrategy',
+    'listDisplayStrategy',
+    'objectDisplayStrategy',
+    'chartDecimalPlaces',
+    'chartMaxSourceRows',
+    'chartZoomMinSampledPoints',
+    'chartZoomMaxSampledPoints',
+  ]);
+  assert.strictEqual(kxResultSelectionSummary(undefined), 'No cells selected');
+  assert.strictEqual(
+    kxResultSelectionSummary({
+      startRow: 10,
+      endRow: 11,
+      startColumn: 2,
+      endColumn: 4,
+    }),
+    '2 rows × 3 columns (6 cells)'
+  );
+  assert.strictEqual(
+    kxLiveResultSummary(1_234, 5),
+    'Live full result • 1,234 rows × 5 columns'
+  );
+  assert.strictEqual(
+    kxSavedPreviewSummary(20, 1_234, 5),
+    'Saved preview • 20 of 1,234 rows × 5 columns'
+  );
+  assert.strictEqual(
+    kxSavedPreviewSummary(2, 2, 3),
+    'Saved preview • 2 rows × 3 columns'
+  );
+  assert.deepStrictEqual(moveKxResultColumn([0, 1, 2], 1, -1), [1, 0, 2]);
+  assert.deepStrictEqual(moveKxResultColumn([0, 1, 2], 0, -1), [0, 1, 2]);
+  assert.match(KX_RESULTS_SHARED_CSS, /:focus-visible/);
+  assert.match(KX_RESULTS_SHARED_CSS, /prefers-reduced-motion/);
+  assert.match(KX_RESULTS_SHARED_CSS, /forced-colors:\s*active/);
+  assert.match(KX_RESULTS_SHARED_CSS, /\.is-search-match:not\(\.is-selected\)/);
+
+  const panelSource = readSource('kx-results-panel.ts');
+  const rendererSource = fs.readFileSync(path.join(ROOT, 'renderer', 'index.ts'), 'utf8');
+  const messageSource = readSource('notebook-message.ts');
+  const sharedToolbarLabels = [
+    'output',
+    'format',
+    'headers',
+    'rowIndex',
+    'copy',
+    'export',
+    'chart',
+    'settings',
+  ];
+  for (const label of sharedToolbarLabels) {
+    assert.match(
+      panelSource,
+      new RegExp(`KX_RESULT_UI_LABELS\\.${label}\\b`),
+      `the panel must consume the shared ${label} label`
+    );
+    assert.match(
+      rendererSource,
+      new RegExp(`KX_RESULT_UI_LABELS\\.${label}\\b`),
+      `the notebook renderer must consume the shared ${label} label`
+    );
+  }
+  assert.match(panelSource, /KX_RESULT_EXPORT_FORMATS\s*\n?\s*\.map\(/);
+  assert.match(rendererSource, /KX_RESULT_EXPORT_FORMATS\.forEach\(/);
+  assert.match(panelSource, /KX_RESULT_CHART_TYPE_OPTIONS\s*\n?\s*\.map\(/);
+  assert.match(rendererSource, /\[\.\.\.KX_RESULT_CHART_TYPE_OPTIONS\]/);
+  assert.match(panelSource, /\$\{KX_RESULTS_SHARED_CSS\}/);
+  assert.match(
+    rendererSource,
+    /style\.textContent = `\$\{uPlotCss\}\\n\$\{KX_RESULTS_SHARED_CSS\}\\n\$\{rendererCss\}`/
+  );
+  assert.match(panelSource, /interface KxPanelSettings extends SharedKxResultSettings/);
+  assert.match(panelSource, /function sharedKxResultSettings\(\): SharedKxResultSettings/);
+  assert.match(panelSource, /estimateCopyExport,[\s\S]*largeCopyExportConfirmationMessage/);
+  assert.ok(
+    !/function estimateCopyExport\(/.test(panelSource),
+    'panel and notebook must share one copy/export guardrail estimator'
+  );
+  assert.match(panelSource, /copyExportConfirmCellThreshold:\s*positiveIntegerSettingUpdate/);
+  assert.match(panelSource, /chartZoomMinSampledPoints:\s*positiveIntegerSettingUpdate/);
+  assert.match(panelSource, /chartZoomMaxSampledPoints:\s*positiveIntegerSettingUpdate/);
+  assert.match(rendererSource, /KX_RESULT_SETTING_DEFINITIONS\.forEach\(/);
+  assert.match(messageSource, /NotebookSharedKxResultSettings = SharedKxResultSettings/);
+  assert.match(panelSource, /qTextRenderModel\(/);
+  assert.match(rendererSource, /qTextRenderModel\(/);
+  assert.match(rendererSource, /kxLiveResultSummary\(/);
+  assert.match(rendererSource, /kxSavedPreviewSummary\(/);
+  assert.match(rendererSource, /kxResultSelectionSummary\(/);
+
+  const liveId = `parity_${'a'.repeat(32)}`;
+  const outputId = `parity-output-${'a'.repeat(32)}`;
+  const liveExport = {
+    type: 'exportLiveRange',
+    outputId,
+    liveId,
+    requestId: 101,
+    startRow: 0,
+    endRow: 999,
+    startColumn: 0,
+    endColumn: 2,
+    format: 'xlsx',
+    includeHeaders: true,
+    includeRowIndex: false,
+    columnIndexes: [2, 0],
+    sortColumn: 'sym',
+    sortDirection: 'asc',
+  };
+  assert.deepStrictEqual(parseNotebookRendererMessage(liveExport), liveExport);
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...liveExport, format: 'parquet' }),
+    undefined
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...liveExport, columnIndexes: [2, 2] }),
+    undefined
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'copyLiveText',
+      outputId,
+      liveId,
+      requestId: 111,
+    }),
+    { type: 'copyLiveText', outputId, liveId, requestId: 111 }
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'exportLiveText',
+      outputId,
+      liveId,
+      requestId: 102,
+    }),
+    { type: 'exportLiveText', outputId, liveId, requestId: 102 }
+  );
+
+  const preview = createPortableKxResult({
+    columns: ['sym', 'price'],
+    rows: [['AAPL', 10], ['MSFT', 20]],
+    rowCount: 2,
+    rowLimit: 2,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  });
+  const previewExport = {
+    type: 'exportPreviewRange',
+    outputId,
+    requestId: 103,
+    payload: preview,
+    startRow: 0,
+    endRow: 1,
+    startColumn: 0,
+    endColumn: 1,
+    format: 'markdown',
+    includeHeaders: true,
+    includeRowIndex: true,
+    columnIndexes: [1, 0],
+    rowIndexes: [1, 0],
+  };
+  assert.deepStrictEqual(parseNotebookRendererMessage(previewExport), previewExport);
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...previewExport, rowIndexes: [1, 1] }),
+    undefined
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...previewExport, endRow: 2 }),
+    undefined
+  );
+  const previewCopy = {
+    ...previewExport,
+    type: 'copyPreviewRange',
+    requestId: 110,
+    format: 'tsv',
+  };
+  assert.deepStrictEqual(parseNotebookRendererMessage(previewCopy), previewCopy);
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...previewCopy, format: 'xlsx' }),
+    undefined,
+    'clipboard copy must reject binary XLSX'
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...previewCopy, outputId: 'bad\noutput' }),
+    undefined
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'rerunPreview',
+      outputId,
+      payload: preview,
+      requestId: 104,
+    }),
+    { type: 'rerunPreview', outputId, payload: preview, requestId: 104 }
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({
+      type: 'rerunPreview',
+      outputId,
+      payload: preview,
+      requestId: 104,
+      liveId,
+    }),
+    undefined,
+    'stale-preview actions must not smuggle an unvalidated live handle'
+  );
+
+  const qTextPreview = createPortableKxTextResult({
+    text: '::',
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  });
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'exportPreviewText',
+      outputId,
+      payload: qTextPreview,
+      requestId: 105,
+    }),
+    { type: 'exportPreviewText', outputId, payload: qTextPreview, requestId: 105 }
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({
+      type: 'exportPreviewText',
+      outputId,
+      payload: preview,
+      requestId: 105,
+    }),
+    undefined
+  );
+  const pngDataUrl = CHART_PNG_DATA_URL_PREFIX +
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString('base64');
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'exportChartPng',
+      outputId,
+      payload: preview,
+      requestId: 106,
+      dataUrl: pngDataUrl,
+    }),
+    {
+      type: 'exportChartPng',
+      outputId,
+      payload: preview,
+      requestId: 106,
+      dataUrl: pngDataUrl,
+    }
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'exportChartPng',
+      payload: preview,
+      requestId: 112,
+      dataUrl: pngDataUrl,
+    }),
+    {
+      type: 'exportChartPng',
+      payload: preview,
+      requestId: 112,
+      dataUrl: pngDataUrl,
+    }
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({
+      type: 'exportChartPng',
+      outputId,
+      payload: qTextPreview,
+      requestId: 113,
+      dataUrl: pngDataUrl,
+    }),
+    undefined
+  );
+
+  const refinedChartRequest = {
+    type: 'requestLiveChart',
+    outputId,
+    liveId,
+    requestId: 107,
+    chartType: 'line',
+    xColumn: 'time',
+    yColumns: ['price'],
+    maxPoints: 7_000,
+    xMin: 10,
+    xMax: 20,
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage(refinedChartRequest),
+    refinedChartRequest
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...refinedChartRequest, xMax: undefined }),
+    undefined
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({ ...refinedChartRequest, xMin: 20, xMax: 10 }),
+    undefined
+  );
+
+  for (const [key, value] of [
+    ['copyExportConfirmCellThreshold', 500_000],
+    ['chartMaxSourceRows', 1_000_000],
+    ['chartZoomMinSampledPoints', 2_000],
+    ['chartZoomMaxSampledPoints', 8_000],
+  ]) {
+    assert.deepStrictEqual(
+      parseNotebookRendererMessage({
+        type: 'updateResultSetting',
+        key,
+        value,
+      }),
+      { type: 'updateResultSetting', key, value }
+    );
+    assert.strictEqual(
+      parseNotebookRendererMessage({
+        type: 'updateResultSetting',
+        key,
+        value: 0,
+      }),
+      undefined
+    );
+  }
+
+  const staleAction = {
+    type: 'actionResult',
+    requestId: 108,
+    action: 'rerun',
+    ok: false,
+    canceled: false,
+    message: 'The requested saved preview is stale.',
+  };
+  assert.deepStrictEqual(parseNotebookRendererHostMessage(staleAction), staleAction);
+  assert.strictEqual(
+    parseNotebookRendererHostMessage({ ...staleAction, action: 'openArbitraryFile' }),
+    undefined
+  );
+  assert.deepStrictEqual(parseNotebookRendererHostMessage({
+    type: 'actionResult',
+    requestId: 109,
+    action: 'openPreview',
+    ok: true,
+    canceled: false,
+    message: 'Opened saved preview in KX Results.',
+  }), {
+    type: 'actionResult',
+    requestId: 109,
+    action: 'openPreview',
+    ok: true,
+    canceled: false,
+    message: 'Opened saved preview in KX Results.',
+  });
+  assert.deepStrictEqual(parseNotebookRendererHostMessage({
+    type: 'actionResult',
+    requestId: 110,
+    action: 'copy',
+    ok: false,
+    canceled: true,
+    message: 'Copy canceled.',
+  }), {
+    type: 'actionResult',
+    requestId: 110,
+    action: 'copy',
+    ok: false,
+    canceled: true,
+    message: 'Copy canceled.',
+  });
+}
+
+async function testKxResultsExport() {
+  const exportSource = readSource('kx-results-export.ts');
+  const panelSource = readSource('kx-results-panel.ts');
+  assert.ok(!/from ['"]vscode['"]|require\(['"]vscode['"]\)/.test(exportSource));
+  assert.match(panelSource, /return sharedColumnarToXlsx\(result, range, includeHeaders, includeRowIndex, cellTextOptions\);/);
+  assert.ok(!/\bnew JSZip\b/.test(panelSource), 'the panel must not retain a second XLSX implementation');
+  assert.ok(!/function chartPngBytesFromDataUrl\(/.test(panelSource));
+  assert.match(exportSource, /decodedBytes > CHART_EXPORT_MAX_BYTES/);
+
+  assert.deepStrictEqual(
+    KX_RESULT_EXPORT_FORMATS.map(format => [
+      format.value,
+      format.label,
+      format.extension,
+      format.copy,
+    ]),
+    [
+      ['csv', 'CSV', 'csv', true],
+      ['xlsx', 'XLSX', 'xlsx', false],
+      ['tsv', 'TSV', 'tsv', true],
+      ['json', 'JSON', 'json', true],
+      ['ndjson', 'NDJSON', 'ndjson', true],
+      ['html', 'HTML', 'html', true],
+      ['markdown', 'Markdown', 'md', true],
+    ],
+    'the reusable export contract must retain the established panel order and labels'
+  );
+  assert.strictEqual(normalizeKxResultExportFormat('xlsx'), 'xlsx');
+  assert.strictEqual(normalizeKxResultExportFormat('unknown'), 'csv');
+  assert.strictEqual(normalizeKxResultTextExportFormat('markdown'), 'markdown');
+  assert.strictEqual(normalizeKxResultTextExportFormat('xlsx'), 'csv', 'XLSX must remain export-only');
+  assert.strictEqual(kxResultExportFileExtension('markdown'), 'md');
+  assert.deepStrictEqual(kxResultExportSaveFilters('html'), { HTML: ['html', 'htm'] });
+  assert.deepStrictEqual(kxResultExportSaveFilters('markdown'), { Markdown: ['md', 'markdown'] });
+  assert.deepStrictEqual(kxResultExportSaveFilters('xlsx'), { XLSX: ['xlsx'] });
+
+  assert.strictEqual(CHART_EXPORT_MAX_BYTES, 50 * 1024 * 1024);
+  assert.strictEqual(COPY_EXPORT_CONFIRM_BYTES, 50 * 1024 * 1024);
+  assert.strictEqual(CHART_PNG_DATA_URL_PREFIX, 'data:image/png;base64,');
+  const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+  const pngDataUrl = CHART_PNG_DATA_URL_PREFIX + png.toString('base64');
+  assert.deepStrictEqual(Buffer.from(chartPngBytesFromDataUrl(pngDataUrl)), png);
+  assert.throws(() => chartPngBytesFromDataUrl(null), /requires a PNG data URL/);
+  assert.throws(
+    () => chartPngBytesFromDataUrl(CHART_PNG_DATA_URL_PREFIX),
+    /Invalid chart PNG data URL/
+  );
+  assert.throws(
+    () => chartPngBytesFromDataUrl(`${CHART_PNG_DATA_URL_PREFIX}!!!!`),
+    /Invalid chart PNG data URL/
+  );
+  assert.throws(
+    () => chartPngBytesFromDataUrl(
+      CHART_PNG_DATA_URL_PREFIX + Buffer.from('not png').toString('base64')
+    ),
+    /Invalid chart PNG data/
+  );
+
+  const table = rowsToColumnarPanelResult([
+    { '#': 'first', note: 'x\u0001<&>"\'' },
+    { '#': 'second', note: null },
+  ], ['#', 'note']);
+  const range = { startRow: 0, endRow: 1, startColumn: 0, endColumn: 1 };
+  const bytes = await columnarToXlsx(table, range, true, true);
+  assert.ok(bytes instanceof Uint8Array);
+  assert.strictEqual(Buffer.from(bytes.subarray(0, 2)).toString('ascii'), 'PK');
+
+  const JSZip = require('jszip');
+  const zip = await JSZip.loadAsync(bytes);
+  for (const entry of [
+    '[Content_Types].xml',
+    '_rels/.rels',
+    'xl/workbook.xml',
+    'xl/_rels/workbook.xml.rels',
+    'xl/styles.xml',
+    'xl/worksheets/sheet1.xml',
+  ]) {
+    assert.ok(zip.file(entry), `XLSX archive is missing ${entry}`);
+  }
+  const contentTypes = await zip.file('[Content_Types].xml').async('string');
+  const partNames = [...contentTypes.matchAll(/<Override PartName="([^"]+)"/g)]
+    .map(match => match[1]);
+  assert.strictEqual(
+    new Set(partNames).size,
+    partNames.length,
+    'XLSX content types must not contain duplicate PartName overrides'
+  );
+  const sheet = await zip.file('xl/worksheets/sheet1.xml').async('string');
+  assert.match(sheet, /<dimension ref="A1:C3"\/>/);
+  assert.match(sheet, /<t xml:space="preserve">#_1<\/t>/);
+  assert.match(sheet, /x&lt;&amp;&gt;&quot;&apos;/);
+  assert.strictEqual(sheet.includes('\u0001'), false, 'invalid XML control characters must be removed');
+
+  const largeTextTable = createColumnarPanelResult(
+    ['payload'],
+    10_000,
+    () => 'x'.repeat(6_000)
+  );
+  const largeEstimate = estimateCopyExport(
+    largeTextTable,
+    { startRow: 0, endRow: 9_999, startColumn: 0, endColumn: 0 },
+    'csv',
+    true,
+    false
+  );
+  assert.ok(
+    largeEstimate.estimatedBytes >= COPY_EXPORT_CONFIRM_BYTES,
+    'sampled export estimation must enforce the shared 50 MiB warning boundary'
+  );
+  assert.match(
+    largeCopyExportConfirmationMessage('export', 'csv', largeEstimate),
+    /Export CSV selection is large:.*estimated .* MB.*Continue\?/
+  );
+  const repeatedJsonKeyTable = createColumnarPanelResult(
+    [`key-${'k'.repeat(3_000)}`],
+    20_000,
+    () => true
+  );
+  for (const format of ['json', 'ndjson']) {
+    const estimate = estimateCopyExport(
+      repeatedJsonKeyTable,
+      { startRow: 0, endRow: 19_999, startColumn: 0, endColumn: 0 },
+      format,
+      false,
+      false
+    );
+    assert.ok(
+      estimate.estimatedBytes >= COPY_EXPORT_CONFIRM_BYTES,
+      `${format} estimation must count object keys repeated on every selected row`
+    );
+    assert.match(
+      largeCopyExportConfirmationMessage('copy', format, estimate),
+      new RegExp(`Copy ${format.toUpperCase()} selection is large:`)
+    );
+  }
+  const controlHeavyHeaderTable = createColumnarPanelResult(
+    [`control-${'\0'.repeat(1_000_000)}`],
+    100,
+    () => true
+  );
+  const originalStringify = JSON.stringify;
+  let estimatorStringifyCalls = 0;
+  let controlHeavyEstimate;
+  JSON.stringify = () => {
+    estimatorStringifyCalls++;
+    throw new Error('copy/export estimation must not stringify column names');
+  };
+  try {
+    controlHeavyEstimate = estimateCopyExport(
+      controlHeavyHeaderTable,
+      { startRow: 0, endRow: 99, startColumn: 0, endColumn: 0 },
+      'json',
+      false,
+      false
+    );
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+  assert.strictEqual(estimatorStringifyCalls, 0);
+  assert.ok(
+    controlHeavyEstimate.estimatedBytes >= COPY_EXPORT_CONFIRM_BYTES,
+    'control-heavy JSON keys must saturate the warning estimate without materialization'
+  );
+
+  const hugeEstimateItem = ['x'.repeat(100), { nested: true }];
+  const hugeEstimateValues = [
+    'x'.repeat(1_000_000),
+    Array(100_000).fill(hugeEstimateItem),
+    { items: Array(100_000).fill(hugeEstimateItem) },
+  ];
+  for (const value of hugeEstimateValues) {
+    const hugeValueTable = createColumnarPanelResult(
+      ['payload'],
+      1,
+      () => value
+    );
+    hugeValueTable.cellText = () => {
+      throw new Error('copy/export estimation must not materialize unbounded cellText');
+    };
+    const estimate = estimateCopyExport(
+      hugeValueTable,
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+      'csv',
+      true,
+      false
+    );
+    assert.ok(
+      estimate.estimatedBytes >= COPY_EXPORT_CONFIRM_BYTES,
+      'a truncated structural sample must saturate the large-export warning'
+    );
+  }
+  const smallEstimate = estimateCopyExport(table, range, 'tsv', true, true);
+  assert.match(
+    largeCopyExportConfirmationMessage('copy', 'tsv', smallEstimate, 1),
+    /Copy TSV selection is large:/
+  );
+
+  await assert.rejects(
+    () => columnarToXlsx(
+      table,
+      { startRow: 0, endRow: 1048575, startColumn: 0, endColumn: 0 },
+      true,
+      false
+    ),
+    /XLSX export exceeds Excel sheet limits/
+  );
 }
 
 async function testLocalDataServerConcurrency() {
@@ -6421,13 +7252,90 @@ function testNotebookContract() {
   assert.strictEqual(payload.data.rows[0][2].kind, 'temporal');
   assert.ok(portableKxResultBytes(payload) <= payload.result.byteLimit);
   assert.deepStrictEqual(validatePortableKxResult(payload), { ok: true, value: payload });
+  const structuredPayload = createPortableKxResult({
+    columns: ['values', 'meta'],
+    rows: [[[1, 2], { enabled: true }]],
+    rowLimit: 1,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+  });
+  const structuredArrayCell = structuredPayload.data.rows[0][0];
+  assert.deepStrictEqual(portableCellValue(structuredArrayCell), [1, 2]);
+  assert.strictEqual(
+    portableCellText(structuredArrayCell, { arrayDisplayFormat: 'commaSpace' }),
+    '1, 2',
+    'saved structured cells must use the shared array display policy'
+  );
+  assert.strictEqual(
+    portableCellText(structuredArrayCell, { arrayDisplayFormat: 'raw' }),
+    '[1 2]'
+  );
+  const structuredTable = createColumnarPanelResult(
+    structuredPayload.schema.columns.map(column => column.name),
+    structuredPayload.data.rows.length,
+    (rowIndex, columnIndex) =>
+      portableCellValue(structuredPayload.data.rows[rowIndex][columnIndex])
+  );
+  const structuredRange = {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 0,
+    endColumn: 1,
+  };
+  assert.strictEqual(
+    structuredTable.toText('json', structuredRange, {
+      includeHeaders: true,
+      includeRowIndex: false,
+    }),
+    '[{"values":[1,2],"meta":{"enabled":true}}]',
+    'saved JSON export must preserve bounded structured cell types'
+  );
+  assert.strictEqual(
+    structuredTable.toText('ndjson', structuredRange, {
+      includeHeaders: true,
+      includeRowIndex: false,
+    }),
+    '{"values":[1,2],"meta":{"enabled":true}}',
+    'saved NDJSON export must preserve bounded structured cell types'
+  );
+  const invalidStructuredCell = { kind: 'json', value: '[1,' };
+  assert.strictEqual(
+    portableCellValue(invalidStructuredCell),
+    '[1,',
+    'clipped or invalid portable JSON must safely fall back to its literal text'
+  );
+  const deepPortableJson = `${'['.repeat(1_000)}0${']'.repeat(1_000)}`;
+  assert.strictEqual(
+    portableCellValue({ kind: 'json', value: deepPortableJson }),
+    deepPortableJson,
+    'deep but syntactically valid portable JSON must not reach recursive display/export code'
+  );
   assert.deepStrictEqual(parseNotebookRendererMessage({ type: 'ready' }), { type: 'ready' });
   assert.strictEqual(parseNotebookRendererMessage({ type: 'ready', payload }), undefined);
+  const outputId = `notebook-output-${'b'.repeat(32)}`;
   assert.deepStrictEqual(
-    parseNotebookRendererMessage({ type: 'openPreview', payload }),
-    { type: 'openPreview', payload }
+    parseNotebookRendererMessage({ type: 'openPreview', outputId, payload, requestId: 101 }),
+    { type: 'openPreview', outputId, payload, requestId: 101 }
   );
-  assert.strictEqual(parseNotebookRendererMessage({ type: 'openPreview', payload, token: 'forbidden' }), undefined);
+  assert.strictEqual(
+    parseNotebookRendererMessage({
+      type: 'openPreview',
+      outputId,
+      payload,
+      requestId: 101,
+      token: 'forbidden',
+    }),
+    undefined
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({ type: 'openPreview', payload, requestId: 102 }),
+    { type: 'openPreview', payload, requestId: 102 },
+    'legacy/Python saved previews may omit a binding and use unique-payload host fallback'
+  );
+  assert.strictEqual(
+    parseNotebookRendererMessage({ type: 'openPreview', outputId, payload }),
+    undefined,
+    'saved-preview handoff must be request-scoped so the renderer receives failure feedback'
+  );
   const sharedResultSettings = {
     density: 'standard',
     functionDisplayStrategy: 'qText',
@@ -6449,18 +7357,31 @@ function testNotebookContract() {
     parseNotebookLiveResultReference({ version: 1, id: liveId }),
     { version: 1, id: liveId }
   );
+  assert.deepStrictEqual(
+    parseNotebookOutputBindingReference({ version: 1, id: outputId }),
+    { version: 1, id: outputId }
+  );
+  assert.strictEqual(
+    parseNotebookOutputBindingReference({ version: 1, id: 'not-public-output-id' }),
+    undefined
+  );
   assert.strictEqual(parseNotebookLiveResultReference({ version: 1, id: 'short' }), undefined);
   assert.strictEqual(
     parseNotebookLiveResultReference({ version: 1, id: liveId, handle: 'forbidden' }),
     undefined
   );
   assert.deepStrictEqual(
+    parseNotebookRendererMessage({ type: 'requestLiveResult', outputId, liveId, requestId: 1 }),
+    { type: 'requestLiveResult', outputId, liveId, requestId: 1 }
+  );
+  assert.strictEqual(
     parseNotebookRendererMessage({ type: 'requestLiveResult', liveId, requestId: 1 }),
-    { type: 'requestLiveResult', liveId, requestId: 1 }
+    undefined
   );
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
       type: 'requestLiveSlice',
+      outputId,
       liveId,
       requestId: 2,
       startRow: 10,
@@ -6472,6 +7393,7 @@ function testNotebookContract() {
     }),
     {
       type: 'requestLiveSlice',
+      outputId,
       liveId,
       requestId: 2,
       startRow: 10,
@@ -6484,6 +7406,7 @@ function testNotebookContract() {
   );
   assert.strictEqual(parseNotebookRendererMessage({
     type: 'requestLiveSlice',
+    outputId,
     liveId,
     requestId: 2,
     startRow: 0,
@@ -6494,15 +7417,17 @@ function testNotebookContract() {
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
       type: 'searchLiveResult',
+      outputId,
       liveId,
       requestId: 3,
       query: 'AAPL',
     }),
-    { type: 'searchLiveResult', liveId, requestId: 3, query: 'AAPL' }
+    { type: 'searchLiveResult', outputId, liveId, requestId: 3, query: 'AAPL' }
   );
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
       type: 'requestLiveChart',
+      outputId,
       liveId,
       requestId: 4,
       chartType: 'line',
@@ -6512,6 +7437,7 @@ function testNotebookContract() {
     }),
     {
       type: 'requestLiveChart',
+      outputId,
       liveId,
       requestId: 4,
       chartType: 'line',
@@ -6522,6 +7448,7 @@ function testNotebookContract() {
   );
   assert.strictEqual(parseNotebookRendererMessage({
     type: 'requestLiveChart',
+    outputId,
     liveId,
     requestId: 4,
     chartType: 'line',
@@ -6531,6 +7458,7 @@ function testNotebookContract() {
   }), undefined, 'live chart series must be unique');
   assert.strictEqual(parseNotebookRendererMessage({
     type: 'requestLiveChart',
+    outputId,
     liveId,
     requestId: 4,
     chartType: 'line',
@@ -6541,6 +7469,7 @@ function testNotebookContract() {
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
       type: 'requestLiveChart',
+      outputId,
       liveId,
       requestId: 5,
       chartType: 'bar',
@@ -6551,6 +7480,7 @@ function testNotebookContract() {
     }),
     {
       type: 'requestLiveChart',
+      outputId,
       liveId,
       requestId: 5,
       chartType: 'bar',
@@ -6562,6 +7492,7 @@ function testNotebookContract() {
   );
   const candlestickRequest = {
     type: 'requestLiveChart',
+    outputId,
     liveId,
     requestId: 6,
     chartType: 'candlestick',
@@ -6594,6 +7525,7 @@ function testNotebookContract() {
   }), undefined, 'box charts must not advertise unsupported grouping');
   const liveCopyRequest = {
     type: 'copyLiveRange',
+    outputId,
     liveId,
     requestId: 5,
     startRow: 10,
@@ -6652,8 +7584,13 @@ function testNotebookContract() {
     value: 'true',
   }), undefined);
   assert.deepStrictEqual(
-    parseNotebookRendererMessage({ type: 'openLiveResult', liveId }),
-    { type: 'openLiveResult', liveId }
+    parseNotebookRendererMessage({
+      type: 'openLiveResult',
+      outputId,
+      liveId,
+      requestId: 7,
+    }),
+    { type: 'openLiveResult', outputId, liveId, requestId: 7 }
   );
 
   const completeResultSettings = {
@@ -6664,9 +7601,11 @@ function testNotebookContract() {
     showRowIndex: true,
     includeHeaders: true,
     includeRowIndex: true,
+    copyExportConfirmCellThreshold: 1_000_000,
     elapsedTimeDisplay: 'auto',
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
+    chartZoomMinSampledPoints: 3_000,
     chartZoomMaxSampledPoints: 7_000,
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
@@ -6694,6 +7633,7 @@ function testNotebookContract() {
     mode: 'table',
     kind: 'table',
     columns: ['sym', 'price'],
+    totalColumnCount: 2,
     rowCount: 1_000_000,
     chartXColumns: ['price'],
     chartYColumns: ['price'],
@@ -6711,6 +7651,7 @@ function testNotebookContract() {
     mode: 'table',
     kind: 'table',
     columns: ['sym', 'price'],
+    totalColumnCount: 2,
     rowCount: 1_000_000,
     chartXColumns: ['price'],
     chartYColumns: ['price'],
@@ -6721,6 +7662,18 @@ function testNotebookContract() {
       messages: ['Full live table.'],
     },
   });
+  assert.strictEqual(parseNotebookRendererHostMessage({
+    type: 'liveResult',
+    liveId,
+    requestId: 6,
+    available: true,
+    mode: 'table',
+    kind: 'table',
+    columns: ['sym', 'price'],
+    totalColumnCount: 1,
+    rowCount: 1,
+    metadata: {},
+  }), undefined, 'live total column count cannot understate inline columns');
   const candleData = {
     chartType: 'candlestick',
     xColumn: 'time',
@@ -6871,7 +7824,9 @@ function testNotebookContract() {
   assert.ok(!html.includes('<img src=x'));
   const plain = notebookResultPlainText(payload);
   assert.match(plain, /KX\/q result/);
-  assert.match(plain, /Bounded output/i);
+  assert.match(plain, /Saved preview showing 2 of 1,000,000 rows/);
+  assert.match(plain, /row limit/);
+  assert.match(plain, /Omitted content is not stored/);
   const csv = notebookResultToCsv(payload);
   assert.match(csv, /^sym,px,ts,note\n/);
   assert.ok(csv.includes('<img src=x onerror=alert(1)>'));
@@ -6910,6 +7865,8 @@ function testNotebookContract() {
   });
   assert.strictEqual(oversizedQText.result.truncated, true);
   assert.ok(oversizedQText.result.truncationReasons.includes('byteLimit'));
+  assert.match(notebookSavedPreviewNotice(oversizedQText), /byte limit/);
+  assert.match(notebookSavedPreviewNotice(oversizedQText), /Omitted content is not stored/);
   assert.ok(portableKxResultBytes(oversizedQText) <= MIN_NOTEBOOK_BYTE_LIMIT);
   assert.strictEqual(validatePortableKxResult(oversizedQText).ok, true);
   const invalidQText = JSON.parse(JSON.stringify(qTextPayload));
@@ -7053,6 +8010,17 @@ function testNotebookContract() {
   });
   assert.deepStrictEqual(clipped.schema.columns.map(column => column.name), ['duplicate', 'duplicate_2']);
   assert.ok(clipped.result.truncationReasons.includes('cellValueLimit'));
+  assert.match(notebookSavedPreviewNotice(clipped), /long cell-value limit/);
+  assert.strictEqual(
+    notebookTruncationReasonSummary([
+      'rowLimit',
+      'byteLimit',
+      'cellValueLimit',
+      'columnLimit',
+      'sourcePreview',
+    ]),
+    'row limit, byte limit, long cell-value limit, column limit, source preview limit'
+  );
   assert.strictEqual(validatePortableKxResult(clipped).ok, true);
 
   const extraField = JSON.parse(JSON.stringify(payload));
@@ -7085,7 +8053,7 @@ function testNotebookContract() {
   const rendererSource = fs.readFileSync(path.join(ROOT, 'renderer', 'index.ts'), 'utf8');
   assert.ok(rendererSource.includes("from 'uplot'"));
   assert.match(rendererSource, /buildChartData\(portableTable\(payload\)/);
-  assert.match(rendererSource, /chartColumnOptions\(portableTable\(payload\)/);
+  assert.match(rendererSource, /chartColumnOptions\(portableTable\(payload,\s*columnIndexes\)/);
   assert.match(rendererSource, /MAX_TABLE_PAGE_CELLS\s*=\s*5000/);
   assert.match(rendererSource, /Previous page/);
   assert.match(rendererSource, /Next page/);
@@ -7094,12 +8062,12 @@ function testNotebookContract() {
   assert.match(rendererSource, /type: 'openPreview'/);
   assert.match(rendererSource, /type: 'copyLiveRange'/);
   assert.match(rendererSource, /multiColumnControl/);
-  assert.match(rendererSource, /\['line', 'scatter', 'step', 'bar', 'box', 'candlestick'\]/);
+  assert.match(rendererSource, /\[\.\.\.KX_RESULT_CHART_TYPE_OPTIONS\]/);
   assert.match(rendererSource, /labelledSelectOptions\([\s\S]*?'Group by'/);
   for (const label of ['Open', 'High', 'Low', 'Close']) {
     assert.ok(rendererSource.includes(`['${label}',`), `${label} candlestick selector must exist`);
   }
-  assert.match(rendererSource, /button\('Render'/);
+  assert.match(rendererSource, /button\(KX_RESULT_UI_LABELS\.renderChart/);
   assert.match(rendererSource, /Chart settings changed — Render to update\./);
   assert.match(rendererSource, /notebookSearchEnterAction\(/);
   assert.match(rendererSource, /action === 'previous' \? -1 : 1/);
@@ -7109,13 +8077,55 @@ function testNotebookContract() {
   assert.match(rendererSource, /notebookMovedSearchMatchIndex\(/);
   assert.match(rendererSource, /activeSavedSearchRow\(state\.savedSearch, rowIndex\)/);
   assert.match(rendererSource, /notebookSelectionToolsState\(/);
-  assert.match(rendererSource, /summary\.textContent = 'Settings'/);
+  assert.match(rendererSource, /summary\.textContent = KX_RESULT_UI_LABELS\.settings/);
   assert.match(rendererSource, /function drawNotebookBoxes\(/);
   assert.match(rendererSource, /function drawNotebookCandlesticks\(/);
   assert.match(rendererSource, /capturePlotSeriesVisibility\(state\)/);
+  assert.match(rendererSource, /capturePlotViewport\(state\)/);
+  assert.match(rendererSource, /state\.plotViewport\?\.data !== data/);
+  assert.match(rendererSource, /state\.plot\.setScale\('x', x\)/);
+  assert.match(rendererSource, /state\.plot\.setScale\('y', y\)/);
+  assert.match(rendererSource, /preparedSavedChartData\(state, state\.payload, renderedChart\)/);
+  const savedSortSource = sourceSection(
+    rendererSource,
+    'function savedRowOrder(',
+    'function emptySavedSearch('
+  );
+  assert.match(
+    savedSortSource,
+    /sortedColumnarRowOrder\([\s\S]*?portableTable\(payload\)[\s\S]*?direction/,
+    'saved notebook sorting must use the stable shared panel comparator'
+  );
+  const hostMessageSource = sourceSection(
+    rendererSource,
+    'function receiveHostMessage(',
+    'function receiveLiveResult('
+  );
+  assert.match(
+    hostMessageSource,
+    /chartSourceLimitChanged[\s\S]*?state\.savedPreparedChart = undefined[\s\S]*?liveChartSamplingChanged[\s\S]*?markLiveChartDirty/,
+    'source-row and point sampling changes must invalidate saved and live chart state'
+  );
+  assert.match(
+    rendererSource,
+    /maxSourceRows = notebookSavedChartSourceRowLimit\(payload\)[\s\S]*?state\.savedMaxChartPoints,[\s\S]*?maxSourceRows,[\s\S]*?savedChartData\(/,
+    'saved chart cache identity and build must include the shared source-row limit'
+  );
+  assert.match(
+    rendererSource,
+    /function liveChartConfigurationSignature\([\s\S]*?chart\.maxPoints[\s\S]*?resultSettings\.chartMaxSourceRows[\s\S]*?resultSettings\.chartZoomMinSampledPoints/,
+    'live chart request identity must include all sampling settings'
+  );
   assert.match(rendererSource, /reconcileNotebookChartConfiguration\(/);
   assert.match(rendererSource, /notebookChartControlModel\(/);
-  assert.match(rendererSource, /reconciledChart\.compatible && previousChart\.data/);
+  assert.match(
+    rendererSource,
+    /data: reconciledChart\.compatible \? previousChart\.data : undefined/
+  );
+  assert.match(
+    rendererSource,
+    /fullData: reconciledChart\.compatible \? previousChart\.fullData : undefined/
+  );
   const receiveLiveResultSource = sourceSection(
     rendererSource,
     'function receiveLiveResult(',
@@ -7127,6 +8137,228 @@ function testNotebookContract() {
   );
   assert.match(receiveLiveResultSource, /visible: previous\.visible|reconciledChart\.configuration/);
   assert.match(receiveLiveResultSource, /requestId: nextRequestId\(\)/);
+  assert.match(
+    receiveLiveResultSource,
+    /if \(!message\.available\) \{[\s\S]*?if \(!isOutstandingLiveRequest\(state, message\.requestId\)\) \{[\s\S]*?return;[\s\S]*?transitionLiveResultUnavailable\(state, message\.message\)/,
+    'an unavailable broadcast must transition only the output that owns its request id'
+  );
+  assert.match(
+    receiveLiveResultSource,
+    /function isOutstandingLiveRequest\([\s\S]*?state\.liveOpenRequestId[\s\S]*?state\.hostActionRequestId/,
+    'stale live actions, including open-full, must be correlated to their originating output'
+  );
+  const unavailableSource = sourceSection(
+    rendererSource,
+    'function transitionLiveResultUnavailable(',
+    'function renderState('
+  );
+  assert.match(unavailableSource, /state\.liveStatus = 'unavailable'/);
+  assert.match(unavailableSource, /state\.liveChart = \{[\s\S]*?data: undefined/);
+  assert.match(unavailableSource, /state\.panelOpened = false/);
+  const columnControlSource = sourceSection(
+    rendererSource,
+    'function resultColumnControl(',
+    'function resultSettingsControl('
+  );
+  assert.match(columnControlSource, /refined: reconciled\.compatible \? state\.liveChart\.refined : false/);
+  assert.match(columnControlSource, /reconcileSavedChartsForColumns\(state\)/);
+  assert.match(rendererSource, /notebookSelectionForColumn\(/);
+  assert.match(rendererSource, /if \(event\.shiftKey\) \{[\s\S]*?event\.preventDefault\(\);[\s\S]*?return;/);
+  assert.match(
+    rendererSource,
+    /state\.liveSelectionStatus = selectionStatus;[\s\S]*?state\.liveSelectionStatus\.textContent = kxResultSelectionSummary\([\s\S]*?notebookSelectionRange\(state\.liveSelection\)/,
+    'live pointer and keyboard selection changes must update the visible selection summary'
+  );
+  assert.match(
+    columnControlSource,
+    /persistentDetails\(state,[\s\S]*?detailsKey[\s\S]*?withFocusKey\(checkbox,[\s\S]*?:visible/,
+    'column menus must preserve open state and per-column keyboard focus across rerenders'
+  );
+  assert.match(
+    rendererSource,
+    /function resultSettingsControl\([\s\S]*?persistentDetails\(state,[\s\S]*?'settings'[\s\S]*?withFocusKey\(summary, 'settings:summary'\)/,
+    'settings must preserve open state and keyboard focus across host-driven rerenders'
+  );
+  assert.match(
+    rendererSource,
+    /function captureRerenderUiState\([\s\S]*?data-kx-focus-key[\s\S]*?function restoreRerenderFocus\([\s\S]*?focus\(\{ preventScroll: true \}\)/,
+    'full renderer refreshes must restore the focused semantic control'
+  );
+  assert.match(
+    rendererSource,
+    /function rerenderFocusFallbackKeys\([\s\S]*?direction === 'up' \? 'down' : 'up'[\s\S]*?:visible[\s\S]*?:summary/,
+    'a column move that reaches a disabled boundary must retain a keyboard focus target'
+  );
+  for (const focusKey of [
+    'search:live:input',
+    'search:live:previous',
+    'search:live:next',
+    'search:saved:input',
+    'search:saved:previous',
+    'search:saved:next',
+    'grid:live:viewport',
+    'grid:saved:viewport',
+  ]) {
+    assert.match(
+      rendererSource,
+      new RegExp(`withFocusKey\\([^\\n]+, '${focusKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}'\\)`),
+      `${focusKey} must survive renderer refreshes`
+    );
+  }
+  assert.match(rendererSource, /'chart:live:y'/);
+  assert.match(rendererSource, /'chart:saved:y'/);
+  assert.match(
+    rendererSource,
+    /if \(state\.liveChart\.visible \|\|[\s\S]*?liveChartCandidates\.numeric\.length > 0/,
+    'a visible live chart must retain its Close action after compatible columns are hidden'
+  );
+  assert.match(
+    rendererSource,
+    /if \(state\.savedChartVisible \|\|[\s\S]*?chartCandidates\.numeric\.length > 0/,
+    'a visible saved chart must retain its Close action after compatible columns are hidden'
+  );
+  const savedChartControlsSource = sourceSection(
+    rendererSource,
+    'function renderSavedChartControls(',
+    'function drawNotebookChart('
+  );
+  assert.match(savedChartControlsSource, /exportPng\.disabled = !prepared/);
+  assert.match(savedChartControlsSource, /reset\.disabled = !prepared/);
+  assert.match(savedChartControlsSource, /exportPng\.disabled = !state\.plot/);
+  assert.match(savedChartControlsSource, /reset\.disabled = !state\.plot/);
+  assert.match(
+    savedChartControlsSource,
+    /preparation\?\.error[\s\S]*?Chart unavailable: selected columns contain no finite saved points/,
+    'saved chart preparation failures must surface their actual bounded error'
+  );
+  assert.match(
+    savedChartControlsSource,
+    /controlModel\.validationMessage \|\|[\s\S]*?savedChartSourceLimitMessage\(state\.payload\)[\s\S]*?render\.disabled = !!validation/,
+    'a saved chart above the shared source cap must explain the limit and disable Render'
+  );
+  assert.match(
+    savedChartControlsSource,
+    /render\.disabled = !!validation \|\| \(!!preparation\?\.error && !dirty\)/,
+    'an unchanged saved chart preparation error must not leave a repeat-only Render action'
+  );
+  const savedChartBuildSource = sourceSection(
+    rendererSource,
+    'function savedChartData(',
+    'function chartColumns('
+  );
+  assert.match(
+    savedChartBuildSource,
+    /error instanceof Error && error\.message[\s\S]*?state\.savedPreparedChart = \{ signature, \.\.\.preparation \}/,
+    'saved source-limit and validation errors must survive the preparation cache'
+  );
+  const liveChartControlsSource = sourceSection(
+    rendererSource,
+    'function renderLiveChart(',
+    'function markLiveChartDirty('
+  );
+  assert.match(
+    liveChartControlsSource,
+    /drawLiveChart\(state, host, chart\.data\);[\s\S]*?exportPng\.disabled = !hasPlot;[\s\S]*?reset\.disabled = !hasPlot;[\s\S]*?refine\.disabled = chart\.pending \|\| !hasPlot \|\| chart\.dirty/,
+    'live chart actions must be enabled only after an actual plot is prepared'
+  );
+  assert.match(
+    liveChartControlsSource,
+    /render\.disabled = chart\.pending \|\| !!liveChartValidationMessage\(state\) \|\|[\s\S]*?!!chart\.error && !chart\.dirty && !chart\.errorWasRefinement/,
+    'an unchanged failed live base chart request must disable repeat-only Render'
+  );
+  assert.match(
+    rendererSource,
+    /state\.liveChart\.errorWasRefinement =[\s\S]*?!!message\.error && !!state\.liveChart\.requestRange[\s\S]*?function markLiveChartDirty\([\s\S]*?chart\.errorWasRefinement = false/,
+    'live configuration changes must re-enable Render while refinement errors retain a base retry'
+  );
+  assert.match(
+    liveChartControlsSource,
+    /chart\.error = 'Zoom the chart before refining\.';[\s\S]*?chart\.errorWasRefinement = true/,
+    'the local Refine-without-zoom warning must not disable base Render'
+  );
+  assert.match(
+    rendererSource,
+    /function keepDetailsPanelInsideResult\([\s\S]*?maximumRight[\s\S]*?translateX\([\s\S]*?details\.addEventListener\('toggle', schedule\)/,
+    'settings and columns overlays must remain inside the notebook result boundary'
+  );
+  assert.ok(
+    !/Shift\+click[\s\S]{0,400}addEventListener\('mousedown'/.test(rendererSource),
+    'column range selection must branch in click handling instead of falling through to sort'
+  );
+  assert.match(rendererSource, /syncSavedSearchNavigation\(\)/);
+  assert.match(rendererSource, /No visible columns\. Use Columns to restore them\./);
+  assert.match(
+    rendererSource,
+    /kxLiveResultSummary\([\s\S]*?state\.liveRowCount,[\s\S]*?state\.liveTotalColumnCount,[\s\S]*?state\.liveAllColumns\.length/
+  );
+  assert.ok(
+    !rendererSource.includes('use the local data server'),
+    'notebook UI must not expose the full-panel local data server'
+  );
+  assert.match(rendererSource, /width: Math\.max\(1, Math\.floor\(host\.getBoundingClientRect\(\)\.width/);
+  assert.match(
+    rendererSource,
+    /item\.gapFlags\?\.\[index\] === true \? null : undefined/,
+    'grouped notebook charts must distinguish structural group holes from real data gaps'
+  );
+  assert.match(rendererSource, /function requestSavedCopy\(/);
+  assert.ok(
+    !rendererSource.includes('function savedDisplayTable('),
+    'saved table copy must use the validated host path and its shared confirmation threshold'
+  );
+  assert.ok(
+    !rendererSource.includes('outputId: state.id'),
+    'renderer-local output item ids must never be used as host authorization'
+  );
+  for (const type of [
+    'requestLiveResult',
+    'requestLiveSlice',
+    'searchLiveResult',
+    'requestLiveChart',
+    'copyLiveRange',
+    'copyLiveText',
+    'exportLiveRange',
+    'exportLiveText',
+    'openLiveResult',
+  ]) {
+    assert.match(
+      rendererSource,
+      new RegExp(`type: '${type}',[\\s\\S]{0,160}outputId: state\\.outputId`),
+      `${type} must require the public KX output binding`
+    );
+  }
+  for (const type of [
+    'openPreview',
+    'copyPreviewRange',
+    'exportPreviewRange',
+    'exportPreviewText',
+    'exportChartPng',
+    'rerunPreview',
+  ]) {
+    assert.match(
+      rendererSource,
+      new RegExp(
+        `type: '${type}',[\\s\\S]{0,180}` +
+        `\\.\\.\\.\\(state\\.outputId \\? \\{ outputId: state\\.outputId \\} : \\{\\}\\)`
+      ),
+      `${type} must preserve unique-payload fallback only when no binding exists`
+    );
+  }
+  assert.match(
+    rendererSource,
+    /parseNotebookOutputBindingReference\([\s\S]*?outputItem\.metadata\[NOTEBOOK_OUTPUT_BINDING_METADATA_KEY\]/,
+    'the renderer must read the public KX-owned binding from output metadata'
+  );
+  assert.match(
+    rendererSource,
+    /function requestOpenLiveResult\([\s\S]*?state\.liveOpenRequestId = requestId;[\s\S]*?type: 'openLiveResult'/,
+    'open-full requests must retain their request id for stale-handle correlation'
+  );
+  assert.match(
+    rendererSource,
+    /function openPreview\([\s\S]*?state\.hostActionRequestId = requestId;[\s\S]*?type: 'openPreview'[\s\S]*?requestId/,
+    'open-preview requests must correlate their host acknowledgement to the originating output'
+  );
   assert.match(rendererSource, /function decoratePlotLegendAccessibility\(plot: uPlot\)/);
   assert.match(rendererSource, /label\.tabIndex = 0/);
   assert.match(rendererSource, /label\.setAttribute\('role', 'button'\)/);
@@ -7137,7 +8369,7 @@ function testNotebookContract() {
   assert.ok(!/Point cap/.test(rendererSource), 'sampling guardrails must not be a notebook-only main control');
   assert.match(
     rendererSource,
-    /headingWrap\.append\(node\('strong', 'kx-heading', 'KX Results'\)\)/,
+    /headingWrap\.append\(node\('strong', 'kx-heading', KX_RESULT_UI_LABELS\.title\)\)/,
     'the compact renderer header must use KX Results vocabulary'
   );
   assert.match(rendererSource, /function notebookChartPointLimit\(\)/);
@@ -7150,7 +8382,8 @@ function testNotebookContract() {
   assert.match(rendererSource, /state\.liveViewport\.scrollTop = state\.liveScrollTop/);
   assert.match(rendererSource, /textContent/);
   assert.ok(!/document\.addEventListener\(['"]copy|window\.addEventListener\(['"]copy/.test(rendererSource));
-  assert.ok(!/(Live full result|Live in-session view|decoded Direct IPC|saved bounded snapshot|persisted preview)/i.test(rendererSource));
+  assert.match(rendererSource, /bounded saved preview/i);
+  assert.match(rendererSource, /live full result/i);
   assert.ok(!/\.innerHTML\s*=|\.outerHTML\s*=|insertAdjacentHTML|document\.write|\beval\s*\(/.test(rendererSource));
   const rendererBundlePath = path.join(ROOT, 'renderer', 'kx-notebook-renderer.js');
   assert.ok(fs.existsSync(rendererBundlePath));
@@ -7238,6 +8471,27 @@ function testNotebookRendererModel() {
     endColumn: 3,
   });
   assert.strictEqual(notebookSelectionCellCount(selection), 12);
+  let columnSelection = notebookSelectionForColumn(undefined, 1, 6, true);
+  assert.deepStrictEqual(columnSelection, {
+    anchorRow: 0,
+    anchorColumn: 1,
+    focusRow: 5,
+    focusColumn: 1,
+  });
+  columnSelection = notebookSelectionForColumn(columnSelection, 4, 6, true);
+  assert.deepStrictEqual(notebookSelectionRange(columnSelection), {
+    startRow: 0,
+    endRow: 5,
+    startColumn: 1,
+    endColumn: 4,
+  });
+  assert.deepStrictEqual(notebookSelectionForColumn(columnSelection, 3, 2, false), {
+    anchorRow: 0,
+    anchorColumn: 3,
+    focusRow: 1,
+    focusColumn: 3,
+  });
+  assert.strictEqual(notebookSelectionForColumn(columnSelection, 3, 0, true), undefined);
   assert.strictEqual(notebookSelectionCopyAllowed(undefined, 20_000), false);
   assert.strictEqual(notebookSelectionCopyAllowed(selection, 20_000), true);
   assert.strictEqual(notebookSelectionCopyAllowed(selection, 11), false);
@@ -7529,6 +8783,7 @@ function testLiveNotebookResultStore() {
   );
   assert.strictEqual(parseNotebookRendererHostMessage(hostLiveResult).available, true);
   assert.strictEqual(hostLiveResult.rowCount, 3);
+  assert.strictEqual(hostLiveResult.totalColumnCount, 3);
   assert.deepStrictEqual(hostLiveResult.columns, ['n', 'name', 'values']);
   assert.deepStrictEqual(hostLiveResult.metadata.messages, []);
   assert.ok(!/(snapshot|decoded|in-session|full live)/i.test(JSON.stringify(hostLiveResult)));
@@ -7555,6 +8810,22 @@ function testLiveNotebookResultStore() {
   assert.strictEqual(chartCapView.columns.length, MAX_NOTEBOOK_LIVE_COLUMNS + 1);
   assert.strictEqual(chartCapView.chartXColumns.length, MAX_NOTEBOOK_LIVE_COLUMNS);
   assert.strictEqual(chartCapView.chartYColumns.length, MAX_NOTEBOOK_LIVE_COLUMNS);
+  const chartCapMessage = liveResultMessage(
+    store,
+    notebookUri,
+    chartCapId,
+    2,
+    hostDisplayOptions
+  );
+  assert.strictEqual(chartCapMessage.columns.length, MAX_NOTEBOOK_LIVE_COLUMNS);
+  assert.strictEqual(
+    chartCapMessage.totalColumnCount,
+    MAX_NOTEBOOK_LIVE_COLUMNS + 1
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(chartCapMessage),
+    chartCapMessage
+  );
   const hostLiveSlice = liveSliceMessage(
     store,
     notebookUri,
@@ -7598,6 +8869,40 @@ function testLiveNotebookResultStore() {
     ['1', 'alpha hit', '1, 2'],
     ['2', 'beta hit', '2, 3'],
   ]);
+  const reorderedWindow = store.slice(baseId, notebookUri, {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 5,
+    endColumn: 6,
+    columnIndexes: [2, 0],
+  });
+  assert.deepStrictEqual(reorderedWindow, {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 5,
+    endColumn: 6,
+    cells: [['3, 4', '3']],
+  }, 'live slices must preserve visible coordinates while fetching reordered source columns');
+  const reorderedRange = store.resultRange(baseId, notebookUri, {
+    startRow: 0,
+    endRow: 1,
+    startColumn: 0,
+    endColumn: 1,
+    columnIndexes: [2, 0],
+    sortColumn: 'n',
+    sortDirection: 'asc',
+  });
+  assert.deepStrictEqual(reorderedRange.table.columns, ['values', 'n']);
+  assert.deepStrictEqual(reorderedRange.range, {
+    startRow: 0,
+    endRow: 1,
+    startColumn: 0,
+    endColumn: 1,
+  });
+  assert.strictEqual(
+    reorderedRange.table.toText('json', reorderedRange.range, { includeHeaders: true }),
+    '[{"values":[1,2],"n":1},{"values":[2,3],"n":2}]'
+  );
   assert.strictEqual(
     store.copyText(baseId, notebookUri, {
       startRow: 0,
@@ -7611,6 +8916,351 @@ function testLiveNotebookResultStore() {
     }),
     'n,name\n1,alpha hit\n2,beta hit\n3,gamma',
     'copy must cover a bounded sorted range independently of the loaded virtual slice'
+  );
+  const largeCsvValue = `"quoted",\n${'x'.repeat(70_000)}`;
+  const structuredCopyId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/structured-copy',
+    query: 'structuredCopy',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable(
+      ['n', 'nullable', 'values', 'flag', 'raw'],
+      [
+        { n: 1, nullable: null, values: [1, 2], flag: true, raw: largeCsvValue },
+        { n: 2, nullable: 'ok', values: [3, null], flag: false, raw: 'short' },
+      ]
+    ),
+  });
+  assert.strictEqual(
+    store.copyText(structuredCopyId, notebookUri, {
+      startRow: 0,
+      endRow: 1,
+      startColumn: 0,
+      endColumn: 3,
+      columnIndexes: [0, 1, 2, 3],
+      format: 'json',
+      includeHeaders: true,
+      includeRowIndex: false,
+    }),
+    '[{"n":1,"nullable":null,"values":[1,2],"flag":true},' +
+      '{"n":2,"nullable":"ok","values":[3,null],"flag":false}]',
+    'live JSON copy must preserve structured values instead of copying display strings'
+  );
+  assert.strictEqual(
+    store.copyText(structuredCopyId, notebookUri, {
+      startRow: 0,
+      endRow: 1,
+      startColumn: 0,
+      endColumn: 3,
+      columnIndexes: [0, 1, 2, 3],
+      format: 'ndjson',
+      includeHeaders: true,
+      includeRowIndex: true,
+    }),
+    '{"#":1,"n":1,"nullable":null,"values":[1,2],"flag":true}\n' +
+      '{"#":2,"n":2,"nullable":"ok","values":[3,null],"flag":false}',
+    'live NDJSON copy must preserve values and panel-compatible row indexes'
+  );
+  const boundedCsv = store.copyText(structuredCopyId, notebookUri, {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 0,
+    endColumn: 0,
+    columnIndexes: [4],
+    format: 'csv',
+    includeHeaders: true,
+    includeRowIndex: false,
+  });
+  assert.ok(boundedCsv.length <= MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS);
+  assert.ok(boundedCsv.length < largeCsvValue.length);
+  assert.match(boundedCsv, /^raw\n"""quoted"", /);
+  assert.match(boundedCsv, /\u2026 \[cell truncated; open KX Results\]"$/);
+  const longHeader = `long-${'h'.repeat(70_000)}`;
+  const longHeaderId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/long-copy-header',
+    query: 'longCopyHeader',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable([longHeader], [{ [longHeader]: true }]),
+  });
+  const longHeaderJson = store.copyText(longHeaderId, notebookUri, {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 0,
+    endColumn: 0,
+    format: 'json',
+    includeHeaders: true,
+    includeRowIndex: false,
+  });
+  assert.deepStrictEqual(JSON.parse(longHeaderJson), [{ [longHeader]: true }]);
+  assert.strictEqual(
+    Object.keys(JSON.parse(longHeaderJson)[0])[0],
+    longHeader,
+    'structured copy must preserve a long header exactly when the aggregate output is bounded'
+  );
+  const overLimitHeader = `over-${'h'.repeat(MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS)}`;
+  const overLimitHeaderId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/over-limit-copy-header',
+    query: 'overLimitCopyHeader',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable([overLimitHeader], [{ [overLimitHeader]: true }]),
+  });
+  assert.throws(
+    () => store.copyText(overLimitHeaderId, notebookUri, {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'json',
+      includeHeaders: true,
+      includeRowIndex: false,
+    }),
+    /Inline copy exceeds the .* character limit/,
+    'an over-limit structured header must fail instead of being silently renamed or truncated'
+  );
+  const structuredPreflightCellReads = (
+    header,
+    rowCount,
+    format,
+    includeRowIndex
+  ) => {
+    let cellReads = 0;
+    let toTextCalls = 0;
+    const table = createColumnarPanelResult([header], rowCount, () => {
+      cellReads++;
+      return true;
+    });
+    table.toText = () => {
+      toTextCalls++;
+      throw new Error('structured copy reached toText before enforcing its aggregate cap');
+    };
+    const preflightStore = new LiveNotebookResultStore(
+      1,
+      () => 'structured-preflight-result-000000000001'
+    );
+    preflightStore.resultRange = () => ({
+      table,
+      range: {
+        startRow: 0,
+        endRow: rowCount - 1,
+        startColumn: 0,
+        endColumn: 0,
+      },
+    });
+    assert.throws(
+      () => preflightStore.copyText(
+        'structured-preflight-result-000000000001',
+        notebookUri,
+        {
+          startRow: 0,
+          endRow: rowCount - 1,
+          startColumn: 0,
+          endColumn: 0,
+          format,
+          includeHeaders: true,
+          includeRowIndex,
+        }
+      ),
+      /Inline copy exceeds the .* character limit/
+    );
+    assert.strictEqual(
+      toTextCalls,
+      0,
+      `${format} must reject aggregate overflow before materializing output text`
+    );
+    return cellReads;
+  };
+  const amplifiedLongHeader =
+    `amplified-"\\\n\0\ud800-${'h'.repeat(70_000)}`;
+  assert.strictEqual(
+    structuredPreflightCellReads(
+      amplifiedLongHeader,
+      MAX_LIVE_NOTEBOOK_COPY_CELLS,
+      'json',
+      false
+    ),
+    0,
+    'JSON must reject a 20k-row amplified long key before serializing any cells'
+  );
+  assert.strictEqual(
+    structuredPreflightCellReads(
+      amplifiedLongHeader,
+      MAX_LIVE_NOTEBOOK_COPY_CELLS,
+      'ndjson',
+      true
+    ),
+    0,
+    'NDJSON must reject repeated key overhead before row-index or cell serialization'
+  );
+  assert.strictEqual(
+    structuredPreflightCellReads(
+      '\0'.repeat(Math.ceil(MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS / 6)),
+      1,
+      'json',
+      false
+    ),
+    0,
+    'JSON key preflight must count control-character escape expansion'
+  );
+  const rowIndexBoundaryReads = structuredPreflightCellReads(
+    'r'.repeat(81),
+    MAX_LIVE_NOTEBOOK_COPY_CELLS,
+    'json',
+    true
+  );
+  assert.ok(
+    rowIndexBoundaryReads > 0 &&
+      rowIndexBoundaryReads < MAX_LIVE_NOTEBOOK_COPY_CELLS,
+    'row-index digits must count toward the aggregate cap before toText'
+  );
+  assert.strictEqual(
+    structuredPreflightCellReads('s'.repeat(999_990), 2, 'json', false),
+    2,
+    'JSON array framing and row separators must count toward the aggregate cap'
+  );
+  assert.strictEqual(
+    structuredPreflightCellReads('s'.repeat(999_991), 2, 'ndjson', false),
+    2,
+    'NDJSON row separators must count toward the aggregate cap'
+  );
+  const assertStructuredValuePreflightRejects = (
+    value,
+    expectedMessage
+  ) => {
+    let toTextCalls = 0;
+    const table = createColumnarPanelResult(['value'], 1, () => value);
+    table.toText = () => {
+      toTextCalls++;
+      throw new Error('structured value preflight reached toText');
+    };
+    const preflightStore = new LiveNotebookResultStore(
+      1,
+      () => 'structured-value-preflight-0000000001'
+    );
+    preflightStore.resultRange = () => ({
+      table,
+      range: {
+        startRow: 0,
+        endRow: 0,
+        startColumn: 0,
+        endColumn: 0,
+      },
+    });
+    const originalStringify = JSON.stringify;
+    let stringifyCalls = 0;
+    let error;
+    JSON.stringify = () => {
+      stringifyCalls++;
+      throw new Error('structured value preflight called JSON.stringify');
+    };
+    try {
+      preflightStore.copyText(
+        'structured-value-preflight-0000000001',
+        notebookUri,
+        {
+          startRow: 0,
+          endRow: 0,
+          startColumn: 0,
+          endColumn: 0,
+          format: 'json',
+          includeHeaders: true,
+          includeRowIndex: false,
+        }
+      );
+    } catch (caught) {
+      error = caught;
+    } finally {
+      JSON.stringify = originalStringify;
+    }
+    assert.match(String(error?.message || error), expectedMessage);
+    assert.strictEqual(stringifyCalls, 0);
+    assert.strictEqual(toTextCalls, 0);
+  };
+  assertStructuredValuePreflightRejects(
+    '\0'.repeat(20_000),
+    /structured copy cell exceeds/i
+  );
+  assertStructuredValuePreflightRejects(
+    Array(20_000).fill('\0'),
+    /structured copy cell exceeds/i
+  );
+  assertStructuredValuePreflightRejects(
+    Object.fromEntries(
+      Array.from({ length: 10_000 }, (_, index) => [`key${index}`, null])
+    ),
+    /structured copy cell exceeds/i
+  );
+  const cyclicStructuredValue = {};
+  cyclicStructuredValue.self = cyclicStructuredValue;
+  assertStructuredValuePreflightRejects(
+    cyclicStructuredValue,
+    /cannot be serialized safely/i
+  );
+  assertStructuredValuePreflightRejects(
+    { toJSON: () => '\0'.repeat(20_000) },
+    /structured copy cell exceeds/i
+  );
+
+  const hugeReadableItem = ['x'.repeat(100), { nested: true }];
+  const hugeReadableValue = Array(100_000).fill(hugeReadableItem);
+  const boundedLiveTable = createColumnarPanelResult(
+    ['huge'],
+    1,
+    () => hugeReadableValue
+  );
+  const boundedLiveId = 'bounded-live-value-0000000000000001';
+  store.records.set(boundedLiveId, {
+    id: boundedLiveId,
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/bounded-live-value',
+    query: 'boundedLiveValue',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: null,
+    createdAt: Date.now(),
+    viewKey: JSON.stringify([undefined, undefined, undefined, undefined]),
+    converted: { mode: 'grid', result: boundedLiveTable },
+    sortOrders: new Map(),
+  });
+  const boundedLiveSlice = store.slice(boundedLiveId, notebookUri, {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 0,
+    endColumn: 0,
+  });
+  assert.ok(
+    boundedLiveSlice.cells[0][0].length <= MAX_LIVE_NOTEBOOK_SLICE_TEXT_CHARS
+  );
+  assert.match(
+    boundedLiveSlice.cells[0][0],
+    /cell truncated; open KX Results/i
+  );
+  assert.deepStrictEqual(
+    store.search(boundedLiveId, notebookUri, 'not-present'),
+    {
+      matches: [],
+      totalScanned: 1,
+      scannedCells: 1,
+      capped: false,
+      partial: true,
+    },
+    'search must report partial coverage when a cell exceeds its safe readable-text scan'
+  );
+  const cyclicReadableValue = [];
+  cyclicReadableValue.push(cyclicReadableValue);
+  boundedLiveTable.cellValue = () => cyclicReadableValue;
+  assert.match(
+    store.slice(boundedLiveId, notebookUri, {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+    }).cells[0][0],
+    /cell truncated; open KX Results/i
   );
   assert.deepStrictEqual(
     store.slice(baseId, notebookUri, {
@@ -7632,6 +9282,15 @@ function testLiveNotebookResultStore() {
   assert.deepStrictEqual(sortedSearch.matches, [0, 1]);
   assert.strictEqual(sortedSearch.totalScanned, 3);
   assert.strictEqual(sortedSearch.partial, false);
+  assert.deepStrictEqual(
+    store.search(baseId, notebookUri, 'HIT', {}, { columnIndexes: [0] }).matches,
+    [],
+    'live search must honor the visible-column projection'
+  );
+  assert.deepStrictEqual(
+    store.search(baseId, notebookUri, 'HIT', {}, { columnIndexes: [1] }).matches,
+    [1, 2]
+  );
   assert.deepStrictEqual(
     store.search(baseId, notebookUri, '\0', {}),
     { matches: [], totalScanned: 0, scannedCells: 0, capped: false, partial: false }
@@ -7779,6 +9438,19 @@ function testLiveNotebookResultStore() {
   assert.strictEqual(chart.sourceRowCount, 120);
   assert.ok(chart.sampledPointCount <= 20);
   assert.deepStrictEqual(chart.series.map(series => series.columnName), ['price', 'size']);
+  const refinedChart = store.chart(chartId, notebookUri, {
+    requestId: 71,
+    chartType: 'line',
+    xColumn: 'time',
+    yColumns: ['price'],
+    maxPoints: 40,
+    minPoints: 10,
+    maxSourceRows: 120,
+    xMin: 30,
+    xMax: 40,
+  });
+  assert.ok(refinedChart.x.every(value => value >= 30 && value <= 40));
+  assert.ok(refinedChart.sampledPointCount >= 10);
   const chartView = store.view(chartId, notebookUri);
   assert.ok(chartView.chartGroupColumns.includes('sym'));
   const groupedChart = store.chart(chartId, notebookUri, {
@@ -8081,6 +9753,7 @@ async function testDirectQNotebookController() {
   const runtime = createNotebookControllerRuntime();
   const {
     KX_NOTEBOOK_LIVE_METADATA_KEY,
+    KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
     KX_Q_NOTEBOOK_CONTROLLER_ID,
     KX_Q_NOTEBOOK_CONTROLLER_LABEL,
     KX_Q_NOTEBOOK_TYPE,
@@ -8257,8 +9930,15 @@ async function testDirectQNotebookController() {
   );
   assert.ok(notebookOutputItem(tableOutput, 'text/plain'));
   const liveMetadata = tableOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY];
+  const bindingMetadata =
+    tableOutput.metadata[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY];
   assert.strictEqual(liveMetadata.version, 1);
   assert.match(liveMetadata.id, /^[A-Za-z0-9_-]{32,128}$/);
+  assert.deepStrictEqual(
+    bindingMetadata,
+    liveMetadata,
+    'direct outputs may reuse the cryptographic live handle as their opaque output binding'
+  );
   const liveTable = liveResults.view(liveMetadata.id, notebook.uri.toString());
   assert.strictEqual(liveTable.rowCount, 3);
   assert.strictEqual(liveTable.query, fullSource);
@@ -8684,7 +10364,7 @@ async function testDirectQNotebookController() {
   const createsBeforeMixedPreCancel = runtime.createExecutionCalls.length;
   const editsBeforeMixedPreCancel = runtime.workspaceEdits.length;
   runtime.controls.preCancelProgress = true;
-  assert.strictEqual(await directController.runCell(mixedPreCanceledCell, connection.id), 'executed');
+  assert.strictEqual(await directController.runCell(mixedPreCanceledCell, connection.id), 'canceled');
   runtime.controls.preCancelProgress = false;
   assert.strictEqual(bridge.calls.length, callsBeforeMixedPreCancel);
   assert.strictEqual(runtime.createExecutionCalls.length, createsBeforeMixedPreCancel);
@@ -8726,7 +10406,7 @@ async function testDirectQNotebookController() {
     'mixed q-cell post-dispatch cancellation',
     () => postCanceledRun,
     1000
-  ), 'executed');
+  ), 'canceled');
   assert.strictEqual(dispatchedSignal.aborted, true);
   const postCanceledOutput = runtime.outputFor(runtime.replacementFor(postCanceledCell));
   assert.match(notebookTextOutput(postCanceledOutput), /Run q Cell \(KX\)/);
@@ -8759,6 +10439,10 @@ async function testDirectQNotebookController() {
     [runtime.vscode.NotebookCellOutputItem.text('old live output')],
     {
       [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
+        version: 1,
+        id: retainedLiveId,
+      },
+      [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
         version: 1,
         id: retainedLiveId,
       },
@@ -8822,7 +10506,7 @@ async function testDirectQNotebookController() {
   };
   assert.strictEqual(
     await directController.runCell(cancelBeforeCommitCell, connection.id),
-    'executed'
+    'canceled'
   );
   runtime.controls.onWorkspaceEditConstruct = undefined;
   assert.strictEqual(runtime.workspaceEdits.length, editsBeforeCommitCancel);
@@ -9160,6 +10844,8 @@ async function testMixedQNotebookCommandIntegration() {
   const {
     NotebookIntegration,
     RUN_Q_NOTEBOOK_CELL_COMMAND,
+    RUN_Q_NOTEBOOK_CELL_AND_SELECT_BELOW_COMMAND,
+    RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND,
     SELECT_NOTEBOOK_Q_TARGET_COMMAND,
     SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND,
     RESTORE_NOTEBOOK_CELL_LANGUAGE_COMMAND,
@@ -9240,7 +10926,15 @@ async function testMixedQNotebookCommandIntegration() {
   };
   const integration = new NotebookIntegration({}, { directController });
   const command = runtime.commands.get(RUN_Q_NOTEBOOK_CELL_COMMAND);
+  const commandAndSelectBelow = runtime.commands.get(
+    RUN_Q_NOTEBOOK_CELL_AND_SELECT_BELOW_COMMAND
+  );
+  const commandAndInsertBelow = runtime.commands.get(
+    RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND
+  );
   assert.strictEqual(typeof command, 'function');
+  assert.strictEqual(typeof commandAndSelectBelow, 'function');
+  assert.strictEqual(typeof commandAndInsertBelow, 'function');
   assert.strictEqual(runtime.statusProviders.length, 1);
   const provider = runtime.statusProviders[0].provider;
 
@@ -9291,6 +10985,38 @@ async function testMixedQNotebookCommandIntegration() {
   assert.strictEqual(runCalls.length, 1);
   assert.strictEqual(runtime.warnings.length, warningsBeforePython + 1);
   assert.match(runtime.warnings.at(-1), /q-language code cell/i);
+  assert.deepStrictEqual(pythonCell.outputs, [{ owner: 'python-controller' }]);
+
+  const navigationBeforeQShortcuts = runtime.executedCommands.length;
+  await commandAndSelectBelow(qCell);
+  assert.deepStrictEqual(runtime.executedCommands.at(-1), {
+    id: 'notebook.focusNextEditor',
+    args: [],
+  });
+  await commandAndInsertBelow(qCell);
+  assert.deepStrictEqual(runtime.executedCommands.at(-1), {
+    id: 'notebook.cell.insertCodeCellBelow',
+    args: [],
+  });
+  assert.strictEqual(
+    runtime.executedCommands.length,
+    navigationBeforeQShortcuts + 2,
+    'successful q Shift+Enter and Alt+Enter routes must apply exactly one native post-run action'
+  );
+  const runsAfterQShortcuts = runCalls.length;
+  const navigationBeforePythonShortcuts = runtime.executedCommands.length;
+  await commandAndSelectBelow(pythonCell);
+  await commandAndInsertBelow(pythonCell);
+  assert.strictEqual(
+    runCalls.length,
+    runsAfterQShortcuts,
+    'q notebook shortcuts must never dispatch a Python cell'
+  );
+  assert.strictEqual(
+    runtime.executedCommands.length,
+    navigationBeforePythonShortcuts,
+    'q notebook shortcuts must never navigate or insert after rejecting a Python cell'
+  );
   assert.deepStrictEqual(pythonCell.outputs, [{ owner: 'python-controller' }]);
 
   let statusUpdates = 0;
@@ -9442,6 +11168,24 @@ async function testMixedQNotebookCommandIntegration() {
   stateChanged.fire();
   runtime.setQuickPickSelectionId('profile-one');
 
+  nextRunResult = 'canceled';
+  const warningsBeforeCanceledRun = runtime.warnings.length;
+  const errorsBeforeCanceledRun = runtime.errors.length;
+  await command(qCell);
+  assert.strictEqual(
+    runtime.warnings.length,
+    warningsBeforeCanceledRun,
+    'a canceled mixed q run must not show the non-q-cell warning'
+  );
+  assert.strictEqual(runtime.errors.length, errorsBeforeCanceledRun);
+  const navigationBeforeCanceledShortcut = runtime.executedCommands.length;
+  await commandAndSelectBelow(qCell);
+  assert.strictEqual(
+    runtime.executedCommands.length,
+    navigationBeforeCanceledShortcut,
+    'a canceled q Shift+Enter run must not move to another cell'
+  );
+
   nextRunResult = 'busy';
   await command(qCell);
   assert.match(runtime.warnings.at(-1), /already running/i);
@@ -9461,12 +11205,945 @@ async function testMixedQNotebookCommandIntegration() {
   statusSubscription.dispose();
   integration.dispose();
   assert.strictEqual(runtime.commands.has(RUN_Q_NOTEBOOK_CELL_COMMAND), false);
+  assert.strictEqual(
+    runtime.commands.has(RUN_Q_NOTEBOOK_CELL_AND_SELECT_BELOW_COMMAND),
+    false
+  );
+  assert.strictEqual(
+    runtime.commands.has(RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND),
+    false
+  );
   assert.strictEqual(runtime.commands.has(SELECT_NOTEBOOK_Q_TARGET_COMMAND), false);
   assert.strictEqual(runtime.statusProviders.length, 0);
   assert.deepStrictEqual(
     runtime.contexts.filter(entry => entry.key === 'vscode-kdb.qNotebookCellResources').at(-1),
     { key: 'vscode-kdb.qNotebookCellResources', value: [] }
   );
+}
+
+async function testNotebookRendererHostActions() {
+  const runtime = createNotebookIntegrationRuntime();
+  const panelCalls = [];
+  const settingUpdates = [];
+  const resultSettings = {
+    cellWidth: 160,
+    rowHeight: 28,
+    fontSize: 0,
+    density: 'standard',
+    showRowIndex: true,
+    includeHeaders: true,
+    includeRowIndex: true,
+    copyExportConfirmCellThreshold: 1,
+    elapsedTimeDisplay: 'auto',
+    chartDecimalPlaces: 4,
+    chartMaxSourceRows: 2_000_000,
+    chartZoomMinSampledPoints: 3_000,
+    chartZoomMaxSampledPoints: 7_000,
+    qTextSyntaxHighlighting: false,
+    qTextDisplayFormatting: false,
+    arrayDisplayFormat: 'commaSpace',
+    functionDisplayStrategy: 'qText',
+    dictionaryDisplayStrategy: 'grid',
+    listDisplayStrategy: 'grid',
+    objectDisplayStrategy: 'grid',
+  };
+  const {
+    NotebookIntegration,
+  } = requireOutWithMocks('notebook-integration', {
+    vscode: runtime.vscode,
+    './kx-results-panel': {
+      KxResultsPanel: {
+        showResult(...args) {
+          panelCalls.push(args);
+        },
+      },
+      sharedKxResultSettings: () => ({ ...resultSettings }),
+      updateSharedKxResultSetting: async (key, value) => {
+        settingUpdates.push({ key, value });
+      },
+    },
+  });
+
+  const notebook = {
+    uri: testUri('file:///workspace/host-actions.ipynb'),
+    notebookType: 'jupyter-notebook',
+    metadata: {
+      metadata: {
+        language_info: { name: 'python' },
+        kernelspec: { language: 'python' },
+        'vscode-kdb': {
+          version: 1,
+          qTarget: { id: 'profile-one', name: 'Connection one' },
+        },
+      },
+    },
+    cellCount: 0,
+    cells: [],
+    cellAt(index) {
+      return this.cells[index];
+    },
+  };
+  const firstCell = runtime.cell(notebook, 0, 'q', 'select from trade');
+  const secondCell = runtime.cell(notebook, 1, 'q', 'select from trade');
+  const legacyCell = runtime.cell(notebook, 2, 'q', 'legacy preview');
+  notebook.cells.push(firstCell, secondCell, legacyCell);
+  notebook.cellCount = notebook.cells.length;
+  const editor = { notebook, selections: [{ start: 0, end: 1 }] };
+  runtime.vscode.window.activeNotebookEditor = editor;
+  runtime.vscode.window.activeTextEditor = { document: firstCell.document };
+
+  const payload = createPortableKxResult({
+    columns: ['n', 'value', 'sym'],
+    rows: [[1, 10, 'A'], [2, 20, 'B'], [3, 30, 'C']],
+    rowCount: 3,
+    rowLimit: 3,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+    qSource: 'select from trade',
+  });
+  const encodedPayload = new TextEncoder().encode(JSON.stringify(payload));
+  const legacyPayload = createPortableKxResult({
+    columns: ['sym'],
+    rows: [['LEGACY']],
+    rowCount: 1,
+    rowLimit: 1,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: '%%q',
+  });
+  const encodedLegacyPayload = new TextEncoder().encode(JSON.stringify(legacyPayload));
+  const liveId = `host-live-${'a'.repeat(32)}`;
+  const qTextLiveId = `host-qtext-${'c'.repeat(32)}`;
+  const firstBindingId = liveId;
+  const secondBindingId = `host-binding-${'b'.repeat(32)}`;
+  const liveMetadata = {
+    [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+  };
+  firstCell.outputs = [{
+    metadata: {
+      ...liveMetadata,
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: firstBindingId },
+    },
+    items: [{ mime: KX_NOTEBOOK_MIME, data: encodedPayload }],
+  }];
+  secondCell.outputs = [{
+    metadata: {
+      ...liveMetadata,
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: secondBindingId },
+    },
+    items: [{ mime: KX_NOTEBOOK_MIME, data: encodedPayload }],
+  }];
+  legacyCell.outputs = [{
+    metadata: {},
+    items: [{ mime: KX_NOTEBOOK_MIME, data: encodedLegacyPayload }],
+  }];
+
+  const pendingLiveIds = [liveId, qTextLiveId];
+  const liveResults = new LiveNotebookResultStore(8, () => pendingLiveIds.shift());
+  assert.strictEqual(liveResults.register({
+    notebookUri: notebook.uri.toString(),
+    cellUri: firstCell.document.uri.toString(),
+    query: 'select from trade',
+    connectionName: 'Connection one',
+    elapsedMs: 4,
+    value: modelQTable(
+      ['n', 'value', 'sym', 'values', 'nullable', 'flag'],
+      [
+        { n: 1, value: 10, sym: 'A', values: [1, 2], nullable: null, flag: true },
+        { n: 2, value: 20, sym: 'B', values: [3, null], nullable: 'ok', flag: false },
+        { n: 3, value: 30, sym: 'C', values: [4, 5], nullable: null, flag: true },
+      ]
+    ),
+  }), liveId);
+  assert.strictEqual(
+    liveResults.view(
+      liveId,
+      notebook.uri.toString(),
+      {},
+      secondCell.document.uri.toString()
+    ),
+    undefined,
+    'store access must reject the same handle from a different cell'
+  );
+
+  let nextRunResult = 'executed';
+  let directControllerSelected = false;
+  const runCalls = [];
+  const directController = {
+    onDidChangeState: new runtime.vscode.EventEmitter().event,
+    isSelected: target => directControllerSelected && target === notebook,
+    connectionProfiles: () => [{
+      id: 'profile-one',
+      name: 'Connection one',
+      active: true,
+      connected: true,
+    }],
+    async runCell(cell, connectionId) {
+      runCalls.push({ cell, connectionId });
+      return nextRunResult;
+    },
+  };
+  const integration = new NotebookIntegration(
+    {},
+    { directController, liveResults }
+  );
+  const chartPngBytes = Buffer.from([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+  ]);
+  const chartPngDataUrl = CHART_PNG_DATA_URL_PREFIX + chartPngBytes.toString('base64');
+
+  try {
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveResult',
+      outputId: secondBindingId,
+      liveId,
+      requestId: 201,
+    });
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'liveResult',
+      liveId,
+      requestId: 201,
+      available: false,
+      message: 'Live result unavailable. Only the bounded saved preview remains.',
+    });
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveResult',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 202,
+    });
+    assert.strictEqual(runtime.postedMessages.at(-1).message.available, true);
+    assert.strictEqual(runtime.postedMessages.at(-1).message.rowCount, 3);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveSlice',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 216,
+      startRow: 0,
+      endRow: 1,
+      startColumn: 0,
+      endColumn: 1,
+      columnIndexes: [0, 1],
+    });
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message.cells, [
+      ['1', '10'],
+      ['2', '20'],
+    ]);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'searchLiveResult',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 217,
+      query: 'B',
+      columnIndexes: [2],
+    });
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message.matches, [1]);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveChart',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 218,
+      chartType: 'line',
+      xColumn: 'n',
+      yColumns: ['value'],
+      maxPoints: 100,
+    });
+    const chartMessage = runtime.postedMessages.at(-1).message;
+    assert.strictEqual(chartMessage.type, 'liveChart');
+    assert.strictEqual(chartMessage.data.chartType, 'line');
+    assert.deepStrictEqual(chartMessage.data.x, [1, 2, 3]);
+    assert.deepStrictEqual(chartMessage.data.series[0].values, [10, 20, 30]);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'updateResultSetting',
+      key: 'density',
+      value: 'compact',
+    });
+    assert.deepStrictEqual(settingUpdates.at(-1), {
+      key: 'density',
+      value: 'compact',
+    });
+    assert.strictEqual(runtime.postedMessages.at(-1).message.type, 'settings');
+
+    runtime.setWarningResponse('Continue');
+    runtime.setSaveDialogUri(testUri('file:///workspace/live.csv'));
+    const liveExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportLiveRange',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 219,
+      startRow: 0,
+      endRow: 2,
+      startColumn: 0,
+      endColumn: 1,
+      format: 'csv',
+      includeHeaders: true,
+      includeRowIndex: false,
+      columnIndexes: [0, 1],
+    });
+    assert.strictEqual(
+      new TextDecoder().decode(runtime.savedFiles[liveExportIndex].content),
+      'n,value\n1,10\n2,20\n3,30'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 219,
+      action: 'export',
+      ok: true,
+      canceled: false,
+      message: 'CSV exported / saved.',
+    });
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyLiveRange',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 225,
+      startRow: 0,
+      endRow: 1,
+      startColumn: 0,
+      endColumn: 3,
+      columnIndexes: [0, 3, 4, 5],
+      format: 'json',
+      includeHeaders: true,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      '[{"n":1,"values":[1,2],"nullable":null,"flag":true},' +
+        '{"n":2,"values":[3,null],"nullable":"ok","flag":false}]',
+      'the host must copy live JSON with native arrays, nulls, and booleans intact'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'liveCopy',
+      liveId,
+      requestId: 225,
+      ok: true,
+    });
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyLiveRange',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 226,
+      startRow: 0,
+      endRow: 1,
+      startColumn: 0,
+      endColumn: 3,
+      columnIndexes: [0, 3, 4, 5],
+      format: 'ndjson',
+      includeHeaders: true,
+      includeRowIndex: true,
+    });
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      '{"#":1,"n":1,"values":[1,2],"nullable":null,"flag":true}\n' +
+        '{"#":2,"n":2,"values":[3,null],"nullable":"ok","flag":false}',
+      'the host must copy panel-compatible live NDJSON without display coercion'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'liveCopy',
+      liveId,
+      requestId: 226,
+      ok: true,
+    });
+
+    runtime.setSaveDialogUri(testUri('file:///workspace/saved.csv'));
+    const savedExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportPreviewRange',
+      outputId: secondBindingId,
+      requestId: 220,
+      payload,
+      startRow: 1,
+      endRow: 2,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: true,
+      includeRowIndex: true,
+      columnIndexes: [2],
+      rowIndexes: [2, 0],
+    });
+    assert.strictEqual(
+      new TextDecoder().decode(runtime.savedFiles[savedExportIndex].content),
+      '#,sym\n2,C\n3,A'
+    );
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
+
+    runtime.setSaveDialogUri(testUri('file:///workspace/bound-chart.png'));
+    const boundChartExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportChartPng',
+      outputId: secondBindingId,
+      payload,
+      requestId: 228,
+      dataUrl: chartPngDataUrl,
+    });
+    assert.deepStrictEqual(
+      Buffer.from(runtime.savedFiles[boundChartExportIndex].content),
+      chartPngBytes,
+      'a current unique output binding must authorize PNG save'
+    );
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
+
+    const beforeStaleChartExport = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportChartPng',
+      outputId: `missing-chart-${'e'.repeat(32)}`,
+      payload,
+      requestId: 229,
+      dataUrl: chartPngDataUrl,
+    });
+    assert.strictEqual(runtime.savedFiles.length, beforeStaleChartExport);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 229,
+      action: 'exportChartPng',
+      ok: false,
+      canceled: false,
+      message: 'The requested chart output is not present in the current notebook.',
+    });
+
+    const staleMessageStart = runtime.postedMessages.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyLiveRange',
+      outputId: secondBindingId,
+      liveId,
+      requestId: 203,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: true,
+      includeRowIndex: true,
+    });
+    assert.deepStrictEqual(
+      runtime.postedMessages.slice(staleMessageStart).map(entry => entry.message.type),
+      ['liveCopy', 'liveResult'],
+      'stale operations must resolve the action and transition the renderer to saved-preview state'
+    );
+    assert.strictEqual(
+      runtime.postedMessages.at(-1).message.available,
+      false
+    );
+
+    runtime.setWarningResponse('Continue');
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: secondBindingId,
+      requestId: 204,
+      payload,
+      startRow: 1,
+      endRow: 2,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: true,
+      includeRowIndex: true,
+      columnIndexes: [2],
+      rowIndexes: [2, 0],
+    });
+    assert.match(runtime.warnings.at(-1), /Copy CSV selection is large:/);
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      '#,sym\n2,C\n3,A',
+      'saved copy must preserve the row numbers displayed for the selected range'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 204,
+      action: 'copy',
+      ok: true,
+      canceled: false,
+      message: 'Copied.',
+    });
+
+    runtime.setWarningResponse('Cancel');
+    const clipboardWrites = runtime.clipboardWrites.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: secondBindingId,
+      requestId: 205,
+      payload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'tsv',
+      includeHeaders: true,
+      includeRowIndex: false,
+      columnIndexes: [2],
+      rowIndexes: [0],
+    });
+    assert.strictEqual(runtime.clipboardWrites.length, clipboardWrites);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 205,
+      action: 'copy',
+      ok: false,
+      canceled: true,
+      message: 'Copy canceled.',
+    });
+
+    runtime.setWarningResponse('Continue');
+    const beforeWrongBindingCopy = runtime.clipboardWrites.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: `missing-binding-${'c'.repeat(32)}`,
+      requestId: 211,
+      payload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: false,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(runtime.clipboardWrites.length, beforeWrongBindingCopy);
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, false);
+    assert.match(
+      runtime.postedMessages.at(-1).message.message,
+      /saved preview is not present/
+    );
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      requestId: 212,
+      payload: legacyPayload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: false,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      'LEGACY',
+      'a unique truly-unbound legacy/Python payload remains actionable'
+    );
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'openPreview',
+      outputId: secondBindingId,
+      requestId: 221,
+      payload,
+    });
+    assert.strictEqual(panelCalls.length, 1);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 221,
+      action: 'openPreview',
+      ok: true,
+      canceled: false,
+      message: 'Opened saved preview in KX Results.',
+    });
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'openPreview',
+      outputId: `missing-binding-${'d'.repeat(32)}`,
+      requestId: 222,
+      payload,
+    });
+    assert.strictEqual(panelCalls.length, 1);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 222,
+      action: 'openPreview',
+      ok: false,
+      canceled: false,
+      message: 'The requested preview is not present in the current notebook.',
+    });
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'openPreview',
+      requestId: 223,
+      payload: legacyPayload,
+    });
+    assert.strictEqual(panelCalls.length, 2);
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
+
+    runtime.setSaveDialogUri(testUri('file:///workspace/unbound-chart.png'));
+    const unboundChartExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportChartPng',
+      payload: legacyPayload,
+      requestId: 230,
+      dataUrl: chartPngDataUrl,
+    });
+    assert.deepStrictEqual(
+      Buffer.from(runtime.savedFiles[unboundChartExportIndex].content),
+      chartPngBytes,
+      'a unique unbound companion payload must retain PNG export'
+    );
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
+
+    const duplicateLegacyCell = runtime.cell(notebook, 3, 'q', 'duplicate legacy preview');
+    duplicateLegacyCell.outputs = [{
+      metadata: {},
+      items: [{ mime: KX_NOTEBOOK_MIME, data: encodedLegacyPayload }],
+    }];
+    notebook.cells.push(duplicateLegacyCell);
+    notebook.cellCount = notebook.cells.length;
+    const beforeAmbiguousRerun = runCalls.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      payload: legacyPayload,
+      requestId: 213,
+    });
+    assert.strictEqual(runCalls.length, beforeAmbiguousRerun);
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, false);
+    assert.match(
+      runtime.postedMessages.at(-1).message.message,
+      /saved preview is not present/
+    );
+    await runtime.emitRendererMessage(editor, {
+      type: 'openPreview',
+      requestId: 224,
+      payload: legacyPayload,
+    });
+    assert.strictEqual(panelCalls.length, 2);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 224,
+      action: 'openPreview',
+      ok: false,
+      canceled: false,
+      message: 'The requested preview is not present in the current notebook.',
+    });
+    const beforeAmbiguousChartExport = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportChartPng',
+      payload: legacyPayload,
+      requestId: 231,
+      dataUrl: chartPngDataUrl,
+    });
+    assert.strictEqual(runtime.savedFiles.length, beforeAmbiguousChartExport);
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, false);
+    assert.match(
+      runtime.postedMessages.at(-1).message.message,
+      /chart output is not present/
+    );
+
+    runtime.vscode.window.activeNotebookEditor = undefined;
+    runtime.vscode.window.activeTextEditor = undefined;
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      outputId: secondBindingId,
+      payload,
+      requestId: 206,
+    });
+    assert.strictEqual(runCalls.at(-1).cell, secondCell);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 206,
+      action: 'rerun',
+      ok: true,
+      canceled: false,
+      message: 'Cell rerun completed.',
+    });
+    runtime.vscode.window.activeNotebookEditor = editor;
+    runtime.vscode.window.activeTextEditor = { document: firstCell.document };
+
+    nextRunResult = 'busy';
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      outputId: firstBindingId,
+      payload,
+      requestId: 207,
+    });
+    assert.strictEqual(runCalls.at(-1).cell, firstCell);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 207,
+      action: 'rerun',
+      ok: false,
+      canceled: false,
+      message: 'The cell is already running.',
+    });
+
+    nextRunResult = 'canceled';
+    const warningsBeforeCanceledRerun = runtime.warnings.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      outputId: firstBindingId,
+      payload,
+      requestId: 227,
+    });
+    assert.strictEqual(runtime.warnings.length, warningsBeforeCanceledRerun);
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 227,
+      action: 'rerun',
+      ok: false,
+      canceled: true,
+      message: 'Rerun canceled.',
+    });
+
+    directControllerSelected = true;
+    const runCallCount = runCalls.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      outputId: secondBindingId,
+      payload,
+      requestId: 208,
+    });
+    assert.strictEqual(
+      runCalls.length,
+      runCallCount,
+      'selected native KX controller reruns must not invoke the mixed direct runner'
+    );
+    assert.deepStrictEqual(runtime.executedCommands.at(-1), {
+      id: 'notebook.cell.execute',
+      args: [
+        { start: 1, end: 2 },
+        notebook.uri,
+      ],
+    });
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 208,
+      action: 'rerun',
+      ok: true,
+      canceled: false,
+      message: 'Rerun requested through the selected KX q controller.',
+    });
+    directControllerSelected = false;
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'openLiveResult',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 209,
+    });
+    assert.strictEqual(panelCalls.length, 3);
+    assert.strictEqual(panelCalls.at(-1)[1].table.rowCount, 3);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'openLiveResult',
+      outputId: secondBindingId,
+      liveId,
+      requestId: 210,
+    });
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'liveResult',
+      liveId,
+      requestId: 210,
+      available: false,
+      message: 'Live result unavailable. Only the bounded saved preview remains.',
+    });
+
+    const duplicateBindingCell = runtime.cell(notebook, 4, 'q', 'duplicate binding');
+    duplicateBindingCell.outputs = [{
+      metadata: {
+        [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+          version: 1,
+          id: firstBindingId,
+        },
+      },
+      items: [{ mime: KX_NOTEBOOK_MIME, data: encodedLegacyPayload }],
+    }];
+    notebook.cells.push(duplicateBindingCell);
+    notebook.cellCount = notebook.cells.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: firstBindingId,
+      requestId: 214,
+      payload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: false,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      runtime.postedMessages.at(-1).message.ok,
+      false,
+      'a duplicated binding must fail closed even when only one bound output has the payload'
+    );
+    const beforeDuplicateBindingChartExport = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportChartPng',
+      outputId: firstBindingId,
+      payload,
+      requestId: 232,
+      dataUrl: chartPngDataUrl,
+    });
+    assert.strictEqual(runtime.savedFiles.length, beforeDuplicateBindingChartExport);
+    assert.strictEqual(
+      runtime.postedMessages.at(-1).message.ok,
+      false,
+      'PNG export must fail closed when an output binding is duplicated'
+    );
+    notebook.cells.pop();
+    notebook.cellCount = notebook.cells.length;
+
+    const fullLiveText = `{${'x'.repeat(MAX_NOTEBOOK_QTEXT_CHARS + 4_096)}}`;
+    const qTextPayload = createPortableKxTextResult({
+      text: fullLiveText,
+      byteLimit: MAX_NOTEBOOK_BYTE_LIMIT,
+      marker: 'direct-ipc',
+    });
+    const qTextCell = runtime.cell(
+      notebook,
+      notebook.cellCount,
+      'q',
+      'large live qText'
+    );
+    qTextCell.outputs = [{
+      metadata: {
+        [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: qTextLiveId },
+        [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: qTextLiveId },
+      },
+      items: [{
+        mime: KX_NOTEBOOK_MIME,
+        data: new TextEncoder().encode(JSON.stringify(qTextPayload)),
+      }],
+    }];
+    notebook.cells.push(qTextCell);
+    notebook.cellCount = notebook.cells.length;
+    assert.strictEqual(liveResults.register({
+      notebookUri: notebook.uri.toString(),
+      cellUri: qTextCell.document.uri.toString(),
+      query: 'large live qText',
+      connectionName: 'Connection one',
+      elapsedMs: 5,
+      value: {
+        qtype: 'function',
+        functionType: 'lambda',
+        ipcType: 100,
+        source: fullLiveText,
+      },
+    }), qTextLiveId);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveResult',
+      outputId: qTextLiveId,
+      liveId: qTextLiveId,
+      requestId: 233,
+    });
+    const boundedQTextMessage = runtime.postedMessages.at(-1).message;
+    assert.strictEqual(boundedQTextMessage.type, 'liveResult');
+    assert.strictEqual(boundedQTextMessage.mode, 'text');
+    assert.ok(boundedQTextMessage.text.length <= MAX_NOTEBOOK_QTEXT_CHARS);
+    assert.notStrictEqual(
+      boundedQTextMessage.text,
+      fullLiveText,
+      'live qText display transport must remain bounded'
+    );
+
+    const beforeFullQTextCopy = runtime.clipboardWrites.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyLiveText',
+      outputId: qTextLiveId,
+      liveId: qTextLiveId,
+      requestId: 234,
+    });
+    assert.strictEqual(runtime.clipboardWrites.length, beforeFullQTextCopy + 1);
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      fullLiveText,
+      'live qText copy must use the full host-held value, never the 1 MiB renderer prefix'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 234,
+      action: 'copy',
+      ok: true,
+      canceled: false,
+      message: 'Copied.',
+    });
+
+    runtime.setSaveDialogUri(testUri('file:///workspace/full-live-qtext.txt'));
+    const fullQTextExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportLiveText',
+      outputId: qTextLiveId,
+      liveId: qTextLiveId,
+      requestId: 236,
+    });
+    assert.strictEqual(
+      new TextDecoder().decode(runtime.savedFiles[fullQTextExportIndex].content),
+      fullLiveText,
+      'live qText export must use the same full host-held value as copy'
+    );
+
+    const beforeStaleQTextCopy = runtime.clipboardWrites.length;
+    const staleQTextMessageStart = runtime.postedMessages.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyLiveText',
+      outputId: secondBindingId,
+      liveId: qTextLiveId,
+      requestId: 235,
+    });
+    assert.strictEqual(runtime.clipboardWrites.length, beforeStaleQTextCopy);
+    assert.deepStrictEqual(
+      runtime.postedMessages
+        .slice(staleQTextMessageStart)
+        .map(entry => entry.message.type),
+      ['actionResult', 'liveResult']
+    );
+    assert.strictEqual(
+      runtime.postedMessages[staleQTextMessageStart].message.ok,
+      false,
+      'stale live qText binding must fail closed before clipboard access'
+    );
+
+    const boundedPayload = createPortableKxResult({
+      columns: ['value'],
+      rows: [['ONLY-IN-BOUNDED-SCAN']],
+      rowCount: 1,
+      rowLimit: 1,
+      byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+      marker: '%%q',
+    });
+    const boundedCell = runtime.cell(notebook, 4, 'q', 'bounded scan');
+    boundedCell.outputs = [
+      {
+        metadata: {},
+        items: [{
+          mime: KX_NOTEBOOK_MIME,
+          data: new TextEncoder().encode(JSON.stringify(boundedPayload)),
+        }],
+      },
+      ...Array.from({ length: 2_000 }, () => ({
+        metadata: {},
+        items: [{ mime: 'text/plain', data: new Uint8Array([0]) }],
+      })),
+    ];
+    notebook.cells.push(boundedCell);
+    notebook.cellCount = notebook.cells.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      requestId: 215,
+      payload: boundedPayload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: false,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      runtime.postedMessages.at(-1).message.ok,
+      false,
+      'legacy fallback must fail closed when the bounded output scan is incomplete'
+    );
+  } finally {
+    integration.dispose();
+    liveResults.clear();
+  }
 }
 
 function testManifestAndSources() {
@@ -9526,6 +12203,8 @@ function testManifestAndSources() {
     'KX: Tag Notebook Cell as q',
     'Prepare this q cell for the active Python kernel',
     'Run q Cell (KX)',
+    'Run q Cell and Select Below (KX)',
+    'Run q Cell and Insert Below (KX)',
     'KX: Choose Notebook q Target',
     'KX: Open Saved Notebook Preview in Results Panel',
   ].forEach(title => assert.ok(commandTitles.has(title), `missing command contribution: ${title}`));
@@ -9565,7 +12244,24 @@ function testManifestAndSources() {
   assertKeybinding(keybindings, commandByTitle['KX: Run q Script'], 'ctrl+alt+enter', 'cmd+alt+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection in New Result'], 'ctrl+shift+enter', 'cmd+shift+enter');
   assertKeybinding(keybindings, commandByTitle['Run q Cell (KX)'], 'ctrl+enter', 'cmd+enter');
-  keybindings.filter(binding => binding.command !== commandByTitle['Run q Cell (KX)'])
+  assertKeybinding(
+    keybindings,
+    commandByTitle['Run q Cell and Select Below (KX)'],
+    'shift+enter',
+    'shift+enter'
+  );
+  assertKeybinding(
+    keybindings,
+    commandByTitle['Run q Cell and Insert Below (KX)'],
+    'alt+enter',
+    'alt+enter'
+  );
+  const mixedRunCommandIds = [
+    commandByTitle['Run q Cell (KX)'],
+    commandByTitle['Run q Cell and Select Below (KX)'],
+    commandByTitle['Run q Cell and Insert Below (KX)'],
+  ];
+  keybindings.filter(binding => !mixedRunCommandIds.includes(binding.command))
     .forEach(binding => {
     assert.match(
       String(binding.when || ''),
@@ -9573,31 +12269,32 @@ function testManifestAndSources() {
       `${binding.command} must not steal a Jupyter notebook execution keybinding`
     );
   });
-  const mixedRunBinding = keybindings.find(binding =>
-    binding.command === commandByTitle['Run q Cell (KX)']
-  );
-  assert.ok(mixedRunBinding);
-  for (const guard of [
-    /notebookCellEditorFocused/,
-    /editorTextFocus/,
-    /notebookEditorFocused/,
-    /notebookType == 'jupyter-notebook'/,
-    /notebookCellType == 'code'/,
-    /editorLangId == q/,
-    /resourceScheme == vscode-notebook-cell/,
-    /!vscode-kdb\.notebookDirectQControllerSelected/,
-  ]) {
-    assert.match(
+  const mixedRunBindings = mixedRunCommandIds.map(commandId =>
+    keybindings.find(binding => binding.command === commandId));
+  mixedRunBindings.forEach(mixedRunBinding => {
+    assert.ok(mixedRunBinding);
+    for (const guard of [
+      /notebookCellEditorFocused/,
+      /editorTextFocus/,
+      /notebookEditorFocused/,
+      /notebookType == 'jupyter-notebook'/,
+      /notebookCellType == 'code'/,
+      /editorLangId == q/,
+      /resourceScheme == vscode-notebook-cell/,
+      /!vscode-kdb\.notebookDirectQControllerSelected/,
+    ]) {
+      assert.match(
+        mixedRunBinding.when,
+        guard,
+        'mixed q notebook shortcuts must be limited to the focused q cell editor while another controller is selected'
+      );
+    }
+    assert.doesNotMatch(
       mixedRunBinding.when,
-      guard,
-      'mixed q Ctrl+Enter must be limited to the focused q cell editor while another controller is selected'
+      /notebookKernel != 'DanielAlonso\.vscode-kdb\/vscode-kdb\.q-notebook-controller'/,
+      'a stale persisted KX kernel ID must not disable mixed q shortcuts while the controller is unregistered'
     );
-  }
-  assert.doesNotMatch(
-    mixedRunBinding.when,
-    /notebookKernel != 'DanielAlonso\.vscode-kdb\/vscode-kdb\.q-notebook-controller'/,
-    'a stale persisted KX kernel ID must not disable mixed q Ctrl+Enter while the controller is unregistered'
-  );
+  });
   assert.strictEqual(keybindings.some(binding =>
     [
       'vscode-kdb.setNotebookCellLanguageQ',
@@ -9693,6 +12390,16 @@ function testManifestAndSources() {
     command: 'vscode-kdb.runQNotebookCell',
     title: 'Run q Cell (KX)',
     icon: '$(play)',
+    enablement: "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected",
+  });
+  assert.deepStrictEqual(commandById['vscode-kdb.runQNotebookCellAndSelectBelow'], {
+    command: 'vscode-kdb.runQNotebookCellAndSelectBelow',
+    title: 'Run q Cell and Select Below (KX)',
+    enablement: "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected",
+  });
+  assert.deepStrictEqual(commandById['vscode-kdb.runQNotebookCellAndInsertBelow'], {
+    command: 'vscode-kdb.runQNotebookCellAndInsertBelow',
+    title: 'Run q Cell and Insert Below (KX)',
     enablement: "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected",
   });
   assert.deepStrictEqual(commandById['vscode-kdb.selectNotebookQTarget'], {
@@ -10156,6 +12863,18 @@ function testManifestAndSources() {
   assert.match(
     notebookIntegrationSource,
     /registerCommand\(\s*'vscode-kdb\.runQNotebookCell'/
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /registerCommand\(\s*'vscode-kdb\.runQNotebookCellAndSelectBelow'/
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /registerCommand\(\s*'vscode-kdb\.runQNotebookCellAndInsertBelow'/
+  );
+  assert.match(
+    notebookIntegrationSource,
+    /result !== 'executed'[\s\S]*?notebook\.focusNextEditor[\s\S]*?notebook\.cell\.insertCodeCellBelow/
   );
   assert.match(
     notebookIntegrationSource,
@@ -10653,7 +13372,14 @@ function createNotebookIntegrationRuntime() {
   const statusProviders = [];
   const workspaceEdits = [];
   const quickPickCalls = [];
+  const warningCalls = [];
+  const postedMessages = [];
+  const clipboardWrites = [];
+  const executedCommands = [];
+  const savedFiles = [];
   let quickPickSelectionId;
+  let warningResponse;
+  let saveDialogUri = testUri('file:///workspace/kx-results.csv');
   let applyEditResult = true;
 
   class EventEmitter {
@@ -10735,9 +13461,10 @@ function createNotebookIntegrationRuntime() {
       activeTextEditor: undefined,
       onDidChangeActiveNotebookEditor: activeNotebookChanged.event,
       onDidChangeNotebookEditorSelection: notebookSelectionChanged.event,
-      showWarningMessage(message) {
+      showWarningMessage(message, ...items) {
         warnings.push(message);
-        return Promise.resolve(undefined);
+        warningCalls.push({ message, items });
+        return Promise.resolve(warningResponse);
       },
       showInformationMessage(message) {
         information.push(message);
@@ -10756,8 +13483,17 @@ function createNotebookIntegrationRuntime() {
           : items[0];
         return Promise.resolve(picked);
       },
+      showSaveDialog() {
+        return Promise.resolve(saveDialogUri);
+      },
     },
     workspace: {
+      workspaceFolders: [],
+      fs: {
+        async writeFile(uri, content) {
+          savedFiles.push({ uri, content: Uint8Array.from(content) });
+        },
+      },
       onDidChangeNotebookDocument: notebookDocumentChanged.event,
       onDidChangeConfiguration: configurationChanged.event,
       async applyEdit(edit) {
@@ -10793,6 +13529,23 @@ function createNotebookIntegrationRuntime() {
         };
       },
     },
+    Uri: {
+      file(filePath) {
+        return {
+          fsPath: filePath,
+          toString() {
+            return `file://${filePath}`;
+          },
+        };
+      },
+    },
+    env: {
+      clipboard: {
+        async writeText(text) {
+          clipboardWrites.push(text);
+        },
+      },
+    },
     languages: {
       async setTextDocumentLanguage(document, languageId) {
         document.languageId = languageId;
@@ -10812,6 +13565,7 @@ function createNotebookIntegrationRuntime() {
           contexts.push({ key: args[0], value: args[1] });
           return Promise.resolve(undefined);
         }
+        executedCommands.push({ id, args });
         const handler = commands.get(id);
         return handler ? Promise.resolve(handler(...args)) : Promise.resolve(undefined);
       },
@@ -10820,7 +13574,8 @@ function createNotebookIntegrationRuntime() {
       createRendererMessaging() {
         return {
           onDidReceiveMessage: rendererMessages.event,
-          async postMessage() {
+          async postMessage(message, editor) {
+            postedMessages.push({ message, editor });
             return true;
           },
         };
@@ -10848,8 +13603,24 @@ function createNotebookIntegrationRuntime() {
     statusProviders,
     workspaceEdits,
     quickPickCalls,
+    warningCalls,
+    postedMessages,
+    clipboardWrites,
+    executedCommands,
+    savedFiles,
+    async emitRendererMessage(editor, message) {
+      rendererMessages.fire({ editor, message });
+      await eventLoopTurn();
+      await eventLoopTurn();
+    },
     setQuickPickSelectionId(value) {
       quickPickSelectionId = value;
+    },
+    setWarningResponse(value) {
+      warningResponse = value;
+    },
+    setSaveDialogUri(value) {
+      saveDialogUri = value;
     },
     setApplyEditResult(value) {
       applyEditResult = value;
