@@ -25,6 +25,8 @@ export const KX_Q_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.q-notebook-controller';
 export const KX_Q_NOTEBOOK_TYPE = 'jupyter-notebook';
 export const KX_Q_NOTEBOOK_CONTROLLER_LABEL = 'KX q (Direct IPC)';
 export const KX_NOTEBOOK_LIVE_METADATA_KEY = NOTEBOOK_LIVE_RESULT_METADATA_KEY;
+export const ENABLE_DIRECT_NOTEBOOK_CONTROLLER_SETTING =
+  'vscode-kdb.notebook.enableDirectController';
 
 const CANCELED_AFTER_ISSUE_SUFFIX =
   'was canceled locally. Direct IPC server work already sent may continue.';
@@ -83,15 +85,16 @@ export interface DirectQNotebookBridge {
   onDidChangeState(listener: () => void): vscode.Disposable;
 }
 
-export class KxQNotebookController implements vscode.Disposable {
-  public readonly controller: vscode.NotebookController;
+export class KxQNotebookRunner implements vscode.Disposable {
   public readonly onDidChangeState: vscode.Event<void>;
 
   private readonly stateSubscription: vscode.Disposable;
-  private readonly selectionSubscription: vscode.Disposable;
+  private readonly configurationSubscription: vscode.Disposable;
   private readonly stateChanged = new vscode.EventEmitter<void>();
   private readonly selectedNotebooks = new Set<string>();
   private readonly activeExecutions = new Set<string>();
+  private controller: vscode.NotebookController | undefined;
+  private selectionSubscription: vscode.Disposable | undefined;
   private executionOrder = 0;
   private disposed = false;
 
@@ -99,25 +102,14 @@ export class KxQNotebookController implements vscode.Disposable {
     private readonly bridge: DirectQNotebookBridge,
     private readonly liveResults: LiveNotebookResultStore
   ) {
-    this.controller = vscode.notebooks.createNotebookController(
-      KX_Q_NOTEBOOK_CONTROLLER_ID,
-      KX_Q_NOTEBOOK_TYPE,
-      KX_Q_NOTEBOOK_CONTROLLER_LABEL,
-      (cells, notebook) => this.executeCells(cells, notebook)
-    );
-    this.controller.supportedLanguages = ['q'];
-    this.controller.supportsExecutionOrder = true;
     this.stateSubscription = this.bridge.onDidChangeState(() => this.refreshDetails());
-    this.onDidChangeState = this.stateChanged.event;
-    this.selectionSubscription = this.controller.onDidChangeSelectedNotebooks(event => {
-      const key = event.notebook.uri.toString();
-      if (event.selected) {
-        this.selectedNotebooks.add(key);
-      } else {
-        this.selectedNotebooks.delete(key);
+    this.configurationSubscription = vscode.workspace.onDidChangeConfiguration(event => {
+      if (event.affectsConfiguration(ENABLE_DIRECT_NOTEBOOK_CONTROLLER_SETTING)) {
+        this.syncControllerRegistration();
       }
-      this.stateChanged.fire();
     });
+    this.onDidChangeState = this.stateChanged.event;
+    this.syncControllerRegistration();
     this.refreshDetails();
   }
 
@@ -126,20 +118,22 @@ export class KxQNotebookController implements vscode.Disposable {
       return;
     }
     const connection = this.bridge.activeConnection();
-    this.controller.description = connection
-      ? `Direct IPC • ${connection.name}`
-      : 'Direct IPC';
-    this.controller.detail = connection
-      ? [
-        'Direct IPC',
-        connection.name,
-        connectionEndpoint(connection),
-        `namespace ${connection.database}`,
-        this.bridge.isConnected(connection.id)
-          ? 'connected'
-          : 'disconnected; native Run connects this active profile while selected',
-      ].join(' • ')
-      : 'Direct IPC • No active KX connection • Add or select one in the KX Connections view';
+    if (this.controller) {
+      this.controller.description = connection
+        ? `Direct IPC • ${connection.name}`
+        : 'Direct IPC';
+      this.controller.detail = connection
+        ? [
+          'Direct IPC',
+          connection.name,
+          connectionEndpoint(connection),
+          `namespace ${connection.database}`,
+          this.bridge.isConnected(connection.id)
+            ? 'connected'
+            : 'disconnected; native Run connects this active profile while selected',
+        ].join(' • ')
+        : 'Direct IPC • No active KX connection • Add or select one in the KX Connections view';
+    }
     this.stateChanged.fire();
   }
 
@@ -161,6 +155,10 @@ export class KxQNotebookController implements vscode.Disposable {
 
   public isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean {
     return this.selectedNotebooks.has(notebook.uri.toString());
+  }
+
+  public isDirectControllerRegistered(): boolean {
+    return this.controller !== undefined;
   }
 
   public async runCell(
@@ -194,11 +192,54 @@ export class KxQNotebookController implements vscode.Disposable {
     }
     this.disposed = true;
     this.stateSubscription.dispose();
-    this.selectionSubscription.dispose();
+    this.configurationSubscription.dispose();
+    this.unregisterController();
     this.stateChanged.dispose();
-    this.selectedNotebooks.clear();
     this.activeExecutions.clear();
-    this.controller.dispose();
+  }
+
+  private syncControllerRegistration(): void {
+    if (this.disposed) {
+      return;
+    }
+    const enabled = vscode.workspace
+      .getConfiguration('vscode-kdb.notebook')
+      .get<unknown>('enableDirectController', false);
+    if (enabled !== true) {
+      this.unregisterController();
+      this.stateChanged.fire();
+      return;
+    }
+    if (this.controller) {
+      return;
+    }
+    const controller = vscode.notebooks.createNotebookController(
+      KX_Q_NOTEBOOK_CONTROLLER_ID,
+      KX_Q_NOTEBOOK_TYPE,
+      KX_Q_NOTEBOOK_CONTROLLER_LABEL,
+      (cells, notebook) => this.executeCells(cells, notebook)
+    );
+    controller.supportedLanguages = ['q'];
+    controller.supportsExecutionOrder = true;
+    this.controller = controller;
+    this.selectionSubscription = controller.onDidChangeSelectedNotebooks(event => {
+      const key = event.notebook.uri.toString();
+      if (event.selected) {
+        this.selectedNotebooks.add(key);
+      } else {
+        this.selectedNotebooks.delete(key);
+      }
+      this.stateChanged.fire();
+    });
+    this.refreshDetails();
+  }
+
+  private unregisterController(): void {
+    this.selectionSubscription?.dispose();
+    this.selectionSubscription = undefined;
+    this.selectedNotebooks.clear();
+    this.controller?.dispose();
+    this.controller = undefined;
   }
 
   private async executeCells(
@@ -443,10 +484,14 @@ export class KxQNotebookController implements vscode.Disposable {
     if (this.activeExecutions.has(executionKey)) {
       return undefined;
     }
+    const controller = this.controller;
+    if (!controller) {
+      return undefined;
+    }
     this.activeExecutions.add(executionKey);
     try {
       return {
-        execution: this.controller.createNotebookCellExecution(cell),
+        execution: controller.createNotebookCellExecution(cell),
         executionKey,
       };
     } catch {
@@ -672,6 +717,10 @@ export class KxQNotebookController implements vscode.Disposable {
     }
   }
 }
+
+// Keep the 0.2.7 exported name for source compatibility while the always-on
+// object is now truthfully a mixed-mode runner.
+export { KxQNotebookRunner as KxQNotebookController };
 
 export function directNotebookSettings(): NotebookSettings {
   const configuration = vscode.workspace.getConfiguration('vscode-kdb.notebook');

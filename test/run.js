@@ -4128,26 +4128,581 @@ async function testConnectionStoreTransactions() {
   }, 'a new passwordless profile must not depend on SecretStorage availability');
   assert.deepStrictEqual(passwordlessHarness.connections, [passwordless]);
   assert.strictEqual(passwordlessHarness.activeId, passwordless.id);
-  passwordlessHarness.ignoreActiveUpdate = true;
+  passwordlessHarness.failActiveUpdate = 1;
   await assert.rejects(
     () => passwordlessStore.setActiveConnection(undefined),
-    /did not persist the selected active KX connection/
+    /injected active-state update failure/
   );
   assert.strictEqual(passwordlessHarness.activeId, passwordless.id);
+  assert.strictEqual(passwordlessStore.activeConnectionId(), passwordless.id);
 
-  const noOpHarness = createVscodeStoreHarness();
-  const { ConnectionStore: NoOpConnectionStore } = requireOutWithVscode(
+  const delayedHarness = createVscodeStoreHarness();
+  const { ConnectionStore: DelayedConnectionStore } = requireOutWithVscode(
     'connection-store',
-    noOpHarness.vscode
+    delayedHarness.vscode
   );
-  const noOpStore = new NoOpConnectionStore(noOpHarness.context);
-  noOpHarness.ignoreConfigurationUpdate = true;
+  const delayedStore = new DelayedConnectionStore(delayedHarness.context);
+  const delayedA = validateConnection({
+    id: 'kx-delayed-a',
+    name: 'Delayed A',
+    host: 'localhost',
+    port: 5005,
+    database: '.',
+    username: 'runner',
+  });
+  const delayedB = validateConnection({
+    id: 'kx-delayed-b',
+    name: 'Delayed B',
+    host: 'localhost',
+    port: 5010,
+    database: '.',
+    username: '',
+  });
+  const delayedAuthValue = ['delayed', 'auth', 'value'].join('-');
+  const rejectedAuthValue = ['rejected', 'auth', 'value'].join('-');
+  delayedHarness.delayConfigurationPropagation = true;
+  delayedHarness.delayActivePropagation = true;
+  await delayedStore.add(delayedA, delayedAuthValue);
+  assert.deepStrictEqual(
+    delayedHarness.connections,
+    [],
+    'the effective configuration fixture must remain stale after the resolved add'
+  );
+  assert.strictEqual(
+    delayedHarness.activeId,
+    undefined,
+    'the Memento fixture must remain stale after the resolved activation'
+  );
+  assert.deepStrictEqual(delayedStore.connections(), [delayedA]);
+  assert.strictEqual(delayedStore.activeConnectionId(), delayedA.id);
+
+  await delayedStore.add(delayedB);
+  assert.deepStrictEqual(
+    delayedStore.connections().map(connection => connection.id),
+    [delayedA.id, delayedB.id],
+    'a second add must build on optimistic state while effective configuration is stale'
+  );
+  assert.deepStrictEqual(delayedHarness.connections, []);
+
+  const delayedAEdited = { ...delayedA, port: 5000 };
+  await delayedStore.update(delayedAEdited);
+  assert.strictEqual(
+    delayedStore.connection(delayedA.id).port,
+    5000,
+    'an edit must immediately resolve the same stable profile ID to its new port'
+  );
+  assert.strictEqual(delayedStore.connections().length, 2);
+  assert.deepStrictEqual(delayedHarness.connections, []);
+
+  await delayedStore.setActiveConnection(delayedB.id);
+  assert.strictEqual(delayedStore.activeConnectionId(), delayedB.id);
+  assert.strictEqual(
+    delayedHarness.activeId,
+    undefined,
+    'resolved Memento updates must not require an immediate matching get snapshot'
+  );
+  await delayedStore.remove(delayedB.id);
+  assert.deepStrictEqual(delayedStore.connections(), [delayedAEdited]);
+  assert.strictEqual(delayedStore.activeConnectionId(), undefined);
+  assert.deepStrictEqual(delayedHarness.connections, []);
+
+  assert.strictEqual(delayedHarness.pendingConfigurationUpdates, 4);
+  assert.deepStrictEqual(
+    delayedHarness.pendingActiveUpdates,
+    [delayedA.id, delayedB.id, undefined]
+  );
+  delayedHarness.flushPropagation();
+  assert.deepStrictEqual(delayedHarness.connections, [delayedAEdited]);
+  assert.strictEqual(delayedHarness.activeId, undefined);
+  assert.deepStrictEqual(delayedStore.connections(), [delayedAEdited]);
+
+  const optimisticEdit = { ...delayedAEdited, port: 5001 };
+  await delayedStore.update(optimisticEdit);
+  assert.strictEqual(delayedStore.connection(delayedA.id).port, 5001);
+  assert.strictEqual(delayedHarness.connections[0].port, 5000);
+  delayedHarness.applyExternalConnections([delayedAEdited]);
+  assert.strictEqual(
+    delayedStore.connection(delayedA.id).port,
+    5001,
+    'an external value indistinguishable from the observed in-flight snapshot stays bounded optimistic'
+  );
+
+  const externalEdit = { ...delayedAEdited, port: 6000 };
+  delayedHarness.applyExternalConnections([externalEdit]);
+  assert.deepStrictEqual(
+    delayedStore.connections(),
+    [externalEdit],
+    'a divergent external effective setting must supersede optimistic state'
+  );
+
+  delayedHarness.failConfigurationUpdate = 1;
   await assert.rejects(
-    () => noOpStore.add({ ...passwordless, id: 'kx-no-op', name: 'Silent no-op' }),
-    /did not persist all 1 KX connection profile/
+    () => delayedStore.update(
+      { ...externalEdit, port: 6001 },
+      rejectedAuthValue,
+      externalEdit
+    ),
+    /injected configuration update failure/
   );
-  assert.deepStrictEqual(noOpHarness.connections, []);
-  assert.strictEqual(noOpHarness.activeId, undefined);
+  assert.deepStrictEqual(
+    delayedHarness.connections,
+    [externalEdit],
+    'a rejected settings write must leave the effective setting unchanged'
+  );
+  assert.deepStrictEqual(
+    delayedStore.connections(),
+    [externalEdit],
+    'a rejected settings write must restore logical connection state'
+  );
+  assert.strictEqual(
+    delayedHarness.secretFor(delayedA.id),
+    delayedAuthValue,
+    'a rejected settings write must restore the previous secret'
+  );
+  assert.strictEqual(
+    delayedHarness.pendingConfigurationUpdates,
+    1,
+    'a rejected settings write must issue one rollback write for the previous profile list'
+  );
+  delayedHarness.flushPropagation();
+  assert.deepStrictEqual(delayedHarness.connections, [externalEdit]);
+
+  const longDelayHarness = createVscodeStoreHarness();
+  const { ConnectionStore: LongDelayConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    longDelayHarness.vscode
+  );
+  const longDelayStore = new LongDelayConnectionStore(longDelayHarness.context);
+  longDelayHarness.delayConfigurationPropagation = true;
+  const longDelayConnections = [];
+  for (let index = 0; index < 12; index++) {
+    const connection = validateConnection({
+      id: `kx-long-delay-${index}`,
+      name: `Long delay ${index}`,
+      host: 'localhost',
+      port: 5100 + index,
+      database: '.',
+      username: '',
+    });
+    longDelayConnections.push(connection);
+    await longDelayStore.add(connection);
+    assert.deepStrictEqual(
+      longDelayStore.connections(),
+      longDelayConnections,
+      'the still-effective snapshot must remain recognized beyond the stale-snapshot cap'
+    );
+  }
+  assert.deepStrictEqual(longDelayHarness.connections, []);
+  assert.deepStrictEqual(longDelayHarness.committedConnections, longDelayConnections);
+  assert.strictEqual(longDelayHarness.pendingConfigurationUpdates, 12);
+  while (longDelayHarness.flushNextConfigurationPropagation()) {
+    assert.deepStrictEqual(
+      longDelayStore.connections(),
+      longDelayConnections,
+      'each intermediate configuration event must retain the latest acknowledged profile list'
+    );
+  }
+  assert.deepStrictEqual(longDelayStore.connections(), longDelayConnections);
+
+  const staleEventHarness = createVscodeStoreHarness();
+  const { ConnectionStore: StaleEventConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    staleEventHarness.vscode
+  );
+  const staleEventStore = new StaleEventConnectionStore(staleEventHarness.context);
+  const staleEventBase = validateConnection({
+    id: 'kx-stale-event',
+    name: 'Stale event',
+    host: 'localhost',
+    port: 5200,
+    database: '.',
+    username: '',
+  });
+  await staleEventStore.add(staleEventBase);
+  staleEventHarness.delayConfigurationPropagation = true;
+  const staleEventCurrent = { ...staleEventBase, port: 5201 };
+  await staleEventStore.update(staleEventCurrent, undefined, staleEventBase);
+  staleEventHarness.emitConfigurationChange();
+  assert.deepStrictEqual(
+    staleEventStore.connections(),
+    [staleEventCurrent],
+    'a configuration event whose effective read is still pre-write must not clear optimism'
+  );
+  assert.strictEqual(staleEventHarness.flushNextConfigurationPropagation(), true);
+  assert.deepStrictEqual(staleEventStore.connections(), [staleEventCurrent]);
+
+  const abaHarness = createVscodeStoreHarness();
+  const { ConnectionStore: AbaConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    abaHarness.vscode
+  );
+  const abaStore = new AbaConnectionStore(abaHarness.context);
+  const abaBase = validateConnection({
+    id: 'kx-aba',
+    name: 'ABA profile',
+    host: 'localhost',
+    port: 5300,
+    database: '.',
+    username: '',
+  });
+  await abaStore.add(abaBase);
+  abaHarness.delayConfigurationPropagation = true;
+  const abaMiddle = { ...abaBase, port: 5301 };
+  const abaLatest = { ...abaBase, port: 5302 };
+  await abaStore.update(abaMiddle, undefined, abaBase);
+  await abaStore.update(abaBase, undefined, abaMiddle);
+  await abaStore.update(abaLatest, undefined, abaBase);
+  assert.deepStrictEqual(abaStore.connections(), [abaLatest]);
+  assert.strictEqual(abaHarness.flushNextConfigurationPropagation(), true);
+  assert.deepStrictEqual(
+    abaStore.connections(),
+    [abaLatest],
+    'the first intermediate value must not surface after A -> B -> A -> C writes'
+  );
+  assert.strictEqual(abaHarness.flushNextConfigurationPropagation(), true);
+  assert.deepStrictEqual(
+    abaStore.connections(),
+    [abaLatest],
+    'a same-valued effective read must not consume the later A acknowledgement'
+  );
+  assert.strictEqual(abaHarness.flushNextConfigurationPropagation(), true);
+  assert.deepStrictEqual(abaStore.connections(), [abaLatest]);
+
+  const pendingRejectHarness = createVscodeStoreHarness();
+  const { ConnectionStore: PendingRejectConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    pendingRejectHarness.vscode
+  );
+  const pendingRejectStore = new PendingRejectConnectionStore(
+    pendingRejectHarness.context
+  );
+  const pendingRejectBase = validateConnection({
+    id: 'kx-pending-reject',
+    name: 'Pending reject',
+    host: 'localhost',
+    port: 5350,
+    database: '.',
+    username: '',
+  });
+  const pendingRejectInitialSecret = ['pending', 'initial', 'secret'].join('-');
+  const pendingRejectNextSecret = ['pending', 'next', 'secret'].join('-');
+  pendingRejectHarness.delayConfigurationPropagation = true;
+  await pendingRejectStore.add(pendingRejectBase, pendingRejectInitialSecret);
+  pendingRejectHarness.failConfigurationUpdate = 1;
+  await assert.rejects(
+    () => pendingRejectStore.update(
+      { ...pendingRejectBase, port: 5351 },
+      pendingRejectNextSecret,
+      pendingRejectBase
+    ),
+    /injected configuration update failure/
+  );
+  assert.deepStrictEqual(pendingRejectStore.connections(), [pendingRejectBase]);
+  assert.deepStrictEqual(
+    pendingRejectHarness.committedConnections,
+    [pendingRejectBase],
+    'a successful rollback must keep the prior acknowledged delayed value durable'
+  );
+  assert.strictEqual(
+    pendingRejectHarness.secretFor(pendingRejectBase.id),
+    pendingRejectInitialSecret
+  );
+  while (pendingRejectHarness.flushNextConfigurationPropagation()) {
+    assert.deepStrictEqual(pendingRejectStore.connections(), [pendingRejectBase]);
+  }
+
+  pendingRejectHarness.failConfigurationUpdate = 2;
+  await assert.rejects(
+    () => pendingRejectStore.update(
+      { ...pendingRejectBase, port: 5352 },
+      pendingRejectNextSecret,
+      pendingRejectBase
+    ),
+    /could not fully restore the previous connection state/
+  );
+  assert.deepStrictEqual(pendingRejectStore.connections(), [pendingRejectBase]);
+  assert.strictEqual(
+    pendingRejectHarness.secretFor(pendingRejectBase.id),
+    undefined,
+    'an uncertain rollback must clear the secret even with earlier optimism'
+  );
+
+  const originalDateNow = Date.now;
+  let fakeNow = 1_000_000;
+  Date.now = () => fakeNow;
+  try {
+    const boundedHarness = createVscodeStoreHarness();
+    const { ConnectionStore: BoundedConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      boundedHarness.vscode
+    );
+    const boundedStore = new BoundedConnectionStore(boundedHarness.context);
+    const boundedBase = validateConnection({
+      id: 'kx-bounded-external',
+      name: 'Bounded external',
+      host: 'localhost',
+      port: 5400,
+      database: '.',
+      username: '',
+    });
+    await boundedStore.add(boundedBase);
+    boundedHarness.delayConfigurationPropagation = true;
+    const boundedMiddle = { ...boundedBase, port: 5401 };
+    const boundedLatest = { ...boundedBase, port: 5402 };
+    await boundedStore.update(boundedMiddle, undefined, boundedBase);
+    await boundedStore.update(boundedLatest, undefined, boundedMiddle);
+    boundedHarness.applyExternalConnections([boundedMiddle]);
+    assert.deepStrictEqual(
+      boundedStore.connections(),
+      [boundedLatest],
+      'an external edit matching an in-flight intermediate is ambiguous only within the bound'
+    );
+    fakeNow += 5001;
+    assert.deepStrictEqual(
+      boundedStore.connections(),
+      [boundedMiddle],
+      'bounded optimism must yield to the effective external setting after expiry'
+    );
+
+    const noEventHarness = createVscodeStoreHarness();
+    const { ConnectionStore: NoEventConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      noEventHarness.vscode
+    );
+    const noEventStore = new NoEventConnectionStore(noEventHarness.context);
+    const noEventBase = validateConnection({
+      id: 'kx-no-event',
+      name: 'No event profile',
+      host: 'localhost',
+      port: 5450,
+      database: '.',
+      username: '',
+    });
+    await noEventStore.add(noEventBase);
+    noEventHarness.delayConfigurationPropagation = true;
+    const noEventEdited = { ...noEventBase, port: 5451 };
+    await noEventStore.update(noEventEdited, undefined, noEventBase);
+    fakeNow += 5001;
+    assert.deepStrictEqual(
+      noEventStore.connections(),
+      [noEventEdited],
+      'a resolved write must not expire while no configuration event has made it ambiguous'
+    );
+    const noEventSecond = validateConnection({
+      id: 'kx-no-event-second',
+      name: 'No event second',
+      host: 'localhost',
+      port: 5452,
+      database: '.',
+      username: '',
+    }, [noEventEdited]);
+    await noEventStore.add(noEventSecond);
+    assert.deepStrictEqual(
+      noEventHarness.committedConnections,
+      [noEventEdited, noEventSecond],
+      'a later mutation must build on the resolved write even beyond the ambiguity TTL'
+    );
+
+    const expiredEventHarness = createVscodeStoreHarness();
+    const { ConnectionStore: ExpiredEventConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      expiredEventHarness.vscode
+    );
+    const expiredEventStore = new ExpiredEventConnectionStore(expiredEventHarness.context);
+    expiredEventHarness.delayConfigurationPropagation = true;
+    const expiredEventBase = validateConnection({
+      id: 'kx-expired-event',
+      name: 'Expired event base',
+      host: 'localhost',
+      port: 5470,
+      database: '.',
+      username: '',
+    });
+    await expiredEventStore.add(expiredEventBase);
+    expiredEventHarness.emitConfigurationChange();
+    fakeNow += 5001;
+    assert.deepStrictEqual(
+      expiredEventStore.connections(),
+      [],
+      'an ambiguous stale event must yield to effective configuration after the bound'
+    );
+    const expiredEventSecond = validateConnection({
+      id: 'kx-expired-event-second',
+      name: 'Expired event second',
+      host: 'localhost',
+      port: 5471,
+      database: '.',
+      username: '',
+    });
+    await assert.rejects(
+      () => expiredEventStore.add(expiredEventSecond),
+      /settings are still reconciling/
+    );
+    assert.deepStrictEqual(
+      expiredEventHarness.committedConnections,
+      [expiredEventBase],
+      'an expired ambiguous snapshot must not erase an acknowledged profile'
+    );
+    assert.strictEqual(expiredEventHarness.flushNextConfigurationPropagation(), true);
+    await expiredEventStore.add(expiredEventSecond);
+    assert.deepStrictEqual(
+      expiredEventHarness.committedConnections,
+      [expiredEventBase, expiredEventSecond],
+      'a fresh configuration observation must unblock safe mutations'
+    );
+
+    const orderedExpiryHarness = createVscodeStoreHarness();
+    const { ConnectionStore: OrderedExpiryConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      orderedExpiryHarness.vscode
+    );
+    const orderedExpiryStore = new OrderedExpiryConnectionStore(
+      orderedExpiryHarness.context
+    );
+    const orderedA = validateConnection({
+      id: 'kx-ordered-expiry',
+      name: 'Ordered expiry',
+      host: 'localhost',
+      port: 5480,
+      database: '.',
+      username: '',
+    });
+    await orderedExpiryStore.add(orderedA);
+    orderedExpiryHarness.delayConfigurationPropagation = true;
+    const orderedB = { ...orderedA, port: 5481 };
+    const orderedC = { ...orderedA, port: 5482 };
+    const orderedD = { ...orderedA, port: 5483 };
+    await orderedExpiryStore.update(orderedB, undefined, orderedA);
+    await orderedExpiryStore.update(orderedC, undefined, orderedB);
+    await orderedExpiryStore.update(orderedD, undefined, orderedC);
+    assert.strictEqual(orderedExpiryHarness.flushNextConfigurationPropagation(), true);
+    fakeNow += 5001;
+    assert.deepStrictEqual(orderedExpiryStore.connections(), [orderedB]);
+    assert.strictEqual(orderedExpiryHarness.flushNextConfigurationPropagation(), true);
+    assert.deepStrictEqual(orderedExpiryStore.connections(), [orderedC]);
+    const orderedExtra = validateConnection({
+      id: 'kx-ordered-expiry-extra',
+      name: 'Ordered expiry extra',
+      host: 'localhost',
+      port: 5484,
+      database: '.',
+      username: '',
+    }, [orderedC]);
+    await assert.rejects(
+      () => orderedExpiryStore.add(orderedExtra),
+      /settings are still reconciling/
+    );
+    assert.deepStrictEqual(
+      orderedExpiryHarness.committedConnections,
+      [orderedD],
+      'an intermediate event must not unblock writes before the acknowledged latest value'
+    );
+    assert.strictEqual(orderedExpiryHarness.flushNextConfigurationPropagation(), true);
+    assert.deepStrictEqual(orderedExpiryStore.connections(), [orderedD]);
+    await orderedExpiryStore.add(orderedExtra);
+    assert.deepStrictEqual(
+      orderedExpiryHarness.committedConnections,
+      [orderedD, orderedExtra]
+    );
+
+    const duplicateExpiryHarness = createVscodeStoreHarness();
+    const { ConnectionStore: DuplicateExpiryConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      duplicateExpiryHarness.vscode
+    );
+    const duplicateExpiryStore = new DuplicateExpiryConnectionStore(
+      duplicateExpiryHarness.context
+    );
+    const duplicateExpiryA = validateConnection({
+      id: 'kx-duplicate-expiry',
+      name: 'Duplicate expiry',
+      host: 'localhost',
+      port: 5490,
+      database: '.',
+      username: '',
+    });
+    await duplicateExpiryStore.add(duplicateExpiryA);
+    duplicateExpiryHarness.delayConfigurationPropagation = true;
+    const duplicateExpiryB = { ...duplicateExpiryA, port: 5491 };
+    const duplicateExpiryC = { ...duplicateExpiryA, port: 5492 };
+    await duplicateExpiryStore.update(
+      duplicateExpiryB,
+      undefined,
+      duplicateExpiryA
+    );
+    await duplicateExpiryStore.update(
+      duplicateExpiryC,
+      undefined,
+      duplicateExpiryB
+    );
+    await duplicateExpiryStore.update(
+      duplicateExpiryB,
+      undefined,
+      duplicateExpiryC
+    );
+    assert.strictEqual(duplicateExpiryHarness.flushNextConfigurationPropagation(), true);
+    fakeNow += 5001;
+    assert.deepStrictEqual(duplicateExpiryStore.connections(), [duplicateExpiryB]);
+    const duplicateExpiryExtra = validateConnection({
+      id: 'kx-duplicate-expiry-extra',
+      name: 'Duplicate expiry extra',
+      host: 'localhost',
+      port: 5493,
+      database: '.',
+      username: '',
+    }, [duplicateExpiryB]);
+    await duplicateExpiryStore.add(duplicateExpiryExtra);
+    const duplicateExpiryLatest = [duplicateExpiryB, duplicateExpiryExtra];
+    assert.deepStrictEqual(
+      duplicateExpiryHarness.committedConnections,
+      duplicateExpiryLatest,
+      'a same-valued latest snapshot may mutate while retaining the ordered ledger'
+    );
+    assert.strictEqual(duplicateExpiryHarness.flushNextConfigurationPropagation(), true);
+    assert.deepStrictEqual(
+      duplicateExpiryStore.connections(),
+      duplicateExpiryLatest,
+      'an older C event must not surface after the same-latest mutation'
+    );
+    assert.strictEqual(duplicateExpiryHarness.flushNextConfigurationPropagation(), true);
+    assert.deepStrictEqual(
+      duplicateExpiryStore.connections(),
+      duplicateExpiryLatest
+    );
+    assert.strictEqual(duplicateExpiryHarness.flushNextConfigurationPropagation(), true);
+    assert.deepStrictEqual(duplicateExpiryStore.connections(), duplicateExpiryLatest);
+
+    const reloadHarness = createVscodeStoreHarness();
+    const { ConnectionStore: ReloadConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      reloadHarness.vscode
+    );
+    reloadHarness.delayConfigurationPropagation = true;
+    reloadHarness.delayActivePropagation = true;
+    const reloadStore = new ReloadConnectionStore(reloadHarness.context);
+    const reloadConnection = validateConnection({
+      id: 'kx-reload',
+      name: 'Reload profile',
+      host: 'localhost',
+      port: 5500,
+      database: '.',
+      username: '',
+    });
+    await reloadStore.add(reloadConnection);
+    assert.deepStrictEqual(reloadHarness.connections, []);
+    assert.deepStrictEqual(reloadHarness.committedConnections, [reloadConnection]);
+    assert.strictEqual(reloadHarness.activeId, undefined);
+    assert.strictEqual(reloadHarness.committedActiveId, reloadConnection.id);
+    for (const subscription of reloadHarness.context.subscriptions.splice(0)) {
+      subscription.dispose();
+    }
+    reloadHarness.reloadConfiguration();
+    const reloadedStore = new ReloadConnectionStore(reloadHarness.context);
+    assert.deepStrictEqual(reloadedStore.connections(), [reloadConnection]);
+    assert.strictEqual(reloadedStore.activeConnectionId(), reloadConnection.id);
+  } finally {
+    Date.now = originalDateNow;
+  }
 
   const harness = createVscodeStoreHarness();
   const { ConnectionStore } = requireOutWithVscode('connection-store', harness.vscode);
@@ -4164,6 +4719,347 @@ async function testConnectionStoreTransactions() {
   });
   const firstAuthValue = ['first', 'auth', 'value'].join('-');
   const nextAuthValue = ['next', 'auth', 'value'].join('-');
+
+  const concurrentHarness = createVscodeStoreHarness();
+  const { ConnectionStore: ConcurrentConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    concurrentHarness.vscode
+  );
+  const concurrentStore = new ConcurrentConnectionStore(concurrentHarness.context);
+  const concurrentBase = validateConnection({
+    id: 'kx-concurrent',
+    name: 'Concurrent q',
+    host: 'localhost',
+    port: 5600,
+    database: '.',
+    username: 'runner',
+  });
+  const concurrentInitialAuth = ['concurrent', 'initial', 'auth'].join('-');
+  const concurrentNextAuth = ['concurrent', 'next', 'auth'].join('-');
+  await concurrentStore.add(concurrentBase, concurrentInitialAuth);
+  const delayedSecretGet = concurrentHarness.delayNextSecretGet();
+  const staleUpdate = concurrentStore.update(
+    { ...concurrentBase, port: 5602 },
+    concurrentNextAuth,
+    concurrentBase
+  );
+  await delayedSecretGet.started;
+  const concurrentExternal = { ...concurrentBase, port: 5601 };
+  concurrentHarness.applyExternalConnections([concurrentExternal]);
+  delayedSecretGet.release();
+  await assert.rejects(
+    () => staleUpdate,
+    /connection settings changed while this operation was in progress/
+  );
+  assert.deepStrictEqual(
+    concurrentHarness.connections,
+    [concurrentExternal],
+    'an external settings edit during SecretStorage read must not be overwritten'
+  );
+  assert.strictEqual(
+    concurrentHarness.secretFor(concurrentBase.id),
+    concurrentInitialAuth,
+    'a rejected stale edit must leave the existing secret unchanged'
+  );
+
+  const delayedRejectedUpdate = concurrentHarness.delayNextConfigurationUpdate();
+  concurrentHarness.failConfigurationUpdate = 1;
+  const rejectedConcurrentWrite = concurrentStore.update(
+    { ...concurrentExternal, port: 5603 },
+    concurrentNextAuth,
+    concurrentExternal
+  );
+  await delayedRejectedUpdate.started;
+  const newerConcurrentExternal = { ...concurrentExternal, port: 5604 };
+  concurrentHarness.applyExternalConnections([newerConcurrentExternal]);
+  delayedRejectedUpdate.release();
+  await assert.rejects(
+    () => rejectedConcurrentWrite,
+    /injected configuration update failure/
+  );
+  assert.deepStrictEqual(
+    concurrentHarness.connections,
+    [newerConcurrentExternal],
+    'rollback after a rejected write must not overwrite a newer external setting'
+  );
+  assert.deepStrictEqual(concurrentHarness.committedConnections, [newerConcurrentExternal]);
+  assert.strictEqual(
+    concurrentHarness.secretFor(concurrentBase.id),
+    undefined,
+    'credentials must be cleared when concurrent settings make endpoint rollback uncertain'
+  );
+
+  const postCommitHarness = createVscodeStoreHarness();
+  const { ConnectionStore: PostCommitConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    postCommitHarness.vscode
+  );
+  const postCommitStore = new PostCommitConnectionStore(postCommitHarness.context);
+  await postCommitStore.add(concurrentBase, concurrentInitialAuth);
+  const postCommitBarrier = postCommitHarness.delayNextConfigurationResolution();
+  const postCommitEdited = { ...concurrentBase, port: 5606 };
+  const postCommitUpdate = postCommitStore.update(
+    postCommitEdited,
+    concurrentNextAuth,
+    concurrentBase
+  );
+  await postCommitBarrier.started;
+  const postCommitExternal = { ...concurrentBase, port: 5607 };
+  postCommitHarness.applyExternalConnections([postCommitExternal]);
+  postCommitBarrier.release();
+  await assert.rejects(
+    () => postCommitUpdate,
+    /connection settings changed after this save was written/
+  );
+  assert.deepStrictEqual(
+    postCommitStore.connections(),
+    [postCommitExternal],
+    'an external event after the store target but before update resolution must win'
+  );
+  assert.deepStrictEqual(postCommitHarness.committedConnections, [postCommitExternal]);
+  assert.strictEqual(
+    postCommitHarness.secretFor(concurrentBase.id),
+    undefined,
+    'a causally newer external endpoint must not retain the superseded edit secret'
+  );
+
+  const olderAfterTargetHarness = createVscodeStoreHarness();
+  const { ConnectionStore: OlderAfterTargetConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    olderAfterTargetHarness.vscode
+  );
+  const olderAfterTargetStore = new OlderAfterTargetConnectionStore(
+    olderAfterTargetHarness.context
+  );
+  olderAfterTargetHarness.delayConfigurationPropagation = true;
+  await olderAfterTargetStore.add(concurrentBase, concurrentInitialAuth);
+  olderAfterTargetHarness.delayConfigurationPropagation = false;
+  const olderAfterTargetBarrier =
+    olderAfterTargetHarness.delayNextConfigurationResolution();
+  const olderAfterTargetEdited = { ...concurrentBase, port: 5608 };
+  const olderAfterTargetUpdate = olderAfterTargetStore.update(
+    olderAfterTargetEdited,
+    concurrentNextAuth,
+    concurrentBase
+  );
+  await olderAfterTargetBarrier.started;
+  assert.strictEqual(
+    olderAfterTargetHarness.flushNextConfigurationPropagation(),
+    true
+  );
+  olderAfterTargetBarrier.release();
+  await olderAfterTargetUpdate;
+  assert.deepStrictEqual(
+    olderAfterTargetStore.connections(),
+    [olderAfterTargetEdited],
+    'an older acknowledged event after the current target must not reject the resolved write'
+  );
+  assert.strictEqual(
+    olderAfterTargetHarness.secretFor(concurrentBase.id),
+    concurrentNextAuth,
+    'an older acknowledged event must not clear the successful edit secret'
+  );
+
+  const delayedTargetHarness = createVscodeStoreHarness();
+  const { ConnectionStore: DelayedTargetConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    delayedTargetHarness.vscode
+  );
+  const delayedTargetStore = new DelayedTargetConnectionStore(
+    delayedTargetHarness.context
+  );
+  await delayedTargetStore.add(concurrentBase, concurrentInitialAuth);
+  delayedTargetHarness.delayConfigurationPropagation = true;
+  const originalDelayedTargetDateNow = Date.now;
+  let delayedTargetNow = 1_500_000;
+  Date.now = () => delayedTargetNow;
+  try {
+    const delayedTargetBarrier =
+      delayedTargetHarness.delayNextConfigurationResolution();
+    const delayedTargetEdited = { ...concurrentBase, port: 5610 };
+    const delayedTargetUpdate = delayedTargetStore.update(
+      delayedTargetEdited,
+      undefined,
+      concurrentBase
+    );
+    await delayedTargetBarrier.started;
+    const delayedTargetExternal = { ...concurrentBase, port: 5611 };
+    delayedTargetHarness.applyExternalConnections([delayedTargetExternal]);
+    delayedTargetBarrier.release();
+    await delayedTargetUpdate;
+    assert.deepStrictEqual(
+      delayedTargetStore.connections(),
+      [delayedTargetEdited],
+      'a resolved write remains immediate when its target event has not been observed'
+    );
+    delayedTargetNow += 5001;
+    assert.deepStrictEqual(
+      delayedTargetStore.connections(),
+      [delayedTargetExternal],
+      'pre-target divergence must yield to effective configuration after the bound'
+    );
+    await assert.rejects(
+      () => delayedTargetStore.update(
+        { ...delayedTargetExternal, port: 5612 },
+        undefined,
+        delayedTargetExternal
+      ),
+      /settings are still reconciling/
+    );
+    assert.strictEqual(
+      delayedTargetHarness.secretFor(concurrentBase.id),
+      concurrentInitialAuth
+    );
+  } finally {
+    Date.now = originalDelayedTargetDateNow;
+  }
+
+  const preCommitHarness = createVscodeStoreHarness();
+  const { ConnectionStore: PreCommitConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    preCommitHarness.vscode
+  );
+  const preCommitStore = new PreCommitConnectionStore(preCommitHarness.context);
+  await preCommitStore.add(concurrentBase);
+  preCommitHarness.delayConfigurationPropagation = true;
+  const preCommitBarrier = preCommitHarness.delayNextConfigurationUpdate();
+  const preCommitEdited = { ...concurrentBase, port: 5613 };
+  const preCommitUpdate = preCommitStore.update(
+    preCommitEdited,
+    undefined,
+    concurrentBase
+  );
+  await preCommitBarrier.started;
+  const preCommitExternal = { ...concurrentBase, port: 5614 };
+  preCommitHarness.applyExternalConnections([preCommitExternal]);
+  preCommitBarrier.release();
+  await preCommitUpdate;
+  assert.deepStrictEqual(
+    preCommitStore.connections(),
+    [preCommitEdited],
+    'a divergent event before the settings write commits must not reject the newer resolved write'
+  );
+  assert.deepStrictEqual(preCommitHarness.committedConnections, [preCommitEdited]);
+  assert.strictEqual(preCommitHarness.flushNextConfigurationPropagation(), true);
+  assert.deepStrictEqual(preCommitStore.connections(), [preCommitEdited]);
+
+  const originalConcurrentDateNow = Date.now;
+  let concurrentNow = 2_000_000;
+  Date.now = () => concurrentNow;
+  try {
+    const inFlightStaleHarness = createVscodeStoreHarness();
+    const { ConnectionStore: InFlightStaleConnectionStore } = requireOutWithVscode(
+      'connection-store',
+      inFlightStaleHarness.vscode
+    );
+    const inFlightStaleStore = new InFlightStaleConnectionStore(
+      inFlightStaleHarness.context
+    );
+    await inFlightStaleStore.add(concurrentBase);
+    inFlightStaleHarness.delayConfigurationPropagation = true;
+    const inFlightStaleBarrier =
+      inFlightStaleHarness.delayNextConfigurationResolution();
+    const inFlightStaleEdited = { ...concurrentBase, port: 5612 };
+    const inFlightStaleUpdate = inFlightStaleStore.update(
+      inFlightStaleEdited,
+      undefined,
+      concurrentBase
+    );
+    await inFlightStaleBarrier.started;
+    inFlightStaleHarness.emitConfigurationChange();
+    inFlightStaleBarrier.release();
+    await inFlightStaleUpdate;
+    assert.deepStrictEqual(inFlightStaleStore.connections(), [inFlightStaleEdited]);
+    concurrentNow += 5001;
+    assert.deepStrictEqual(
+      inFlightStaleStore.connections(),
+      [concurrentBase],
+      'an ambiguous in-flight event must yield to effective settings after the bound'
+    );
+    await assert.rejects(
+      () => inFlightStaleStore.update(
+        { ...concurrentBase, port: 5613 },
+        undefined,
+        concurrentBase
+      ),
+      /settings are still reconciling/
+    );
+    assert.strictEqual(
+      inFlightStaleHarness.flushNextConfigurationPropagation(),
+      true
+    );
+    assert.deepStrictEqual(inFlightStaleStore.connections(), [inFlightStaleEdited]);
+  } finally {
+    Date.now = originalConcurrentDateNow;
+  }
+
+  const duplicateTargetHarness = createVscodeStoreHarness();
+  const { ConnectionStore: DuplicateTargetConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    duplicateTargetHarness.vscode
+  );
+  const duplicateTargetStore = new DuplicateTargetConnectionStore(
+    duplicateTargetHarness.context
+  );
+  await duplicateTargetStore.add(concurrentBase);
+  duplicateTargetHarness.delayConfigurationPropagation = true;
+  const duplicateTargetB = { ...concurrentBase, port: 5608 };
+  const duplicateTargetC = { ...concurrentBase, port: 5609 };
+  await duplicateTargetStore.update(duplicateTargetB, undefined, concurrentBase);
+  await duplicateTargetStore.update(duplicateTargetC, undefined, duplicateTargetB);
+  const duplicateTargetBarrier =
+    duplicateTargetHarness.delayNextConfigurationResolution();
+  const duplicateTargetFinal = duplicateTargetStore.update(
+    duplicateTargetB,
+    undefined,
+    duplicateTargetC
+  );
+  await duplicateTargetBarrier.started;
+  assert.strictEqual(
+    duplicateTargetHarness.flushNextConfigurationPropagation(),
+    true
+  );
+  assert.strictEqual(
+    duplicateTargetHarness.flushNextConfigurationPropagation(),
+    true
+  );
+  duplicateTargetBarrier.release();
+  await duplicateTargetFinal;
+  assert.deepStrictEqual(
+    duplicateTargetStore.connections(),
+    [duplicateTargetB],
+    'older B/C events must not supersede the current duplicate-valued B write'
+  );
+  assert.strictEqual(
+    duplicateTargetHarness.flushNextConfigurationPropagation(),
+    true
+  );
+  assert.deepStrictEqual(duplicateTargetStore.connections(), [duplicateTargetB]);
+
+  const ownEventHarness = createVscodeStoreHarness();
+  const { ConnectionStore: OwnEventConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    ownEventHarness.vscode
+  );
+  const ownEventStore = new OwnEventConnectionStore(ownEventHarness.context);
+  ownEventHarness.delayConfigurationPropagation = true;
+  await ownEventStore.add(concurrentBase, concurrentInitialAuth);
+  const ownEventSecretGet = ownEventHarness.delayNextSecretGet();
+  const ownEventEdited = { ...concurrentBase, port: 5605 };
+  const ownEventUpdate = ownEventStore.update(
+    ownEventEdited,
+    concurrentNextAuth,
+    concurrentBase
+  );
+  await ownEventSecretGet.started;
+  assert.strictEqual(ownEventHarness.flushNextConfigurationPropagation(), true);
+  ownEventSecretGet.release();
+  await ownEventUpdate;
+  assert.deepStrictEqual(
+    ownEventStore.connections(),
+    [ownEventEdited],
+    'a delayed event for an acknowledged extension write must not invalidate the mutation'
+  );
 
   harness.failSecretStore = 1;
   await assert.rejects(() => store.add(connection, firstAuthValue), /injected SecretStorage store failure/);
@@ -4849,6 +5745,116 @@ async function testConnectionManagerLifecycle() {
     inheritedClient,
     'display/namespace-only edits must keep the healthy direct session'
   );
+
+  const staleNotebookTarget = validateConnection({
+    ...connection,
+    id: 'kx-notebook-target-edit',
+    name: 'Notebook target edit',
+    port: 5005,
+  });
+  const staleNotebookClient = await timeoutManager.connect(staleNotebookTarget);
+  const currentNotebookTarget = { ...staleNotebookTarget, port: 5000 };
+  const currentNotebookClient = await timeoutManager.connect(currentNotebookTarget);
+  assert.notStrictEqual(currentNotebookClient, staleNotebookClient);
+  assert.strictEqual(
+    staleNotebookClient.closed,
+    true,
+    'editing a targeted stable profile from port 5005 to 5000 must close its stale session'
+  );
+  assert.strictEqual(
+    currentNotebookClient.options.port,
+    5000,
+    'the next run must reconnect the same profile ID to its current port'
+  );
+
+  const integratedStoreHarness = createVscodeStoreHarness();
+  const { ConnectionStore: IntegratedConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    integratedStoreHarness.vscode
+  );
+  const integratedStore = new IntegratedConnectionStore(integratedStoreHarness.context);
+  const integratedTarget = validateConnection({
+    ...connection,
+    id: 'kx-integrated-notebook-target',
+    name: 'Integrated notebook target',
+    port: 5005,
+  });
+  const integratedActive = validateConnection({
+    ...connection,
+    id: 'kx-integrated-active',
+    name: 'Different active profile',
+    port: 5111,
+  });
+  await integratedStore.add(integratedTarget);
+  await integratedStore.add(integratedActive);
+  await integratedStore.setActiveConnection(integratedActive.id);
+
+  const integratedManager = new ConnectionManager(integratedStore);
+  const integratedRuntime = createNotebookControllerRuntime();
+  const { KxQNotebookRunner } = requireOutWithMocks('notebook-controller', {
+    vscode: integratedRuntime.vscode,
+  });
+  const integratedRunner = new KxQNotebookRunner({
+    activeConnection: () => integratedStore.activeConnection(),
+    connections: () => integratedStore.connections(),
+    connectionById: id => integratedStore.connection(id),
+    isConnected: id => integratedManager.isConnected(id),
+    executeScript: (target, source, onIssued, signal) =>
+      integratedManager.executeScript(target, source, onIssued, signal),
+    errorMessage: async error => error instanceof Error ? error.message : String(error),
+    onDidChangeState: listener => integratedManager.onDidChangeState(listener),
+  }, new LiveNotebookResultStore());
+  const integratedNotebook = integratedRuntime.notebook(
+    'file:///workspace/integrated-target-edit.ipynb'
+  );
+  const firstIntegratedCell = integratedRuntime.cell({
+    languageId: 'q',
+    source: 'firstTargetRun[]',
+    uri: 'vscode-notebook-cell:///integrated-target-edit/first',
+  });
+  firstIntegratedCell.notebook = integratedNotebook;
+  const clientsBeforeIntegratedRun = createdClients.length;
+  assert.strictEqual(
+    await integratedRunner.runCell(firstIntegratedCell, integratedTarget.id),
+    'executed'
+  );
+  assert.strictEqual(createdClients.length, clientsBeforeIntegratedRun + 1);
+  const integratedStaleClient = createdClients.at(-1);
+  assert.strictEqual(integratedStaleClient.options.port, 5005);
+  assert.strictEqual(integratedStore.activeConnectionId(), integratedActive.id);
+
+  const integratedCurrentTarget = { ...integratedTarget, port: 5000 };
+  await integratedStore.update(
+    integratedCurrentTarget,
+    undefined,
+    integratedTarget
+  );
+  const secondIntegratedCell = integratedRuntime.cell({
+    languageId: 'q',
+    source: 'secondTargetRun[]',
+    uri: 'vscode-notebook-cell:///integrated-target-edit/second',
+  });
+  secondIntegratedCell.notebook = integratedNotebook;
+  assert.strictEqual(
+    await integratedRunner.runCell(secondIntegratedCell, integratedTarget.id),
+    'executed'
+  );
+  const integratedCurrentClient = createdClients.at(-1);
+  assert.notStrictEqual(integratedCurrentClient, integratedStaleClient);
+  assert.strictEqual(integratedStaleClient.closed, true);
+  assert.strictEqual(
+    integratedCurrentClient.options.port,
+    5000,
+    'Store → mixed runner → ConnectionManager must resolve the current same-ID endpoint'
+  );
+  assert.strictEqual(
+    integratedStore.activeConnectionId(),
+    integratedActive.id,
+    'a different active/global profile must not replace the explicit notebook target'
+  );
+  integratedRunner.dispose();
+  await integratedManager.disconnectAll();
+  integratedManager.dispose();
 
   const oldCloseCallback = inheritedClient.options.onDidClose;
   const changedRuntime = {
@@ -7088,7 +8094,15 @@ async function testDirectQNotebookController() {
   const bridge = createDirectQNotebookBridgeHarness();
   const directController = new KxQNotebookController(bridge, liveResults);
 
+  assert.strictEqual(
+    runtime.controllers.length,
+    0,
+    'the KX q-only controller must not register by default'
+  );
+  assert.strictEqual(directController.isDirectControllerRegistered(), false);
+  runtime.setDirectControllerEnabled(true);
   assert.strictEqual(runtime.controllers.length, 1);
+  assert.strictEqual(directController.isDirectControllerRegistered(), true);
   const registered = runtime.controllers[0];
   assert.strictEqual(registered.id, KX_Q_NOTEBOOK_CONTROLLER_ID);
   assert.strictEqual(registered.id, 'vscode-kdb.q-notebook-controller');
@@ -7114,7 +8128,7 @@ async function testDirectQNotebookController() {
     ...connection,
     id: 'kx-notebook-two',
     name: 'Notebook q two',
-    port: 5002,
+    port: 5005,
     database: '.research',
   };
   bridge.connection = connection;
@@ -7397,6 +8411,37 @@ async function testDirectQNotebookController() {
     directController.isSelected(notebook),
     false,
     'self-created mixed executions must not select or mutate the notebook controller'
+  );
+  const editedSecondConnection = {
+    ...secondConnection,
+    port: 5000,
+  };
+  bridge.connectionList = [connection, editedSecondConnection];
+  bridge.executeImpl = async (target, source, onIssued) => {
+    assert.strictEqual(target, editedSecondConnection);
+    assert.strictEqual(source, 'editedTargetPort[]');
+    onIssued();
+    return target.port;
+  };
+  const editedTargetCell = runtime.cell({
+    languageId: 'q',
+    source: 'editedTargetPort[]',
+    uri: 'vscode-notebook-cell:///native-q/edited-target-port',
+  });
+  editedTargetCell.notebook = notebook;
+  assert.strictEqual(
+    await directController.runCell(editedTargetCell, secondConnection.id),
+    'executed'
+  );
+  assert.strictEqual(
+    bridge.calls.at(-1).connection.port,
+    5000,
+    'each mixed run must resolve the stable target ID to the latest saved endpoint'
+  );
+  assert.strictEqual(
+    bridge.connection,
+    connection,
+    'changing the active/global profile must not override the explicit notebook target ID'
   );
   bridge.connectionList = [connection];
 
@@ -7876,6 +8921,33 @@ async function testDirectQNotebookController() {
   }
 
   selectionSubscription.dispose();
+  runtime.setDirectControllerEnabled(false);
+  assert.strictEqual(directController.isDirectControllerRegistered(), false);
+  assert.strictEqual(
+    directController.isSelected(notebook),
+    false,
+    'disabling the optional controller must clear restored/selected notebook state'
+  );
+  assert.strictEqual(registered.disposeCalls, 1);
+  bridge.connection = connection;
+  bridge.connectionList = [connection];
+  bridge.executeImpl = async (target, source, onIssued) => {
+    assert.strictEqual(target, connection);
+    assert.strictEqual(source, 'runnerWithoutKernel[]');
+    onIssued();
+    return 42;
+  };
+  const defaultMixedCell = runtime.cell({
+    languageId: 'q',
+    source: 'runnerWithoutKernel[]',
+    uri: 'vscode-notebook-cell:///native-q/default-mixed-runner',
+  });
+  defaultMixedCell.notebook = notebook;
+  assert.strictEqual(
+    await directController.runCell(defaultMixedCell, connection.id),
+    'executed',
+    'Run q Cell (KX) must remain available when no KX controller is registered'
+  );
   directController.dispose();
   directController.dispose();
   const disposedCell = runtime.cell({
@@ -7893,6 +8965,7 @@ async function testDirectQNotebookController() {
 
 async function testLegacyQDirectNotebookRequest() {
   const runtime = createNotebookControllerRuntime();
+  runtime.setDirectControllerEnabled(true);
   const requests = [];
   const requestSignals = [];
   const createdClients = [];
@@ -8383,7 +9456,7 @@ async function testMixedQNotebookCommandIntegration() {
 
   nextRunResult = 'unavailable';
   await command(qCell);
-  assert.match(runtime.errors.at(-1), /notebook or KX direct IPC controller closed/i);
+  assert.match(runtime.errors.at(-1), /notebook or KX direct IPC runner closed/i);
 
   statusSubscription.dispose();
   integration.dispose();
@@ -8405,15 +9478,15 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.7');
+  assert.strictEqual(manifest.version, '0.2.8');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.7');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.7');
+  assert.strictEqual(packageLock.version, '0.2.8');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.8');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
   );
-  assert.match(pythonNotebookPyproject, /^version = "0\.2\.7"$/m);
+  assert.match(pythonNotebookPyproject, /^version = "0\.2\.8"$/m);
   assert.strictEqual(manifest.icon, 'icons/kx-marketplace.png');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(manifest, 'files'), false, 'package via .vscodeignore, not files');
   assert.ok(!manifest.extensionDependencies || manifest.extensionDependencies.length === 0);
@@ -8483,7 +9556,7 @@ function testManifestAndSources() {
   );
   assert.ok(
     manifest.activationEvents.includes('onNotebook:jupyter-notebook'),
-    'opening an ordinary Jupyter notebook must activate native KX controller registration'
+    'opening an ordinary Jupyter notebook must activate the mixed KX runner/actions'
   );
 
   const commandByTitle = Object.fromEntries(commands.map(command => [command.title, command.command]));
@@ -8512,7 +9585,6 @@ function testManifestAndSources() {
     /notebookCellType == 'code'/,
     /editorLangId == q/,
     /resourceScheme == vscode-notebook-cell/,
-    /notebookKernel != 'DanielAlonso\.vscode-kdb\/vscode-kdb\.q-notebook-controller'/,
     /!vscode-kdb\.notebookDirectQControllerSelected/,
   ]) {
     assert.match(
@@ -8521,6 +9593,11 @@ function testManifestAndSources() {
       'mixed q Ctrl+Enter must be limited to the focused q cell editor while another controller is selected'
     );
   }
+  assert.doesNotMatch(
+    mixedRunBinding.when,
+    /notebookKernel != 'DanielAlonso\.vscode-kdb\/vscode-kdb\.q-notebook-controller'/,
+    'a stale persisted KX kernel ID must not disable mixed q Ctrl+Enter while the controller is unregistered'
+  );
   assert.strictEqual(keybindings.some(binding =>
     [
       'vscode-kdb.setNotebookCellLanguageQ',
@@ -8803,9 +9880,20 @@ function testManifestAndSources() {
   assert.strictEqual(notebookPresentation.scope, 'window');
   assert.strictEqual(notebookPresentation.default, 'inline');
   assert.deepStrictEqual(notebookPresentation.enum, ['inline', 'panel', 'both']);
-  assert.match(notebookPresentation.description, /Direct-controller results/i);
+  assert.match(notebookPresentation.description, /Direct IPC output/i);
   assert.match(notebookPresentation.description, /saved or reopened output is the bounded portable snapshot/i);
   assert.match(notebookPresentation.description, /cannot recover omitted rows/i);
+  const directControllerSetting =
+    configurationProperties['vscode-kdb.notebook.enableDirectController'];
+  assert.strictEqual(directControllerSetting.type, 'boolean');
+  assert.strictEqual(directControllerSetting.scope, 'application');
+  assert.strictEqual(directControllerSetting.default, false);
+  assert.match(directControllerSetting.description, /optional legacy q-only/i);
+  assert.match(directControllerSetting.description, /kernel picker/i);
+  assert.match(directControllerSetting.description, /Disabled by default/i);
+  assert.match(directControllerSetting.description, /Python-first mixed workflow/i);
+  assert.match(directControllerSetting.description, /without registering or switching/i);
+  assert.match(directControllerSetting.description, /previously saved KX controller selection/i);
   const notebookRowLimit = configurationProperties['vscode-kdb.notebook.maxOutputRows'];
   assert.strictEqual(notebookRowLimit.type, 'integer');
   assert.strictEqual(notebookRowLimit.default, DEFAULT_NOTEBOOK_ROW_LIMIT);
@@ -8813,14 +9901,14 @@ function testManifestAndSources() {
   assert.strictEqual(notebookRowLimit.maximum, MAX_NOTEBOOK_ROW_LIMIT);
   assert.strictEqual(notebookRowLimit.default, 20);
   assert.match(notebookRowLimit.description, /%%q/);
-  assert.match(notebookRowLimit.description, /Direct IPC controller output/i);
+  assert.match(notebookRowLimit.description, /Direct IPC mixed-runner or optional-controller output/i);
   assert.match(notebookRowLimit.description, /in-memory result record/i);
   const notebookByteLimit = configurationProperties['vscode-kdb.notebook.maxOutputBytes'];
   assert.strictEqual(notebookByteLimit.type, 'integer');
   assert.strictEqual(notebookByteLimit.default, DEFAULT_NOTEBOOK_BYTE_LIMIT);
   assert.strictEqual(notebookByteLimit.minimum, MIN_NOTEBOOK_BYTE_LIMIT);
   assert.strictEqual(notebookByteLimit.maximum, MAX_NOTEBOOK_BYTE_LIMIT);
-  assert.match(notebookByteLimit.description, /direct-controller output/i);
+  assert.match(notebookByteLimit.description, /Direct IPC mixed-runner or optional-controller output/i);
   assert.match(notebookByteLimit.description, /No credentials, connection objects, or recoverable IPC handles/i);
   const serverFeatureSetting = configurationProperties['vscode-kdb.features.serverExplorer'];
   assert.strictEqual(serverFeatureSetting.type, 'boolean');
@@ -8931,6 +10019,8 @@ function testManifestAndSources() {
   assert.ok(controllerSource, 'native q notebook controller source is missing');
   assert.match(controllerSource[1], /vscode\.notebooks\.createNotebookController\(/);
   assert.match(controllerSource[1], /supportedLanguages = \['q'\]/);
+  assert.match(controllerSource[1], /enabled !== true/);
+  assert.match(controllerSource[1], /this\.unregisterController\(\)/);
   assert.strictEqual(
     sources.some(([, source]) => /ms-toolsai\.jupyter|vscode-jupyter/.test(source)),
     false,
@@ -8967,6 +10057,21 @@ function testManifestAndSources() {
 
   const storeSource = readSource('connection-store.ts');
   assert.ok(/context\.secrets\.(store|get|delete)/.test(storeSource), 'passwords must use VS Code SecretStorage');
+  assert.match(
+    storeSource,
+    /\.get<unknown>\(CONNECTIONS_SETTING\)/,
+    'ConnectionStore must read the effective application configuration'
+  );
+  assert.doesNotMatch(
+    storeSource,
+    /\.inspect<|\.globalValue/,
+    'ConnectionStore must not rely on a global-only inspect snapshot'
+  );
+  assert.doesNotMatch(
+    storeSource,
+    /VS Code did not persist/,
+    'resolved VS Code updates must not be rejected by same-turn readback checks'
+  );
   const migrationSource = readSource('connection-migration.ts');
   const commandsSourceForMigration = readSource('connection-commands.ts');
   assert.match(
@@ -9004,11 +10109,17 @@ function testManifestAndSources() {
   const notebookIntegrationSource = readSource('notebook-integration.ts');
   const notebookControllerSource = readSource('notebook-controller.ts');
   const liveNotebookResultsSource = readSource('notebook-live-results.ts');
-  assert.match(extensionSource, /new KxQNotebookController\(/);
+  assert.match(extensionSource, /new KxQNotebookRunner\(/);
   assert.match(extensionSource, /directQNotebookBridge\(store, manager, tree\)/);
   assert.match(
     extensionSource,
-    /context\.subscriptions\.push\([\s\S]*?notebookController,[\s\S]*?notebookIntegration/
+    /context\.extensionMode !== vscode\.ExtensionMode\.Test/
+  );
+  assert.doesNotMatch(extensionSource, /ExtensionMode\.Development/);
+  assert.match(extensionSource, /process\.env\.VSCODE_KDB_EXTENSION_HOST_TEST !== '1'/);
+  assert.match(
+    extensionSource,
+    /context\.subscriptions\.push\([\s\S]*?notebookRunner,[\s\S]*?notebookIntegration/
   );
   assert.match(
     extensionSource,
@@ -9779,6 +10890,7 @@ function createNotebookControllerRuntime() {
     preCancelProgress: false,
   };
   const configuration = new Map([
+    ['vscode-kdb.notebook.enableDirectController', false],
     ['vscode-kdb.notebook.maxOutputRows', 2],
     ['vscode-kdb.notebook.maxOutputBytes', 4096],
     ['vscode-kdb.results.viewer.functionDisplayStrategy', 'qText'],
@@ -9826,6 +10938,7 @@ function createNotebookControllerRuntime() {
   }
 
   const notebookChanges = new EventEmitter();
+  const configurationChanges = new EventEmitter();
 
   class NotebookCellOutput {
     constructor(items, metadata = {}) {
@@ -10032,6 +11145,7 @@ function createNotebookControllerRuntime() {
     },
     workspace: {
       onDidChangeNotebookDocument: notebookChanges.event,
+      onDidChangeConfiguration: configurationChanges.event,
       async applyEdit(edit) {
         workspaceEdits.push(edit);
         if (typeof controls.beforeApplyEdit === 'function') {
@@ -10182,6 +11296,14 @@ function createNotebookControllerRuntime() {
     workspaceEdits,
     progressRuns,
     controls,
+    setDirectControllerEnabled(enabled) {
+      configuration.set('vscode-kdb.notebook.enableDirectController', enabled);
+      configurationChanges.fire({
+        affectsConfiguration(key) {
+          return key === 'vscode-kdb.notebook.enableDirectController';
+        },
+      });
+    },
     cell({
       kind = vscode.NotebookCellKind.Code,
       languageId = 'q',
@@ -10709,22 +11831,34 @@ function createQTextResultsPanelHarness() {
 }
 
 function createVscodeStoreHarness() {
+  const configurationListeners = new Set();
   const state = {
     activeId: undefined,
+    committedActiveId: undefined,
     connections: [],
+    committedConnections: [],
     secrets: new Map(),
     failSecretStore: 0,
     failSecretDelete: 0,
     failSecretGet: 0,
     failConfigurationUpdate: 0,
     failActiveUpdate: 0,
-    ignoreConfigurationUpdate: false,
-    ignoreActiveUpdate: false,
+    delayConfigurationPropagation: false,
+    delayActivePropagation: false,
+    pendingConfigurationUpdates: [],
+    pendingActiveUpdates: [],
+    nextSecretGetBarrier: undefined,
+    nextConfigurationUpdateBarrier: undefined,
+    nextConfigurationResolutionBarrier: undefined,
     secretGetCalls: 0,
     secretStoreCalls: 0,
     secretDeleteCalls: 0,
   };
   const configuration = {
+    get(key) {
+      assert.strictEqual(key, 'connections');
+      return cloneJson(state.connections);
+    },
     inspect(key) {
       assert.strictEqual(key, 'connections');
       return { globalValue: cloneJson(state.connections) };
@@ -10732,17 +11866,42 @@ function createVscodeStoreHarness() {
     async update(key, value, target) {
       assert.strictEqual(key, 'connections');
       assert.strictEqual(target, 'global');
+      const barrier = state.nextConfigurationUpdateBarrier;
+      if (barrier) {
+        state.nextConfigurationUpdateBarrier = undefined;
+        barrier.started.resolve();
+        await barrier.release.promise;
+      }
       if (state.failConfigurationUpdate > 0) {
         state.failConfigurationUpdate--;
         throw new Error('injected configuration update failure');
       }
-      if (state.ignoreConfigurationUpdate) {
-        return;
+      state.committedConnections = cloneJson(value);
+      if (state.delayConfigurationPropagation) {
+        state.pendingConfigurationUpdates.push(cloneJson(value));
+      } else {
+        state.connections = cloneJson(value);
+        fireConfigurationChange();
       }
-      state.connections = cloneJson(value);
+      const resolutionBarrier = state.nextConfigurationResolutionBarrier;
+      if (resolutionBarrier) {
+        state.nextConfigurationResolutionBarrier = undefined;
+        resolutionBarrier.started.resolve();
+        await resolutionBarrier.release.promise;
+      }
     },
   };
+  function fireConfigurationChange() {
+    for (const listener of configurationListeners) {
+      listener({
+        affectsConfiguration(key) {
+          return key === 'vscode-kdb.connections';
+        },
+      });
+    }
+  }
   const context = {
+    subscriptions: [],
     globalState: {
       get() {
         return state.activeId;
@@ -10752,7 +11911,9 @@ function createVscodeStoreHarness() {
           state.failActiveUpdate--;
           throw new Error('injected active-state update failure');
         }
-        if (state.ignoreActiveUpdate) {
+        state.committedActiveId = value;
+        if (state.delayActivePropagation) {
+          state.pendingActiveUpdates.push(value);
           return;
         }
         state.activeId = value;
@@ -10761,6 +11922,12 @@ function createVscodeStoreHarness() {
     secrets: {
       async get(key) {
         state.secretGetCalls++;
+        const barrier = state.nextSecretGetBarrier;
+        if (barrier) {
+          state.nextSecretGetBarrier = undefined;
+          barrier.started.resolve();
+          await barrier.release.promise;
+        }
         if (state.failSecretGet > 0) {
           state.failSecretGet--;
           throw new Error('injected SecretStorage get failure');
@@ -10788,14 +11955,26 @@ function createVscodeStoreHarness() {
   const harness = {
     vscode: {
       ConfigurationTarget: { Global: 'global' },
-      workspace: { getConfiguration: () => configuration },
+      workspace: {
+        getConfiguration: () => configuration,
+        onDidChangeConfiguration(listener) {
+          configurationListeners.add(listener);
+          return { dispose: () => configurationListeners.delete(listener) };
+        },
+      },
     },
     context,
     get connections() {
       return cloneJson(state.connections);
     },
+    get committedConnections() {
+      return cloneJson(state.committedConnections);
+    },
     get activeId() {
       return state.activeId;
+    },
+    get committedActiveId() {
+      return state.committedActiveId;
     },
     set failSecretStore(value) {
       state.failSecretStore = value;
@@ -10812,11 +11991,79 @@ function createVscodeStoreHarness() {
     set failActiveUpdate(value) {
       state.failActiveUpdate = value;
     },
-    set ignoreConfigurationUpdate(value) {
-      state.ignoreConfigurationUpdate = value;
+    set delayConfigurationPropagation(value) {
+      state.delayConfigurationPropagation = value;
     },
-    set ignoreActiveUpdate(value) {
-      state.ignoreActiveUpdate = value;
+    set delayActivePropagation(value) {
+      state.delayActivePropagation = value;
+    },
+    delayNextSecretGet() {
+      assert.strictEqual(state.nextSecretGetBarrier, undefined);
+      const started = deferred();
+      const release = deferred();
+      state.nextSecretGetBarrier = { started, release };
+      return {
+        started: started.promise,
+        release: () => release.resolve(),
+      };
+    },
+    delayNextConfigurationUpdate() {
+      assert.strictEqual(state.nextConfigurationUpdateBarrier, undefined);
+      const started = deferred();
+      const release = deferred();
+      state.nextConfigurationUpdateBarrier = { started, release };
+      return {
+        started: started.promise,
+        release: () => release.resolve(),
+      };
+    },
+    delayNextConfigurationResolution() {
+      assert.strictEqual(state.nextConfigurationResolutionBarrier, undefined);
+      const started = deferred();
+      const release = deferred();
+      state.nextConfigurationResolutionBarrier = { started, release };
+      return {
+        started: started.promise,
+        release: () => release.resolve(),
+      };
+    },
+    get pendingConfigurationUpdates() {
+      return state.pendingConfigurationUpdates.length;
+    },
+    get pendingActiveUpdates() {
+      return state.pendingActiveUpdates.slice();
+    },
+    flushNextConfigurationPropagation() {
+      const connections = state.pendingConfigurationUpdates.shift();
+      if (connections === undefined) {
+        return false;
+      }
+      state.connections = cloneJson(connections);
+      fireConfigurationChange();
+      return true;
+    },
+    flushPropagation() {
+      while (harness.flushNextConfigurationPropagation()) {
+        // Apply and notify one acknowledged setting snapshot at a time.
+      }
+      for (const activeId of state.pendingActiveUpdates.splice(0)) {
+        state.activeId = activeId;
+      }
+    },
+    reloadConfiguration() {
+      state.pendingConfigurationUpdates.length = 0;
+      state.pendingActiveUpdates.length = 0;
+      state.connections = cloneJson(state.committedConnections);
+      state.activeId = state.committedActiveId;
+    },
+    emitConfigurationChange() {
+      fireConfigurationChange();
+    },
+    applyExternalConnections(connections) {
+      state.pendingConfigurationUpdates.length = 0;
+      state.connections = cloneJson(connections);
+      state.committedConnections = cloneJson(connections);
+      fireConfigurationChange();
     },
     get secretCalls() {
       return {
@@ -10887,6 +12134,7 @@ function createSqlToolsConfigurationApi(options = {}) {
 }
 
 function createMigrationCommandHarness(options = {}) {
+  const configurationListeners = new Set();
   const state = {
     activeId: options.initialActiveId,
     connections: cloneJson(options.initialConnections || []),
@@ -10926,6 +12174,10 @@ function createMigrationCommandHarness(options = {}) {
     },
   };
   const kxConfiguration = {
+    get(key) {
+      assert.strictEqual(key, 'connections');
+      return cloneJson(state.connections);
+    },
     inspect(key) {
       assert.strictEqual(key, 'connections');
       return { globalValue: cloneJson(state.connections) };
@@ -10934,6 +12186,13 @@ function createMigrationCommandHarness(options = {}) {
       assert.strictEqual(key, 'connections');
       assert.strictEqual(target, 'global');
       state.connections = cloneJson(value);
+      for (const listener of configurationListeners) {
+        listener({
+          affectsConfiguration(candidate) {
+            return candidate === 'vscode-kdb.connections';
+          },
+        });
+      }
     },
   };
 
@@ -10941,6 +12200,10 @@ function createMigrationCommandHarness(options = {}) {
     ConfigurationTarget: { Global: 'global' },
     workspace: {
       workspaceFolders: undefined,
+      onDidChangeConfiguration(listener) {
+        configurationListeners.add(listener);
+        return { dispose: () => configurationListeners.delete(listener) };
+      },
       getConfiguration(section) {
         if (section === 'sqltools') {
           return sqlToolsConfiguration;
@@ -11043,6 +12306,7 @@ function createMigrationCommandHarness(options = {}) {
     },
   };
   const context = {
+    subscriptions: [],
     globalState: {
       get() {
         return state.activeId;

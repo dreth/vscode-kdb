@@ -20,7 +20,7 @@ There is no notebook-only visible Point cap. Live requests still honor common `v
 
 The separate Python helper can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.
 
-On the Python-helper route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the helper result with the desired `kx_notebook.Chart` specification to persist a changed selection. Its escaped `text/html` fallback renders a network-free static SVG from the emitted specification. Direct-controller output has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
+On the Python-helper route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the `.ipynb`; re-emit the helper result with the desired `kx_notebook.Chart` specification to persist a changed selection. Its escaped `text/html` fallback renders a network-free static SVG from the emitted specification. Direct IPC output from the mixed runner or optional controller has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.
 
 Once a direct result's bound live record is absent, notebook charting uses only the bounded rows saved in the MIME payload. Opening that snapshot in the full KX Results panel does not restore missing data.
 

@@ -73,15 +73,20 @@ const NOTEBOOK_DIRECT_CONTROLLER_CONTEXT =
 const MAX_NOTEBOOK_SCAN_CELLS = 10_000;
 const MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL = 2_000;
 
-export interface DirectQControllerSelection {
+export interface DirectQNotebookRunner {
   readonly onDidChangeState: vscode.Event<void>;
   isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean;
   connectionProfiles(): NotebookQTargetProfile[];
   runCell(cell: vscode.NotebookCell, connectionId: string): Promise<DirectQCellRunResult>;
 }
 
+/** @deprecated Use DirectQNotebookRunner. */
+export type DirectQControllerSelection = DirectQNotebookRunner;
+
 export interface NotebookIntegrationOptions {
-  directController?: DirectQControllerSelection;
+  directRunner?: DirectQNotebookRunner;
+  /** @deprecated Use directRunner. */
+  directController?: DirectQNotebookRunner;
   liveResults?: LiveNotebookResultStore;
 }
 
@@ -89,6 +94,7 @@ export class NotebookIntegration implements vscode.Disposable {
   private readonly context: vscode.ExtensionContext;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly messaging: vscode.NotebookRendererMessaging;
+  private readonly directRunner: DirectQNotebookRunner | undefined;
   private readonly statusBarChanged = new vscode.EventEmitter<void>();
   private readonly cellLanguageProvider = new NotebookCellLanguageProvider<vscode.TextDocument>(
     (document, languageId) => vscode.languages.setTextDocumentLanguage(document, languageId)
@@ -99,6 +105,7 @@ export class NotebookIntegration implements vscode.Disposable {
     private readonly options: NotebookIntegrationOptions = {}
   ) {
     this.context = context;
+    this.directRunner = options.directRunner ?? options.directController;
     this.messaging = vscode.notebooks.createRendererMessaging(KX_NOTEBOOK_RENDERER_ID);
     this.disposables.push(
       this.messaging.onDidReceiveMessage(event => {
@@ -153,8 +160,8 @@ export class NotebookIntegration implements vscode.Disposable {
           void this.messaging.postMessage(this.rendererSettingsMessage());
         }
       }),
-      ...(this.options.directController
-        ? [this.options.directController.onDidChangeState(() => {
+      ...(this.directRunner
+        ? [this.directRunner.onDidChangeState(() => {
           this.updateContexts();
         })]
         : []),
@@ -316,10 +323,10 @@ export class NotebookIntegration implements vscode.Disposable {
     if (!editor) {
       return;
     }
-    const runner = this.options.directController;
+    const runner = this.directRunner;
     if (!runner) {
       void vscode.window.showErrorMessage(
-        'Run q Cell (KX) is unavailable because the KX direct IPC controller did not start.'
+        'Run q Cell (KX) is unavailable because the KX direct IPC runner did not start.'
       );
       return;
     }
@@ -363,7 +370,7 @@ export class NotebookIntegration implements vscode.Disposable {
       );
     } else if (result === 'unavailable') {
       void vscode.window.showErrorMessage(
-        'Run q Cell (KX) is unavailable because the notebook or KX direct IPC controller closed.'
+        'Run q Cell (KX) is unavailable because the notebook or KX direct IPC runner closed.'
       );
     } else if (result !== 'executed') {
       void vscode.window.showWarningMessage(
@@ -395,10 +402,10 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return undefined;
     }
-    const runner = this.options.directController;
+    const runner = this.directRunner;
     if (!runner) {
       void vscode.window.showErrorMessage(
-        'KX target selection is unavailable because the direct IPC controller did not start.'
+        'KX target selection is unavailable because the direct IPC runner did not start.'
       );
       return undefined;
     }
@@ -866,7 +873,7 @@ export class NotebookIntegration implements vscode.Disposable {
     if (!isQCell(cell) || this.directControllerSelected(cell.notebook)) {
       return undefined;
     }
-    const profiles = this.options.directController?.connectionProfiles() ?? [];
+    const profiles = this.directRunner?.connectionProfiles() ?? [];
     const resolution = resolveNotebookQTarget(cell.notebook.metadata, profiles);
     const profile = resolution.kind === 'resolved' ? resolution.profile : undefined;
     const route = safeConnectionName(profile?.name) || 'Select connection';
@@ -928,7 +935,7 @@ export class NotebookIntegration implements vscode.Disposable {
   private directControllerSelected(
     notebook: Pick<vscode.NotebookDocument, 'uri'>
   ): boolean {
-    return this.options.directController?.isSelected(notebook) === true;
+    return this.directRunner?.isSelected(notebook) === true;
   }
 }
 

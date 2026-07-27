@@ -901,7 +901,7 @@
 
 
 <h1 id="running-q">Running q</h1>
-<p>The <code>.q</code> editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. The native <strong>KX q (Direct IPC)</strong> notebook controller executes complete q cells through the same active connection. Python <code>%%q</code> cells use a separate explicit helper path described in <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
+<p>The <code>.q</code> editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. In notebooks, Python remains selected by default and <strong>Run q Cell (KX)</strong> executes complete q cells through an explicitly chosen Direct IPC target. Python <code>%%q</code> cells use a separate explicit helper path described in <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="commands-and-keybindings">Commands and keybindings</h2>
 <table>
 <thead>
@@ -934,7 +934,7 @@
 </tbody>
 </table>
 <p>A code lens at the top of a q document also runs the whole script.</p>
-<p>These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected controller: direct q when <strong>KX q (Direct IPC)</strong> is selected, or Python when a Python controller is selected. Separately, KX contributes a default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> for <strong>Run q Cell (KX)</strong> only while a mixed notebook's q code-cell editor text has focus; it does not match Python, Markdown, output/cell-container focus, or <code>Ctrl+Shift+Enter</code>. User/keymap bindings may override defaults, so the q-cell action remains available from the toolbar, context menu, and Command Palette.</p>
+<p>These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected Python/Jupyter controller. Separately, KX contributes a default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> for <strong>Run q Cell (KX)</strong> only while a q code-cell editor has text focus; it does not match Python, Markdown, output/cell-container focus, or <code>Ctrl+Shift+Enter</code>. User/keymap bindings may override defaults, so the leading q-cell action remains available from the toolbar, context menu, and Command Palette. If the optional q-only controller is enabled and selected, normal notebook Run belongs to that controller and the mixed action stands down.</p>
 <h2 id="notebook-commands">Notebook commands</h2>
 <table>
 <thead>
@@ -946,11 +946,11 @@
 <tbody>
 <tr>
 <td><strong>Notebook: Select Notebook Kernel</strong></td>
-<td>VS Code's native selector includes <strong>KX q (Direct IPC)</strong>. With it selected, normal Run sends the complete q cell through the active KX profile/session and namespace.</td>
+<td>VS Code/Jupyter owns this selector. KX is absent from its candidates by default; explicitly enabling <code>vscode-kdb.notebook.enableDirectController</code> adds <strong>KX q (Direct IPC)</strong>. The selector itself is not removed.</td>
 </tr>
 <tr>
 <td><strong>Run q Cell (KX)</strong></td>
-<td>With another controller selected, runs one q-language cell through the notebook's explicit q target/session. It is also bound to <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> only for focused q cell editor text.</td>
+<td>With Python selected, runs one q-language cell through the notebook's explicit current q target/session. It is also bound to <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> only for focused q cell editor text.</td>
 </tr>
 <tr>
 <td><strong>Make q Cell (KX)</strong></td>
@@ -978,7 +978,8 @@
 </tr>
 </tbody>
 </table>
-<p>For a q-only notebook, select <strong>KX q (Direct IPC)</strong>, use q-language cells, and Run normally. For a mixed notebook, keep Python selected and use <strong>Run q Cell (KX)</strong> on q-language cells; Python cells still use normal Jupyter Run. Both direct paths reject a leading <code>%%q</code> and use the same client-side complete-source grouping as editor scripts. q-only uses the active profile; mixed mode uses the notebook's explicit target and reuses that profile's q session. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. For the separate Python-kernel evaluator route, keep or prepare <code>%%q</code>, restore the notebook default/Python language, then use normal Run after installing and configuring <code>kx_notebook</code>. The extension does not monkey-patch Jupyter or intercept Python-controller Run.</p>
+<p>For the default workflow, keep Python selected, use <strong>Make q Cell (KX)</strong> for q language/highlighting, explicitly choose one saved profile, and use <strong>Run q Cell (KX)</strong>. Python cells still use normal Jupyter Run. Target metadata contains only stable ID/name; every run resolves current profile data, so same-ID endpoint edits take effect, active changes do not override the target, and a missing target prompts instead of falling through. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait.</p>
+<p>For an explicitly requested q-only workflow, enable <code>vscode-kdb.notebook.enableDirectController</code>, select <strong>KX q (Direct IPC)</strong>, and use normal Run through the active profile. Both Direct IPC paths reject a leading <code>%%q</code> and use the same client-side complete-source grouping as editor scripts. For the separate Python-kernel evaluator route, keep or prepare <code>%%q</code>, restore the notebook default/Python language, then use normal Run after installing and configuring <code>kx_notebook</code>. The extension does not monkey-patch Jupyter or intercept Python-controller Run.</p>
 <h2 id="exact-execution-semantics">Exact execution semantics</h2>
 <ul>
 <li>A non-empty selection is preserved exactly.</li>
@@ -989,10 +990,10 @@
 </ul>
 <p>Multiline selections, documents, and complete direct cells normalize CRLF/CR to line-feed endings and use a client-side q script-line grouper. An unindented source line starts a group; following indented lines continue it. Blank lines and comments preserve source order. <code>/</code> ... <code>\</code> block comments, top-level q system-command lines, and a bare <code>\</code> that starts q's trailing script comment retain their script meaning. Groups execute in order through ordinary q <code>value</code>, and the final executed group is returned.</p>
 <p>Whitespace, q indentation, source validity, and system-command behavior still belong to q. A system command in the source can therefore affect later groups in the same run. Select the intended text when a partial document should run.</p>
-<p>Generated script/cell requests do not depend on <code>.Q.ld</code> and are not rejected by q release date. Deterministic compatibility coverage runs the full direct-cell request against a simulated missing-<code>.Q.ld</code> capability; the release live test uses only the installed modern q runtime. There was no historical q binary available for a live run, so version 0.2.7 claims no exact minimum q version or live old-q result.</p>
+<p>Generated script/cell requests do not depend on <code>.Q.ld</code> and are not rejected by q release date. Deterministic compatibility coverage runs the full direct-cell request against a simulated missing-<code>.Q.ld</code> capability; the release live test uses only the installed modern q runtime. There was no historical q binary available for a live run, so version 0.2.8 claims no exact minimum q version or live old-q result.</p>
 <h2 id="syntax-scope">Syntax scope</h2>
 <p>The extension owns its first-party TextMate q grammar. Version 0.2.2 recognizes a top-line <code>%%q</code> as a notebook directive while retaining the ordinary q rules and highlighting below it. The extension continues to associate q with <code>.q</code> files only. It does not claim <code>.k</code>: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.</p>
-<p>This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change <code>.q</code> source documents. In notebooks, the cell language selects highlighting and the selected controller owns execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents; the native notebook controller uses VS Code's normal Run UI.</p>
+<p>This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change <code>.q</code> source documents. In notebooks, the cell language selects highlighting; normal Run belongs to the selected Jupyter controller, while the explicit KX action owns Direct IPC q execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents.</p>
 <h2 id="active-connection-and-namespace">Active connection and namespace</h2>
 <p>All three normal <code>.q</code> editor paths use the active standalone connection. If one is configured but not open, the extension connects on demand.</p>
 <p>The connection's <strong>Database / Namespace</strong> value is applied consistently:</p>
@@ -1004,7 +1005,7 @@
 <p>The wrapper restores the server's previous namespace after success or failure, including after a source system command changed it during the run. A q error is rethrown and shown as an error, not converted into an ordinary result row. Assignments and definitions still persist in the namespace in which q evaluates them.</p>
 <h2 id="result-placement">Result placement</h2>
 <p>The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.</p>
-<p><strong>Run Selection in New Result</strong> creates another panel. It does not route through SQLTools and does not create <code>.session.sql</code> files. A direct-controller notebook result can hand off its live in-memory value while the bound live record exists; reopened/Python-helper output contains only the saved bounded preview.</p>
+<p><strong>Run Selection in New Result</strong> creates another panel. It does not route through SQLTools and does not create <code>.session.sql</code> files. A Direct IPC notebook result can hand off its live in-memory value while the bound live record exists; reopened/Python-helper output contains only the saved bounded preview.</p>
 <h2 id="query-history">Query History</h2>
 <p><code>vscode-kdb.features.queryHistory</code> defaults to <code>false</code>. When enabled, <strong>KX Query History</strong> records editor line, selection, and script executions only after the exact text is actually issued to q. A run rejected before issue is not stored. Entries are newest first and contain the query text, stable connection ID and recorded label, timestamp, execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. Result payloads and passwords are never included.</p>
 <p>Storage is the current VS Code workspace's local extension <code>Memento</code>. History is not placed in user/workspace settings, registered for Settings Sync, or transmitted as telemetry. The entry cap is <code>vscode-kdb.queryHistory.maxEntries</code>, default <code>100</code>, with a valid range of <code>1</code> through <code>1000</code>; lowering it removes the oldest excess entries.</p>

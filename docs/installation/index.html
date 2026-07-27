@@ -402,10 +402,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#use-the-native-direct-q-notebook-controller" class="md-nav__link">
+  <a href="#use-mixed-python-and-q-cells" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Use the native direct q notebook controller
+        Use mixed Python and q cells
 
     </span>
   </a>
@@ -413,10 +413,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#use-mixed-python-and-q-cells" class="md-nav__link">
+  <a href="#optional-native-direct-q-notebook-controller" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Use mixed Python and q cells
+        Optional native direct q notebook controller
 
     </span>
   </a>
@@ -870,10 +870,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#use-the-native-direct-q-notebook-controller" class="md-nav__link">
+  <a href="#use-mixed-python-and-q-cells" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Use the native direct q notebook controller
+        Use mixed Python and q cells
 
     </span>
   </a>
@@ -881,10 +881,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#use-mixed-python-and-q-cells" class="md-nav__link">
+  <a href="#optional-native-direct-q-notebook-controller" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Use mixed Python and q cells
+        Optional native direct q notebook controller
 
     </span>
   </a>
@@ -947,7 +947,7 @@
 <h1 id="installation">Installation</h1>
 <h2 id="requirements">Requirements</h2>
 <p>KX for VS Code requires VS Code <code>1.96.0</code> or newer and a kdb+/q process reachable over q IPC for normal <code>.q</code> editor execution. The extension does not bundle q or a kdb+ license.</p>
-<p>The native <strong>KX q (Direct IPC)</strong> controller uses the active KX profile. Mixed-notebook <strong>Run q Cell (KX)</strong> uses the notebook's explicitly selected q target. Both use the same direct q machinery as editor execution and neither requires a Python package. Release 0.2.7 groups complete q source on the client and evaluates ordinary q <code>value</code> groups, so it does not require <code>.Q.ld</code> or reject a process by q release date. Compatibility is covered deterministically for generated source when <code>.Q.ld</code> is absent and live on the installed modern q runtime; no historical q binary was available, so no exact minimum q version or live old-q result is claimed. The separate optional Python-kernel <code>%%q</code> route requires Python 3.9 or newer, IPython, and <code>kx_notebook</code> in that kernel. The helper bundles no q runtime or PyKX binary.</p>
+<p>Mixed-notebook <strong>Run q Cell (KX)</strong> uses the notebook's explicitly selected current q target while Python stays selected. The optional <strong>KX q (Direct IPC)</strong> controller uses the active profile only when its default-false setting is enabled and it is selected. Both use the same direct q machinery as editor execution and neither requires a Python package. Release 0.2.8 preserves 0.2.7's client-side complete-source grouping and ordinary q <code>value</code> evaluation, so it does not require <code>.Q.ld</code> or reject a process by q release date. Compatibility is covered deterministically for generated source when <code>.Q.ld</code> is absent and live on the installed modern q runtime; no historical q binary was available, so no exact minimum q version or live old-q result is claimed. The separate optional Python-kernel <code>%%q</code> route requires Python 3.9 or newer, IPython, and <code>kx_notebook</code> in that kernel. The helper bundles no q runtime or PyKX binary.</p>
 <p>SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's <code>sqltools.connections</code> setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.</p>
 <h2 id="install-the-extension">Install the extension</h2>
 <p>Use a project-approved distribution of <strong>KX for VS Code</strong>. When installing a locally supplied VSIX, use VS Code's <strong>Extensions: Install from VSIX...</strong> command and confirm the extension name, publisher, and version before installation.</p>
@@ -980,26 +980,21 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 <p>If you previously used the <code>DanielAlonso.kdb-sqltools</code> driver, run <strong>KX: Import SQLTools KDB Connections</strong> from the Command Palette. It is intentionally absent from the routine KX Connections title toolbar. SQLTools may already be uninstalled. KX inspects existing user, workspace, and workspace-folder settings and reviews only profiles whose normalized driver is <code>KDB</code>, <code>kdb+</code>, <code>kdb</code>, <code>kdb-sqltools</code>, or <code>DanielAlonso.kdb-sqltools</code>.</p>
 <p>The review never displays password values. SSH-enabled and malformed profiles are explained but cannot be selected. Existing KX profiles are skipped unless you explicitly import the candidate under a new unique name; this release has no replace or overwrite action. If selected settings contain passwords, choose whether to copy them once into VS Code SecretStorage, import without passwords, or cancel. Source settings remain unchanged and are never synchronized.</p>
 <p>The imported legacy connection timeout applies only to KX connect/handshake. Query timeout continues to inherit the KX global query default until you edit it. After import, use <strong>Review Imported Connection</strong> or the KX sidebar to inspect and test the saved direct profile.</p>
-<h2 id="use-the-native-direct-q-notebook-controller">Use the native direct q notebook controller</h2>
-<ol>
-<li>Add or select a profile in <strong>KX Connections</strong>.</li>
-<li>Open an ordinary <code>.ipynb</code>.</li>
-<li>Choose <strong>KX q (Direct IPC)</strong> from the notebook's top-right kernel/controller selector or <strong>Notebook: Select Notebook Kernel</strong>.</li>
-<li>Set the intended code cells to q if needed.</li>
-<li>Use normal <strong>Run Cell</strong> or <code>Ctrl+Enter</code>.</li>
-</ol>
-<p>The controller executes the complete q cell through the active profile's existing direct q client and namespace. It can connect a saved disconnected profile on demand because selecting the controller was explicit. Use ordinary q source: a leading <code>%%q</code> is rejected and belongs to the separate Python route. The controller does not install a q kernel, intercept a Python kernel, or create a notebook-specific connection. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="use-mixed-python-and-q-cells">Use mixed Python and q cells</h2>
 <ol>
 <li>Keep the normal Python Jupyter controller selected.</li>
 <li>Leave Python cells as Python and run them normally.</li>
 <li>Click the leading <strong>Make q Cell (KX)</strong> action on the intended code cell. This changes the whole cell's language without changing the selected Python kernel.</li>
-<li>Choose the visible notebook-level <code>q default</code> target from saved KX profiles.</li>
+<li>Choose the visible notebook-level <code>q default</code> target or <strong>KX: Choose Notebook q Target</strong>, then select one saved KX profile.</li>
 <li>Use the leading <strong>Run q Cell (KX)</strong> play action, its <code>KX: &lt;profile&gt; · Ctrl+Enter</code> status item, or the focused-cell shortcut.</li>
 </ol>
-<p>The KX action executes the complete q source through that explicit target without switching the Python controller. A target persists only safe profile ID/name metadata in the <code>.ipynb</code>; a missing or removed target asks for a replacement instead of using list order. q assignments continue through the selected profile's KX q process across q cells that share the target. Python variables and KX q variables remain separate.</p>
+<p>The KX action executes the complete q source through that explicit target without switching the Python controller. A target persists only safe stable profile ID/name metadata in the <code>.ipynb</code>. Every run resolves current store data: editing the same profile to a new host/port uses the new endpoint and recycles a stale client as needed; changing the active profile does not override it. A missing or removed target asks for a replacement instead of using list order. q assignments continue through the selected profile's KX q process across q cells that share the target. Python variables and KX q variables remain separate.</p>
 <p>When the q cell editor itself has text focus, the contributed default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs the KX action. The shortcut is limited to q code-cell editor focus and is disabled when the KX direct controller is selected. Python, Markdown, cell-container, and output focus keep their normal notebook shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if the shortcut was customized.</p>
 <p>Mixed mode cannot claim native KX kernel execution while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.</p>
+<p>KX is absent from the kernel candidates by default. VS Code's top-right Jupyter selector remains; KX does not remove it.</p>
+<h2 id="optional-native-direct-q-notebook-controller">Optional native direct q notebook controller</h2>
+<p>Set the application-scoped <code>vscode-kdb.notebook.enableDirectController</code> setting to <code>true</code>, then choose <strong>KX q (Direct IPC)</strong> from the normal notebook kernel selector. This opt-in controller executes complete q cells through the active profile's existing direct q client and namespace using normal <strong>Run Cell</strong>, <strong>Run All</strong>, and notebook shortcuts.</p>
+<p>Turning the setting off disposes the controller, so a previously saved KX selection cannot be restored while it is unregistered. Use ordinary q source: a leading <code>%%q</code> is rejected and belongs to the separate Python route. The controller does not install a q kernel, intercept Python/Jupyter, use private APIs, or create a notebook-specific connection. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>
 <h2 id="notebook-commands">Notebook commands</h2>
 <table>
 <thead>
@@ -1060,10 +1055,14 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 npm<span class="w"> </span>run<span class="w"> </span>compile
 npm<span class="w"> </span><span class="nb">test</span>
 npm<span class="w"> </span>run<span class="w"> </span>test:parity:self
+npm<span class="w"> </span>run<span class="w"> </span>test:parity
 npm<span class="w"> </span>run<span class="w"> </span>test:notebook-python
 npm<span class="w"> </span>run<span class="w"> </span>test:notebook-cross
 npm<span class="w"> </span>run<span class="w"> </span>test:extension-host
 </code></pre></div>
+<p>The full parity gate compiles its reference checkout. For a protected reference,
+use a disposable clone and set <code>KDB_SQLTOOLS_PARITY_ROOT</code> plus
+<code>KDB_SQLTOOLS_PARITY_REVISION</code> explicitly.</p>
 <p>When a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>

@@ -33,6 +33,7 @@ npm ci
 npm run compile
 npm test
 npm run test:parity:self
+npm run test:parity
 npm run test:notebook-python
 npm run test:notebook-cross
 npm run test:extension-host
@@ -44,25 +45,28 @@ For a release candidate, require the live IPC check instead of allowing it to sk
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
+The full parity gate compiles its reference checkout. If that checkout must remain
+byte-for-byte untouched, point `KDB_SQLTOOLS_PARITY_ROOT` and
+`KDB_SQLTOOLS_PARITY_REVISION` at a disposable clone with a satisfied dependency
+tree rather than the protected checkout.
+
 Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default location.
 
-The 0.2.7 release uses the standalone parity self-tests above. Do not run the separate cross-extension gate when the pinned reference checkout must remain completely unmodified: that gate compiles both checkouts even though it guards tracked reference state.
-
-The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, native-controller, complete functional, or visual parity evidence. Pure/provider/source tests cover detailed routing and UI contracts. `npm run test:extension-host` adds scoped non-visual activation, isolated multi-profile configuration, exact active selection, and real notebook language conversion/restoration; it does not automate the connection webview, kernel selection, toolbar/status layout, QuickPick interaction, or visual execution.
+The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, current notebook, complete functional, or visual parity evidence. Pure/provider/source tests cover detailed routing and UI contracts. `npm run test:extension-host` uses isolated VS Code user data and the actual store for two application/global profiles, exact active selection, same-ID port `5005`→`5000` edit/current target resolution, default controller non-registration, cleanup, and real notebook language conversion/restoration. It does not visually automate the connection webview, top-right kernel selector, toolbar/status layout, QuickPick interaction, or q execution.
 
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.2.7.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.8.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.7.vsix")
-with ZipFile("vscode-kdb-0.2.7-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.8.vsix")
+with ZipFile("vscode-kdb-0.2.8-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.7.vsix vscode-kdb-0.2.7-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.8.vsix vscode-kdb-0.2.8-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.

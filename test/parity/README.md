@@ -8,6 +8,11 @@ npm run test:parity
 
 The runner compiles both checkouts, runs its own self-tests, runs the reference focused and required live-q suites, and then applies common deterministic and anonymous live-q fixtures to the public/core boundaries that both products expose. It never installs dependencies or edits tracked reference source/docs, packages, stages, resets, commits, or publishes the reference repository. The approved reference compile can refresh ignored `out/**`; ignored build output is excluded from source evidence while tracked/index state is guarded before and after every reference command.
 
+If the original reference checkout must remain byte-for-byte untouched, clone it
+to a disposable directory, give that clone a satisfied dependency tree, and use
+the root/revision overrides below. Do not run the compiling gate directly against
+the protected checkout.
+
 Defaults:
 
 - reference checkout: `/opt/data/home/projects/kdb-sqltools`

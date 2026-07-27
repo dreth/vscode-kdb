@@ -151,6 +151,7 @@ function runVsCode(display) {
       env: {
         ...process.env,
         DISPLAY: display,
+        VSCODE_KDB_EXTENSION_HOST_TEST: '1',
         ...(libraryPath ? { LD_LIBRARY_PATH: libraryPath } : {}),
       },
       stdio: 'inherit',
