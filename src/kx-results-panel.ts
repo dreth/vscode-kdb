@@ -2567,7 +2567,7 @@ export class KxResultsPanel {
           </select></label>
           <label class="settings-row"><span>Cell width</span><input id="settingsCellWidth" type="number" min="80" max="600" step="1"></label>
           <label class="settings-row"><span>Row height</span><input id="settingsRowHeight" type="number" min="20" max="80" step="1"></label>
-          <label class="settings-row"><span>Font size</span><input id="settingsFontSize" type="number" min="0" max="32" step="1"></label>
+          <label class="settings-row"><span>Font size</span><input id="settingsFontSize" type="number" min="0" max="32" step="1" placeholder="Auto (VS Code default)" aria-label="Font size, Auto uses the VS Code default"></label>
         </details>
         <details class="settings-section">
           <summary class="settings-heading"><span>Columns</span><span id="hiddenColumns">All visible</span></summary>
@@ -5529,7 +5529,11 @@ export class KxResultsPanel {
         settingsDensity.value = settings.density;
         settingsCellWidth.value = String(settings.cellWidth);
         settingsRowHeight.value = String(settings.rowHeight);
-        settingsFontSize.value = String(settings.fontSize);
+        settingsFontSize.value = settings.fontSize > 0 ? String(settings.fontSize) : '';
+        settingsFontSize.setAttribute(
+          'aria-valuetext',
+          settings.fontSize > 0 ? String(settings.fontSize) : 'Auto (VS Code default)'
+        );
       }
 
       function updateSetting(key, value) {

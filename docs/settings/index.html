@@ -982,7 +982,7 @@
 <p>These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, authentication tokens, connection objects, recoverable IPC handles, and unbounded data. Output metadata may contain a random targeting ID so actions bind to the exact output; that ID contains no result or connection data and cannot restore a live result. A direct result's full value is transient extension-host state only: bound to the notebook/current-cell URI (and rebound after a mixed output edit), removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.</p>
 <p>Mixed <strong>Run q Cell (KX)</strong> and the optional direct controller reject a leading <code>%%q</code>; they run ordinary complete-cell q. Mixed cells use the notebook's explicit current target, while the q-only controller uses the active session only if explicitly enabled and selected. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, guarded <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs and stays, <code>Shift+Enter</code> runs and moves next, and <code>Alt+Enter</code> / <code>Option+Enter</code> runs and inserts below. Move/insert occurs only after an executed result. Python, Markdown, cell-container, and output focus keep normal notebook behavior.</p>
 <p>The released Python <code>%%q</code> companion is a distinct Python-kernel-owned route: start with and keep a Python-language cell, load <code>kx_notebook</code>, connect with <code>%kx connect</code> or select another explicit evaluator, and use normal Jupyter Run. A durable extension Direct IPC cell stays q-language instead; do not switch one cell back and forth. The companion does not share the extension Direct IPC session or receive its live record/output binding.</p>
-<p><code>inline</code> is the default released-companion experience. For companion output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Companion output has no extension live-result record/output binding, so the panel source is only the bounded saved payload. First-party direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable <code>vscode-kdb.results.*</code> configuration as the panel; Settings messages update and broadcast that common source of truth.</p>
+<p><code>inline</code> is the default released-companion experience. For companion output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Companion output has no extension live-result record/output binding, so the panel source is only the bounded saved payload. First-party direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable <code>vscode-kdb.results.*</code> configuration as the panel; Settings messages update and broadcast that common source of truth. In notebook output, the Settings overlay is height-constrained and scrollable inside the result. Its visible <strong>Close</strong> button and <strong>Escape</strong> dismissal both return focus to the Settings summary.</p>
 <h2 id="feature-controls">Feature Controls</h2>
 <p>Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.</p>
 <table>
@@ -1196,6 +1196,7 @@
 </table>
 <p>True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels and live direct notebook results.</p>
 <p>The KX Results panel and notebook renderer use the same <code>vscode-kdb.results.*</code> schema for density/dimensions, row-index display, output defaults, copy/export threshold, elapsed time, qText/value strategies, and chart precision/source/sampling. A supported change made in either surface updates the same global setting and propagates to open panels and KX notebook outputs. <code>vscode-kdb.notebook.*</code> remains separate only for genuine notebook lifecycle/presentation concerns such as portable snapshot limits, direct-controller registration, and companion-output presentation. Per-output selection, visible-column order, sort, search, height, chart selection, hidden series, and zoom are transient and are not written into <code>.ipynb</code>.</p>
+<p>Font size keeps its existing numeric storage contract. A value of <code>0</code> still means “use the VS Code default,” but notebook Settings presents that state as <strong>Auto</strong> rather than an ambiguous raw zero. Entering <code>0</code> or clearing the field writes <code>0</code>; no second preference or per-output font-size state is created.</p>
 <p>Array display examples:</p>
 <table>
 <thead>
@@ -1241,8 +1242,8 @@
 </tr>
 <tr>
 <td><code>vscode-kdb.results.compact.fontSize</code></td>
-<td><code>0</code></td>
-<td>0-32 px; <code>0</code> uses the VS Code default</td>
+<td><code>0</code> (<strong>Auto</strong>)</td>
+<td>0-32 px; stored <code>0</code> uses the VS Code default</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.results.standard.cellWidth</code></td>
@@ -1256,8 +1257,8 @@
 </tr>
 <tr>
 <td><code>vscode-kdb.results.standard.fontSize</code></td>
-<td><code>0</code></td>
-<td>0-32 px; <code>0</code> uses the VS Code default</td>
+<td><code>0</code> (<strong>Auto</strong>)</td>
+<td>0-32 px; stored <code>0</code> uses the VS Code default</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.results.comfortable.cellWidth</code></td>
@@ -1271,8 +1272,8 @@
 </tr>
 <tr>
 <td><code>vscode-kdb.results.comfortable.fontSize</code></td>
-<td><code>0</code></td>
-<td>0-32 px; <code>0</code> uses the VS Code default</td>
+<td><code>0</code> (<strong>Auto</strong>)</td>
+<td>0-32 px; stored <code>0</code> uses the VS Code default</td>
 </tr>
 </tbody>
 </table>

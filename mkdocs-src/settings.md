@@ -29,7 +29,7 @@ Mixed **Run q Cell (KX)** and the optional direct controller reject a leading `%
 
 The released Python `%%q` companion is a distinct Python-kernel-owned route: start with and keep a Python-language cell, load `kx_notebook`, connect with `%kx connect` or select another explicit evaluator, and use normal Jupyter Run. A durable extension Direct IPC cell stays q-language instead; do not switch one cell back and forth. The companion does not share the extension Direct IPC session or receive its live record/output binding.
 
-`inline` is the default released-companion experience. For companion output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Companion output has no extension live-result record/output binding, so the panel source is only the bounded saved payload. First-party direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable `vscode-kdb.results.*` configuration as the panel; Settings messages update and broadcast that common source of truth.
+`inline` is the default released-companion experience. For companion output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Companion output has no extension live-result record/output binding, so the panel source is only the bounded saved payload. First-party direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable `vscode-kdb.results.*` configuration as the panel; Settings messages update and broadcast that common source of truth. In notebook output, the Settings overlay is height-constrained and scrollable inside the result. Its visible **Close** button and **Escape** dismissal both return focus to the Settings summary.
 
 ## Feature Controls
 
@@ -104,6 +104,8 @@ True q tables and keyed tables remain grids. q-text has a large-character safety
 
 The KX Results panel and notebook renderer use the same `vscode-kdb.results.*` schema for density/dimensions, row-index display, output defaults, copy/export threshold, elapsed time, qText/value strategies, and chart precision/source/sampling. A supported change made in either surface updates the same global setting and propagates to open panels and KX notebook outputs. `vscode-kdb.notebook.*` remains separate only for genuine notebook lifecycle/presentation concerns such as portable snapshot limits, direct-controller registration, and companion-output presentation. Per-output selection, visible-column order, sort, search, height, chart selection, hidden series, and zoom are transient and are not written into `.ipynb`.
 
+Font size keeps its existing numeric storage contract. A value of `0` still means “use the VS Code default,” but notebook Settings presents that state as **Auto** rather than an ambiguous raw zero. Entering `0` or clearing the field writes `0`; no second preference or per-output font-size state is created.
+
 Array display examples:
 
 | Value | Example |
@@ -118,13 +120,13 @@ Array display examples:
 | --- | --- | --- |
 | `vscode-kdb.results.compact.cellWidth` | `140` | 80-600 px |
 | `vscode-kdb.results.compact.rowHeight` | `24` | 20-80 px |
-| `vscode-kdb.results.compact.fontSize` | `0` | 0-32 px; `0` uses the VS Code default |
+| `vscode-kdb.results.compact.fontSize` | `0` (**Auto**) | 0-32 px; stored `0` uses the VS Code default |
 | `vscode-kdb.results.standard.cellWidth` | `160` | 80-600 px |
 | `vscode-kdb.results.standard.rowHeight` | `28` | 20-80 px |
-| `vscode-kdb.results.standard.fontSize` | `0` | 0-32 px; `0` uses the VS Code default |
+| `vscode-kdb.results.standard.fontSize` | `0` (**Auto**) | 0-32 px; stored `0` uses the VS Code default |
 | `vscode-kdb.results.comfortable.cellWidth` | `180` | 80-600 px |
 | `vscode-kdb.results.comfortable.rowHeight` | `32` | 20-80 px |
-| `vscode-kdb.results.comfortable.fontSize` | `0` | 0-32 px; `0` uses the VS Code default |
+| `vscode-kdb.results.comfortable.fontSize` | `0` (**Auto**) | 0-32 px; stored `0` uses the VS Code default |
 
 ## Charting
 

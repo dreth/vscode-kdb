@@ -881,7 +881,8 @@
 <li>distinct Open, High, Low, and Close fields for candlestick.</li>
 </ul>
 <p>Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until <strong>Render</strong> is pressed. The chart stays below the table and adds no chart height while hidden.</p>
-<p>There is no redundant notebook-only visible Point cap control. Live requests honor common <code>vscode-kdb.results.*</code> source/sampling settings and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, keyboard-reachable legend toggles, crosshair selection, drag zoom, live-handle sample refinement, <strong>Reset zoom</strong>, and <strong>Export PNG</strong> through the extension save dialog. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.</p>
+<p>There is no redundant notebook-only visible Point cap control. Live requests honor common <code>vscode-kdb.results.*</code> source/sampling settings and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation uses VS Code theme tokens for readable axis/tick text and restrained grid/tick contrast in light, dark, and high-contrast themes. Multi-series charts keep a visible legend with a color swatch for every plotted label. Each legend button supports pointer and <strong>Enter</strong>/<strong>Space</strong> toggling, exposes its current pressed state, and visibly distinguishes a hidden series. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.</p>
+<p>The Y-series selector repeats the same swatches beside selected and available series, so names map directly to plotted lines. Its overlay is width-contained and vertically scrollable instead of covering the full notebook output at narrow widths.</p>
 <p>Separately installed <code>kx-notebook==0.1.0</code> can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.</p>
 <p>On the released-companion route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the <code>.ipynb</code>; re-emit the companion result with the desired <code>kx_notebook.Chart</code> specification to persist a changed selection. Its escaped <code>text/html</code> fallback renders a network-free static SVG from the emitted specification. Direct IPC output from the mixed runner or optional controller has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.</p>
 <p>Once a direct result's bound live record is absent, notebook charting uses only the bounded rows saved in the MIME payload. It can reset zoom within that preview but cannot refine into omitted rows. Opening that snapshot in the full KX Results panel does not restore missing data. The panel additionally has an editor-sized draggable table/chart splitter; inline output deliberately keeps the chart below the table.</p>
@@ -891,7 +892,7 @@
 <li>Press the top-level <strong>Chart</strong> button.</li>
 <li>Select a chart type and eligible columns.</li>
 <li>Press <strong>Render</strong>.</li>
-<li>Use the tooltip/crosshair, legend toggles, drag zoom, <strong>Refine zoom</strong>, or <strong>Reset zoom</strong>.</li>
+<li>Use the tooltip/crosshair, pointer or keyboard legend toggles, drag zoom, <strong>Refine zoom</strong>, or <strong>Reset zoom</strong>.</li>
 <li>After rendering, use <strong>Export PNG</strong> to save the chart canvas.</li>
 </ol>
 <p>Changing controls does not silently rerender the existing chart. The panel marks settings as changed until <strong>Render</strong> is pressed. Compatible chart selections are remembered for that result shape.</p>
@@ -952,8 +953,8 @@
 <p>The bundled uPlot assets run locally under the VS Code webview content security policy. The chart supports:</p>
 <ul>
 <li>cursor/crosshair values and OHLC-aware tooltips;</li>
-<li>readable numeric and temporal axes;</li>
-<li>legend series toggling;</li>
+<li>readable numeric and temporal axes using VS Code theme colors;</li>
+<li>a persistent color-keyed legend with pointer and <strong>Enter</strong>/<strong>Space</strong> series toggling;</li>
 <li>drag-select zoom;</li>
 <li>automatic and explicit refinement of the current zoom range;</li>
 <li>reset to the original x domain;</li>

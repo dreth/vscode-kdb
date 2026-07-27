@@ -99,6 +99,8 @@ export interface KxResultSettingDefinition {
   control: 'checkbox' | 'number' | 'select';
   minimum?: number;
   maximum?: number;
+  autoValue?: number;
+  autoLabel?: string;
   values?: readonly KxResultOptionDefinition[];
 }
 
@@ -115,7 +117,15 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
   },
   { key: 'cellWidth', label: 'Cell width', control: 'number', minimum: 80, maximum: 600 },
   { key: 'rowHeight', label: 'Row height', control: 'number', minimum: 20, maximum: 80 },
-  { key: 'fontSize', label: 'Font size', control: 'number', minimum: 0, maximum: 32 },
+  {
+    key: 'fontSize',
+    label: 'Font size',
+    control: 'number',
+    minimum: 0,
+    maximum: 32,
+    autoValue: 0,
+    autoLabel: 'Auto (VS Code default)',
+  },
   { key: 'showRowIndex', label: 'Show row #', control: 'checkbox' },
   { key: 'includeHeaders', label: 'Include headers', control: 'checkbox' },
   { key: 'includeRowIndex', label: 'Include row #', control: 'checkbox' },
