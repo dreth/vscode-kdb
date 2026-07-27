@@ -58,16 +58,16 @@ The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARI
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.2.8.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.9.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.8.vsix")
-with ZipFile("vscode-kdb-0.2.8-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.9.vsix")
+with ZipFile("vscode-kdb-0.2.9-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.8.vsix vscode-kdb-0.2.8-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.9.vsix vscode-kdb-0.2.9-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.
