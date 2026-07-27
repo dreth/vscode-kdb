@@ -4,6 +4,8 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.9 - 2026-07-27
+
 - Unified the KX Results panel and notebook renderer around shared toolbar labels, output formats, chart families, settings definitions, state summaries, formatting behavior, focus treatment, and theme tokens.
 - Brought live notebook tables onto the established KX Results workflow: CSV/XLSX/TSV/JSON/NDJSON/HTML/Markdown output selection, header/row-number controls, range or full-visible copy/export, visible-column show/hide/reset/move, bounded search/sort, responsive controls, and exact live-value handoff to the full panel.
 - Added explicit **Live full result** and **Saved preview** states. Reopened/expired output reports persisted versus total rows and offers **Open saved preview** and **Rerun cell** without implying that omitted rows remain available.
