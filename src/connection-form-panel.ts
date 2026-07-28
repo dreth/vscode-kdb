@@ -24,6 +24,8 @@ export interface ConnectionFormInitialValues {
   globalQueryTimeoutMs: number;
   hasStoredPassword: boolean;
   reservedNames: string[];
+  scopeKey: string;
+  scopes: Array<{ key: string; label: string; description: string }>;
 }
 
 export interface ConnectionFormCallbacks {
@@ -417,7 +419,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
     .field.full { grid-column: 1 / -1; }
     label { display: block; margin-bottom: 6px; font-weight: 600; }
     .required { color: var(--vscode-errorForeground); }
-    input[type="text"], input[type="number"], input[type="password"] {
+    input[type="text"], input[type="number"], input[type="password"], select {
       width: 100%;
       min-height: 30px;
       padding: 5px 8px;
@@ -428,7 +430,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       color: var(--vscode-input-foreground);
       font: inherit;
     }
-    input:focus {
+    input:focus, select:focus {
       border-color: var(--vscode-focusBorder);
       outline: 1px solid var(--vscode-focusBorder);
       outline-offset: -1px;
@@ -526,6 +528,11 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
             <input id="name" name="name" type="text" required maxlength="100" autocomplete="off" aria-describedby="nameHelp">
             <p id="nameHelp" class="help">A unique name shown in KX Connections.</p>
           </div>
+          <div class="field full">
+            <label for="scope">Save profile in</label>
+            <select id="scope" name="scope" aria-describedby="scopeHelp"></select>
+            <p id="scopeHelp" class="help">Workspace profiles live in project settings and survive container recreation. User profiles are shared across projects in this VS Code environment and are Settings Sync eligible where VS Code allows.</p>
+          </div>
           <div class="field">
             <label for="host">Host <span class="required" aria-hidden="true">*</span></label>
             <input id="host" name="host" type="text" required maxlength="253" autocomplete="off" aria-describedby="hostHelp" title="Direct q IPC host name or IP address; no URL, SSH, TLS, or gateway configuration.">
@@ -549,7 +556,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
           <div class="field full">
             <label for="password">Password</label>
             <input id="password" name="password" type="password" maxlength="65535" autocomplete="new-password" aria-describedby="passwordHelp">
-            <p id="passwordHelp" class="help">Optional. Stored only in VS Code SecretStorage and never in settings or logs.</p>
+            <p id="passwordHelp" class="help">Optional. Stored only in VS Code SecretStorage and never in settings, source control, or Settings Sync. Secrets may need to be entered again in each local or remote environment.</p>
             <div id="clearPasswordRow" class="check-row" hidden>
               <input id="clearPassword" name="clearPassword" type="checkbox" aria-describedby="passwordHelp">
               <label for="clearPassword">Clear saved password</label>
@@ -608,6 +615,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       const clearPassword = document.getElementById('clearPassword');
       const controls = {
         name: document.getElementById('name'),
+        scope: document.getElementById('scope'),
         host: document.getElementById('host'),
         port: document.getElementById('port'),
         database: document.getElementById('database'),
@@ -631,6 +639,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       function formPayload() {
         return {
           name: controls.name.value,
+          scope: controls.scope.value,
           host: controls.host.value,
           port: controls.port.value,
           database: controls.database.value,
@@ -774,6 +783,18 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
       function initialize(values, maxTimeoutMs) {
         title.textContent = values.mode === 'edit' ? 'Edit KX Connection' : 'Add KX Connection';
         controls.name.value = values.name || '';
+        controls.scope.replaceChildren();
+        (Array.isArray(values.scopes) ? values.scopes : []).forEach(scope => {
+          if (!scope || typeof scope.key !== 'string' || typeof scope.label !== 'string') {
+            return;
+          }
+          const option = document.createElement('option');
+          option.value = scope.key;
+          option.textContent = scope.label;
+          option.title = typeof scope.description === 'string' ? scope.description : '';
+          controls.scope.append(option);
+        });
+        controls.scope.value = values.scopeKey || controls.scope.options[0]?.value || '';
         controls.host.value = values.host || '';
         controls.port.value = String(values.port || '');
         controls.database.value = values.database || '${DEFAULT_NAMESPACE}';
@@ -795,9 +816,9 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         clearPassword.checked = false;
         document.getElementById('passwordHelp').textContent = values.mode === 'edit'
           ? (values.hasStoredPassword
-            ? 'Leave blank to keep the saved password. It remains in VS Code SecretStorage; select Clear saved password to remove it.'
-            : 'No password is saved. Enter one to store it only in VS Code SecretStorage.')
-          : 'Optional. Stored only in VS Code SecretStorage and never in settings or logs.';
+            ? 'Leave blank to keep the saved password. It remains in this environment’s VS Code SecretStorage and does not sync; select Clear saved password to remove it.'
+            : 'No password is saved in this environment. Enter one to store it only in VS Code SecretStorage; it will not sync.')
+          : 'Optional. Stored only in this environment’s VS Code SecretStorage; never in settings, source control, or Settings Sync.';
         setError('', undefined);
         validate(false);
         window.setTimeout(() => controls.name.focus(), 0);
@@ -878,7 +899,13 @@ export function initialConnectionFormValues(
   globalConnectTimeoutMs: number,
   globalQueryTimeoutMs: number,
   hasStoredPassword: boolean,
-  reservedNames: string[]
+  reservedNames: string[],
+  scopes: Array<{ key: string; label: string; description: string }> = [{
+    key: 'global',
+    label: 'User',
+    description: 'Shared across projects in this VS Code environment.',
+  }],
+  scopeKey = scopes[0]?.key || 'global'
 ): ConnectionFormInitialValues {
   return {
     mode,
@@ -893,5 +920,7 @@ export function initialConnectionFormValues(
     globalQueryTimeoutMs,
     hasStoredPassword,
     reservedNames,
+    scopes,
+    scopeKey,
   };
 }

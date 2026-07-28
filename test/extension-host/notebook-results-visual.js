@@ -2762,7 +2762,7 @@ async function assertAllNullSavedChartControls(cdpPort, marker) {
     assert.strictEqual(initial.canvases, 0);
     assert.match(
       `${initial.status} ${initial.notice}`,
-      /no finite|unavailable|not eligible|numeric Y column/i
+      /no finite|no selected y column has finite numeric values|unavailable|not eligible|numeric Y column/i
     );
     await renderer.evaluate(root => {
       const details = root.querySelector('.kx-chart-controls details.kx-series-control');

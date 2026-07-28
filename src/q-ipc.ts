@@ -42,6 +42,7 @@ export interface QGeneralNull {
 export interface QTable {
   qtype: 'table';
   columns: string[];
+  columnTypes: string[];
   rows: Array<{ [key: string]: QDisplayValue }>;
   columnData: QValue[];
   rowCount: number;
@@ -53,6 +54,7 @@ export interface QKeyedTable {
   keyTable: QTable;
   valueTable: QTable;
   columns: string[];
+  columnTypes: string[];
   rows: Array<{ [key: string]: QDisplayValue }>;
   rowCount: number;
   rowsMaterialized?: boolean;
@@ -84,6 +86,8 @@ export interface QResultDisplayOptions {
 }
 
 type QNestedDisplayValue = QCellValue | QNestedDisplayValue[] | { [key: string]: QNestedDisplayValue };
+const Q_VECTOR_TYPE = Symbol('qVectorType');
+type QTypedVector = QValue[] & { [Q_VECTOR_TYPE]?: string };
 
 interface NormalizedQResultDisplayOptions {
   functionDisplayStrategy: QResultDisplayStrategy;
@@ -1813,6 +1817,15 @@ class QReader {
     for (let i = 0; i < length; i++) {
       values.push(type === 0 ? this.readObject() : this.readAtom(type));
     }
+    const qType = qIpcTypeName(type);
+    if (qType) {
+      Object.defineProperty(values, Q_VECTOR_TYPE, {
+        enumerable: false,
+        configurable: false,
+        writable: false,
+        value: qType,
+      });
+    }
     return values;
   }
 
@@ -2100,6 +2113,7 @@ function makeQTable(columnsValue: QValue, columnDataValue: QValue): QTable {
   const columns = uniqueColumnNames(asList(columnsValue).map(valueToColumnName));
   const columnData = asList(columnDataValue);
   const tableColumnData = columnData.slice(0, columns.length);
+  const columnTypes = tableColumnData.map(qColumnType);
   let rowCount = 0;
   for (let columnIndex = 0; columnIndex < tableColumnData.length; columnIndex++) {
     rowCount = Math.max(rowCount, vectorLength(tableColumnData[columnIndex]));
@@ -2110,6 +2124,7 @@ function makeQTable(columnsValue: QValue, columnDataValue: QValue): QTable {
   const table = {
     qtype: 'table',
     columns,
+    columnTypes,
     columnData,
     rowCount,
   } as QTable;
@@ -2124,12 +2139,17 @@ function makeQTable(columnsValue: QValue, columnDataValue: QValue): QTable {
 
 function makeQKeyedTable(keyTable: QTable, valueTable: QTable): QKeyedTable {
   const columns = appendUniqueColumnNames(keyTable.columns, valueTable.columns);
+  const columnTypes = [
+    ...keyTable.columnTypes,
+    ...valueTable.columnTypes,
+  ];
   const rowCount = Math.max(qTableRowCount(keyTable), qTableRowCount(valueTable));
   const table = {
     qtype: 'keyedTable',
     keyTable,
     valueTable,
     columns,
+    columnTypes,
     rowCount,
   } as QKeyedTable;
   defineLazyRows(
@@ -2214,18 +2234,57 @@ function materializeQKeyedTableRows(table: QKeyedTable): Array<{ [key: string]: 
 }
 
 function qTableToColumnarPanel(table: QTable): ColumnarPanelResult {
-  return createColumnarPanelResult(table.columns, qTableRowCount(table), (rowIndex, columnIndex) => {
-    return qTablePanelCellValue(table, rowIndex, columnIndex);
-  });
+  return createColumnarPanelResult(
+    table.columns,
+    qTableRowCount(table),
+    (rowIndex, columnIndex) => qTablePanelCellValue(table, rowIndex, columnIndex),
+    table.columnTypes
+  );
 }
 
 function qKeyedTableToColumnarPanel(table: QKeyedTable): ColumnarPanelResult {
-  return createColumnarPanelResult(table.columns, qKeyedTableRowCount(table), (rowIndex, columnIndex) => {
-    if (columnIndex < table.keyTable.columns.length) {
-      return qTablePanelCellValue(table.keyTable, rowIndex, columnIndex);
-    }
-    return qTablePanelCellValue(table.valueTable, rowIndex, columnIndex - table.keyTable.columns.length);
-  });
+  return createColumnarPanelResult(
+    table.columns,
+    qKeyedTableRowCount(table),
+    (rowIndex, columnIndex) => {
+      if (columnIndex < table.keyTable.columns.length) {
+        return qTablePanelCellValue(table.keyTable, rowIndex, columnIndex);
+      }
+      return qTablePanelCellValue(table.valueTable, rowIndex, columnIndex - table.keyTable.columns.length);
+    },
+    table.columnTypes
+  );
+}
+
+function qColumnType(value: QValue): string {
+  if (Array.isArray(value)) {
+    return (value as QTypedVector)[Q_VECTOR_TYPE] || 'mixed';
+  }
+  return typeof value === 'string' ? 'char' : 'mixed';
+}
+
+function qIpcTypeName(type: number): string | undefined {
+  switch (type) {
+    case 1: return 'boolean';
+    case 2: return 'guid';
+    case 4: return 'byte';
+    case 5: return 'short';
+    case 6: return 'int';
+    case 7: return 'long';
+    case 8: return 'real';
+    case 9: return 'float';
+    case 10: return 'char';
+    case 11: return 'symbol';
+    case 12: return 'timestamp';
+    case 13: return 'month';
+    case 14: return 'date';
+    case 15: return 'datetime';
+    case 16: return 'timespan';
+    case 17: return 'minute';
+    case 18: return 'second';
+    case 19: return 'time';
+    default: return undefined;
+  }
 }
 
 function qTableCellValue(table: QTable, rowIndex: number, columnIndex: number): QDisplayValue {

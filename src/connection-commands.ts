@@ -8,7 +8,11 @@ import {
 } from './connection';
 import { ConnectionManager } from './connection-manager';
 import { ConnectionMigrationCommand } from './connection-migration';
-import { ConnectionStore } from './connection-store';
+import {
+  ConnectionConfigurationScope,
+  ConnectionStore,
+  connectionScopeLabel,
+} from './connection-store';
 import { ConnectionTreeItem, ConnectionsTreeProvider } from './connection-tree';
 import { parseConnectionFormPayload } from './connection-form-model';
 import {
@@ -190,13 +194,29 @@ export class ConnectionCommands {
       }
     }
     const globalTimeouts = this.manager.globalTimeouts();
+    const availableScopes = typeof this.store.availableConnectionScopes === 'function'
+      ? this.store.availableConnectionScopes()
+      : [{ kind: 'global' as const }];
+    const selectedScope = editing && typeof this.store.connectionScope === 'function'
+      ? this.store.connectionScope(editing.id)
+      : undefined;
+    const defaultScope = selectedScope ||
+      (typeof this.store.defaultNewConnectionScope === 'function'
+        ? this.store.defaultNewConnectionScope()
+        : availableScopes[0]);
     const initial = initialConnectionFormValues(
       editing ? 'edit' : 'add',
       draft,
       globalTimeouts.connectTimeoutMs,
       globalTimeouts.queryTimeoutMs,
       hasStoredPassword,
-      connections.filter(connection => connection.id !== editing?.id).map(connection => connection.name)
+      connections.filter(connection => connection.id !== editing?.id).map(connection => connection.name),
+      availableScopes.map(scope => ({
+        key: connectionScopeKey(scope),
+        label: connectionScopeLabel(scope),
+        description: connectionScopeDescription(scope),
+      })),
+      connectionScopeKey(defaultScope)
     );
 
     const panel = new ConnectionFormPanel(initial, {
@@ -302,11 +322,13 @@ export class ConnectionCommands {
       editing: current,
       hasStoredPassword,
     });
+    const scope = this.scopeForFormKey(parsed.scopeKey);
 
     if (!current) {
       await this.store.add(
         parsed.connection,
-        typeof parsed.passwordUpdate === 'string' ? parsed.passwordUpdate : undefined
+        typeof parsed.passwordUpdate === 'string' ? parsed.passwordUpdate : undefined,
+        scope
       );
       const saved = this.store.connection(parsed.connection.id);
       if (!saved) {
@@ -316,7 +338,8 @@ export class ConnectionCommands {
       }
       this.tree.refresh();
       vscode.window.showInformationMessage(
-        `Added KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}).`
+        `Added KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}) ` +
+        `in ${connectionScopeLabel(scope)} settings.`
       );
       return;
     }
@@ -326,7 +349,7 @@ export class ConnectionCommands {
       current,
       parsed.connection,
       parsed.passwordUpdate !== undefined,
-      () => this.store.update(parsed.connection, parsed.passwordUpdate, editing)
+      () => this.store.update(parsed.connection, parsed.passwordUpdate, editing, scope)
     );
     this.tree.refresh();
     if (outcome.sessionState === 'reconnect-failed') {
@@ -339,8 +362,23 @@ export class ConnectionCommands {
     }
     const lifecycle = outcome.sessionState === 'reconnected' ? ' Reconnected with the saved settings.' : '';
     vscode.window.showInformationMessage(
-      `Updated KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}).${lifecycle}`
+      `Updated KX connection "${parsed.connection.name}" (${connectionEndpoint(parsed.connection)}) ` +
+      `in ${connectionScopeLabel(scope)} settings.${lifecycle}`
     );
+  }
+
+  private scopeForFormKey(key: string | undefined): ConnectionConfigurationScope {
+    const available = typeof this.store.availableConnectionScopes === 'function'
+      ? this.store.availableConnectionScopes()
+      : [{ kind: 'global' as const }];
+    const selected = available.find(scope => connectionScopeKey(scope) === key);
+    if (key && !selected) {
+      throw new Error('The selected connection settings scope is no longer available.');
+    }
+    return selected ||
+      (typeof this.store.defaultNewConnectionScope === 'function'
+        ? this.store.defaultNewConnectionScope()
+        : available[0]);
   }
 
   private async confirmAndRemove(connection: KxConnection): Promise<boolean> {
@@ -348,8 +386,13 @@ export class ConnectionCommands {
     if (!current) {
       return true;
     }
+    const owner = typeof this.store.connectionScope === 'function'
+      ? this.store.connectionScope(current.id)
+      : undefined;
+    const ownerText = owner ? ` from ${connectionScopeLabel(owner)} settings` : '';
     const confirmation = await vscode.window.showWarningMessage(
-      `Delete KX connection "${current.name}"? Its saved password will also be deleted.`,
+      `Delete KX connection "${current.name}"${ownerText}? ` +
+      'Its saved password is deleted only if no lower-scope profile with the same stable ID remains.',
       { modal: true },
       'Delete Connection'
     );
@@ -358,6 +401,7 @@ export class ConnectionCommands {
     }
 
     await this.store.remove(current.id, connection);
+    const revealed = this.store.connection(current.id);
     let disconnectError: Error | undefined;
     try {
       await this.manager.disconnect(current.id);
@@ -365,12 +409,20 @@ export class ConnectionCommands {
       disconnectError = error instanceof Error ? error : new Error(String(error));
     }
     this.tree.refresh();
+    const outcome = revealed
+      ? `Removed the ${owner ? connectionScopeLabel(owner) : 'owning-scope'} definition of ` +
+        `"${current.name}". ${connectionScopeLabel(
+          typeof this.store.connectionScope === 'function'
+            ? this.store.connectionScope(current.id) || { kind: 'global' }
+            : { kind: 'global' }
+        )} settings now supply this stable ID; its saved password was retained.`
+      : `Deleted KX connection "${current.name}".`;
     if (disconnectError) {
       vscode.window.showWarningMessage(
-        `Deleted KX connection "${current.name}", but transport cleanup reported: ${disconnectError.message}`
+        `${outcome} Transport cleanup reported: ${disconnectError.message}`
       );
     } else {
-      vscode.window.showInformationMessage(`Deleted KX connection "${current.name}".`);
+      vscode.window.showInformationMessage(outcome);
     }
     return true;
   }
@@ -394,7 +446,13 @@ export class ConnectionCommands {
     const activeId = this.store.activeConnectionId();
     const picks: ConnectionPick[] = connections.map(connection => ({
       label: connection.name,
-      description: `${connectionEndpoint(connection)} • ${connection.database}`,
+      description: [
+        connectionEndpoint(connection),
+        connection.database,
+        typeof this.store.connectionScope === 'function'
+          ? connectionScopeLabel(this.store.connectionScope(connection.id) || { kind: 'global' })
+          : undefined,
+      ].filter(Boolean).join(' • '),
       detail: [
         connection.id === activeId ? 'Active' : undefined,
         this.manager.isConnected(connection.id) ? 'Connected' : 'Disconnected',
@@ -427,4 +485,20 @@ export class ConnectionCommands {
     const message = error instanceof Error ? error.message : String(error);
     vscode.window.showErrorMessage(`${action} failed: ${message}`);
   }
+}
+
+function connectionScopeKey(scope: ConnectionConfigurationScope): string {
+  return scope.kind === 'workspaceFolder'
+    ? `workspaceFolder:${encodeURIComponent(scope.folderUri || '')}`
+    : scope.kind;
+}
+
+function connectionScopeDescription(scope: ConnectionConfigurationScope): string {
+  if (scope.kind === 'global') {
+    return 'Shared across projects in this VS Code environment; Settings Sync eligible where VS Code allows.';
+  }
+  if (scope.kind === 'workspace') {
+    return 'Stored with this workspace/project so it survives Remote or Dev Container recreation.';
+  }
+  return 'Stored in this workspace folder’s project settings.';
 }

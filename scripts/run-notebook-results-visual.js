@@ -467,7 +467,7 @@ function validateArtifacts() {
       nullChart.initial?.exportPngDisabled !== true ||
       nullChart.initial?.resetDisabled !== true ||
       nullChart.initial?.canvases !== 0 ||
-      !/no finite|unavailable|not eligible|numeric Y column/i.test(
+      !/no finite|no selected y column has finite numeric values|unavailable|not eligible|numeric Y column/i.test(
         `${nullChart.initial?.status || ''} ${nullChart.initial?.notice || ''}`
       ) ||
       nullChart.reconfigured?.renderDisabled !== false ||

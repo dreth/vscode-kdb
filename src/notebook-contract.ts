@@ -4,6 +4,7 @@ import {
   cellValueToText,
   createColumnarPanelResult,
 } from './kx-results';
+import { isQTemporalType } from './q-type';
 
 export const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
 export const KX_NOTEBOOK_CONTRACT_VERSION = 1;
@@ -266,11 +267,12 @@ export function createPortableKxResult(input: NotebookResultInput): PortableKxTa
   const encoder = new TextEncoder();
   let convertedRowBytes = 0;
   for (let rowIndex = 0; rowIndex < availableRowCount; rowIndex++) {
-    const row = columns.map((_column, columnIndex) => portableCell(
+    const row = columns.map((column, columnIndex) => portableCell(
       usesCellAccessor
         ? input.cellValue!(rowIndex, columnIndex)
         : input.rows[rowIndex]?.[columnIndex],
-      reasons
+      reasons,
+      column.type
     ));
     convertedRows.push(row);
     convertedRowBytes += encoder.encode(JSON.stringify(row)).byteLength;
@@ -819,7 +821,11 @@ function normalizeColumn(
   };
 }
 
-function portableCell(value: unknown, reasons: Set<NotebookTruncationReason>): PortableCell {
+function portableCell(
+  value: unknown,
+  reasons: Set<NotebookTruncationReason>,
+  qType?: string
+): PortableCell {
   if (value === null || value === undefined) {
     return { kind: 'null' };
   }
@@ -840,7 +846,7 @@ function portableCell(value: unknown, reasons: Set<NotebookTruncationReason>): P
     if (clipped.length !== value.length) {
       reasons.add('cellValueLimit');
     }
-    return { kind: 'string', value: clipped };
+    return { kind: isQTemporalType(qType) ? 'temporal' : 'string', value: clipped };
   }
   let text: string;
   try {

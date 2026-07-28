@@ -88,6 +88,7 @@ export const KX_RESULT_UI_LABELS = {
   openFullResult: 'Open in KX Results',
   openSavedPreview: 'Open saved preview',
   rerunCell: 'Rerun cell',
+  runSavedQResultLive: 'Run %%q live with KX',
   selectAllColumns: 'Select all',
   deselectAllColumns: 'Deselect all',
   resetColumns: 'Reset columns',

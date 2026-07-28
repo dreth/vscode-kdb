@@ -65,6 +65,7 @@ import {
 import {
   NotebookSettings,
   hasNotebookQMarker,
+  notebookQSourceFromMagic,
   safeNotebookByteLimit,
   safeNotebookPresentation,
   safeNotebookRowLimit,
@@ -76,7 +77,10 @@ import {
   safeConnectionName,
   withNotebookQTarget,
 } from './notebook-q-target';
-import type { DirectQCellRunResult } from './notebook-controller';
+import type {
+  DirectQCellRunOptions,
+  DirectQCellRunResult,
+} from './notebook-controller';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
 export const SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
@@ -90,6 +94,8 @@ export const RUN_Q_NOTEBOOK_CELL_AND_SELECT_BELOW_COMMAND =
 export const RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND =
   'vscode-kdb.runQNotebookCellAndInsertBelow';
 export const SELECT_NOTEBOOK_Q_TARGET_COMMAND = 'vscode-kdb.selectNotebookQTarget';
+export const RUN_NOTEBOOK_PREVIEW_LIVE_COMMAND =
+  'vscode-kdb.runNotebookPreviewLive';
 
 const NOTEBOOK_Q_CELL_RESOURCES_CONTEXT = 'vscode-kdb.qNotebookCellResources';
 const NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT =
@@ -106,7 +112,11 @@ export interface DirectQNotebookRunner {
   readonly onDidChangeState: vscode.Event<void>;
   isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean;
   connectionProfiles(): NotebookQTargetProfile[];
-  runCell(cell: vscode.NotebookCell, connectionId: string): Promise<DirectQCellRunResult>;
+  runCell(
+    cell: vscode.NotebookCell,
+    connectionId: string,
+    options?: DirectQCellRunOptions
+  ): Promise<DirectQCellRunResult>;
 }
 
 /** @deprecated Use DirectQNotebookRunner. */
@@ -181,6 +191,10 @@ export class NotebookIntegration implements vscode.Disposable {
       vscode.commands.registerCommand(
         'vscode-kdb.selectNotebookQTarget',
         (cell?: vscode.NotebookCell) => this.selectNotebookQTarget(cell)
+      ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.runNotebookPreviewLive',
+        (cell?: vscode.NotebookCell) => this.runNotebookPreviewLive(cell)
       ),
       vscode.commands.registerCommand('vscode-kdb.openNotebookPreviewInResults', () =>
         this.openSelectedNotebookPreview()),
@@ -270,8 +284,11 @@ export class NotebookIntegration implements vscode.Disposable {
         message.liveId
       );
       const cellUri = binding?.cell.document.uri.toString();
-      if (!binding || !cellUri ||
-        !liveResults?.has(message.liveId, notebookUri, cellUri)) {
+      const available = !!binding && !!cellUri && (
+        liveResults?.has(message.liveId, notebookUri, cellUri) ||
+        liveResults?.bindStagedOutput(message.liveId, notebookUri, cellUri)
+      );
+      if (!available || !cellUri) {
         await this.rejectUnavailableLiveMessage(message, event.editor);
         return;
       }
@@ -605,14 +622,12 @@ export class NotebookIntegration implements vscode.Disposable {
           }
           const outcome = await this.runQCellWithKx(match.cell, event.editor);
           return notebookRerunOutcome(outcome);
-        } else {
-          await vscode.commands.executeCommand(
-            'notebook.cell.execute',
-            { start: match.cell.index, end: match.cell.index + 1 },
-            event.editor.notebook.uri
-          );
         }
-        return 'Rerun requested.';
+        const outcome = await this.runNotebookPreviewLive(
+          match.cell,
+          event.editor
+        );
+        return notebookLiveRerunOutcome(outcome);
       });
       await this.messaging.postMessage(response, event.editor);
       return;
@@ -729,6 +744,85 @@ export class NotebookIntegration implements vscode.Disposable {
     return result;
   }
 
+  private async runNotebookPreviewLive(
+    commandCell?: vscode.NotebookCell,
+    commandEditor?: vscode.NotebookEditor
+  ): Promise<NotebookQCellRunOutcome> {
+    const editor = commandEditor ??
+      activeJupyterNotebookEditor('running a saved %%q preview live with KX');
+    if (!editor) {
+      return 'unsupported-notebook';
+    }
+    if (this.directControllerSelected(editor.notebook)) {
+      void vscode.window.showInformationMessage(
+        'Select the Python/Jupyter controller before using Run %%q Live with KX. The action does not switch notebook kernels.'
+      );
+      return 'controller-selected';
+    }
+    const cell = commandCell?.notebook === editor.notebook
+      ? commandCell
+      : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    const sourceCellSnapshot = cell
+      ? {
+          source: cell.document.getText(),
+          languageId: cell.document.languageId,
+        }
+      : undefined;
+    const source = sourceCellSnapshot
+      ? notebookQSourceFromMagic(sourceCellSnapshot.source)
+      : undefined;
+    if (!cell || source === undefined) {
+      void vscode.window.showWarningMessage(
+        'Run %%q Live with KX applies only to a code cell whose first line is %%q.'
+      );
+      return 'not-q';
+    }
+    if (!source.trim()) {
+      void vscode.window.showWarningMessage(
+        'Run %%q Live with KX requires q source below the %%q line.'
+      );
+      return 'not-q';
+    }
+    const runner = this.directRunner;
+    if (!runner) {
+      void vscode.window.showErrorMessage(
+        'Run %%q Live with KX is unavailable because the KX direct IPC runner did not start.'
+      );
+      return 'unavailable';
+    }
+    const resolution = resolveNotebookQTarget(
+      editor.notebook.metadata,
+      runner.connectionProfiles()
+    );
+    const target = resolution.kind === 'resolved'
+      ? resolution.profile
+      : await this.selectNotebookQTarget(cell, resolution, editor, true);
+    if (!target) {
+      return 'canceled';
+    }
+    const confirmation = await vscode.window.showWarningMessage(
+      `Run this %%q body again as a new KX Direct IPC execution on "${target.name}"? ` +
+      'This does not reuse the Python kx_notebook evaluator or its session, and the selected notebook kernel will not change.',
+      { modal: true },
+      'Run via Direct IPC'
+    );
+    if (confirmation !== 'Run via Direct IPC') {
+      return 'canceled';
+    }
+    const result = await runner.runCell(cell, target.id, {
+      source,
+      sourceCellSnapshot: sourceCellSnapshot!,
+      runLabel: 'Run %%q Live with KX (new Direct IPC execution)',
+    });
+    if (result === 'executed') {
+      void vscode.window.showInformationMessage(
+        `New KX Direct IPC execution finished on "${target.name}". ` +
+        'A successful result is live while its extension-host record exists; the selected notebook kernel was not changed.'
+      );
+    }
+    return result;
+  }
+
   private async runQCellWithKxAndThen(
     commandCell: vscode.NotebookCell | undefined,
     action: 'select-below' | 'insert-below'
@@ -759,7 +853,8 @@ export class NotebookIntegration implements vscode.Disposable {
   private async selectNotebookQTarget(
     commandCell?: vscode.NotebookCell,
     knownResolution?: NotebookQTargetResolution,
-    commandEditor?: vscode.NotebookEditor
+    commandEditor?: vscode.NotebookEditor,
+    allowMagicCell = false
   ): Promise<NotebookQTargetProfile | undefined> {
     const editor = commandEditor ??
       activeJupyterNotebookEditor('choosing a KX target for q cells');
@@ -775,7 +870,8 @@ export class NotebookIntegration implements vscode.Disposable {
     const cell = commandCell?.notebook === editor.notebook
       ? commandCell
       : activeTextNotebookCell(editor) ?? selectedCell(editor);
-    if (!cell || !isQCell(cell)) {
+    if (!cell || (!isQCell(cell) &&
+      !(allowMagicCell && notebookQSourceFromMagic(cell.document.getText()) !== undefined))) {
       void vscode.window.showWarningMessage(
         'Choose q Target applies only to a q-language code cell in the active Jupyter notebook.'
       );
@@ -1156,8 +1252,13 @@ export class NotebookIntegration implements vscode.Disposable {
       messages.push(notebookSavedPreviewNotice(payload));
     }
     KxResultsPanel.showResult(this.context, {
-      table: createColumnarPanelResult(columns, payload.data.rows.length, (rowIndex, columnIndex) =>
-        portableCellValue(payload.data.rows[rowIndex][columnIndex])),
+      table: createColumnarPanelResult(
+        columns,
+        payload.data.rows.length,
+        (rowIndex, columnIndex) =>
+          portableCellValue(payload.data.rows[rowIndex][columnIndex]),
+        payload.schema.columns.map(column => column.type)
+      ),
       query: payload.provenance.qSource ?? (payload.provenance.marker === 'direct-ipc'
         ? 'Direct IPC'
         : '%%q'),
@@ -1593,6 +1694,30 @@ function notebookRerunOutcome(
   }
 }
 
+function notebookLiveRerunOutcome(
+  outcome: NotebookQCellRunOutcome
+): string | NotebookActionOutcome {
+  switch (outcome) {
+    case 'executed':
+      return 'The new KX Direct IPC execution finished; see its replacement output for success or error details.';
+    case 'canceled':
+      return { canceled: true, message: 'Live Direct IPC execution canceled.' };
+    case 'busy':
+      throw new Error('The cell is already running through KX.');
+    case 'stale':
+      throw new Error('The cell changed before the live Direct IPC output could be applied.');
+    case 'write-failed':
+      throw new Error('Direct IPC completed, but the live output could not be applied.');
+    case 'unavailable':
+      throw new Error('The KX Direct IPC runner is unavailable for this cell.');
+    case 'controller-selected':
+      throw new Error('Select the Python/Jupyter controller before running this %%q body through KX Direct IPC.');
+    case 'not-q':
+    case 'unsupported-notebook':
+      throw new Error('Run %%q Live with KX requires a %%q code cell in a Jupyter notebook.');
+  }
+}
+
 async function notebookActionResult(
   requestId: number,
   action: NotebookActionResultMessage['action'],
@@ -1793,7 +1918,8 @@ function portablePreviewRange(
       return sourceRow === undefined
         ? null
         : portableCellValue(payload.data.rows[sourceRow][indexes[columnIndex]]);
-    }
+    },
+    indexes.map(index => payload.schema.columns[index].type)
   );
   return {
     table,

@@ -4,6 +4,13 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+## 0.2.11 - 2026-07-28
+
+- Added one shared q-aware chart type model across ordinary KX Results and notebook output. q dates, months, timestamps, datetimes, times, minutes, and seconds are now valid X-axis values for line, scatter, step, bar, and candlestick charts while OHLC and ordinary Y selectors remain numeric-only; null/invalid temporal values stay gaps instead of becoming categorical labels.
+- Kept reopened `kx_notebook` helper output truthful and bounded, with an explicit **Run `%%q` live with KX** action for a new extension Direct IPC execution. Successful live results use the normal live-result record and full-result handoff without changing the selected Python kernel; the action confirms the separate session/process boundary and rejects source/language changes before dispatch or output changes while running.
+- Made connection ownership explicit and durable across User, Workspace, and Workspace Folder settings. Forms and tree rows show scope, same-ID precedence is deterministic, moves reject hidden destination collisions, ambiguous multi-folder ownership cannot be edited arbitrarily, rapid cross-scope writes compose optimistically, and only non-secret profile metadata is Settings Sync eligible. Passwords remain environment-local in SecretStorage.
+- Expanded focused, released-package cross-contract, live q, real Extension Host, strict MkDocs, and 12-screenshot notebook visual coverage for temporal chart axes, live helper reruns, output-binding identity, scope precedence/moves/collisions, and delayed configuration propagation. Remote/Dev Container UI acceptance remains unclaimed because no remote/container runtime was available.
+
 ## 0.2.10 - 2026-07-28
 
 - Repaired chart zoom resampling in the KX Results panel and live notebook renderer. Every distinct valid completed live zoom now requests source data after a 450 ms debounce without algorithm or visible-point suppression; notebook refinements remain absolute and clamped to the original full X domain across successive narrower zooms. Initial/full-domain renders, duplicate scale notifications, dirty or pending charts do not auto-request, Reset invalidates pending refinement responses, programmatic response scales do not recursively refine, and manual **Refine zoom** remains immediate.

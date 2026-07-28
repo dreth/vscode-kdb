@@ -40,7 +40,7 @@ const {
   planChartAutoRefine,
   planChartZoomReset,
 } = requireOut('chart-zoom');
-const { buildChartData } = requireOut('charting');
+const { buildChartData, chartColumnOptions } = requireOut('charting');
 const {
   chartLegendToggleKey,
   chartSeriesColorIndexes,
@@ -187,6 +187,7 @@ const {
 } = requireOut('notebook-renderer-model');
 const {
   hasNotebookQMarker,
+  notebookQSourceFromMagic,
   notebookQMagicLine,
   safeNotebookByteLimit,
   safeNotebookPresentation,
@@ -281,6 +282,7 @@ const tests = [
   ['connection form payload and password semantics', testConnectionFormModel],
   ['connection webview lifecycle', testConnectionFormPanelLifecycle],
   ['connection form host testing', testConnectionFormHostTesting],
+  ['connection multi-scope precedence and ownership', testConnectionScopes],
   ['connection SecretStorage transactions', testConnectionStoreTransactions],
   ['post-persist active connection lifecycle', testConnectionUpdateLifecycle],
   ['connection manager lifecycle races', testConnectionManagerLifecycle],
@@ -767,6 +769,122 @@ async function testQIpc() {
     [['AAPL', '100'], ['MSFT', '250']]
   );
   assert.strictEqual(qValueRowsMaterialized(table), false, 'viewer conversion must stay columnar/lazy');
+
+  const temporalTable = deserializeQPayload(qTable(
+    [
+      'timestamp',
+      'month',
+      'date',
+      'datetime',
+      'timespan',
+      'minute',
+      'second',
+      'time',
+      'price',
+      'open',
+      'high',
+      'low',
+      'close',
+    ],
+    [
+      longVector(12, [0n, 1_000_000_000n]),
+      typedIntVector(13, [0, 1]),
+      typedIntVector(14, [0, 1]),
+      doubleVector(15, [0, 1]),
+      longVector(16, [0n, 60_000_000_000n]),
+      typedIntVector(17, [0, 1]),
+      typedIntVector(18, [0, 1]),
+      typedIntVector(19, [0, 1]),
+      intVector([100, 101]),
+      intVector([99, 100]),
+      intVector([102, 103]),
+      intVector([98, 99]),
+      intVector([101, 102]),
+    ]
+  ));
+  const temporalPanel = qValueToColumnarPanel(temporalTable);
+  assert.strictEqual(temporalPanel.mode, 'grid');
+  assert.deepStrictEqual(temporalPanel.result.columnTypes, [
+    'timestamp',
+    'month',
+    'date',
+    'datetime',
+    'timespan',
+    'minute',
+    'second',
+    'time',
+    'int',
+    'int',
+    'int',
+    'int',
+    'int',
+  ]);
+  const temporalOptions = chartColumnOptions(temporalPanel.result);
+  const temporalNames = [
+    'timestamp',
+    'month',
+    'date',
+    'datetime',
+    'timespan',
+    'minute',
+    'second',
+    'time',
+  ];
+  temporalNames.forEach(name => {
+    assert.ok(
+      temporalOptions.xColumns.some(option =>
+        option.columnName === name && option.kind === 'temporal'),
+      `${name} must be a q-type-classified temporal X option`
+    );
+    assert.ok(
+      !temporalOptions.yColumns.some(option => option.columnName === name),
+      `${name} must not become a numeric Y option`
+    );
+    const line = buildChartData(temporalPanel.result, {
+      chartType: 'line',
+      xColumn: name,
+      yColumns: ['price'],
+      width: 640,
+      version: 1,
+      requestId: 1,
+    });
+    assert.strictEqual(line.xKind, 'temporal');
+    assert.strictEqual(
+      line.x.length,
+      2,
+      `${name} values must normalize into plottable temporal X coordinates`
+    );
+  });
+  assert.deepStrictEqual(
+    temporalOptions.yColumns.map(option => option.columnName),
+    ['price', 'open', 'high', 'low', 'close']
+  );
+  for (const chartType of ['line', 'scatter', 'step', 'bar', 'box']) {
+    const chart = buildChartData(temporalPanel.result, {
+      chartType,
+      xColumn: 'timestamp',
+      yColumns: ['price'],
+      width: 640,
+      version: 1,
+      requestId: 1,
+    });
+    assert.strictEqual(chart.xKind, 'temporal');
+    assert.strictEqual(chart.chartType, chartType);
+  }
+  const temporalCandle = buildChartData(temporalPanel.result, {
+    chartType: 'candlestick',
+    xColumn: 'date',
+    yColumns: [],
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    width: 640,
+    version: 1,
+    requestId: 2,
+  });
+  assert.strictEqual(temporalCandle.xKind, 'temporal');
+  assert.strictEqual(temporalCandle.chartType, 'candlestick');
   const server = net.createServer();
   await listen(server);
   const address = server.address();
@@ -3432,6 +3550,7 @@ async function testTreeProviders() {
 async function testConnectionsTreeProvider() {
   const harness = createVscodeTreeHarness();
   const {
+    ConnectionConflictTreeItem,
     ConnectionTreeItem,
     ConnectionsTreeProvider,
   } = requireOutWithMocks('connection-tree', { vscode: harness.vscode });
@@ -3456,6 +3575,17 @@ async function testConnectionsTreeProvider() {
       username: '',
     }),
   ];
+  const conflictItem = new ConnectionConflictTreeItem({
+    id: 'kx-tree-ambiguous',
+    scopes: [
+      { kind: 'workspaceFolder', folderUri: 'file:///workspace/a' },
+      { kind: 'workspaceFolder', folderUri: 'file:///workspace/b' },
+    ],
+  });
+  assert.match(conflictItem.label, /kx-tree-ambiguous/);
+  assert.match(conflictItem.description, /not loaded/);
+  assert.match(String(conflictItem.tooltip), /ambiguous write ownership/i);
+  assert.match(String(conflictItem.tooltip), /all but one workspace-folder setting/i);
   let activeId = connections[0].id;
   const store = {
     connections: () => connections.map(connection => ({ ...connection })),
@@ -3839,6 +3969,12 @@ async function testConnectionFormPanelLifecycle() {
     globalQueryTimeoutMs: 15000,
     hasStoredPassword: true,
     reservedNames: ['Reserved q'],
+    scopeKey: 'global',
+    scopes: [{
+      key: 'global',
+      label: 'User',
+      description: 'Shared across projects in this VS Code environment.',
+    }],
   });
 
   const submitted = [];
@@ -4292,6 +4428,309 @@ async function testConnectionFormHostTesting() {
   assert.strictEqual(failedSaveSuccesses, 0, 'failed profile persistence must never report success');
   assert.match(failedSaveHarness.errors.at(-1), /Add KX connection failed/);
   assert.match(failedSaveHarness.errors.at(-1), /injected profile persistence failure/);
+}
+
+async function testConnectionScopes() {
+  const profile = (id, name, host, port) => validateConnection({
+    id,
+    name,
+    host,
+    port,
+    database: '.',
+    username: '',
+  });
+  const globalShared = profile('kx-shared', 'Shared profile', 'stale-local.example.test', 5000);
+  const workspaceShared = profile('kx-shared', 'Shared profile', 'workspace.example.test', 5001);
+  const folderShared = profile('kx-shared', 'Shared profile', 'container.example.test', 5002);
+  const sameNameGlobal = profile('kx-name-global', 'Same name', 'global-name.example.test', 5100);
+  const sameNameWorkspace = profile('kx-name-workspace', 'Same name', 'workspace-name.example.test', 5101);
+  const workspaceOnly = profile('kx-devcontainer', 'Dev Container q', 'q.example.test', 5200);
+  const conflictA = profile('kx-folder-conflict', 'Folder conflict', 'folder-a.example.test', 5300);
+  const conflictB = profile('kx-folder-conflict', 'Folder conflict', 'folder-b.example.test', 5301);
+  const identicalA = profile('kx-folder-identical', 'Identical folders', 'same.example.test', 5302);
+  const identicalB = { ...identicalA };
+  const collisionGlobal = profile(
+    'kx-move-collision',
+    'Move collision user',
+    'user-collision.example.test',
+    5303
+  );
+  const collisionWorkspace = profile(
+    'kx-move-collision',
+    'Move collision workspace',
+    'workspace-collision.example.test',
+    5304
+  );
+  const collisionPassword = 'move-collision-password';
+  const folderAUri = 'file:///workspace/a';
+  const folderBUri = 'file:///workspace/b';
+  const harness = createScopedConnectionStoreHarness({
+    global: [globalShared, sameNameGlobal, collisionGlobal],
+    workspace: [workspaceShared, sameNameWorkspace, workspaceOnly, collisionWorkspace],
+    folders: [
+      { uri: folderAUri, connections: [folderShared, conflictA, identicalA] },
+      { uri: folderBUri, connections: [conflictB, identicalB] },
+    ],
+    activeId: collisionWorkspace.id,
+    secrets: {
+      [`vscode-kdb.connectionPassword.${collisionWorkspace.id}`]: collisionPassword,
+    },
+  });
+  const {
+    ConnectionStore,
+    mergeConnectionConfigurations,
+  } = requireOutWithVscode('connection-store', harness.vscode);
+
+  const merged = mergeConnectionConfigurations({
+    global: harness.globalConnections,
+    workspace: harness.workspaceConnections,
+    workspaceFolders: [
+      { folderUri: folderAUri, value: harness.folderConnections(folderAUri) },
+      { folderUri: folderBUri, value: harness.folderConnections(folderBUri) },
+    ],
+  });
+  assert.strictEqual(
+    merged.connections.find(connection => connection.id === 'kx-shared').host,
+    folderShared.host,
+    'workspace-folder profiles must override workspace and user profiles with the same stable ID'
+  );
+  assert.deepStrictEqual(
+    merged.connections
+      .filter(connection => connection.name === 'Same name')
+      .map(connection => connection.id)
+      .sort(),
+    ['kx-name-global', 'kx-name-workspace'],
+    'same-name profiles with distinct stable IDs must remain visible instead of selecting an endpoint silently'
+  );
+  assert.strictEqual(
+    merged.connections.some(connection => connection.id === 'kx-folder-conflict'),
+    false,
+    'different sibling-folder endpoints with the same ID must fail closed'
+  );
+  assert.strictEqual(
+    merged.connections.some(connection => connection.id === 'kx-folder-identical'),
+    false,
+    'identical sibling-folder definitions must not expose an arbitrary writable owner'
+  );
+  assert.deepStrictEqual(
+    merged.conflicts.map(conflict => conflict.id),
+    ['kx-folder-conflict', 'kx-folder-identical']
+  );
+  assert.deepStrictEqual(
+    merged.conflicts.map(conflict => conflict.scopes),
+    [
+      [
+        { kind: 'workspaceFolder', folderUri: folderAUri },
+        { kind: 'workspaceFolder', folderUri: folderBUri },
+      ],
+      [
+        { kind: 'workspaceFolder', folderUri: folderAUri },
+        { kind: 'workspaceFolder', folderUri: folderBUri },
+      ],
+    ],
+    'multi-root conflict ownership must be deterministic for equal and differing definitions'
+  );
+
+  const store = new ConnectionStore(harness.context);
+  assert.strictEqual(store.connection('kx-shared').host, folderShared.host);
+  assert.deepStrictEqual(store.connectionScope('kx-shared'), {
+    kind: 'workspaceFolder',
+    folderUri: folderAUri,
+  });
+  assert.strictEqual(
+    store.connection('kx-devcontainer').host,
+    workspaceOnly.host,
+    'effective devcontainer/workspace settings must load independently of stale user settings'
+  );
+  assert.deepStrictEqual(
+    store.connectionScopeConflicts().map(conflict => conflict.id),
+    ['kx-folder-conflict', 'kx-folder-identical']
+  );
+  await assert.rejects(
+    () => store.update(identicalA, undefined, identicalA),
+    /multiple workspace folders define stable ID "kx-folder-identical".*all but one/si
+  );
+  await assert.rejects(
+    () => store.update(
+      identicalA,
+      undefined,
+      identicalA,
+      { kind: 'global' }
+    ),
+    /Cannot edit or move.*kx-folder-identical/si
+  );
+  await assert.rejects(
+    () => store.remove(conflictA.id, conflictA),
+    /Cannot remove.*kx-folder-conflict/si
+  );
+
+  const collisionGlobalBefore = harness.globalConnections.find(
+    connection => connection.id === collisionGlobal.id
+  );
+  const collisionWorkspaceBefore = harness.workspaceConnections.find(
+    connection => connection.id === collisionWorkspace.id
+  );
+  await assert.rejects(
+    () => store.update(
+      { ...collisionWorkspace, port: 5399 },
+      'replacement-password',
+      collisionWorkspace,
+      { kind: 'global' }
+    ),
+    /User settings.*already defines stable ID "kx-move-collision".*no settings were changed/si
+  );
+  assert.deepStrictEqual(
+    harness.globalConnections.find(connection => connection.id === collisionGlobal.id),
+    collisionGlobalBefore
+  );
+  assert.deepStrictEqual(
+    harness.workspaceConnections.find(connection => connection.id === collisionWorkspace.id),
+    collisionWorkspaceBefore
+  );
+  assert.strictEqual(harness.secretFor(collisionWorkspace.id), collisionPassword);
+  assert.strictEqual(harness.activeId, collisionWorkspace.id);
+  assert.strictEqual(store.activeConnectionId(), collisionWorkspace.id);
+
+  const editedFolder = { ...folderShared, port: 5400 };
+  await store.update(editedFolder, undefined, folderShared);
+  assert.strictEqual(
+    harness.folderConnections(folderAUri)
+      .find(connection => connection.id === editedFolder.id).port,
+    5400,
+    'editing a profile must write back to its owning workspace-folder scope'
+  );
+  assert.strictEqual(
+    harness.globalConnections.find(connection => connection.id === editedFolder.id).port,
+    globalShared.port
+  );
+
+  const workspaceAdded = profile(
+    'kx-workspace-added',
+    'Workspace added',
+    'workspace-added.example.test',
+    5500
+  );
+  await store.add(workspaceAdded, undefined, { kind: 'workspace' });
+  assert.ok(
+    harness.workspaceConnections.some(connection => connection.id === workspaceAdded.id)
+  );
+  assert.ok(
+    !harness.globalConnections.some(connection => connection.id === workspaceAdded.id)
+  );
+
+  const userAdded = profile('kx-user-added', 'User added', 'user-added.example.test', 5600);
+  await store.add(userAdded, undefined, { kind: 'global' });
+  assert.ok(harness.globalConnections.some(connection => connection.id === userAdded.id));
+  await store.update(
+    { ...userAdded, port: 5601 },
+    undefined,
+    userAdded,
+    { kind: 'workspace' }
+  );
+  assert.ok(!harness.globalConnections.some(connection => connection.id === userAdded.id));
+  assert.strictEqual(
+    harness.workspaceConnections.find(connection => connection.id === userAdded.id).port,
+    5601,
+    'moving a profile must persist it in the selected scope and remove its old owner'
+  );
+  assert.deepStrictEqual(store.connectionScope(userAdded.id), { kind: 'workspace' });
+
+  const rollbackProfile = profile(
+    'kx-scope-rollback',
+    'Scope rollback',
+    'rollback.example.test',
+    5700
+  );
+  await store.add(rollbackProfile, undefined, { kind: 'global' });
+  harness.failNextScopeUpdate('global');
+  await assert.rejects(
+    () => store.update(
+      { ...rollbackProfile, port: 5701 },
+      undefined,
+      rollbackProfile,
+      { kind: 'workspace' }
+    ),
+    /injected global configuration update failure/
+  );
+  assert.deepStrictEqual(
+    harness.globalConnections.find(connection => connection.id === rollbackProfile.id),
+    rollbackProfile,
+    'a failed owner removal must restore the original scoped profile'
+  );
+  assert.strictEqual(
+    harness.workspaceConnections.some(connection => connection.id === rollbackProfile.id),
+    false,
+    'a failed scope move must roll back the destination write'
+  );
+  assert.deepStrictEqual(store.connectionScope(rollbackProfile.id), { kind: 'global' });
+
+  const rapidHarness = createScopedConnectionStoreHarness({});
+  const { ConnectionStore: RapidConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    rapidHarness.vscode
+  );
+  const rapidStore = new RapidConnectionStore(rapidHarness.context);
+  const rapidUser = profile(
+    'kx-rapid-user',
+    'Rapid user',
+    'rapid-user.example.test',
+    5800
+  );
+  const rapidWorkspace = profile(
+    'kx-rapid-workspace',
+    'Rapid workspace',
+    'rapid-workspace.example.test',
+    5801
+  );
+  rapidHarness.delayConfigurationPropagation = true;
+  await rapidStore.add(rapidUser, undefined, { kind: 'global' });
+  assert.deepStrictEqual(
+    rapidStore.connections().map(connection => connection.id),
+    [rapidUser.id]
+  );
+  await rapidStore.add(rapidWorkspace, undefined, { kind: 'workspace' });
+  assert.deepStrictEqual(
+    rapidStore.connections().map(connection => connection.id),
+    [rapidUser.id, rapidWorkspace.id],
+    'resolved cross-scope writes must compose before configuration propagation'
+  );
+  assert.strictEqual(rapidHarness.pendingConfigurationUpdates, 2);
+  rapidHarness.flushConfigurationUpdate(1);
+  assert.deepStrictEqual(
+    rapidStore.connections().map(connection => connection.id),
+    [rapidUser.id, rapidWorkspace.id],
+    'a newer workspace event arriving before the older user event must retain both writes'
+  );
+  rapidHarness.flushConfigurationUpdate(0);
+  assert.deepStrictEqual(
+    rapidStore.connections().map(connection => connection.id),
+    [rapidUser.id, rapidWorkspace.id],
+    'cross-scope state must remain stable after delayed events finish out of order'
+  );
+  assert.deepStrictEqual(rapidStore.connectionScope(rapidUser.id), { kind: 'global' });
+  assert.deepStrictEqual(rapidStore.connectionScope(rapidWorkspace.id), { kind: 'workspace' });
+
+  harness.applyExternalGlobal([
+    { ...globalShared, host: 'new-but-still-shadowed.example.test' },
+    sameNameGlobal,
+    rollbackProfile,
+  ]);
+  assert.strictEqual(
+    store.connection('kx-shared').host,
+    editedFolder.host,
+    'a stale or new user/global event must never trump an explicit workspace-folder profile'
+  );
+  for (const connection of [
+    ...harness.globalConnections,
+    ...harness.workspaceConnections,
+    ...harness.folderConnections(folderAUri),
+  ]) {
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(connection, 'password'),
+      false,
+      'connection settings must never contain secrets'
+    );
+  }
 }
 
 async function testConnectionStoreTransactions() {
@@ -6470,6 +6909,7 @@ function testKxResultsUiParityContract() {
     openFullResult: 'Open in KX Results',
     openSavedPreview: 'Open saved preview',
     rerunCell: 'Rerun cell',
+    runSavedQResultLive: 'Run %%q live with KX',
     selectAllColumns: 'Select all',
     deselectAllColumns: 'Deselect all',
     resetColumns: 'Reset columns',
@@ -7384,6 +7824,12 @@ function testNotebookContract() {
   assert.strictEqual(hasNotebookQMarker('%%q --max-rows 5 --max-bytes 20000\nselect from t'), true);
   assert.strictEqual(hasNotebookQMarker('\n%%q\nselect from t'), false);
   assert.strictEqual(hasNotebookQMarker('x:42'), false);
+  assert.strictEqual(
+    notebookQSourceFromMagic('%%q --max-rows 25 --max-bytes 20000\nselect from t'),
+    'select from t'
+  );
+  assert.strictEqual(notebookQSourceFromMagic('%%q'), '');
+  assert.strictEqual(notebookQSourceFromMagic('select from t'), undefined);
   assert.strictEqual(notebookQMagicLine({ rowLimit: 25, byteLimit: 20000 }),
     '%%q --max-rows 25 --max-bytes 20000');
 
@@ -7418,6 +7864,15 @@ function testNotebookContract() {
   assert.strictEqual(payload.chart.type, 'line');
   assert.deepStrictEqual(payload.chart.yColumns, ['px']);
   assert.strictEqual(payload.data.rows[0][1].kind, 'number');
+  const typedTemporalString = createPortableKxResult({
+    columns: [{ name: 'ts', type: 'timestamp' }],
+    rows: [['2026-07-27T09:30:00.000000000Z']],
+  });
+  assert.strictEqual(
+    typedTemporalString.data.rows[0][0].kind,
+    'temporal',
+    'q temporal schema must survive portable notebook serialization even when IPC display values are strings'
+  );
   assert.strictEqual(payload.data.rows[0][2].kind, 'temporal');
   assert.ok(portableKxResultBytes(payload) <= payload.result.byteLimit);
   assert.deepStrictEqual(validatePortableKxResult(payload), { ok: true, value: payload });
@@ -9299,6 +9754,47 @@ function testLiveNotebookResultStore() {
     safeLiveColumnNames(['bad\nname', 'badname', '', 'badname']),
     ['badname', 'badname_2', 'column3', 'badname_3']
   );
+  const temporalLiveId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/temporal-chart',
+    query: 'temporalChart',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: deserializeQPayload(qTable(
+      ['timestamp', 'month', 'date', 'datetime', 'timespan', 'minute', 'second', 'time', 'price'],
+      [
+        longVector(12, [0n, 1_000_000_000n]),
+        typedIntVector(13, [0, 1]),
+        typedIntVector(14, [0, 1]),
+        doubleVector(15, [0, 1]),
+        longVector(16, [0n, 60_000_000_000n]),
+        typedIntVector(17, [0, 1]),
+        typedIntVector(18, [0, 1]),
+        typedIntVector(19, [0, 1]),
+        intVector([100, 101]),
+      ]
+    )),
+  });
+  const temporalLiveView = store.view(temporalLiveId, notebookUri);
+  assert.deepStrictEqual(
+    temporalLiveView.chartXColumns,
+    ['timestamp', 'month', 'date', 'datetime', 'timespan', 'minute', 'second', 'time', 'price'],
+    'the notebook live surface must expose every q temporal type as a chart X option'
+  );
+  assert.deepStrictEqual(
+    temporalLiveView.chartYColumns,
+    ['price'],
+    'the notebook live surface must keep Y requirements numeric'
+  );
+  const temporalLiveChart = store.chart(temporalLiveId, notebookUri, {
+    requestId: 1,
+    chartType: 'line',
+    xColumn: 'timestamp',
+    yColumns: ['price'],
+    maxPoints: 10,
+  });
+  assert.strictEqual(temporalLiveChart.xKind, 'temporal');
+  assert.deepStrictEqual(temporalLiveChart.series.map(series => series.columnName), ['price']);
   const chartCapColumns = Array.from(
     { length: MAX_NOTEBOOK_LIVE_COLUMNS + 1 },
     (_, index) => `metric${index}`
@@ -10213,6 +10709,28 @@ function testLiveNotebookResultStore() {
   const reboundId = stagedStore.stage(
     liveRegistration('file:///stage.ipynb', 'cell:///old', 3)
   );
+  assert.strictEqual(
+    stagedStore.bindStagedOutput(
+      reboundId,
+      'file:///stage.ipynb',
+      'cell:///replacement'
+    ),
+    true,
+    'a verified renderer output may complete the staged bind before the replacement event settles'
+  );
+  assert.strictEqual(
+    stagedStore.has(reboundId, 'file:///stage.ipynb', 'cell:///replacement'),
+    true
+  );
+  assert.strictEqual(
+    stagedStore.bindStagedOutput(
+      reboundId,
+      'file:///stage.ipynb',
+      'cell:///attacker'
+    ),
+    false,
+    'an already-bound result must not be rebound by a later renderer message'
+  );
   stagedStore.removeCell('file:///stage.ipynb', 'cell:///old');
   stagedStore.rebind(
     reboundId,
@@ -10651,6 +11169,122 @@ async function testDirectQNotebookController() {
   assert.deepStrictEqual(mixedPythonCell.outputs, [untouchedPythonOutput]);
   assert.strictEqual(mixedPythonCell.document.languageId, 'python');
 
+  bridge.executeImpl = async (target, source, onIssued) => {
+    assert.strictEqual(target, connection);
+    assert.strictEqual(source, '1+1');
+    onIssued();
+    return 2;
+  };
+  const pythonOverrideCell = runtime.cell({
+    languageId: 'python',
+    source: '%%q\n1+1',
+    uri: 'vscode-notebook-cell:///native-q/python-source-override',
+  });
+  pythonOverrideCell.notebook = notebook;
+  assert.strictEqual(
+    await directController.runCell(pythonOverrideCell, connection.id, {
+      source: '1+1',
+      sourceCellSnapshot: {
+        source: '%%q\n1+1',
+        languageId: 'python',
+      },
+      runLabel: 'Run %%q Live with KX',
+    }),
+    'executed',
+    'an explicitly authorized Python %%q body must write its Direct IPC result'
+  );
+  const pythonOverrideReplacement = runtime.replacementFor(pythonOverrideCell);
+  assert.ok(pythonOverrideReplacement);
+  assert.strictEqual(pythonOverrideReplacement.document.languageId, 'python');
+  assert.strictEqual(pythonOverrideReplacement.document.getText(), '%%q\n1+1');
+  const pythonOverrideOutput = runtime.outputFor(pythonOverrideReplacement);
+  assert.strictEqual(
+    notebookOutputItem(pythonOverrideOutput, KX_NOTEBOOK_MIME).value.data.rows[0][0].value,
+    2
+  );
+  assert.strictEqual(
+    liveResults.view(
+      pythonOverrideOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id,
+      notebook.uri.toString()
+    ).query,
+    '1+1'
+  );
+
+  const staleBeforeDispatchCell = runtime.cell({
+    languageId: 'python',
+    source: '%%q\n2+2',
+    uri: 'vscode-notebook-cell:///native-q/python-source-override-stale-before-dispatch',
+  });
+  staleBeforeDispatchCell.notebook = notebook;
+  const callsBeforeStaleOverride = bridge.calls.length;
+  assert.strictEqual(
+    await directController.runCell(staleBeforeDispatchCell, connection.id, {
+      source: '1+1',
+      sourceCellSnapshot: {
+        source: '%%q\n1+1',
+        languageId: 'python',
+      },
+    }),
+    'stale',
+    'a Python %%q override captured before target selection must not execute after the cell changes'
+  );
+  assert.strictEqual(
+    bridge.calls.length,
+    callsBeforeStaleOverride,
+    'a stale pre-dispatch Python %%q override must not issue Direct IPC'
+  );
+  assert.strictEqual(runtime.replacementFor(staleBeforeDispatchCell), undefined);
+
+  for (const mutation of [
+    { source: '%%q\n2+2' },
+    { languageId: 'q' },
+  ]) {
+    const overrideIssued = deferred();
+    const overrideResult = deferred();
+    bridge.executeImpl = async (_target, source, onIssued) => {
+      assert.strictEqual(source, 'til 2');
+      onIssued();
+      overrideIssued.resolve();
+      return overrideResult.promise;
+    };
+    const suffix = Object.prototype.hasOwnProperty.call(mutation, 'source')
+      ? 'source'
+      : 'language';
+    const mutatingOverrideCell = runtime.cell({
+      languageId: 'python',
+      source: '%%q\ntil 2',
+      uri: `vscode-notebook-cell:///native-q/python-override-${suffix}-race`,
+    });
+    mutatingOverrideCell.notebook = notebook;
+    const mutatingRun = directController.runCell(
+      mutatingOverrideCell,
+      connection.id,
+      {
+        source: 'til 2',
+        sourceCellSnapshot: {
+          source: '%%q\ntil 2',
+          languageId: 'python',
+        },
+      }
+    );
+    await assertCompletesWithin(
+      `Python override ${suffix} dispatch`,
+      () => overrideIssued.promise,
+      1000
+    );
+    runtime.touchCell(mutatingOverrideCell, mutation);
+    overrideResult.resolve([0, 1]);
+    assert.strictEqual(
+      await mutatingRun,
+      'stale',
+      `a Python override ${suffix} mutation must reject the stale Direct IPC result`
+    );
+    assert.strictEqual(runtime.replacementFor(mutatingOverrideCell), undefined);
+  }
+
+  const executionsBeforeNonCodeGuard = runtime.executions.length;
+  const editsBeforeNonCodeGuard = runtime.workspaceEdits.length;
+  const callsBeforeNonCodeGuard = bridge.calls.length;
   const qLanguageMarkdown = runtime.cell({
     kind: runtime.vscode.NotebookCellKind.Markup,
     languageId: 'q',
@@ -10659,9 +11293,9 @@ async function testDirectQNotebookController() {
   });
   qLanguageMarkdown.notebook = notebook;
   assert.strictEqual(await directController.runCell(qLanguageMarkdown, connection.id), 'not-q');
-  assert.strictEqual(runtime.executions.length, executionsBeforePythonGuard);
-  assert.strictEqual(runtime.workspaceEdits.length, editsBeforePythonGuard);
-  assert.strictEqual(bridge.calls.length, callsBeforePythonGuard);
+  assert.strictEqual(runtime.executions.length, executionsBeforeNonCodeGuard);
+  assert.strictEqual(runtime.workspaceEdits.length, editsBeforeNonCodeGuard);
+  assert.strictEqual(bridge.calls.length, callsBeforeNonCodeGuard);
 
   const unsupportedNotebook = runtime.notebook('file:///workspace/not-kx.ipynb');
   unsupportedNotebook.notebookType = 'other-notebook';
@@ -10675,7 +11309,7 @@ async function testDirectQNotebookController() {
     await directController.runCell(unsupportedCell, connection.id),
     'unsupported-notebook'
   );
-  assert.strictEqual(bridge.calls.length, callsBeforePythonGuard);
+  assert.strictEqual(bridge.calls.length, callsBeforeNonCodeGuard);
 
   bridge.connection = undefined;
   bridge.connectionList = [];
@@ -11793,7 +12427,12 @@ async function testNotebookRendererHostActions() {
   };
   const firstCell = runtime.cell(notebook, 0, 'q', 'select from trade');
   const secondCell = runtime.cell(notebook, 1, 'q', 'select from trade');
-  const legacyCell = runtime.cell(notebook, 2, 'q', 'legacy preview');
+  const legacyCell = runtime.cell(
+    notebook,
+    2,
+    'python',
+    '%%q --max-rows 20 --max-bytes 1000000\nselect from helperTrade'
+  );
   notebook.cells.push(firstCell, secondCell, legacyCell);
   notebook.cellCount = notebook.cells.length;
   const editor = { notebook, selections: [{ start: 0, end: 1 }] };
@@ -11885,8 +12524,8 @@ async function testNotebookRendererHostActions() {
       active: true,
       connected: true,
     }],
-    async runCell(cell, connectionId) {
-      runCalls.push({ cell, connectionId });
+    async runCell(cell, connectionId, options) {
+      runCalls.push({ cell, connectionId, options });
       return nextRunResult;
     },
   };
@@ -12279,6 +12918,37 @@ async function testNotebookRendererHostActions() {
     assert.strictEqual(panelCalls.length, 2);
     assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
 
+    runtime.setWarningResponse('Run via Direct IPC');
+    const commandsBeforeHelperLiveRun = runtime.executedCommands.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      payload: legacyPayload,
+      requestId: 237,
+    });
+    const helperLiveRun = runCalls.at(-1);
+    assert.strictEqual(helperLiveRun.cell, legacyCell);
+    assert.strictEqual(helperLiveRun.connectionId, 'profile-one');
+    assert.strictEqual(helperLiveRun.options.source, 'select from helperTrade');
+    assert.match(helperLiveRun.options.runLabel, /new Direct IPC execution/i);
+    assert.strictEqual(
+      legacyCell.document.languageId,
+      'python',
+      'the explicit Direct IPC helper action must preserve the selected Python cell language'
+    );
+    assert.strictEqual(
+      runtime.executedCommands.length,
+      commandsBeforeHelperLiveRun,
+      'the explicit helper handoff must not invoke Python/Jupyter notebook.cell.execute'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 237,
+      action: 'rerun',
+      ok: true,
+      canceled: false,
+      message: 'The new KX Direct IPC execution finished; see its replacement output for success or error details.',
+    });
+
     runtime.setSaveDialogUri(testUri('file:///workspace/unbound-chart.png'));
     const unboundChartExportIndex = runtime.savedFiles.length;
     await runtime.emitRendererMessage(editor, {
@@ -12663,10 +13333,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.10');
+  assert.strictEqual(manifest.version, '0.2.11');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.10');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.10');
+  assert.strictEqual(packageLock.version, '0.2.11');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.11');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -12714,6 +13384,7 @@ function testManifestAndSources() {
     'Run q Cell and Select Below (KX)',
     'Run q Cell and Insert Below (KX)',
     'KX: Choose Notebook q Target',
+    'KX: Run %%q Preview Live via Direct IPC',
     'KX: Open Saved Notebook Preview in Results Panel',
   ].forEach(title => assert.ok(commandTitles.has(title), `missing command contribution: ${title}`));
 
@@ -13167,6 +13838,8 @@ function testManifestAndSources() {
   const connectionsSetting = configurationProperties['vscode-kdb.connections'];
   assert.ok(connectionsSetting, 'vscode-kdb.connections must be globally configurable');
   assert.strictEqual(connectionsSetting.type, 'array');
+  assert.strictEqual(connectionsSetting.scope, 'resource');
+  assert.strictEqual(connectionsSetting.ignoreSync, false);
   const storedFields = Object.keys(((connectionsSetting.items || {}).properties) || {}).sort();
   assert.deepStrictEqual(
     storedFields,
@@ -13180,6 +13853,11 @@ function testManifestAndSources() {
   );
   assert.match(connectionsSetting.description, /direct q IPC/i);
   assert.match(connectionsSetting.description, /SecretStorage/);
+  assert.match(connectionsSetting.description, /User, Workspace, and Workspace Folder/i);
+  assert.match(connectionsSetting.description, /more-specific settings override/i);
+  assert.match(connectionsSetting.description, /Settings Sync eligible/i);
+  assert.match(connectionsSetting.description, /never enter settings or sync/i);
+  assert.match(connectionsSetting.description, /re-entry per environment/i);
   for (const timeoutField of ['connectTimeoutMs', 'queryTimeoutMs']) {
     const schema = connectionsSetting.items.properties[timeoutField];
     assert.strictEqual(schema.type, 'integer');
@@ -13272,16 +13950,11 @@ function testManifestAndSources() {
 
   const storeSource = readSource('connection-store.ts');
   assert.ok(/context\.secrets\.(store|get|delete)/.test(storeSource), 'passwords must use VS Code SecretStorage');
-  assert.match(
-    storeSource,
-    /\.get<unknown>\(CONNECTIONS_SETTING\)/,
-    'ConnectionStore must read the effective application configuration'
-  );
-  assert.doesNotMatch(
-    storeSource,
-    /\.inspect<|\.globalValue/,
-    'ConnectionStore must not rely on a global-only inspect snapshot'
-  );
+  assert.match(storeSource, /\.inspect<unknown>\(CONNECTIONS_SETTING\)/);
+  assert.match(storeSource, /inspected\.globalValue/);
+  assert.match(storeSource, /inspected\?\.workspaceValue/);
+  assert.match(storeSource, /\.workspaceFolderValue/);
+  assert.match(storeSource, /mergeConnectionConfigurations/);
   assert.doesNotMatch(
     storeSource,
     /VS Code did not persist/,
@@ -13297,8 +13970,13 @@ function testManifestAndSources() {
     !/ConnectionManager/.test(migrationSource),
     'the one-shot settings bridge must not own SQLTools sessions or KX client lifecycle'
   );
-  assert.ok(storeSource.includes('ConfigurationTarget.Global'), 'connections must use global settings');
-  const safeBlock = sourceSection(storeSource, 'const safeConnections', 'await vscode.workspace');
+  for (const target of ['Global', 'Workspace', 'WorkspaceFolder']) {
+    assert.ok(
+      storeSource.includes(`ConfigurationTarget.${target}`),
+      `connections must support ${target} settings`
+    );
+  }
+  const safeBlock = sourceSection(storeSource, 'const safeConnections', 'await this.configurationForScope');
   assert.ok(safeBlock.includes('username: connection.username'));
   assert.ok(safeBlock.includes('connectTimeoutMs: connection.connectTimeoutMs'));
   assert.ok(safeBlock.includes('queryTimeoutMs: connection.queryTimeoutMs'));
@@ -13348,7 +14026,7 @@ function testManifestAndSources() {
   assert.match(notebookControllerSource, /this\.liveResults\.register\(/);
   assert.match(
     notebookControllerSource,
-    /public async runCell\(\s*cell: vscode\.NotebookCell,\s*connectionId: string\s*\)/
+    /public async runCell\(\s*cell: vscode\.NotebookCell,\s*connectionId: string,\s*options: DirectQCellRunOptions = \{\}\s*\)/
   );
   const mixedControllerSource = sourceSection(
     notebookControllerSource,
@@ -13391,13 +14069,26 @@ function testManifestAndSources() {
   const mixedRunnerSource = sourceSection(
     notebookIntegrationSource,
     'private async runQCellWithKx',
-    'private async selectNotebookQTarget'
+    'private async runNotebookPreviewLive'
   );
   assert.match(mixedRunnerSource, /resolveNotebookQTarget\(/);
   assert.match(mixedRunnerSource, /runner\.runCell\(cell, target\.id\)/);
   assert.ok(
     !/setTextDocumentLanguage|applyEdit|%%q|selectKernel|notebook\.selectKernel/.test(mixedRunnerSource),
     'Run q Cell (KX) must not rewrite Python/q cells or mutate the selected notebook controller'
+  );
+  const helperLiveRunnerSource = sourceSection(
+    notebookIntegrationSource,
+    'private async runNotebookPreviewLive',
+    'private async runQCellWithKxAndThen'
+  );
+  assert.match(helperLiveRunnerSource, /notebookQSourceFromMagic\(/);
+  assert.match(helperLiveRunnerSource, /runner\.runCell\(cell, target\.id, \{/);
+  assert.match(helperLiveRunnerSource, /new KX Direct IPC execution/);
+  assert.match(helperLiveRunnerSource, /selected notebook kernel will not change/);
+  assert.ok(
+    !/notebook\.cell\.execute|selectKernel|notebook\.selectKernel/.test(helperLiveRunnerSource),
+    'Run %%q Live with KX must be an explicit Direct IPC execution without invoking Jupyter or changing kernels'
   );
   assert.match(liveNotebookResultsSource, /MAX_LIVE_NOTEBOOK_SLICE_CELLS/);
   assert.ok(!/ms-toolsai\.jupyter|vscode-jupyter/.test(
@@ -15109,6 +15800,183 @@ function createQTextResultsPanelHarness() {
   return harness;
 }
 
+function createScopedConnectionStoreHarness(options) {
+  const configurationListeners = new Set();
+  const state = {
+    global: cloneJson(options.global || []),
+    workspace: cloneJson(options.workspace || []),
+    folders: new Map(
+      (options.folders || []).map(folder => [
+        folder.uri,
+        cloneJson(folder.connections || []),
+      ])
+    ),
+    committedGlobal: cloneJson(options.global || []),
+    committedWorkspace: cloneJson(options.workspace || []),
+    committedFolders: new Map(
+      (options.folders || []).map(folder => [
+        folder.uri,
+        cloneJson(folder.connections || []),
+      ])
+    ),
+    activeId: options.activeId,
+    secrets: new Map(Object.entries(options.secrets || {})),
+    failNextTarget: undefined,
+    delayConfigurationPropagation: false,
+    pendingConfigurationUpdates: [],
+  };
+  const folders = [...state.folders.keys()].map(uri => ({
+    name: uri.slice(uri.lastIndexOf('/') + 1),
+    uri: testUri(uri),
+  }));
+  const fireConfigurationChange = () => {
+    configurationListeners.forEach(listener => listener({
+      affectsConfiguration(key) {
+        return key === 'vscode-kdb.connections';
+      },
+    }));
+  };
+  const configuration = resource => ({
+    get(key) {
+      assert.strictEqual(key, 'connections');
+      if (resource) {
+        return cloneJson(state.folders.get(resource.toString()) || state.workspace || state.global);
+      }
+      return cloneJson(state.workspace.length ? state.workspace : state.global);
+    },
+    inspect(key) {
+      assert.strictEqual(key, 'connections');
+      return {
+        globalValue: cloneJson(state.global),
+        workspaceValue: cloneJson(state.workspace),
+        ...(resource
+          ? { workspaceFolderValue: cloneJson(state.folders.get(resource.toString()) || []) }
+          : {}),
+      };
+    },
+    async update(key, value, target) {
+      assert.strictEqual(key, 'connections');
+      if (state.failNextTarget === target) {
+        state.failNextTarget = undefined;
+        throw new Error(`injected ${target} configuration update failure`);
+      }
+      if (target === 'global') {
+        state.committedGlobal = cloneJson(value);
+      } else if (target === 'workspace') {
+        state.committedWorkspace = cloneJson(value);
+      } else if (target === 'workspaceFolder') {
+        assert.ok(resource, 'workspace-folder writes require a resource');
+        state.committedFolders.set(resource.toString(), cloneJson(value));
+      } else {
+        assert.fail(`unexpected configuration target ${target}`);
+      }
+      if (state.delayConfigurationPropagation) {
+        state.pendingConfigurationUpdates.push({
+          target,
+          resource: resource?.toString(),
+          value: cloneJson(value),
+        });
+        return;
+      }
+      applyConfigurationUpdate(target, resource?.toString(), value);
+      fireConfigurationChange();
+    },
+  });
+  const applyConfigurationUpdate = (target, resource, value) => {
+    if (target === 'global') {
+      state.global = cloneJson(value);
+    } else if (target === 'workspace') {
+      state.workspace = cloneJson(value);
+    } else if (target === 'workspaceFolder') {
+      state.folders.set(resource, cloneJson(value));
+    }
+  };
+  const context = {
+    subscriptions: [],
+    globalState: {
+      get() {
+        return state.activeId;
+      },
+      async update(_key, value) {
+        state.activeId = value;
+      },
+    },
+    secrets: {
+      async get(key) {
+        return state.secrets.get(key);
+      },
+      async store(key, value) {
+        state.secrets.set(key, value);
+      },
+      async delete(key) {
+        state.secrets.delete(key);
+      },
+    },
+  };
+  const harness = {
+    context,
+    vscode: {
+      ConfigurationTarget: {
+        Global: 'global',
+        Workspace: 'workspace',
+        WorkspaceFolder: 'workspaceFolder',
+      },
+      Uri: {
+        parse(value) {
+          return testUri(value);
+        },
+      },
+      workspace: {
+        workspaceFolders: folders,
+        workspaceFile: testUri('file:///workspace/project.code-workspace'),
+        getConfiguration(_section, resource) {
+          return configuration(resource);
+        },
+        onDidChangeConfiguration(listener) {
+          configurationListeners.add(listener);
+          return { dispose: () => configurationListeners.delete(listener) };
+        },
+      },
+    },
+    get globalConnections() {
+      return cloneJson(state.global);
+    },
+    get workspaceConnections() {
+      return cloneJson(state.workspace);
+    },
+    get activeId() {
+      return state.activeId;
+    },
+    get pendingConfigurationUpdates() {
+      return state.pendingConfigurationUpdates.length;
+    },
+    folderConnections(uri) {
+      return cloneJson(state.folders.get(uri) || []);
+    },
+    secretFor(id) {
+      return state.secrets.get(`vscode-kdb.connectionPassword.${id}`);
+    },
+    applyExternalGlobal(connections) {
+      state.global = cloneJson(connections);
+      state.committedGlobal = cloneJson(connections);
+      fireConfigurationChange();
+    },
+    failNextScopeUpdate(target) {
+      state.failNextTarget = target;
+    },
+    set delayConfigurationPropagation(value) {
+      state.delayConfigurationPropagation = value;
+    },
+    flushConfigurationUpdate(index = 0) {
+      const [pending] = state.pendingConfigurationUpdates.splice(index, 1);
+      assert.ok(pending, `no pending scoped configuration update at index ${index}`);
+      applyConfigurationUpdate(pending.target, pending.resource, pending.value);
+      fireConfigurationChange();
+    },
+  };
+  return harness;
+}
+
 function createVscodeStoreHarness() {
   const configurationListeners = new Set();
   const state = {
@@ -15686,9 +16554,25 @@ function symbolVector(values) {
 }
 
 function intVector(values) {
+  return typedIntVector(6, values);
+}
+
+function typedIntVector(type, values) {
   const body = Buffer.alloc(values.length * 4);
   values.forEach((value, index) => body.writeInt32LE(value, index * 4));
-  return Buffer.concat([vectorHeader(6, values.length), body]);
+  return Buffer.concat([vectorHeader(type, values.length), body]);
+}
+
+function longVector(type, values) {
+  const body = Buffer.alloc(values.length * 8);
+  values.forEach((value, index) => body.writeBigInt64LE(BigInt(value), index * 8));
+  return Buffer.concat([vectorHeader(type, values.length), body]);
+}
+
+function doubleVector(type, values) {
+  const body = Buffer.alloc(values.length * 8);
+  values.forEach((value, index) => body.writeDoubleLE(value, index * 8));
+  return Buffer.concat([vectorHeader(type, values.length), body]);
 }
 
 function vectorHeader(type, length) {

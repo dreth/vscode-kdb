@@ -48,7 +48,7 @@ Changing controls does not silently rerender the existing chart. The panel marks
 | Box | Numeric or temporal | One or more numeric Y columns summarized as box statistics | Not supported |
 | Candlestick | Numeric or temporal | Four distinct numeric Open, High, Low, and Close columns | Not supported |
 
-Column eligibility is inferred from a sample of visible data. Hidden columns do not appear as chart choices.
+Decoded q columns use shared q type metadata before any value sampling. q `byte`, `short`, `int`, `long`, `real`, and `float` are numeric; q `timestamp`, `month`, `date`, `datetime`, `timespan`, `minute`, `second`, and `time` are temporal. Every listed temporal type is a valid X choice for every chart family above, but not a numeric Y or OHLC choice. Portable notebook schema uses the same classification, so a saved temporal preview remains chartable within its stored rows. Unknown/untyped external values use conservative sample inference. Hidden columns do not appear as chart choices.
 
 ### Candlestick validation
 

@@ -2,7 +2,7 @@
 
 Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The manifest is the source of truth for accepted values.
 
-Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
+Connection records can be owned by User, Workspace, or Workspace Folder settings. Other settings can be set at their declared VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
 
 ## Notebook language and results
 
@@ -27,7 +27,7 @@ These are output-serialization limits, not server-side q limits. The portable co
 
 Mixed **Run q Cell (KX)** and the optional direct controller reject a leading `%%q`; they run ordinary complete-cell q. Mixed cells use the notebook's explicit current target, while the q-only controller uses the active session only if explicitly enabled and selected. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, guarded `Ctrl+Enter` / `Cmd+Enter` runs and stays, `Shift+Enter` runs and moves next, and `Alt+Enter` / `Option+Enter` runs and inserts below. Move/insert occurs only after an executed result. Python, Markdown, cell-container, and output focus keep normal notebook behavior.
 
-The released Python `%%q` companion is a distinct Python-kernel-owned route: start with and keep a Python-language cell, load `kx_notebook`, connect with `%kx connect` or select another explicit evaluator, and use normal Jupyter Run. A durable extension Direct IPC cell stays q-language instead; do not switch one cell back and forth. The companion does not share the extension Direct IPC session or receive its live record/output binding.
+The released Python `%%q` companion is a distinct Python-kernel-owned route: start with and keep a Python-language cell, load `kx_notebook`, connect with `%kx connect` or select another explicit evaluator, and use normal Jupyter Run. A durable extension Direct IPC cell stays q-language instead; do not switch one cell back and forth. The companion does not share the extension Direct IPC session or receive its live record/output binding. Its bounded MIME output cannot supply omitted rows to the extension. **Run %%q live with KX** explicitly reruns the body as a new extension-selected Direct IPC execution after confirmation; it does not call Jupyter Run, reuse the helper session, or change the selected Python kernel.
 
 `inline` is the default released-companion experience. For companion output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Companion output has no extension live-result record/output binding, so the panel source is only the bounded saved payload. First-party direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable `vscode-kdb.results.*` configuration as the panel; Settings messages update and broadcast that common source of truth. In notebook output, the Settings overlay is height-constrained and scrollable inside the result. Its visible **Close** button and **Escape** dismissal both return focus to the Settings summary.
 
@@ -58,7 +58,7 @@ The imported `connectionTimeout` is interpreted as seconds and maps to the new p
 
 | Setting | Default | Use |
 | --- | --- | --- |
-| `vscode-kdb.connections` | `[]` | Safe standalone connection metadata. Manage it through the **KX Connection** form; passwords are stored separately in SecretStorage. |
+| `vscode-kdb.connections` | `[]` | Safe standalone connection metadata at User, Workspace, or Workspace Folder scope. Same-ID precedence is Folder > Workspace > User. The form preserves/moves ownership explicitly. User values are Settings Sync eligible where allowed; passwords remain separate in SecretStorage and never sync. |
 | `vscode-kdb.connectionTimeoutMs` | `30000` | Global direct q IPC connect/handshake timeout in milliseconds. TCP connect and q IPC handshake each receive this full budget. `0` disables both phase deadlines. |
 | `vscode-kdb.queryTimeoutMs` | `1800000` | Independent global query-response timeout in milliseconds (30 minutes). `0` disables only the query deadline. |
 | `vscode-kdb.performance.trace` | `false` | Add safe operation timings, sizes, and counts to **Output > KX**. Query text/values, credentials, and local-server tokens are omitted or redacted. |
@@ -79,6 +79,8 @@ Each object in `vscode-kdb.connections` has these safe fields:
 | `queryTimeoutMs` | No | Per-connection query override. Omit (leave blank in the form) to inherit the resolved global query default; `0` disables it. |
 
 Existing connection objects without either override remain valid and need no migration. A blank or omitted per-connection query override inherits the global `queryTimeoutMs` value, whose default is 30 minutes; it does not copy a global or per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; **Clear saved password** removes it explicitly.
+
+Workspace-defined profiles live with the project and survive container recreation; remote/container User settings are not a durable project substitute. SecretStorage is local to the relevant VS Code environment, so passwords may need re-entry after moving between local, remote, or container hosts.
 
 The `KX` Output channel always receives connection/query lifecycle diagnostics. Performance trace adds detail only when explicitly enabled. The extension does not enable it for you.
 
