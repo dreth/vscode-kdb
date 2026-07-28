@@ -22,6 +22,11 @@ export interface ChartZoomResetPlan<T> {
   readonly hideTooltip: true;
 }
 
+export interface ChartAutoRefinePlan {
+  readonly range: ChartRange;
+  readonly key: string;
+}
+
 export function chartZoomDataAfterResponse<T>(
   currentOriginalData: T | null | undefined,
   renderedData: T,
@@ -90,6 +95,37 @@ export function chartRangeIsZoomed(
   const magnitudeTolerance = Math.max(Math.abs(full.min), Math.abs(full.max)) * Number.EPSILON * 16;
   const tolerance = Math.max(1e-9, spanTolerance, magnitudeTolerance);
   return Math.abs(current.min - full.min) > tolerance || Math.abs(current.max - full.max) > tolerance;
+}
+
+export function planChartAutoRefine(
+  full: ChartRange | null | undefined,
+  current: ChartRange | null | undefined,
+  lastRangeKey: string,
+  blocked = false
+): ChartAutoRefinePlan | null {
+  if (blocked || !isValidChartRange(full) || !isValidChartRange(current)) {
+    return null;
+  }
+  const range = {
+    min: Math.max(full.min, current.min),
+    max: Math.min(full.max, current.max),
+  };
+  if (!isValidChartRange(range) || !chartRangeIsZoomed(full, range)) {
+    return null;
+  }
+  const key = chartZoomRangeKey(range);
+  return key === lastRangeKey ? null : { range, key };
+}
+
+export function chartZoomRangeKey(range: ChartRange): string {
+  return `${Number(range.min).toPrecision(12)}:${Number(range.max).toPrecision(12)}`;
+}
+
+export function chartRequestIsCurrent(
+  currentRequestId: number,
+  responseRequestId: number
+): boolean {
+  return responseRequestId === currentRequestId;
 }
 
 export function isValidChartRange(value: ChartRange | null | undefined): value is ChartRange {

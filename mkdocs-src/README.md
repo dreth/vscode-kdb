@@ -40,6 +40,8 @@ npm run test:extension-host
 npm run test:notebook-results-visual
 ```
 
+The 0.2.9 chart repair treats each distinct valid completed live zoom as a source-resampling request after a 450 ms debounce in both KX Results and live notebook output. Notebook requests stay clamped to the original full X domain across successive narrower refinements; initial/full-domain renders, duplicate scale notifications, dirty charts, and pending requests do not auto-request. Manual **Refine zoom** remains immediate.
+
 For a release candidate, require the live IPC check instead of allowing it to skip:
 
 ```sh

@@ -9,6 +9,12 @@ import {
   chartTypeCapabilities,
 } from '../src/charting';
 import {
+  chartRequestIsCurrent,
+  chartZoomRangeKey,
+  isValidChartRange,
+  planChartAutoRefine,
+} from '../src/chart-zoom';
+import {
   chartLegendToggleKey,
   chartSeriesColorIndexes,
   chartSeriesVisible,
@@ -134,7 +140,11 @@ interface LiveChartState {
   dirty: boolean;
   data?: NotebookLiveChartData;
   fullData?: NotebookLiveChartData;
+  fullRange?: PlotScaleRange;
   requestRange?: { min: number; max: number };
+  autoRefineTimer?: number;
+  lastAutoRefineRangeKey: string;
+  syncAutoRefineRangeOnNextPlot: boolean;
   refined: boolean;
   error?: string;
   errorWasRefinement?: boolean;
@@ -261,6 +271,7 @@ const LIVE_MAX_RENDER_COLUMNS = 48;
 const LIVE_MAX_CANVAS_HEIGHT = 8_000_000;
 const LIVE_CLIPBOARD_CELL_LIMIT = 20_000;
 const SAVED_SEARCH_MAX_MATCHES = 10_000;
+const LIVE_CHART_AUTO_REFINE_DELAY_MS = 450;
 const states = new Map<string, OutputState>();
 let presentation: NotebookPresentation = 'inline';
 let requestSequence = 0;
@@ -490,16 +501,20 @@ function receiveHostMessage(
       }
       renderState(context, state);
     } else if (message.type === 'liveChart') {
-      if (message.requestId !== state.liveChart.requestId) {
+      if (!chartRequestIsCurrent(state.liveChart.requestId, message.requestId)) {
         continue;
       }
       state.liveChart.pending = false;
       if (message.data) {
         if (state.liveChart.requestRange) {
           state.liveChart.fullData = state.liveChart.fullData || state.liveChart.data;
+          state.liveChart.syncAutoRefineRangeOnNextPlot = true;
           state.liveChart.refined = true;
         } else {
           state.liveChart.fullData = message.data;
+          state.liveChart.fullRange = chartDataXRange(message.data);
+          state.liveChart.lastAutoRefineRangeKey = '';
+          state.liveChart.syncAutoRefineRangeOnNextPlot = false;
           state.liveChart.refined = false;
         }
         state.liveChart.data = message.data;
@@ -538,6 +553,7 @@ function receiveLiveResult(
     return;
   }
   const previousChart = state.liveChart;
+  clearLiveChartAutoRefine(previousChart, true);
   state.liveStatus = 'available';
   state.liveMode = message.mode;
   state.liveKind = message.kind;
@@ -588,7 +604,15 @@ function receiveLiveResult(
     dirty: reconciledChart.compatible ? previousChart.dirty : true,
     data: reconciledChart.compatible ? previousChart.data : undefined,
     fullData: reconciledChart.compatible ? previousChart.fullData : undefined,
+    fullRange: reconciledChart.compatible ? previousChart.fullRange : undefined,
     requestRange: undefined,
+    autoRefineTimer: undefined,
+    lastAutoRefineRangeKey: reconciledChart.compatible
+      ? previousChart.lastAutoRefineRangeKey
+      : '',
+    syncAutoRefineRangeOnNextPlot: reconciledChart.compatible
+      ? previousChart.syncAutoRefineRangeOnNextPlot
+      : false,
     refined: reconciledChart.compatible ? previousChart.refined : false,
     error: undefined,
     errorWasRefinement: false,
@@ -611,6 +635,7 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
     window.clearTimeout(state.searchTimer);
     state.searchTimer = undefined;
   }
+  clearLiveChartAutoRefine(state.liveChart, true);
   state.liveStatus = 'unavailable';
   state.liveRequestId = nextRequestId();
   state.liveMode = undefined;
@@ -644,7 +669,11 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
     dirty: true,
     data: undefined,
     fullData: undefined,
+    fullRange: undefined,
     requestRange: undefined,
+    autoRefineTimer: undefined,
+    lastAutoRefineRangeKey: '',
+    syncAutoRefineRangeOnNextPlot: false,
     refined: false,
     error: undefined,
     errorWasRefinement: false,
@@ -967,6 +996,9 @@ function renderLiveTableTools(
       ? KX_RESULT_UI_LABELS.closeChart
       : KX_RESULT_UI_LABELS.chart, () => {
       state.liveChart.visible = !state.liveChart.visible;
+      if (!state.liveChart.visible) {
+        clearLiveChartAutoRefine(state.liveChart);
+      }
       renderState(context, state);
     });
     withFocusKey(chartToggle, 'toolbar:live:chart-toggle');
@@ -1546,6 +1578,15 @@ function renderLiveChart(
   exportPng.disabled = !chart.data || !state.plot;
   controls.append(exportPng);
   const reset = button(KX_RESULT_UI_LABELS.resetZoom, () => {
+    clearLiveChartAutoRefine(chart, true);
+    if (chart.pending && chart.requestRange) {
+      chart.requestId = nextRequestId();
+      chart.pending = false;
+      chart.requestRange = undefined;
+      chart.syncAutoRefineRangeOnNextPlot = false;
+      chart.error = undefined;
+      chart.errorWasRefinement = false;
+    }
     if (chart.refined && chart.fullData) {
       chart.data = chart.fullData;
       chart.refined = false;
@@ -1601,7 +1642,7 @@ function renderLiveChart(
     const host = node('div', 'kx-chart-host');
     panel.append(host);
     root.append(panel);
-    drawLiveChart(state, host, chart.data);
+    drawLiveChart(context, state, host, chart.data);
     const hasPlot = !!state.plot;
     exportPng.disabled = !hasPlot;
     reset.disabled = !hasPlot;
@@ -1612,6 +1653,7 @@ function renderLiveChart(
 }
 
 function markLiveChartDirty(chart: LiveChartState): void {
+  clearLiveChartAutoRefine(chart, true);
   chart.dirty = true;
   chart.error = undefined;
   chart.errorWasRefinement = false;
@@ -1652,10 +1694,12 @@ function requestLiveChart(
   range?: { min: number; max: number }
 ): void {
   const chart = state.liveChart;
+  clearLiveChartAutoRefine(chart);
   if (!context.postMessage || !state.liveId || !state.outputId ||
     liveChartValidationMessage(state)) {
     return;
   }
+  chart.lastAutoRefineRangeKey = range ? chartZoomRangeKey(range) : '';
   const requestId = nextRequestId();
   chart.requestId = requestId;
   chart.requestSignature = liveChartConfigurationSignature(chart);
@@ -1665,6 +1709,7 @@ function requestLiveChart(
   chart.requestRange = range;
   if (!range) {
     chart.fullData = undefined;
+    chart.fullRange = undefined;
     chart.refined = false;
   }
   const capabilities = chartTypeCapabilities(chart.chartType);
@@ -1708,8 +1753,13 @@ function liveChartConfigurationSignature(chart: LiveChartState): string {
   ]);
 }
 
-function drawLiveChart(state: OutputState, host: HTMLElement, data: NotebookLiveChartData): void {
-  drawNotebookChart(state, host, data);
+function drawLiveChart(
+  context: RendererContext<RendererState>,
+  state: OutputState,
+  host: HTMLElement,
+  data: NotebookLiveChartData
+): void {
+  drawNotebookChart(context, state, host, data, true);
 }
 
 function scheduleLiveSearch(
@@ -2710,15 +2760,17 @@ function renderSavedChartControls(
     ));
     return;
   }
-  drawNotebookChart(state, chartHost, prepared);
+  drawNotebookChart(context, state, chartHost, prepared, false);
   exportPng.disabled = !state.plot || !context.postMessage;
   reset.disabled = !state.plot;
 }
 
 function drawNotebookChart(
+  context: RendererContext<RendererState>,
   state: OutputState,
   host: HTMLElement,
-  data: NotebookLiveChartData
+  data: NotebookLiveChartData,
+  autoRefine: boolean
 ): void {
   if (data.x.length === 0 || data.series.length === 0) {
     host.append(node('div', 'kx-notice', 'Chart has no finite sampled points.'));
@@ -2814,11 +2866,15 @@ function drawNotebookChart(
       280,
       data,
       state,
-      legendHost
+      legendHost,
+      autoRefine ? context : undefined
     ),
     aligned,
     data
   );
+  if (autoRefine) {
+    syncLiveChartRenderedAutoRefineRange(state);
+  }
 }
 
 function notebookChartSeriesKeys(data: NotebookLiveChartData): string[] {
@@ -2960,6 +3016,7 @@ function plotLegendLabels(plot: uPlot): HTMLElement[] {
 }
 
 function resetPlotZoom(state: OutputState): void {
+  clearLiveChartAutoRefine(state.liveChart, true);
   if (!state.plot) {
     return;
   }
@@ -3001,19 +3058,86 @@ function plotScaleRange(plot: uPlot, scaleKey: 'x' | 'y'): PlotScaleRange | unde
 }
 
 function currentPlotXRange(state: OutputState): { min: number; max: number } | undefined {
-  const scale = state.plot?.scales.x;
-  const values = state.liveChart.data?.x;
-  const min = Number(scale?.min);
-  const max = Number(scale?.max);
-  if (!values?.length || !Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
+  return planChartAutoRefine(
+    state.liveChart.fullRange,
+    state.plot ? plotScaleRange(state.plot, 'x') : undefined,
+    '',
+    false
+  )?.range;
+}
+
+function queueLiveChartAutoRefine(
+  context: RendererContext<RendererState>,
+  state: OutputState,
+  plot: uPlot
+): void {
+  const chart = state.liveChart;
+  const plan = planChartAutoRefine(
+    chart.fullRange,
+    plotScaleRange(plot, 'x'),
+    chart.lastAutoRefineRangeKey,
+    state.plot !== plot || chart.pending || chart.dirty || !chart.data
+  );
+  if (!plan) {
+    clearLiveChartAutoRefine(chart);
+    return;
+  }
+  clearLiveChartAutoRefine(chart);
+  chart.autoRefineTimer = window.setTimeout(() => {
+    chart.autoRefineTimer = undefined;
+    const current = planChartAutoRefine(
+      chart.fullRange,
+      state.plot === plot ? plotScaleRange(plot, 'x') : undefined,
+      chart.lastAutoRefineRangeKey,
+      state.plot !== plot || chart.pending || chart.dirty || !chart.data
+    );
+    if (!current || current.key !== plan.key) {
+      return;
+    }
+    requestLiveChart(context, state, current.range);
+    renderState(context, state);
+  }, LIVE_CHART_AUTO_REFINE_DELAY_MS);
+}
+
+function clearLiveChartAutoRefine(chart: LiveChartState, resetRangeKey = false): void {
+  if (chart.autoRefineTimer !== undefined) {
+    window.clearTimeout(chart.autoRefineTimer);
+    chart.autoRefineTimer = undefined;
+  }
+  if (resetRangeKey) {
+    chart.lastAutoRefineRangeKey = '';
+    chart.syncAutoRefineRangeOnNextPlot = false;
+  }
+}
+
+function syncLiveChartRenderedAutoRefineRange(state: OutputState): void {
+  const chart = state.liveChart;
+  if (!chart.syncAutoRefineRangeOnNextPlot || !state.plot) {
+    return;
+  }
+  chart.syncAutoRefineRangeOnNextPlot = false;
+  clearLiveChartAutoRefine(chart);
+  const rendered = planChartAutoRefine(
+    chart.fullRange,
+    plotScaleRange(state.plot, 'x'),
+    '',
+    false
+  );
+  chart.lastAutoRefineRangeKey = rendered?.key || '';
+}
+
+function chartDataXRange(data: NotebookLiveChartData): PlotScaleRange | undefined {
+  if (isValidChartRange(data.xDomain)) {
+    return { min: data.xDomain.min, max: data.xDomain.max };
+  }
+  if (data.x.length === 0) {
     return undefined;
   }
-  const domainMin = Math.min(...values);
-  const domainMax = Math.max(...values);
-  const tolerance = Math.max(1, Math.abs(domainMax - domainMin)) * 1e-9;
-  return min > domainMin + tolerance || max < domainMax - tolerance
-    ? { min, max }
-    : undefined;
+  const range = {
+    min: Math.min(...data.x),
+    max: Math.max(...data.x),
+  };
+  return isValidChartRange(range) ? range : undefined;
 }
 
 function requestChartPngExport(
@@ -3051,7 +3175,8 @@ function notebookPlotOptions(
   height: number,
   data: NotebookLiveChartData,
   state: OutputState,
-  legendHost: HTMLElement
+  legendHost: HTMLElement,
+  liveContext?: RendererContext<RendererState>
 ): uPlot.Options {
   const axisColor = (): CanvasRenderingContext2D['strokeStyle'] => {
     const foreground = getComputedStyle(host).color;
@@ -3175,6 +3300,17 @@ function notebookPlotOptions(
           syncPlotLegendAccessibility(plot);
         },
       ],
+      ...(liveContext
+        ? {
+          setScale: [
+            (plot: uPlot, scaleKey: string) => {
+              if (scaleKey === 'x') {
+                queueLiveChartAutoRefine(liveContext, state, plot);
+              }
+            },
+          ],
+        }
+        : {}),
     },
   };
 }
@@ -3613,6 +3749,7 @@ function resultColumnControl(
   const actions = node('div', 'kx-columns-actions');
   const apply = (nextOrder: number[], nextHidden: number[]): void => {
     if (mode === 'live') {
+      clearLiveChartAutoRefine(state.liveChart, true);
       state.liveColumnOrder = nextOrder;
       state.liveHiddenColumnIndexes = nextHidden;
       syncLiveVisibleColumns(state);
@@ -3633,12 +3770,20 @@ function resultColumnControl(
         ...reconciled.configuration,
         data: reconciled.compatible ? state.liveChart.data : undefined,
         fullData: reconciled.compatible ? state.liveChart.fullData : undefined,
+        fullRange: reconciled.compatible ? state.liveChart.fullRange : undefined,
         requestSignature: reconciled.compatible
           ? state.liveChart.requestSignature
           : undefined,
         requestId: reconciled.compatible ? state.liveChart.requestId : nextRequestId(),
         pending: reconciled.compatible ? state.liveChart.pending : false,
         requestRange: reconciled.compatible ? state.liveChart.requestRange : undefined,
+        autoRefineTimer: undefined,
+        lastAutoRefineRangeKey: reconciled.compatible
+          ? state.liveChart.lastAutoRefineRangeKey
+          : '',
+        syncAutoRefineRangeOnNextPlot: reconciled.compatible
+          ? state.liveChart.syncAutoRefineRangeOnNextPlot
+          : false,
         dirty: reconciled.compatible ? state.liveChart.dirty : true,
         refined: reconciled.compatible ? state.liveChart.refined : false,
         error: reconciled.compatible ? state.liveChart.error : undefined,
@@ -4196,6 +4341,8 @@ function chartForColumns(
     requestId: 0,
     pending: false,
     dirty: true,
+    lastAutoRefineRangeKey: '',
+    syncAutoRefineRangeOnNextPlot: false,
     refined: false,
   };
 }
@@ -4869,6 +5016,7 @@ function disposeState(id: string): void {
   if (!state) {
     return;
   }
+  clearLiveChartAutoRefine(state.liveChart, true);
   destroyPlot(state);
   state.liveViewportResizeObserver?.disconnect();
   if (state.renderTimer !== undefined) {

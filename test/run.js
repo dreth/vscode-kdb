@@ -33,8 +33,11 @@ const {
 } = requireOut('q-text');
 const {
   captureChartFullXRange,
+  chartRequestIsCurrent,
   chartZoomDataAfterResponse,
+  chartZoomRangeKey,
   chartRangeIsZoomed,
+  planChartAutoRefine,
   planChartZoomReset,
 } = requireOut('chart-zoom');
 const { buildChartData } = requireOut('charting');
@@ -409,6 +412,54 @@ function testChartZoomLifecycle() {
   assert.strictEqual(chartRangeIsZoomed(temporalFull, { min: temporalFull.min + 1, max: temporalFull.max }), true);
   assert.strictEqual(captureChartFullXRange(null, { min: 4, max: 4 }, false), null);
   assert.strictEqual(chartRangeIsZoomed(full, { min: NaN, max: 40 }), false);
+
+  assert.strictEqual(
+    planChartAutoRefine(full, full, '', false),
+    null,
+    'the full original domain must not request refinement'
+  );
+  const firstAutoRefine = planChartAutoRefine(full, { min: 20, max: 80 }, '', false);
+  assert.deepStrictEqual(firstAutoRefine, {
+    range: { min: 20, max: 80 },
+    key: chartZoomRangeKey({ min: 20, max: 80 }),
+  }, 'the first completed zoom must plan one absolute ranged request');
+  assert.strictEqual(
+    planChartAutoRefine(full, { min: 20, max: 80 }, firstAutoRefine.key, false),
+    null,
+    'repeated setScale notifications for one range must deduplicate'
+  );
+  const secondAutoRefine = planChartAutoRefine(
+    full,
+    { min: 30, max: 60 },
+    firstAutoRefine.key,
+    false
+  );
+  assert.deepStrictEqual(secondAutoRefine, {
+    range: { min: 30, max: 60 },
+    key: chartZoomRangeKey({ min: 30, max: 60 }),
+  }, 'a second narrower zoom must plan a second distinct absolute request');
+  assert.deepStrictEqual(
+    planChartAutoRefine(full, { min: -20, max: 60 }, '', false)?.range,
+    { min: 0, max: 60 },
+    'live refinement ranges must clamp to the original domain'
+  );
+  assert.strictEqual(
+    planChartAutoRefine(full, { min: 30, max: 60 }, secondAutoRefine.key, true),
+    null,
+    'pending or dirty charts must not plan automatic requests'
+  );
+  assert.strictEqual(
+    refinedReset.autoRefineKey,
+    '',
+    'reset must clear automatic refinement deduplication state'
+  );
+  assert.strictEqual(chartRequestIsCurrent(7, 7), true);
+  assert.strictEqual(
+    chartRequestIsCurrent(8, 7),
+    false,
+    'a stale chart response must remain ineligible for application'
+  );
+
   let hiddenSeries = updateHiddenChartSeriesKeys([], ['price', 'size'], ['price']);
   assert.deepStrictEqual(hiddenSeries, ['price']);
   hiddenSeries = updateHiddenChartSeriesKeys(
@@ -597,6 +648,31 @@ function testChartZoomLifecycle() {
   assert.match(chartDataSource, /toNonNegativeInteger\(value\.requestId, -1\) !== latestChartRequestId/);
   const messageSource = sourceSection(panelSource, "        } else if (msg.type === 'chartData' && msg.data) {", "      actionFormat.addEventListener('change'");
   assert.match(messageSource, /setChartData\(msg\.data\);/);
+  const autoRefineSource = sourceSection(
+    panelSource,
+    '      function queueChartAutoRefine() {',
+    '      function clearChartAutoRefineTimer() {'
+  );
+  assert.match(autoRefineSource, /!range \|\| !chartCanExport\(\) \|\| chartControlsDirty/);
+  assert.match(autoRefineSource, /CHART_AUTO_REFINE_DELAY_MS/);
+  assert.match(autoRefineSource, /chartZoomRangeKey\(current\) !== key/);
+  assert.match(autoRefineSource, /requestChartDataForRange\(current/);
+  assert.ok(
+    !panelSource.includes('chartDataCanAutoRefine') &&
+      !panelSource.includes('chartVisibleSamplePointCount') &&
+      !panelSource.includes('chartAutoRefineMinVisiblePoints'),
+    'panel auto-refine must not suppress valid zooms by sampling algorithm or visible-point count'
+  );
+  assert.match(panelSource, /updateChartZoomStateAfterRender\(chartUPlot\)/);
+  assert.match(
+    panelSource,
+    /function updateChartZoomStateAfterRender\(self\) \{[\s\S]*?updateChartZoomStateInternal\(self, true\)/
+  );
+  assert.match(
+    panelSource,
+    /chartZoomed && suppressAutoRefine[\s\S]*?chartLastAutoRefineKey = chartZoomRangeKey\(renderedRange\)/,
+    'a programmatic refined response must become the dedupe baseline instead of recursively refining itself'
+  );
 }
 
 async function testQIpc() {
@@ -8192,6 +8268,75 @@ function testNotebookContract() {
   assert.match(rendererSource, /state\.plotViewport\?\.data !== data/);
   assert.match(rendererSource, /state\.plot\.setScale\('x', x\)/);
   assert.match(rendererSource, /state\.plot\.setScale\('y', y\)/);
+  assert.match(rendererSource, /const LIVE_CHART_AUTO_REFINE_DELAY_MS = 450;/);
+  assert.match(rendererSource, /autoRefineTimer\?: number;/);
+  assert.match(rendererSource, /lastAutoRefineRangeKey: string;/);
+  assert.match(rendererSource, /syncAutoRefineRangeOnNextPlot: boolean;/);
+  assert.match(
+    rendererSource,
+    /state\.liveChart\.requestRange\)[\s\S]*?state\.liveChart\.syncAutoRefineRangeOnNextPlot = true/
+  );
+  assert.match(
+    rendererSource,
+    /if \(autoRefine\) \{[\s\S]*?syncLiveChartRenderedAutoRefineRange\(state\)/
+  );
+  const renderedRangeSyncSource = sourceSection(
+    rendererSource,
+    'function syncLiveChartRenderedAutoRefineRange(',
+    'function chartDataXRange('
+  );
+  assert.match(renderedRangeSyncSource, /clearLiveChartAutoRefine\(chart\)/);
+  assert.match(renderedRangeSyncSource, /plotScaleRange\(state\.plot, 'x'\)/);
+  assert.match(renderedRangeSyncSource, /chart\.lastAutoRefineRangeKey = rendered\?\.key \|\| ''/);
+  assert.match(
+    rendererSource,
+    /state\.liveChart\.visible = !state\.liveChart\.visible;[\s\S]*?if \(!state\.liveChart\.visible\) \{[\s\S]*?clearLiveChartAutoRefine\(state\.liveChart\);/,
+    'hiding a chart must cancel the timer without erasing the completed refinement key'
+  );
+  assert.doesNotMatch(
+    sourceSection(rendererSource, 'const chartToggle = button(', "withFocusKey(chartToggle, 'toolbar:live:chart-toggle')"),
+    /clearLiveChartAutoRefine\(state\.liveChart, true\)/
+  );
+  assert.match(
+    rendererSource,
+    /setScale: \[[\s\S]*?scaleKey === 'x'[\s\S]*?queueLiveChartAutoRefine\(liveContext, state, plot\)/
+  );
+  const liveAutoRefineSource = sourceSection(
+    rendererSource,
+    'function queueLiveChartAutoRefine(',
+    'function clearLiveChartAutoRefine('
+  );
+  assert.match(liveAutoRefineSource, /planChartAutoRefine\(/);
+  assert.match(liveAutoRefineSource, /state\.plot !== plot \|\| chart\.pending \|\| chart\.dirty/);
+  assert.match(liveAutoRefineSource, /current\.key !== plan\.key/);
+  assert.match(liveAutoRefineSource, /requestLiveChart\(context, state, current\.range\)/);
+  assert.match(liveAutoRefineSource, /LIVE_CHART_AUTO_REFINE_DELAY_MS/);
+  assert.match(
+    rendererSource,
+    /function currentPlotXRange\([\s\S]*?state\.liveChart\.fullRange[\s\S]*?planChartAutoRefine/
+  );
+  assert.match(
+    rendererSource,
+    /state\.liveChart\.fullRange = chartDataXRange\(message\.data\)/
+  );
+  assert.match(
+    rendererSource,
+    /chartRequestIsCurrent\(state\.liveChart\.requestId, message\.requestId\)/
+  );
+  assert.match(
+    rendererSource,
+    /function resetPlotZoom\([\s\S]*?clearLiveChartAutoRefine\(state\.liveChart, true\)/
+  );
+  assert.match(
+    rendererSource,
+    /const reset = button\(KX_RESULT_UI_LABELS\.resetZoom[\s\S]*?clearLiveChartAutoRefine\(chart, true\);[\s\S]*?if \(chart\.pending && chart\.requestRange\) \{[\s\S]*?chart\.requestId = nextRequestId\(\);[\s\S]*?chart\.pending = false;[\s\S]*?chart\.requestRange = undefined;/,
+    'Reset must invalidate an in-flight ranged request before restoring the full chart'
+  );
+  assert.match(
+    rendererSource,
+    /function requestLiveChart\([\s\S]*?clearLiveChartAutoRefine\(chart\)[\s\S]*?chart\.lastAutoRefineRangeKey = range \? chartZoomRangeKey\(range\) : ''/
+  );
+  assert.match(rendererSource, /\.\.\.\(range \? \{ xMin: range\.min, xMax: range\.max \} : \{\}\)/);
   assert.match(rendererSource, /preparedSavedChartData\(state, state\.payload, renderedChart\)/);
   const savedSortSource = sourceSection(
     rendererSource,
@@ -8365,7 +8510,7 @@ function testNotebookContract() {
   );
   assert.match(
     liveChartControlsSource,
-    /drawLiveChart\(state, host, chart\.data\);[\s\S]*?exportPng\.disabled = !hasPlot;[\s\S]*?reset\.disabled = !hasPlot;[\s\S]*?refine\.disabled = chart\.pending \|\| !hasPlot \|\| chart\.dirty/,
+    /drawLiveChart\(context, state, host, chart\.data\);[\s\S]*?exportPng\.disabled = !hasPlot;[\s\S]*?reset\.disabled = !hasPlot;[\s\S]*?refine\.disabled = chart\.pending \|\| !hasPlot \|\| chart\.dirty/,
     'live chart actions must be enabled only after an actual plot is prepared'
   );
   assert.match(

@@ -1517,6 +1517,31 @@ async function exerciseLiveChartControls(renderer) {
       value.statusAriaLive === 'polite',
     15_000
   );
+  const autoRefinements = [];
+  for (let zoomIndex = 0; zoomIndex < 2; zoomIndex += 1) {
+    await dragNotebookChartInRenderer(renderer);
+    const previousEligibleRows = autoRefinements.at(-1)?.eligibleRows || 65;
+    autoRefinements.push(await waitForRenderer(
+      `live automatic chart refinement ${zoomIndex + 1}`,
+      renderer,
+      root => {
+        const status = root.querySelector('.kx-chart-panel > .kx-status')?.textContent || '';
+        const match = /from ([\d,]+) eligible rows/.exec(status);
+        return {
+          status,
+          eligibleRows: match ? Number(match[1].replaceAll(',', '')) : 0,
+        };
+      },
+      value => value.status.startsWith('Refined zoom') &&
+        value.eligibleRows > 0 &&
+        value.eligibleRows < previousEligibleRows,
+      15_000
+    ));
+  }
+  assert(
+    autoRefinements[1].eligibleRows < autoRefinements[0].eligibleRows,
+    'a second narrower live zoom must trigger a second absolute source refinement'
+  );
   await renderer.evaluate(root => {
     const details = root.querySelector('details.kx-columns');
     if (details) {
@@ -1578,6 +1603,7 @@ async function exerciseLiveChartControls(renderer) {
     yChange,
     yPersistence,
     afterDraw,
+    autoRefinements,
     hiddenColumns,
   };
 }
