@@ -4268,7 +4268,7 @@ export class KxResultsPanel {
             chartDataIsRefinement || !!chartFullXRange
           );
           chartZoomStateSuspended = false;
-          updateChartZoomState(chartUPlot);
+          updateChartZoomStateAfterRender(chartUPlot);
           notifyChartRendered();
           updateChartControls();
         } catch (error) {
@@ -5039,6 +5039,14 @@ export class KxResultsPanel {
       }
 
       function updateChartZoomState(self) {
+        updateChartZoomStateInternal(self, false);
+      }
+
+      function updateChartZoomStateAfterRender(self) {
+        updateChartZoomStateInternal(self, true);
+      }
+
+      function updateChartZoomStateInternal(self, suppressAutoRefine) {
         if (chartZoomStateSuspended) {
           return;
         }
@@ -5047,7 +5055,13 @@ export class KxResultsPanel {
           chartFullXRange = captureChartFullXRange(null, currentRange, false);
         }
         chartZoomed = chartRangeIsZoomed(chartFullXRange, currentRange);
-        if (chartZoomed) {
+        if (chartZoomed && suppressAutoRefine) {
+          clearChartAutoRefineTimer();
+          const renderedRange = currentChartZoomRange();
+          if (renderedRange) {
+            chartLastAutoRefineKey = chartZoomRangeKey(renderedRange);
+          }
+        } else if (chartZoomed) {
           queueChartAutoRefine();
         } else {
           clearChartAutoRefineTimer();
@@ -5068,12 +5082,7 @@ export class KxResultsPanel {
 
       function queueChartAutoRefine() {
         const range = currentChartZoomRange();
-        if (!range || !chartCanExport() || chartControlsDirty || !chartDataCanAutoRefine()) {
-          clearChartAutoRefineTimer();
-          return;
-        }
-        const visiblePoints = chartVisibleSamplePointCount(range);
-        if (visiblePoints >= chartAutoRefineMinVisiblePoints() || chartData.eligibleRowCount <= visiblePoints) {
+        if (!range || !chartCanExport() || chartControlsDirty) {
           clearChartAutoRefineTimer();
           return;
         }
@@ -5102,41 +5111,12 @@ export class KxResultsPanel {
         }
       }
 
-      function chartVisibleSamplePointCount(range) {
-        if (!chartData || !Array.isArray(chartData.x)) {
-          return 0;
-        }
-        let count = 0;
-        chartData.x.forEach(value => {
-          if (value >= range.min && value <= range.max) {
-            count += 1;
-          }
-        });
-        return count;
-      }
-
       function chartZoomRangeKey(range) {
         return Number(range.min).toPrecision(12) + ':' + Number(range.max).toPrecision(12);
       }
 
       function chartZoomMinSampledPoints() {
         return positiveIntegerSetting(settings.chartZoomMinSampledPoints, DEFAULT_SETTINGS.chartZoomMinSampledPoints);
-      }
-
-      function chartAutoRefineMinVisiblePoints() {
-        const configuredMinimum = chartZoomMinSampledPoints();
-        const availableSample = chartData ? Math.max(1, chartData.sampledPointCount) : configuredMinimum;
-        return Math.min(configuredMinimum, availableSample);
-      }
-
-      function chartDataCanAutoRefine() {
-        if (!chartData) {
-          return false;
-        }
-        return chartData.algorithm.indexOf('minmax-bucket/') === 0 ||
-          chartData.algorithm.indexOf('bar-cluster-even/') === 0 ||
-          chartData.algorithm.indexOf('box-bucket/') === 0 ||
-          chartData.algorithm.indexOf('ohlc-bucket/') === 0;
       }
 
       function chartZoomMaxSampledPoints() {
