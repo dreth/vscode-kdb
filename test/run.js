@@ -12663,10 +12663,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.9');
+  assert.strictEqual(manifest.version, '0.2.10');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.9');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.9');
+  assert.strictEqual(packageLock.version, '0.2.10');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.10');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
