@@ -779,9 +779,16 @@ function renderHeader(
         openPreview(context, state, statusNode(root));
       }
     );
-    const rerun = titledButton(KX_RESULT_UI_LABELS.rerunCell, 'Rerun this cell', () => {
-      requestPreviewRerun(context, state);
-    });
+    const helperPreview = state.payload.provenance.marker === '%%q';
+    const rerun = titledButton(
+      helperPreview
+        ? KX_RESULT_UI_LABELS.runSavedQResultLive
+        : KX_RESULT_UI_LABELS.rerunCell,
+      helperPreview
+        ? 'Run the %%q body as a new first-party KX Direct IPC execution; the Python kernel stays selected'
+        : 'Rerun this first-party Direct IPC cell',
+      () => requestPreviewRerun(context, state)
+    );
     toolbar.append(
       withFocusKey(openSaved, 'header:open-saved'),
       withFocusKey(rerun, 'header:rerun')
@@ -4586,7 +4593,9 @@ function requestPreviewRerun(
   }
   const requestId = nextRequestId();
   state.hostActionRequestId = requestId;
-  state.hostActionMessage = 'Requesting cell rerun…';
+  state.hostActionMessage = state.payload.provenance.marker === '%%q'
+    ? 'Requesting a new KX Direct IPC execution…'
+    : 'Requesting cell rerun…';
   context.postMessage({
     type: 'rerunPreview',
     ...(state.outputId ? { outputId: state.outputId } : {}),
@@ -4751,7 +4760,8 @@ function portableTable(
     columnIndexes.map(index => payload.schema.columns[index].name),
     payload.data.rows.length,
     (rowIndex, columnIndex) =>
-      portableCellValue(payload.data.rows[rowIndex][columnIndexes[columnIndex]])
+      portableCellValue(payload.data.rows[rowIndex][columnIndexes[columnIndex]]),
+    columnIndexes.map(index => payload.schema.columns[index].type)
   );
 }
 

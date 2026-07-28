@@ -143,6 +143,7 @@ export interface LiveNotebookResultRange {
 interface LiveNotebookRecord extends LiveNotebookResultRegistration {
   id: string;
   createdAt: number;
+  staged?: boolean;
   viewKey?: string;
   converted?: QPanelResult;
   sortOrders: Map<string, number[]>;
@@ -170,6 +171,7 @@ export class LiveNotebookResultStore {
       ...registration,
       id,
       createdAt: Date.now(),
+      staged: true,
       sortOrders: new Map<string, number[]>(),
     });
     return id;
@@ -180,6 +182,26 @@ export class LiveNotebookResultStore {
       throw new Error('Live KX notebook result identifier is invalid.');
     }
     this.bind(id, registration);
+  }
+
+  public bindStagedOutput(
+    id: string,
+    notebookUri: string,
+    cellUri: string
+  ): boolean {
+    const record = this.records.get(id);
+    if (!record?.staged || record.notebookUri !== notebookUri) {
+      return false;
+    }
+    this.bind(id, {
+      notebookUri,
+      cellUri,
+      query: record.query,
+      connectionName: record.connectionName,
+      elapsedMs: record.elapsedMs,
+      value: record.value,
+    });
+    return true;
   }
 
   public remove(id: string, notebookUri: string): void {
@@ -644,7 +666,10 @@ export class LiveNotebookResultStore {
   private bind(id: string, registration: LiveNotebookResultRegistration): void {
     const previous = this.records.get(id);
     if (previous) {
-      this.cellResults.delete(cellKey(previous.notebookUri, previous.cellUri));
+      const previousKey = cellKey(previous.notebookUri, previous.cellUri);
+      if (this.cellResults.get(previousKey) === id) {
+        this.cellResults.delete(previousKey);
+      }
     }
     const targetKey = cellKey(registration.notebookUri, registration.cellUri);
     const replacedId = this.cellResults.get(targetKey);
@@ -655,6 +680,7 @@ export class LiveNotebookResultStore {
       ...registration,
       id,
       createdAt: previous?.createdAt ?? Date.now(),
+      staged: false,
       viewKey: previous?.viewKey,
       converted: previous?.converted,
       sortOrders: previous?.sortOrders ?? new Map<string, number[]>(),
@@ -763,7 +789,10 @@ function columnSelectionTable(
   return createColumnarPanelResult(
     indexes.map(index => table.columns[index]),
     table.rowCount,
-    (rowIndex, columnIndex) => table.cellValue(rowIndex, indexes[columnIndex])
+    (rowIndex, columnIndex) => table.cellValue(rowIndex, indexes[columnIndex]),
+    table.columnTypes
+      ? indexes.map(index => table.columnTypes![index])
+      : undefined
   );
 }
 
@@ -775,7 +804,8 @@ function inlineChartSource(table: ColumnarPanelResult): ColumnarPanelResult {
   return createColumnarPanelResult(
     columns,
     table.rowCount,
-    (rowIndex, columnIndex) => table.cellValue(rowIndex, columnIndex)
+    (rowIndex, columnIndex) => table.cellValue(rowIndex, columnIndex),
+    table.columnTypes?.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS)
   );
 }
 

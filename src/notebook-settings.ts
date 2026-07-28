@@ -41,6 +41,14 @@ export function hasNotebookQMarker(source: string): boolean {
   return /^\uFEFF?%%q(?:\s|$)/.test(source);
 }
 
+export function notebookQSourceFromMagic(source: string): string | undefined {
+  if (!hasNotebookQMarker(source)) {
+    return undefined;
+  }
+  const firstNewline = source.indexOf('\n');
+  return firstNewline < 0 ? '' : source.slice(firstNewline + 1);
+}
+
 export function notebookQMagicLine(settings: Pick<NotebookSettings, 'rowLimit' | 'byteLimit'>): string {
   return `%%q --max-rows ${settings.rowLimit} --max-bytes ${settings.byteLimit}`;
 }

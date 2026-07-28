@@ -28,6 +28,7 @@ export interface ConnectionFormParseOptions {
 export interface ParsedConnectionForm {
   connection: KxConnection;
   passwordUpdate: string | null | undefined;
+  scopeKey?: string;
 }
 
 export class ConnectionFormValidationError extends Error {
@@ -50,6 +51,7 @@ const FORM_FIELDS = new Set([
   'clearPassword',
   'connectTimeoutMs',
   'queryTimeoutMs',
+  'scope',
 ]);
 
 export function parseConnectionFormPayload(
@@ -73,6 +75,7 @@ export function parseConnectionFormPayload(
   const password = requiredString(payload, 'password');
   const connectTimeoutText = requiredString(payload, 'connectTimeoutMs');
   const queryTimeoutText = requiredString(payload, 'queryTimeoutMs');
+  const scopeKey = typeof payload.scope === 'string' ? payload.scope : undefined;
   if (!Object.prototype.hasOwnProperty.call(payload, 'clearPassword') ||
       typeof payload.clearPassword !== 'boolean') {
     throw new ConnectionFormValidationError('Clear saved password must be a true or false value.', 'password');
@@ -125,6 +128,7 @@ export function parseConnectionFormPayload(
       payload.clearPassword,
       options.hasStoredPassword
     ),
+    ...(scopeKey ? { scopeKey } : {}),
   };
 }
 

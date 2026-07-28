@@ -44,6 +44,7 @@ export interface ExportShape {
 
 export interface ColumnarPanelResult {
   columns: string[];
+  columnTypes?: string[];
   rowCount: number;
   cellValue(rowIndex: number, columnIndex: number): unknown;
   cellText(rowIndex: number, columnIndex: number, options?: CellTextOptions): string;
@@ -354,12 +355,18 @@ export function rowsToTextFormat(
 export function createColumnarPanelResult(
   columns: string[],
   rowCount: number,
-  cellValue: (rowIndex: number, columnIndex: number) => unknown
+  cellValue: (rowIndex: number, columnIndex: number) => unknown,
+  columnTypes?: readonly string[]
 ): ColumnarPanelResult {
   const normalizedColumns = columns.map(column => String(column));
   const normalizedRowCount = nonNegativeCount(rowCount);
+  const normalizedColumnTypes = columnTypes?.slice(0, normalizedColumns.length)
+    .map(type => String(type || 'mixed'));
   const result: ColumnarPanelResult = {
     columns: normalizedColumns,
+    ...(normalizedColumnTypes && normalizedColumnTypes.length > 0
+      ? { columnTypes: normalizedColumnTypes }
+      : {}),
     rowCount: normalizedRowCount,
     cellValue(rowIndex: number, columnIndex: number): unknown {
       if (rowIndex < 0 || rowIndex >= normalizedRowCount || columnIndex < 0 || columnIndex >= normalizedColumns.length) {
@@ -408,9 +415,14 @@ export function filterColumnarPanelResult(result: ColumnarPanelResult, visibleCo
     }
   });
 
-  return createColumnarPanelResult(filteredColumns, result.rowCount, (rowIndex, columnIndex) => {
-    return result.cellValue(rowIndex, sourceColumnIndexes[columnIndex]);
-  });
+  return createColumnarPanelResult(
+    filteredColumns,
+    result.rowCount,
+    (rowIndex, columnIndex) => result.cellValue(rowIndex, sourceColumnIndexes[columnIndex]),
+    result.columnTypes
+      ? sourceColumnIndexes.map(columnIndex => result.columnTypes![columnIndex])
+      : undefined
+  );
 }
 
 export function applyColumnarRowOrder(result: ColumnarPanelResult, rowOrder: number[] | undefined): ColumnarPanelResult {
@@ -421,9 +433,12 @@ export function applyColumnarRowOrder(result: ColumnarPanelResult, rowOrder: num
   const sourceRowIndexes = rowOrder
     .map(rowIndex => Math.floor(Number(rowIndex)))
     .filter(rowIndex => Number.isFinite(rowIndex) && rowIndex >= 0 && rowIndex < result.rowCount);
-  return createColumnarPanelResult(result.columns, sourceRowIndexes.length, (rowIndex, columnIndex) => {
-    return result.cellValue(sourceRowIndexes[rowIndex], columnIndex);
-  });
+  return createColumnarPanelResult(
+    result.columns,
+    sourceRowIndexes.length,
+    (rowIndex, columnIndex) => result.cellValue(sourceRowIndexes[rowIndex], columnIndex),
+    result.columnTypes
+  );
 }
 
 export function sortedColumnarRowOrder(

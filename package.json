@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.10",
+  "version": "0.2.11",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -74,6 +74,7 @@
     "onCommand:vscode-kdb.runQNotebookCellAndSelectBelow",
     "onCommand:vscode-kdb.runQNotebookCellAndInsertBelow",
     "onCommand:vscode-kdb.selectNotebookQTarget",
+    "onCommand:vscode-kdb.runNotebookPreviewLive",
     "onCommand:vscode-kdb.openNotebookPreviewInResults"
   ],
   "scripts": {
@@ -92,8 +93,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.10.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.10.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.11.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.11.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -307,6 +308,12 @@
         "command": "vscode-kdb.selectNotebookQTarget",
         "title": "KX: Choose Notebook q Target",
         "icon": "$(server-process)",
+        "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
+        "command": "vscode-kdb.runNotebookPreviewLive",
+        "title": "KX: Run %%q Preview Live via Direct IPC",
+        "icon": "$(debug-start)",
         "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
@@ -598,6 +605,11 @@
           "group": "inline@2"
         },
         {
+          "command": "vscode-kdb.runNotebookPreviewLive",
+          "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && vscode-kdb.notebookResultAvailable && notebookCellResource not in vscode-kdb.qNotebookCellResources && !vscode-kdb.notebookDirectQControllerSelected",
+          "group": "inline@20"
+        },
+        {
           "command": "vscode-kdb.openNotebookPreviewInResults",
           "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && vscode-kdb.notebookResultAvailable",
           "group": "inline@21"
@@ -677,9 +689,11 @@
         },
         "vscode-kdb.connections": {
           "type": "array",
-          "scope": "application",
+          "scope": "resource",
+          "ignoreSync": false,
           "default": [],
-          "description": "Global direct q IPC connections. Authentication secrets are stored separately in VS Code SecretStorage.",
+          "description": "Direct q IPC profiles from User, Workspace, and Workspace Folder settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project. Passwords stay in VS Code SecretStorage, never enter settings or sync, and may require re-entry per environment.",
+          "markdownDescription": "Direct q IPC profiles from **User**, **Workspace**, and **Workspace Folder** settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project and survive container recreation. Passwords stay in VS Code SecretStorage, never enter settings or sync, and may require re-entry in each local or remote environment.",
           "items": {
             "type": "object",
             "additionalProperties": false,

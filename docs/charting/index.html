@@ -945,7 +945,7 @@
 </tr>
 </tbody>
 </table>
-<p>Column eligibility is inferred from a sample of visible data. Hidden columns do not appear as chart choices.</p>
+<p>Decoded q columns use shared q type metadata before any value sampling. q <code>byte</code>, <code>short</code>, <code>int</code>, <code>long</code>, <code>real</code>, and <code>float</code> are numeric; q <code>timestamp</code>, <code>month</code>, <code>date</code>, <code>datetime</code>, <code>timespan</code>, <code>minute</code>, <code>second</code>, and <code>time</code> are temporal. Every listed temporal type is a valid X choice for every chart family above, but not a numeric Y or OHLC choice. Portable notebook schema uses the same classification, so a saved temporal preview remains chartable within its stored rows. Unknown/untyped external values use conservative sample inference. Hidden columns do not appear as chart choices.</p>
 <h3 id="candlestick-validation">Candlestick validation</h3>
 <p>Candlestick rows require finite numeric OHLC values. The selected columns must be distinct, <code>High</code> must be at least <code>Low</code>, <code>Open</code>, and <code>Close</code>, and <code>Low</code> must be no greater than <code>Open</code> and <code>Close</code>. The chart reports the offending row/x value instead of drawing an invalid envelope.</p>
 <p>Rows at the same x value are aggregated into an OHLC candle. Further reduction uses financial buckets that preserve opening, high, low, and closing meaning.</p>
