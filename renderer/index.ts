@@ -2,6 +2,7 @@ import uPlot from 'uplot';
 import uPlotCss from 'uplot/dist/uPlot.min.css';
 import type { ActivationFunction, OutputItem, RendererContext } from 'vscode-notebook-renderer';
 import {
+  CHART_MAX_SAMPLED_POINTS,
   CHART_ZOOM_MAX_SAMPLED_POINTS,
   ChartType,
   buildChartData,
@@ -9,10 +10,19 @@ import {
   chartTypeCapabilities,
 } from '../src/charting';
 import {
+  ChartZoomAppliedData,
+  ChartZoomAppliedFailure,
+  ChartZoomLifecycleState,
+  applyChartZoomLifecycleFailure,
+  applyChartZoomLifecycleResponse,
   chartRequestIsCurrent,
+  chartZoomRequestedRenderRange,
   chartZoomRangeKey,
   isValidChartRange,
+  issueChartZoomLifecycleRequest,
   planChartAutoRefine,
+  reduceChartZoomLifecycle,
+  resetChartZoomLifecycle,
 } from '../src/chart-zoom';
 import {
   chartLegendToggleKey,
@@ -20,6 +30,19 @@ import {
   chartSeriesVisible,
   updateHiddenChartSeriesKeys,
 } from '../src/chart-series-state';
+import {
+  KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+  KX_COLUMN_MAX_WIDTH,
+  KX_COLUMN_MIN_WIDTH,
+  VariableColumnMetrics,
+  automaticColumnWidthsForLengths,
+  hasPositionalColumnWidths,
+  normalizePositionalColumnWidths,
+  resolvedColumnWidth,
+  updatePositionalColumnWidth,
+  variableColumnMetrics,
+  widestDisplayedColumnTextLengths,
+} from '../src/column-sizing';
 import {
   ColumnarPanelResult,
   ExportFormat,
@@ -57,6 +80,7 @@ import {
   notebookSearchEnterAction,
   notebookSelectionToolsState,
   reconcileNotebookChartYColumns,
+  reconcileNotebookHiddenColumnIndexes,
   toggleNotebookChartYColumn,
 } from '../src/notebook-renderer-model';
 import {
@@ -144,10 +168,11 @@ interface LiveChartState {
   requestRange?: { min: number; max: number };
   autoRefineTimer?: number;
   lastAutoRefineRangeKey: string;
-  syncAutoRefineRangeOnNextPlot: boolean;
+  requestedRenderRange?: PlotScaleRange;
   refined: boolean;
   error?: string;
   errorWasRefinement?: boolean;
+  zoomLifecycle: ChartZoomLifecycleState<NotebookLiveChartData>;
 }
 
 interface PlotScaleRange {
@@ -196,11 +221,13 @@ interface OutputState {
   liveId?: string;
   liveStatus: LiveStatus;
   liveRequestId: number;
+  liveColumnTextLengthRequestId: number;
   liveMode?: 'table' | 'text';
   liveKind?: string;
   liveAllColumns: string[];
   liveTotalColumnCount: number;
   liveColumns: string[];
+  liveWholeResultColumnTextLengths: number[];
   liveColumnOrder: number[];
   liveHiddenColumnIndexes: number[];
   liveRowCount: number;
@@ -245,6 +272,10 @@ interface OutputState {
   savedScrollLeft: number;
   savedViewportHeight?: number;
   savedViewport?: HTMLElement;
+  savedColumnTextLengthCache?: {
+    arrayDisplayFormat: NotebookSharedKxResultSettings['arrayDisplayFormat'];
+    lengths: number[];
+  };
   renderTimer?: number;
   searchTimer?: number;
   plotSeriesKeys: string[];
@@ -333,9 +364,11 @@ export const activate: ActivationFunction<RendererState> = context => {
           ? (outputBinding ? 'requesting' : 'unavailable')
           : 'none',
         liveRequestId: 0,
+        liveColumnTextLengthRequestId: 0,
         liveAllColumns: [],
         liveTotalColumnCount: 0,
         liveColumns: [],
+        liveWholeResultColumnTextLengths: [],
         liveColumnOrder: [],
         liveHiddenColumnIndexes: [],
         liveRowCount: 0,
@@ -401,6 +434,12 @@ function receiveHostMessage(
       previous.listDisplayStrategy !== resultSettings.listDisplayStrategy ||
       previous.objectDisplayStrategy !== resultSettings.objectDisplayStrategy;
     const sliceTextChanged = previous.arrayDisplayFormat !== resultSettings.arrayDisplayFormat;
+    const wholeResultSizingNeedsRefresh =
+      resultSettings.autoFitColumns &&
+      resultSettings.autoFitMode === 'wholeResult' &&
+      (!previous.autoFitColumns ||
+        previous.autoFitMode !== 'wholeResult' ||
+        sliceTextChanged);
     const chartMaxPointLimitChanged =
       previous.chartZoomMaxSampledPoints !== resultSettings.chartZoomMaxSampledPoints;
     const chartSourceLimitChanged =
@@ -423,13 +462,42 @@ function receiveHostMessage(
       if (liveChartSamplingChanged) {
         markLiveChartDirty(state.liveChart);
       }
-      if (conversionChanged && state.liveId && state.liveStatus === 'available') {
-        requestLiveResult(context, state);
-        return;
+      if (sliceTextChanged) {
+        state.savedColumnTextLengthCache = undefined;
       }
+      const liveSearchQueryToRefresh =
+        sliceTextChanged && !conversionChanged && state.liveMode === 'table'
+          ? state.liveSearch.query
+          : '';
       if (sliceTextChanged && state.liveMode === 'table') {
+        if (state.searchTimer !== undefined) {
+          window.clearTimeout(state.searchTimer);
+          state.searchTimer = undefined;
+        }
         state.liveSlice = undefined;
         state.liveSliceError = undefined;
+        state.liveSliceRequestId = nextRequestId();
+        state.liveSearch = {
+          ...emptyLiveSearch(),
+          query: liveSearchQueryToRefresh,
+        };
+      }
+      if ((conversionChanged || wholeResultSizingNeedsRefresh) &&
+        state.liveId && state.liveStatus === 'available') {
+        state.liveWholeResultColumnTextLengths = [];
+        if (conversionChanged) {
+          requestLiveResult(context, state);
+        } else {
+          requestLiveColumnTextLengths(context, state);
+          if (liveSearchQueryToRefresh) {
+            requestLiveSearch(context, state);
+          }
+        }
+        renderState(context, state);
+        return;
+      }
+      if (liveSearchQueryToRefresh) {
+        requestLiveSearch(context, state);
       }
       renderState(context, state);
     });
@@ -450,6 +518,15 @@ function receiveHostMessage(
   for (const state of matching) {
     if (message.type === 'liveResult') {
       receiveLiveResult(context, state, message);
+    } else if (message.type === 'liveColumnTextLengths') {
+      if (message.requestId !== state.liveColumnTextLengthRequestId ||
+        state.liveStatus !== 'available' ||
+        !resultSettings.autoFitColumns ||
+        resultSettings.autoFitMode !== 'wholeResult') {
+        continue;
+      }
+      state.liveWholeResultColumnTextLengths = message.lengths.slice();
+      renderState(context, state);
     } else if (message.type === 'liveSlice') {
       if (message.requestId !== state.liveSliceRequestId) {
         continue;
@@ -504,25 +581,54 @@ function receiveHostMessage(
       if (!chartRequestIsCurrent(state.liveChart.requestId, message.requestId)) {
         continue;
       }
-      state.liveChart.pending = false;
+      const responseWasRefinement = !!state.liveChart.requestRange;
       if (message.data) {
-        if (state.liveChart.requestRange) {
-          state.liveChart.fullData = state.liveChart.fullData || state.liveChart.data;
-          state.liveChart.syncAutoRefineRangeOnNextPlot = true;
-          state.liveChart.refined = true;
-        } else {
-          state.liveChart.fullData = message.data;
-          state.liveChart.fullRange = chartDataXRange(message.data);
-          state.liveChart.lastAutoRefineRangeKey = '';
-          state.liveChart.syncAutoRefineRangeOnNextPlot = false;
-          state.liveChart.refined = false;
+        state.liveChart.pending = false;
+        const applied: {
+          value?: ChartZoomAppliedData<NotebookLiveChartData>;
+        } = {};
+        applyChartZoomLifecycleResponse(
+          state.liveChart.zoomLifecycle,
+          message.requestId,
+          message.data,
+          value => {
+            applied.value = value;
+          }
+        );
+        if (!applied.value) {
+          continue;
         }
-        state.liveChart.data = message.data;
+        let lifecycle = applied.value.state;
+        if (!responseWasRefinement) {
+          lifecycle = reduceChartZoomLifecycle(lifecycle, {
+            type: 'rendered',
+            requestId: message.requestId,
+            naturalRange: chartDataXRange(message.data),
+          });
+          state.liveChart.lastAutoRefineRangeKey = '';
+        }
+        applyLiveChartZoomLifecycle(state.liveChart, lifecycle);
+      } else {
+        const failed: {
+          value?: ChartZoomAppliedFailure<NotebookLiveChartData>;
+        } = {};
+        applyChartZoomLifecycleFailure(
+          state.liveChart.zoomLifecycle,
+          message.requestId,
+          value => {
+            failed.value = value;
+          }
+        );
+        if (!failed.value) {
+          continue;
+        }
+        state.liveChart.pending = false;
+        applyLiveChartZoomLifecycle(state.liveChart, failed.value.state);
       }
       state.liveChart.dirty =
         state.liveChart.requestSignature !== liveChartConfigurationSignature(state.liveChart);
       state.liveChart.errorWasRefinement =
-        !!message.error && !!state.liveChart.requestRange;
+        !!message.error && responseWasRefinement;
       state.liveChart.requestRange = undefined;
       state.liveChart.error = message.error;
       renderState(context, state);
@@ -557,20 +663,21 @@ function receiveLiveResult(
   state.liveStatus = 'available';
   state.liveMode = message.mode;
   state.liveKind = message.kind;
+  const previousColumns = state.liveAllColumns.slice();
   const previousOrderNames = state.liveColumnOrder
     .map(index => state.liveAllColumns[index])
     .filter((name): name is string => typeof name === 'string');
-  const previousHiddenNames = new Set(
-    state.liveHiddenColumnIndexes
-      .map(index => state.liveAllColumns[index])
-      .filter((name): name is string => typeof name === 'string')
-  );
+  const previousHiddenColumnIndexes = state.liveHiddenColumnIndexes.slice();
   state.liveAllColumns = message.columns || [];
+  state.liveWholeResultColumnTextLengths =
+    message.wholeResultColumnTextLengths?.slice() || [];
   state.liveTotalColumnCount = message.totalColumnCount ?? state.liveAllColumns.length;
   state.liveColumnOrder = reconciledColumnOrder(state.liveAllColumns, previousOrderNames);
-  state.liveHiddenColumnIndexes = state.liveAllColumns
-    .map((_name, index) => index)
-    .filter(index => previousHiddenNames.has(state.liveAllColumns[index]));
+  state.liveHiddenColumnIndexes = reconcileNotebookHiddenColumnIndexes(
+    previousColumns,
+    previousHiddenColumnIndexes,
+    state.liveAllColumns
+  );
   syncLiveVisibleColumns(state);
   state.liveRowCount = message.rowCount || 0;
   state.liveChartXColumns = message.chartXColumns || [];
@@ -592,11 +699,18 @@ function receiveLiveResult(
     visibleChartColumns.numeric,
     visibleChartColumns.group
   );
+  const chartRequestId = nextRequestId();
+  const preservedZoomLifecycle = previousChart.pending
+    ? reduceChartZoomLifecycle(previousChart.zoomLifecycle, {
+      type: 'cancel',
+      requestId: previousChart.requestId,
+    })
+    : previousChart.zoomLifecycle;
   state.liveChart = {
     ...previousChart,
     ...reconciledChart.configuration,
     maxPoints: notebookChartPointLimit(),
-    requestId: nextRequestId(),
+    requestId: chartRequestId,
     requestSignature: reconciledChart.compatible
       ? previousChart.requestSignature
       : undefined,
@@ -610,18 +724,25 @@ function receiveLiveResult(
     lastAutoRefineRangeKey: reconciledChart.compatible
       ? previousChart.lastAutoRefineRangeKey
       : '',
-    syncAutoRefineRangeOnNextPlot: reconciledChart.compatible
-      ? previousChart.syncAutoRefineRangeOnNextPlot
-      : false,
+    requestedRenderRange: reconciledChart.compatible
+      ? previousChart.requestedRenderRange
+      : undefined,
     refined: reconciledChart.compatible ? previousChart.refined : false,
     error: undefined,
     errorWasRefinement: false,
+    zoomLifecycle: reconciledChart.compatible
+      ? preservedZoomLifecycle
+      : reduceChartZoomLifecycle<NotebookLiveChartData>(null, {
+        type: 'clear',
+        requestId: chartRequestId,
+      }),
   };
   renderState(context, state);
 }
 
 function isOutstandingLiveRequest(state: OutputState, requestId: number): boolean {
   return requestId === state.liveRequestId ||
+    requestId === state.liveColumnTextLengthRequestId ||
     requestId === state.liveSliceRequestId ||
     requestId === state.liveSearch.requestId ||
     requestId === state.liveChart.requestId ||
@@ -638,11 +759,13 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
   clearLiveChartAutoRefine(state.liveChart, true);
   state.liveStatus = 'unavailable';
   state.liveRequestId = nextRequestId();
+  state.liveColumnTextLengthRequestId = nextRequestId();
   state.liveMode = undefined;
   state.liveKind = undefined;
   state.liveAllColumns = [];
   state.liveTotalColumnCount = 0;
   state.liveColumns = [];
+  state.liveWholeResultColumnTextLengths = [];
   state.liveColumnOrder = [];
   state.liveHiddenColumnIndexes = [];
   state.liveRowCount = 0;
@@ -661,9 +784,10 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
   state.liveSortDirection = undefined;
   state.liveSelection = undefined;
   state.liveSearch = emptyLiveSearch();
+  const chartRequestId = nextRequestId();
   state.liveChart = {
     ...state.liveChart,
-    requestId: nextRequestId(),
+    requestId: chartRequestId,
     requestSignature: undefined,
     pending: false,
     dirty: true,
@@ -673,10 +797,14 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
     requestRange: undefined,
     autoRefineTimer: undefined,
     lastAutoRefineRangeKey: '',
-    syncAutoRefineRangeOnNextPlot: false,
+    requestedRenderRange: undefined,
     refined: false,
     error: undefined,
     errorWasRefinement: false,
+    zoomLifecycle: reduceChartZoomLifecycle<NotebookLiveChartData>(null, {
+      type: 'clear',
+      requestId: chartRequestId,
+    }),
   };
   state.liveCopyRequestId = nextRequestId();
   state.liveOpenRequestId = nextRequestId();
@@ -1104,10 +1232,10 @@ function renderLiveGrid(
     resultSettings.rowHeight,
     LIVE_HEADER_HEIGHT
   )}px`;
-  const cellWidth = resultSettings.cellWidth;
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
+  const columnMetrics = variableColumnMetrics(liveColumnWidths(state));
   const canvas = node('div', 'kx-live-canvas');
-  canvas.style.width = `${rowIndexWidth + state.liveColumns.length * cellWidth}px`;
+  canvas.style.width = `${rowIndexWidth + columnMetrics.totalWidth}px`;
   canvas.style.height = `${liveCanvasHeight(state)}px`;
   viewport.append(canvas);
   root.append(viewport);
@@ -1150,12 +1278,68 @@ interface LiveWindow {
   endColumn: number;
 }
 
+function liveColumnWidths(state: OutputState): number[] {
+  const visibleSourceIndexes = visibleLiveColumnIndexes(state);
+  const visibleAutomaticWidths = resultSettings.autoFitColumns
+    ? automaticColumnWidthsForLengths(
+      liveColumnTextLengths(state),
+      resultSettings.fontSize,
+      7
+    )
+    : [];
+  const automaticWidths: number[] = [];
+  visibleSourceIndexes.forEach((sourceIndex, position) => {
+    automaticWidths[sourceIndex] = visibleAutomaticWidths[position];
+  });
+  return visibleSourceIndexes.map(sourceIndex =>
+    resolvedColumnWidth(
+      sourceIndex,
+      resultSettings.cellWidth,
+      resultSettings.columnWidths,
+      resultSettings.autoFitColumns,
+      automaticWidths
+    ));
+}
+
+function liveColumnTextLengths(state: OutputState): number[] {
+  const visibleSourceIndexes = visibleLiveColumnIndexes(state);
+  const lengths = state.liveColumns.map((column, position) => {
+    const sourceIndex = visibleSourceIndexes[position];
+    return resultSettings.autoFitMode === 'wholeResult'
+      ? Math.max(
+        column.length,
+        state.liveWholeResultColumnTextLengths[sourceIndex] || 0
+      )
+      : column.length;
+  });
+  if (resultSettings.autoFitMode !== 'visibleRows' || !state.liveSlice) {
+    return lengths;
+  }
+  const slice = state.liveSlice;
+  for (let column = slice.startColumn; column <= slice.endColumn; column += 1) {
+    if (column < 0 || column >= lengths.length) {
+      continue;
+    }
+    for (const row of slice.cells) {
+      lengths[column] = Math.min(
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+        Math.max(
+          lengths[column],
+          String(row[column - slice.startColumn] || '').length
+        )
+      );
+    }
+  }
+  return lengths;
+}
+
 function liveWindow(
   state: OutputState,
   viewportWidth: number,
   viewportHeight = liveViewportHeight(state)
 ): LiveWindow {
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
+  const columnWidths = liveColumnWidths(state);
   return notebookGridWindow({
     rowCount: state.liveRowCount,
     columnCount: state.liveColumns.length,
@@ -1165,6 +1349,7 @@ function liveWindow(
     viewportHeight,
     rowHeight: resultSettings.rowHeight,
     cellWidth: resultSettings.cellWidth,
+    columnWidths,
     rowIndexWidth,
     headerHeight: LIVE_HEADER_HEIGHT,
     rowOverscan: LIVE_ROW_OVERSCAN,
@@ -1185,7 +1370,8 @@ function refreshLiveViewport(
     return;
   }
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
-  canvas.style.width = `${rowIndexWidth + state.liveColumns.length * resultSettings.cellWidth}px`;
+  const columnMetrics = variableColumnMetrics(liveColumnWidths(state));
+  canvas.style.width = `${rowIndexWidth + columnMetrics.totalWidth}px`;
   canvas.style.height = `${liveCanvasHeight(state)}px`;
   const window = liveWindow(
     state,
@@ -1193,8 +1379,15 @@ function refreshLiveViewport(
     viewport.clientHeight || liveViewportHeight(state)
   );
   canvas.replaceChildren();
-  renderLiveHeaders(context, state, canvas, window.startColumn, window.endColumn);
-  renderLiveCells(state, canvas, window);
+  renderLiveHeaders(
+    context,
+    state,
+    canvas,
+    window.startColumn,
+    window.endColumn,
+    columnMetrics
+  );
+  renderLiveCells(state, canvas, window, columnMetrics);
   syncLiveActiveDescendant(state);
   if (state.liveRowCount === 0) {
     const empty = node('div', 'kx-live-empty', '0 rows');
@@ -1202,7 +1395,10 @@ function refreshLiveViewport(
       empty,
       rowIndexWidth,
       LIVE_HEADER_HEIGHT,
-      Math.max(resultSettings.cellWidth, viewport.clientWidth - rowIndexWidth),
+      Math.max(
+        columnMetrics.widths[0] || resultSettings.cellWidth,
+        viewport.clientWidth - rowIndexWidth
+      ),
       resultSettings.rowHeight
     );
     canvas.append(empty);
@@ -1218,9 +1414,11 @@ function renderLiveHeaders(
   state: OutputState,
   canvas: HTMLElement,
   startColumn: number,
-  endColumn: number
+  endColumn: number,
+  columnMetrics: VariableColumnMetrics
 ): void {
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
+  const visibleSourceIndexes = visibleLiveColumnIndexes(state);
   const row = node('div', 'kx-live-row kx-live-header-row');
   row.setAttribute('role', 'row');
   row.setAttribute('aria-rowindex', '1');
@@ -1228,7 +1426,7 @@ function renderLiveHeaders(
     row,
     0,
     state.liveScrollTop,
-    rowIndexWidth + state.liveColumns.length * resultSettings.cellWidth,
+    rowIndexWidth + columnMetrics.totalWidth,
     LIVE_HEADER_HEIGHT
   );
   if (resultSettings.showRowIndex) {
@@ -1297,11 +1495,17 @@ function renderLiveHeaders(
         : 'none'
     );
     header.title = `Sort by ${columnName}; Shift+click selects a column range`;
+    header.append(columnResizeHandle(
+      context,
+      state,
+      visibleSourceIndexes[columnIndex] ?? columnIndex,
+      columnMetrics.widths[columnIndex]
+    ));
     placeLiveCell(
       header,
-      rowIndexWidth + columnIndex * resultSettings.cellWidth,
+      rowIndexWidth + columnMetrics.lefts[columnIndex],
       0,
-      resultSettings.cellWidth,
+      columnMetrics.widths[columnIndex],
       LIVE_HEADER_HEIGHT
     );
     row.append(header);
@@ -1309,7 +1513,12 @@ function renderLiveHeaders(
   canvas.append(row);
 }
 
-function renderLiveCells(state: OutputState, canvas: HTMLElement, window: LiveWindow): void {
+function renderLiveCells(
+  state: OutputState,
+  canvas: HTMLElement,
+  window: LiveWindow,
+  columnMetrics: VariableColumnMetrics
+): void {
   const slice = state.liveSlice;
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
   const virtualTop = liveVirtualScrollTop(state);
@@ -1323,7 +1532,7 @@ function renderLiveCells(state: OutputState, canvas: HTMLElement, window: LiveWi
       row,
       0,
       top,
-      rowIndexWidth + state.liveColumns.length * resultSettings.cellWidth,
+      rowIndexWidth + columnMetrics.totalWidth,
       resultSettings.rowHeight
     );
     if (resultSettings.showRowIndex) {
@@ -1400,9 +1609,9 @@ function renderLiveCells(state: OutputState, canvas: HTMLElement, window: LiveWi
       });
       placeLiveCell(
         cell,
-        rowIndexWidth + columnIndex * resultSettings.cellWidth,
+        rowIndexWidth + columnMetrics.lefts[columnIndex],
         0,
-        resultSettings.cellWidth,
+        columnMetrics.widths[columnIndex],
         resultSettings.rowHeight
       );
       row.append(cell);
@@ -1585,22 +1794,7 @@ function renderLiveChart(
   exportPng.disabled = !chart.data || !state.plot;
   controls.append(exportPng);
   const reset = button(KX_RESULT_UI_LABELS.resetZoom, () => {
-    clearLiveChartAutoRefine(chart, true);
-    if (chart.pending && chart.requestRange) {
-      chart.requestId = nextRequestId();
-      chart.pending = false;
-      chart.requestRange = undefined;
-      chart.syncAutoRefineRangeOnNextPlot = false;
-      chart.error = undefined;
-      chart.errorWasRefinement = false;
-    }
-    if (chart.refined && chart.fullData) {
-      chart.data = chart.fullData;
-      chart.refined = false;
-      renderState(context, state);
-      return;
-    }
-    resetPlotZoom(state);
+    resetLiveChartZoom(context, state);
   });
   withFocusKey(reset, 'chart:live:reset');
   reset.disabled = !chart.data;
@@ -1659,6 +1853,37 @@ function renderLiveChart(
   }
 }
 
+function resetLiveChartZoom(
+  context: RendererContext<RendererState>,
+  state: OutputState
+): void {
+  const chart = state.liveChart;
+  clearLiveChartAutoRefine(chart, true);
+  if ((chart.pending && chart.requestRange) || chart.zoomLifecycle.dataIsRefinement) {
+    chart.requestId = nextRequestId();
+    chart.pending = false;
+    chart.requestRange = undefined;
+    chart.error = undefined;
+    chart.errorWasRefinement = false;
+    const restored: {
+      value?: ChartZoomAppliedData<NotebookLiveChartData>;
+    } = {};
+    const lifecycle = resetChartZoomLifecycle(
+      chart.zoomLifecycle,
+      chart.requestId,
+      value => {
+        restored.value = value;
+      }
+    );
+    applyLiveChartZoomLifecycle(chart, restored.value?.state || lifecycle);
+    if (chart.data) {
+      renderState(context, state);
+      return;
+    }
+  }
+  resetPlotZoom(state);
+}
+
 function markLiveChartDirty(chart: LiveChartState): void {
   clearLiveChartAutoRefine(chart, true);
   chart.dirty = true;
@@ -1713,35 +1938,42 @@ function requestLiveChart(
   chart.pending = true;
   chart.error = undefined;
   chart.errorWasRefinement = false;
-  chart.requestRange = range;
-  if (!range) {
-    chart.fullData = undefined;
-    chart.fullRange = undefined;
-    chart.refined = false;
-  }
   const capabilities = chartTypeCapabilities(chart.chartType);
-  context.postMessage({
-    type: 'requestLiveChart',
-    outputId: state.outputId,
-    liveId: state.liveId,
-    requestId,
-    chartType: chart.chartType,
-    xColumn: chart.xColumn,
-    yColumns: capabilities.usesGenericY ? chart.yColumns.slice(0, 16) : [],
-    ...(capabilities.supportsGroupBy && chart.groupByColumn
-      ? { groupByColumn: chart.groupByColumn }
-      : {}),
-    ...(capabilities.usesOhlc
-      ? {
-        openColumn: chart.openColumn,
-        highColumn: chart.highColumn,
-        lowColumn: chart.lowColumn,
-        closeColumn: chart.closeColumn,
+  applyLiveChartZoomLifecycle(
+    chart,
+    issueChartZoomLifecycleRequest(
+      chart.zoomLifecycle,
+      requestId,
+      range,
+      request => {
+        chart.requestRange = request.range || undefined;
+        context.postMessage?.({
+          type: 'requestLiveChart',
+          outputId: state.outputId!,
+          liveId: state.liveId!,
+          requestId: request.requestId,
+          chartType: chart.chartType,
+          xColumn: chart.xColumn,
+          yColumns: capabilities.usesGenericY ? chart.yColumns.slice(0, 16) : [],
+          ...(capabilities.supportsGroupBy && chart.groupByColumn
+            ? { groupByColumn: chart.groupByColumn }
+            : {}),
+          ...(capabilities.usesOhlc
+            ? {
+              openColumn: chart.openColumn,
+              highColumn: chart.highColumn,
+              lowColumn: chart.lowColumn,
+              closeColumn: chart.closeColumn,
+            }
+            : {}),
+          maxPoints: Math.min(MAX_NOTEBOOK_LIVE_CHART_POINTS, Math.max(1, chart.maxPoints)),
+          ...(request.range
+            ? { xMin: request.range.min, xMax: request.range.max }
+            : {}),
+        });
       }
-      : {}),
-    maxPoints: Math.min(MAX_NOTEBOOK_LIVE_CHART_POINTS, Math.max(1, chart.maxPoints)),
-    ...(range ? { xMin: range.min, xMax: range.max } : {}),
-  });
+    )
+  );
 }
 
 function liveChartConfigurationSignature(chart: LiveChartState): string {
@@ -1984,6 +2216,23 @@ function renderSavedTable(
   const rowOrder = savedRowOrder(state, payload);
   reconcileSavedSearch(state, payload, rowOrder);
   const visibleColumns = visibleSavedColumnIndexes(state);
+  const pageSize = Math.max(1, Math.min(
+    TABLE_PAGE_SIZE,
+    Math.floor(MAX_TABLE_PAGE_CELLS / Math.max(1, visibleColumns.length))
+  ));
+  const lastPageStart = payload.data.rows.length === 0
+    ? 0
+    : Math.floor((payload.data.rows.length - 1) / pageSize) * pageSize;
+  const pageStart = Math.min(state.savedTablePageStart, lastPageStart);
+  const pageEnd = Math.min(payload.data.rows.length, pageStart + pageSize);
+  const columnWidths = savedColumnWidths(
+    state,
+    payload,
+    visibleColumns,
+    rowOrder,
+    pageStart,
+    pageEnd
+  );
   const currentActionCellCount = () =>
     savedActionCellCount(state, payload, visibleColumns.length);
   const copySelection = (format: NotebookLiveCopyFormat): void =>
@@ -2188,15 +2437,19 @@ function renderSavedTable(
   )}px`;
   state.savedViewport = wrap;
   const table = document.createElement('table');
+  table.style.width = `${
+    columnWidths.reduce((total, width) => total + width, 0) +
+    (resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0)
+  }px`;
   const colgroup = document.createElement('colgroup');
   if (resultSettings.showRowIndex) {
     const indexColumn = document.createElement('col');
     indexColumn.style.width = `${LIVE_ROW_INDEX_WIDTH}px`;
     colgroup.append(indexColumn);
   }
-  visibleColumns.forEach(() => {
+  visibleColumns.forEach((_sourceColumnIndex, position) => {
     const column = document.createElement('col');
-    column.style.width = `${resultSettings.cellWidth}px`;
+    column.style.width = `${columnWidths[position]}px`;
     colgroup.append(column);
   });
   table.append(colgroup);
@@ -2270,20 +2523,17 @@ function renderSavedTable(
     sort.title = `Sort by ${column.name}; Shift+click selects a column range`;
     th.append(sort);
     th.append(node('span', 'kx-column-type', column.type));
+    th.append(columnResizeHandle(
+      context,
+      state,
+      sourceColumnIndex,
+      columnWidths[columnIndex]
+    ));
     headRow.append(th);
   });
   head.append(headRow);
   table.append(head);
   const body = document.createElement('tbody');
-  const pageSize = Math.max(1, Math.min(
-    TABLE_PAGE_SIZE,
-    Math.floor(MAX_TABLE_PAGE_CELLS / Math.max(1, visibleColumns.length))
-  ));
-  const lastPageStart = payload.data.rows.length === 0
-    ? 0
-    : Math.floor((payload.data.rows.length - 1) / pageSize) * pageSize;
-  const pageStart = Math.min(state.savedTablePageStart, lastPageStart);
-  const pageEnd = Math.min(payload.data.rows.length, pageStart + pageSize);
   rowOrder.slice(pageStart, pageEnd).forEach((sourceRow, pageIndex) => {
     const rowIndex = pageStart + pageIndex;
     const row = payload.data.rows[sourceRow];
@@ -2582,6 +2832,101 @@ function revealSavedSelection(
   state.savedScrollLeft = wrap.scrollLeft;
 }
 
+function savedColumnWidths(
+  state: OutputState,
+  payload: PortableKxTableResult,
+  visibleColumns: readonly number[],
+  rowOrder: readonly number[],
+  pageStart: number,
+  pageEnd: number
+): number[] {
+  let automaticWidths: number[] = [];
+  if (resultSettings.autoFitColumns) {
+    const sourceLengths = resultSettings.autoFitMode === 'wholeResult'
+      ? savedWholeResultColumnTextLengths(state, payload)
+      : savedVisibleRowColumnTextLengths(
+        payload,
+        rowOrder,
+        pageStart,
+        pageEnd
+      );
+    const visibleAutomaticWidths = automaticColumnWidthsForLengths(
+      visibleColumns.map(sourceIndex => sourceLengths[sourceIndex] || 0),
+      resultSettings.fontSize,
+      7
+    );
+    visibleColumns.forEach((sourceIndex, position) => {
+      automaticWidths[sourceIndex] = visibleAutomaticWidths[position];
+    });
+  }
+  return visibleColumns.map(sourceIndex =>
+    resolvedColumnWidth(
+      sourceIndex,
+      resultSettings.cellWidth,
+      resultSettings.columnWidths,
+      resultSettings.autoFitColumns,
+      automaticWidths
+    ));
+}
+
+function savedWholeResultColumnTextLengths(
+  state: OutputState,
+  payload: PortableKxTableResult
+): number[] {
+  const cached = state.savedColumnTextLengthCache;
+  if (cached?.arrayDisplayFormat === resultSettings.arrayDisplayFormat) {
+    return cached.lengths.slice();
+  }
+  const lengths = widestDisplayedColumnTextLengths(portableTable(payload), {
+    arrayDisplayFormat: resultSettings.arrayDisplayFormat,
+  });
+  payload.schema.columns.forEach((column, index) => {
+    lengths[index] = Math.min(
+      KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+      Math.max(lengths[index] || 0, column.name.length, column.type.length)
+    );
+  });
+  state.savedColumnTextLengthCache = {
+    arrayDisplayFormat: resultSettings.arrayDisplayFormat,
+    lengths,
+  };
+  return lengths.slice();
+}
+
+function savedVisibleRowColumnTextLengths(
+  payload: PortableKxTableResult,
+  rowOrder: readonly number[],
+  pageStart: number,
+  pageEnd: number
+): number[] {
+  const lengths = payload.schema.columns.map(column =>
+    Math.min(
+      KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+      Math.max(column.name.length, column.type.length)
+    ));
+  for (let displayRow = pageStart; displayRow < pageEnd; displayRow += 1) {
+    const row = payload.data.rows[rowOrder[displayRow]];
+    if (!row) {
+      continue;
+    }
+    row.forEach((cell, column) => {
+      if (lengths[column] >= KX_COLUMN_AUTO_TEXT_CHAR_LIMIT) {
+        return;
+      }
+      lengths[column] = Math.min(
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+        Math.max(
+          lengths[column],
+          portableCellText(cell, {
+            arrayDisplayFormat: resultSettings.arrayDisplayFormat,
+          }).length
+        )
+      );
+    });
+  }
+  return lengths;
+}
+
 function renderSavedChartControls(
   context: RendererContext<RendererState>,
   state: OutputState,
@@ -2877,7 +3222,8 @@ function drawNotebookChart(
       autoRefine ? context : undefined
     ),
     aligned,
-    data
+    data,
+    autoRefine ? () => resetLiveChartZoom(context, state) : undefined
   );
   if (autoRefine) {
     syncLiveChartRenderedAutoRefineRange(state);
@@ -2916,7 +3262,8 @@ function createPlot(
   host: HTMLElement,
   options: uPlot.Options,
   data: uPlot.AlignedData,
-  sourceData: NotebookLiveChartData
+  sourceData: NotebookLiveChartData,
+  resetZoom?: () => void
 ): void {
   try {
     state.plot = new uPlot(options, data, host);
@@ -2925,7 +3272,11 @@ function createPlot(
     decoratePlotLegendAccessibility(state.plot);
     host.addEventListener('dblclick', event => {
       event.preventDefault();
-      resetPlotZoom(state);
+      if (resetZoom) {
+        resetZoom();
+      } else {
+        resetPlotZoom(state);
+      }
     });
     state.plotResizeObserver = new ResizeObserver(entries => {
       const width = Math.floor(entries[0]?.contentRect.width || 0);
@@ -3083,7 +3434,8 @@ function queueLiveChartAutoRefine(
     chart.fullRange,
     plotScaleRange(plot, 'x'),
     chart.lastAutoRefineRangeKey,
-    state.plot !== plot || chart.pending || chart.dirty || !chart.data
+    state.plot !== plot || chart.pending || chart.dirty || !chart.data ||
+      !!chart.requestedRenderRange
   );
   if (!plan) {
     clearLiveChartAutoRefine(chart);
@@ -3096,7 +3448,8 @@ function queueLiveChartAutoRefine(
       chart.fullRange,
       state.plot === plot ? plotScaleRange(plot, 'x') : undefined,
       chart.lastAutoRefineRangeKey,
-      state.plot !== plot || chart.pending || chart.dirty || !chart.data
+      state.plot !== plot || chart.pending || chart.dirty || !chart.data ||
+        !!chart.requestedRenderRange
     );
     if (!current || current.key !== plan.key) {
       return;
@@ -3113,24 +3466,51 @@ function clearLiveChartAutoRefine(chart: LiveChartState, resetRangeKey = false):
   }
   if (resetRangeKey) {
     chart.lastAutoRefineRangeKey = '';
-    chart.syncAutoRefineRangeOnNextPlot = false;
+    if (chart.zoomLifecycle.requestedRenderRange) {
+      applyLiveChartZoomLifecycle(
+        chart,
+        reduceChartZoomLifecycle(chart.zoomLifecycle, {
+          type: 'rendered',
+          requestId: chart.requestId,
+          naturalRange: undefined,
+        })
+      );
+    }
   }
 }
 
 function syncLiveChartRenderedAutoRefineRange(state: OutputState): void {
   const chart = state.liveChart;
-  if (!chart.syncAutoRefineRangeOnNextPlot || !state.plot) {
+  const requestedRange = chartZoomRequestedRenderRange(chart.zoomLifecycle);
+  if (!requestedRange || !state.plot) {
     return;
   }
-  chart.syncAutoRefineRangeOnNextPlot = false;
   clearLiveChartAutoRefine(chart);
-  const rendered = planChartAutoRefine(
-    chart.fullRange,
-    plotScaleRange(state.plot, 'x'),
-    '',
-    false
-  );
-  chart.lastAutoRefineRangeKey = rendered?.key || '';
+  chart.lastAutoRefineRangeKey = chartZoomRangeKey(requestedRange);
+  try {
+    state.plot.setScale('x', { min: requestedRange.min, max: requestedRange.max });
+  } finally {
+    applyLiveChartZoomLifecycle(
+      chart,
+      reduceChartZoomLifecycle(chart.zoomLifecycle, {
+        type: 'rendered',
+        requestId: chart.requestId,
+        naturalRange: plotScaleRange(state.plot, 'x'),
+      })
+    );
+  }
+}
+
+function applyLiveChartZoomLifecycle(
+  chart: LiveChartState,
+  lifecycle: ChartZoomLifecycleState<NotebookLiveChartData>
+): void {
+  chart.zoomLifecycle = lifecycle;
+  chart.data = lifecycle.data || undefined;
+  chart.fullData = lifecycle.fullData || undefined;
+  chart.fullRange = lifecycle.fullRange || undefined;
+  chart.requestedRenderRange = lifecycle.requestedRenderRange || undefined;
+  chart.refined = lifecycle.dataIsRefinement;
 }
 
 function chartDataXRange(data: NotebookLiveChartData): PlotScaleRange | undefined {
@@ -3772,6 +4152,9 @@ function resultColumnControl(
         candidates.numeric,
         candidates.group
       );
+      const chartRequestId = reconciled.compatible
+        ? state.liveChart.requestId
+        : nextRequestId();
       state.liveChart = {
         ...state.liveChart,
         ...reconciled.configuration,
@@ -3781,22 +4164,28 @@ function resultColumnControl(
         requestSignature: reconciled.compatible
           ? state.liveChart.requestSignature
           : undefined,
-        requestId: reconciled.compatible ? state.liveChart.requestId : nextRequestId(),
+        requestId: chartRequestId,
         pending: reconciled.compatible ? state.liveChart.pending : false,
         requestRange: reconciled.compatible ? state.liveChart.requestRange : undefined,
         autoRefineTimer: undefined,
         lastAutoRefineRangeKey: reconciled.compatible
           ? state.liveChart.lastAutoRefineRangeKey
           : '',
-        syncAutoRefineRangeOnNextPlot: reconciled.compatible
-          ? state.liveChart.syncAutoRefineRangeOnNextPlot
-          : false,
+        requestedRenderRange: reconciled.compatible
+          ? state.liveChart.requestedRenderRange
+          : undefined,
         dirty: reconciled.compatible ? state.liveChart.dirty : true,
         refined: reconciled.compatible ? state.liveChart.refined : false,
         error: reconciled.compatible ? state.liveChart.error : undefined,
         errorWasRefinement: reconciled.compatible
           ? state.liveChart.errorWasRefinement
           : false,
+        zoomLifecycle: reconciled.compatible
+          ? state.liveChart.zoomLifecycle
+          : reduceChartZoomLifecycle<NotebookLiveChartData>(null, {
+            type: 'clear',
+            requestId: chartRequestId,
+          }),
       };
     } else {
       state.savedColumnOrder = nextOrder;
@@ -3929,9 +4318,102 @@ function resultSettingsControl(
       ));
     }
   });
+  const resetWidths = button('Reset column widths', () => {
+    resultSettings = { ...resultSettings, columnWidths: {} };
+    renderState(context, state);
+    context.postMessage?.({ type: 'resetResultColumnWidths' });
+  });
+  resetWidths.disabled = !hasPositionalColumnWidths(
+    resultSettings.columnWidths
+  );
+  withFocusKey(resetWidths, 'settings:reset-column-widths');
+  panel.append(resetWidths);
   details.append(panel);
   keepDetailsPanelInsideResult(details, panel);
   return details;
+}
+
+function columnResizeHandle(
+  context: RendererContext<RendererState>,
+  state: OutputState,
+  position: number,
+  currentWidth: number
+): HTMLSpanElement {
+  const handle = node('span', 'kx-column-resize-handle');
+  handle.title = 'Drag to resize this column; double-click to reset its positional width';
+  handle.dataset.position = String(position);
+  handle.addEventListener('mousedown', event => {
+    if (event.button !== 0) {
+      return;
+    }
+    const startX = event.clientX;
+    const startWidth = currentWidth;
+    let nextWidth = currentWidth;
+    const guide = node('span', 'kx-column-resize-guide');
+    guide.style.left = `${event.clientX}px`;
+    document.body.append(guide);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const move = (moveEvent: MouseEvent): void => {
+      nextWidth = Math.min(
+        KX_COLUMN_MAX_WIDTH,
+        Math.max(
+          KX_COLUMN_MIN_WIDTH,
+          Math.round(startWidth + moveEvent.clientX - startX)
+        )
+      );
+      guide.style.left = `${moveEvent.clientX}px`;
+      handle.title = `Column ${position + 1}: ${nextWidth}px`;
+      moveEvent.preventDefault();
+    };
+    const finish = (): void => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', finish);
+      guide.remove();
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+      if (nextWidth !== currentWidth) {
+        applyRendererColumnWidth(context, state, position, nextWidth);
+      }
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', finish);
+    event.stopPropagation();
+    event.preventDefault();
+  });
+  handle.addEventListener('dblclick', event => {
+    applyRendererColumnWidth(context, state, position, 0);
+    event.stopPropagation();
+    event.preventDefault();
+  });
+  handle.addEventListener('click', event => {
+    event.stopPropagation();
+    event.preventDefault();
+  });
+  return handle;
+}
+
+function applyRendererColumnWidth(
+  context: RendererContext<RendererState>,
+  state: OutputState,
+  position: number,
+  width: number
+): void {
+  const current = normalizePositionalColumnWidths(resultSettings.columnWidths);
+  resultSettings = {
+    ...resultSettings,
+    columnWidths: updatePositionalColumnWidth(
+      current,
+      position,
+      width === 0 ? null : width
+    ),
+  };
+  renderState(context, state);
+  context.postMessage?.({
+    type: 'setResultColumnWidth',
+    position,
+    width,
+  });
 }
 
 function settingCheckbox(
@@ -4030,9 +4512,28 @@ function requestLiveResult(
   }
   const requestId = nextRequestId();
   state.liveRequestId = requestId;
+  state.liveColumnTextLengthRequestId = requestId;
   state.liveStatus = 'requesting';
   context.postMessage({
     type: 'requestLiveResult',
+    outputId: state.outputId,
+    liveId: state.liveId,
+    requestId,
+  });
+}
+
+function requestLiveColumnTextLengths(
+  context: RendererContext<RendererState>,
+  state: OutputState
+): void {
+  if (!context.postMessage || !state.liveId || !state.outputId ||
+    state.liveStatus !== 'available') {
+    return;
+  }
+  const requestId = nextRequestId();
+  state.liveColumnTextLengthRequestId = requestId;
+  context.postMessage({
+    type: 'requestLiveColumnTextLengths',
     outputId: state.outputId,
     liveId: state.liveId,
     requestId,
@@ -4349,8 +4850,11 @@ function chartForColumns(
     pending: false,
     dirty: true,
     lastAutoRefineRangeKey: '',
-    syncAutoRefineRangeOnNextPlot: false,
     refined: false,
+    zoomLifecycle: reduceChartZoomLifecycle<NotebookLiveChartData>(null, {
+      type: 'clear',
+      requestId: 0,
+    }),
   };
 }
 
@@ -4724,11 +5228,13 @@ function scrollLiveCellIntoView(state: OutputState, row: number, column: number)
     targetVirtualTop = virtualTop + resultSettings.rowHeight - viewportHeight;
   }
   state.liveScrollTop = livePhysicalScrollTop(state, targetVirtualTop);
-  const left = rowIndexWidth + column * resultSettings.cellWidth;
+  const columnMetrics = variableColumnMetrics(liveColumnWidths(state));
+  const left = rowIndexWidth + (columnMetrics.lefts[column] || 0);
+  const width = columnMetrics.widths[column] || resultSettings.cellWidth;
   if (left < state.liveScrollLeft + rowIndexWidth) {
     state.liveScrollLeft = Math.max(0, left - rowIndexWidth);
-  } else if (left + resultSettings.cellWidth > state.liveScrollLeft + viewport.clientWidth) {
-    state.liveScrollLeft = left + resultSettings.cellWidth - viewport.clientWidth;
+  } else if (left + width > state.liveScrollLeft + viewport.clientWidth) {
+    state.liveScrollLeft = left + width - viewport.clientWidth;
   }
   viewport.scrollTop = state.liveScrollTop;
   viewport.scrollLeft = state.liveScrollLeft;
@@ -5215,6 +5721,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function defaultResultSettings(): NotebookSharedKxResultSettings {
   return {
     cellWidth: 160,
+    columnWidths: {},
+    autoFitColumns: true,
+    autoFitMode: 'wholeResult',
     rowHeight: 28,
     fontSize: 0,
     density: 'standard',
@@ -5238,13 +5747,7 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
 }
 
 function notebookChartPointLimit(): number {
-  const configured = Number(resultSettings.chartZoomMaxSampledPoints);
-  return Math.min(
-    MAX_NOTEBOOK_LIVE_CHART_POINTS,
-    Number.isSafeInteger(configured) && configured >= 1
-      ? configured
-      : CHART_ZOOM_MAX_SAMPLED_POINTS
-  );
+  return Math.min(MAX_NOTEBOOK_LIVE_CHART_POINTS, CHART_MAX_SAMPLED_POINTS);
 }
 
 function notebookSavedChartSourceRowLimit(payload: PortableKxTableResult): number {
@@ -5274,7 +5777,8 @@ const rendererCss = `
 .kx-messages{margin:5px 0;color:var(--vscode-descriptionForeground)}.kx-source{margin:6px 0}.kx-source pre{white-space:pre-wrap;max-height:150px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:6px}
 .kx-qtext{white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:8px;border:1px solid var(--vscode-panel-border,#555)}.kx-q-comment{color:var(--vscode-editorCodeLens-foreground)}.kx-q-string,.kx-q-symbol{color:var(--vscode-debugTokenExpression-string)}.kx-q-number,.kx-q-temporal{color:var(--vscode-debugTokenExpression-number)}.kx-q-keyword,.kx-q-command{color:var(--vscode-debugTokenExpression-name);font-weight:600}.kx-q-builtin,.kx-q-system,.kx-q-namespace{color:var(--vscode-symbolIcon-functionForeground)}.kx-q-operator{color:var(--vscode-symbolIcon-operatorForeground)}
 .kx-live-viewport{position:relative;overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;contain:strict;box-sizing:border-box;outline:none}.kx-live-viewport:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-live-canvas{position:relative;min-width:100%}.kx-live-row{position:absolute;left:0}.kx-live-header-row{z-index:3}.kx-live-cell,.kx-live-empty{box-sizing:border-box;position:absolute;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 7px;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);user-select:none}.kx-live-empty{color:var(--vscode-descriptionForeground)}button.kx-live-cell{text-align:left;border-radius:0}.kx-live-header{z-index:3;font-weight:600;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-row-index{z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-corner{z-index:4}.kx-live-cell.is-loading{color:transparent;background:linear-gradient(90deg,var(--vscode-editor-background),var(--vscode-editorWidget-background),var(--vscode-editor-background))}.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{color:var(--vscode-list-activeSelectionForeground,var(--vscode-editor-foreground));background:var(--vscode-list-activeSelectionBackground,#094771);box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-live-cell.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}
-.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;min-width:100%;width:max-content;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}
+.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}
+.kx-column-resize-handle{position:absolute;top:0;right:-3px;z-index:8;width:9px;height:100%;cursor:col-resize}.kx-column-resize-handle:hover{background:var(--vscode-focusBorder,#007fd4);opacity:.55}.kx-column-resize-guide{position:fixed;top:0;bottom:0;z-index:2147483647;width:1px;pointer-events:none;background:var(--vscode-focusBorder,#007fd4)}
 .kx-control{display:flex;flex-direction:column;gap:2px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-control select,.kx-control input{color:var(--vscode-foreground);min-width:90px}.kx-control.is-auto input::placeholder{color:var(--vscode-input-placeholderForeground,var(--vscode-descriptionForeground));opacity:1}.kx-series-control{position:relative;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-series-control>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-series-list{position:absolute;z-index:15;top:calc(100% + 2px);left:0;display:grid;gap:4px;max-height:min(220px,45vh);min-width:180px;max-width:min(320px,80vw);overflow:auto;padding:7px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}.kx-series-option{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}.kx-series-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.kx-series-swatches{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto;overflow:visible!important}.kx-series-swatch{display:inline-block;width:10px;height:10px;flex:0 0 10px;border:1px solid var(--vscode-contrastBorder,var(--vscode-panel-border,transparent));border-radius:2px;box-sizing:border-box}.kx-chart-panel{border-top:1px solid var(--vscode-panel-border,#555);padding-top:7px;margin-top:7px}.kx-chart-host{width:100%;height:auto;margin-top:6px;overflow:hidden;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);box-sizing:border-box}.kx-chart-canvas{width:100%;height:280px;overflow:hidden}.kx-chart-host .uplot{max-width:100%;font-family:var(--vscode-font-family,system-ui,sans-serif);color:var(--vscode-editor-foreground);background:var(--vscode-editor-background)}.kx-chart-host .u-wrap{background:var(--vscode-editor-background)}.kx-chart-host .u-axis,.kx-chart-host .u-legend{color:var(--vscode-charts-foreground,var(--vscode-editor-foreground))}.kx-chart-host .u-select{background:var(--vscode-list-activeSelectionBackground,rgba(80,140,220,.22))}.kx-chart-host .u-cursor-x,.kx-chart-host .u-cursor-y{border-color:var(--vscode-focusBorder,#607d8b)}.kx-chart-legend{max-height:96px;overflow:auto;border-top:1px solid var(--vscode-charts-lines,var(--vscode-panel-border,#555));background:var(--vscode-editor-background)}.kx-chart-host .u-legend{display:block;width:100%;margin:0;padding:3px 5px;text-align:left;font:inherit}.kx-chart-host .u-legend tbody{display:flex;align-items:center;gap:2px 10px;flex-wrap:wrap}.kx-chart-host .u-legend .u-series{display:block;margin:0}.kx-chart-host .u-legend .u-series>th{display:flex;align-items:center;max-width:min(240px,75vw);padding:3px 4px;border-radius:2px;outline-offset:-1px;color:var(--vscode-editor-foreground)!important}.kx-chart-host .u-legend .u-marker{width:14px;height:10px;flex:0 0 14px;margin-right:5px;border-radius:2px;box-shadow:0 0 0 1px var(--vscode-contrastBorder,var(--vscode-editor-foreground))}.kx-chart-host .u-legend .kx-series-hidden>th{text-decoration:line-through;opacity:.48}.kx-chart-host .u-legend .kx-series-hidden .u-marker{filter:grayscale(1)}.kx-status{min-height:1.2em;margin-top:5px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-empty{padding:8px;color:var(--vscode-descriptionForeground)}
 .kx-settings{position:relative}.kx-settings>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-settings-panel{position:absolute;top:calc(100% + 2px);right:0;z-index:25;display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:7px;width:min(430px,80vw);max-height:min(360px,60vh);overflow:auto;padding:9px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px var(--vscode-widget-shadow,transparent)}.kx-settings-header{position:sticky;top:-9px;z-index:2;grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-9px -9px 2px;padding:8px 9px;border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background)}.kx-settings-close{margin-left:auto}.kx-setting-checkbox{display:flex;align-items:center;gap:5px;font-size:.9em}
 .kx-density-compact :where(.kx-primary-toolbar,.kx-header){padding-block:3px}.kx-density-compact :where(button,select,input){padding-block:2px}.kx-density-comfortable :where(.kx-primary-toolbar,.kx-header){padding-block:8px}

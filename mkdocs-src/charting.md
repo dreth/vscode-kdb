@@ -16,7 +16,7 @@ A live result from either **KX q (Direct IPC)** or mixed-mode **Run q Cell (KX)*
 
 Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until **Render** is pressed. The chart stays below the table and adds no chart height while hidden.
 
-There is no redundant notebook-only visible Point cap control. Live requests honor common `vscode-kdb.results.*` source/sampling settings and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation uses VS Code theme tokens for readable axis/tick text and restrained grid/tick contrast in light, dark, and high-contrast themes. Multi-series charts keep a visible legend with a color swatch for every plotted label. Each legend button supports pointer and **Enter**/**Space** toggling, exposes its current pressed state, and visibly distinguishes a hidden series. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.
+There is no redundant notebook-only visible Point cap control. Live requests honor the shared `vscode-kdb.results.*` source guardrail, the fixed ranged-density contract below, and a hard 10,000-point inline safety ceiling; compact status text reports validation, sampling, and warnings. Every distinct completed live zoom, including a second zoom inside a refined response, requests its absolute range from the full in-memory source. The bundled local uPlot implementation uses VS Code theme tokens for readable axis/tick text and restrained grid/tick contrast in light, dark, and high-contrast themes. Multi-series charts keep a visible legend with a color swatch for every plotted label. Each legend button supports pointer and **Enter**/**Space** toggling, exposes its current pressed state, and visibly distinguishes a hidden series. Hidden-series state survives compatible zoom, refinement, reset, rerender, resize, settings, and configuration updates.
 
 The Y-series selector repeats the same swatches beside selected and available series, so names map directly to plotted lines. Its overlay is width-contained and vertically scrollable instead of covering the full notebook output at narrow widths.
 
@@ -69,7 +69,9 @@ The bundled uPlot assets run locally under the VS Code webview content security 
 - a draggable chart/table splitter; and
 - PNG export of the rendered canvas, including custom bars, boxes, and candles.
 
-The first full render captures an immutable original X-domain and retains the original full sample. Manual drag zoom, auto-refinement, explicit **Refine zoom**, resize/rerender, and refined samples do not replace them. **Reset zoom** restores that original numeric or temporal domain and original sample, returns Y to automatic scaling, clears selection and tooltip state, and clears pending auto-refinement timer/state. Series hidden from the legend remain hidden through zoom, refinement, Reset zoom/double-click, rerender, resize, and settings/configuration refresh. The button state is derived from the current scale with a small deterministic floating-point tolerance.
+The first full render captures an immutable original X-domain and retains the original full sample. Each genuinely distinct completed drag zoom is debounced and requests that exact absolute range from the full source, including repeated nested zooms after a refined response. Identical scale notifications are deduplicated. Programmatic response reconstruction, settings, resize, and hide/show rerenders are suspended from refinement so they cannot recurse.
+
+Manual drag zoom, auto-refinement, explicit **Refine zoom**, resize/rerender, and refined samples do not replace the baseline. **Reset zoom** invalidates an in-flight refinement, ignores its late response, restores the original numeric or temporal domain and original sample without backend I/O, returns Y to automatic scaling, and clears selection, tooltip, and auto-refinement state. Series hidden from the legend remain hidden through zoom, refinement, Reset zoom/double-click, rerender, resize, and settings/configuration refresh. The button state is derived from the current scale with a small deterministic floating-point tolerance.
 
 Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step retain sampled gaps for missing/non-finite Y values; other generic types skip them where appropriate.
 
@@ -79,6 +81,20 @@ Generic series use min/max-aware reduction, bars keep aligned x clusters, boxes 
 
 The default chart source limit is 2,000,000 rows. Sources above `vscode-kdb.results.viewer.chartMaxSourceRows` are rejected before scanning. Raising the limit can block the extension host; prefer a q-side limit or the [Local Data Server](local-data-server.md) for larger analysis.
 
-The full-view sample target is bounded by plot width and a built-in 12,000-point ceiling. Zoom refinement defaults to a 3,000-point trigger and a 7,000-point maximum. Configure numeric label precision and refinement using the [chart settings](settings.md#charting).
+The full-view sample target is bounded by plot width and a built-in 12,000-point ceiling. Every absolute refined range follows this fixed density contract:
+
+- Fewer than 3,000 eligible source rows: render every available row; never invent or upsample points.
+- From 3,000 through 7,000 eligible rows: keep all available density without forced reduction.
+- Above 7,000 eligible rows: apply the chart type's reduction model and cap the result at about 7,000 points.
+
+Type-specific semantic consolidation still applies: rows sharing an x value may form one aligned bar cluster or OHLC candle rather than invented duplicate visual points. Configure numeric label precision and the source-row guardrail using the [chart settings](settings.md#charting).
+
+The legacy `vscode-kdb.results.viewer.chartZoomMinSampledPoints` and `vscode-kdb.results.viewer.chartZoomMaxSampledPoints` keys remain only as deprecated compatibility entries. They are ignored so user or workspace overrides cannot weaken the fixed density contract.
+
+## Zoom lifecycle compatibility note
+
+The exact KDB SQLTools 0.3.15 release source at commit `f7af079` rebuilt each refined response as a fresh plot whose natural sampled X-domain became the next zoom frame. The following 0.3.16 lifecycle change at commit `4beaa6b` added a fixed full-range baseline plus one `chartRequestIsRefinement` boolean, but did not retain the exact requested range and original full sample as independent state. A refined plot reconstruction could therefore compare its natural sampled domain with the full baseline as though it were a new user zoom, while nested requests and Reset lacked a complete lifecycle baseline.
+
+This implementation instead tracks the active request ID, exact absolute requested range, immutable original domain, and original full sample separately. That is why a reconstruction notification can be ignored without suppressing a distinct second zoom, and why Reset can reject stale responses and restore locally.
 
 The built-in chart intentionally does not attempt to embed a full external analytics environment. Use tokenized local data endpoints for Python, pandas, Plotly, or another separately managed toolchain.

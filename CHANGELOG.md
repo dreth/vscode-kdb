@@ -2,7 +2,13 @@
 
 All notable changes to KX for VS Code are documented here.
 
-## Unreleased
+## 0.2.12 - 2026-07-29
+
+- Persisted authoritative manual grid widths in an uncapped sparse zero-based original/source-position map shared by panels and notebook output across unrelated queries, panel recreation, VS Code reloads, and machine restarts. Legacy array-shaped state is normalized on read. Drag resizing updates that source slot through hide/reorder operations, double-click resets one position, and **Reset column widths** clears every positional override.
+- Added explicit persisted auto-fit controls across KX Results and live/saved notebook grids. **Whole result** is the stable default and measures complete available headers/values, including off-screen array/list values; **Visible rows** preserves viewport-adaptive sizing, and an unchecked checkbox performs no automatic width calculation.
+- Made the active density and **Cell width** controls consistent all-column presets: applying either clears/replaces manual positional widths, including column zero. Manual widths remain authoritative over auto-fit until reset.
+- Hardened repeated/nested live chart zooms so each distinct completed absolute range resamples from the retained full source. Refined ranges keep all available density below 3,000 and from 3,000 through 7,000 rows, cap larger ranges at about 7,000, deduplicate only identical notifications, suppress programmatic rerender loops, reject stale responses, and reset to the immutable original sample/domain without backend I/O. The legacy zoom-minimum/maximum setting keys remain as deprecated compatibility entries but no longer override this fixed density contract.
+- Added deterministic regression coverage for first/all-column sizing, whole-result and visible-row fitting, unchecked semantics, positional persistence/preset reset, repeated zoom lifecycle, density boundaries, stale responses, rerender deduplication, and reset.
 
 ## 0.2.11 - 2026-07-28
 

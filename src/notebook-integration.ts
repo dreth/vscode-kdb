@@ -1,6 +1,7 @@
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { KX_COLUMN_AUTO_TEXT_CHAR_LIMIT } from './column-sizing';
 import {
   CellRange,
   ColumnarPanelResult,
@@ -38,7 +39,9 @@ import {
 import {
   KxResultsPanel,
   SharedKxResultSettings,
+  resetPositionalKxResultColumnWidths,
   sharedKxResultSettings,
+  updatePositionalKxResultColumnWidth,
   updateSharedKxResultSetting,
 } from './kx-results-panel';
 import {
@@ -51,6 +54,7 @@ import {
   NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
   NotebookActionResultMessage,
   NotebookLiveChartMessage,
+  NotebookLiveColumnTextLengthsMessage,
   NotebookLiveCopyMessage,
   NotebookLiveResultMessage,
   NotebookLiveSearchMessage,
@@ -215,6 +219,15 @@ export class NotebookIntegration implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('vscode-kdb.notebook') ||
           event.affectsConfiguration('vscode-kdb.results')) {
+          if (event.affectsConfiguration('vscode-kdb.results.viewer.autoFitColumns') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.autoFitMode') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.arrayDisplayFormat') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.functionDisplayStrategy') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.dictionaryDisplayStrategy') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.listDisplayStrategy') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.objectDisplayStrategy')) {
+            this.options.liveResults?.cancelColumnTextLengthScans();
+          }
           void this.messaging.postMessage(this.rendererSettingsMessage());
         }
       }),
@@ -271,6 +284,16 @@ export class NotebookIntegration implements vscode.Disposable {
       await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
       return;
     }
+    if (message.type === 'setResultColumnWidth') {
+      await updatePositionalKxResultColumnWidth(message.position, message.width);
+      await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
+      return;
+    }
+    if (message.type === 'resetResultColumnWidths') {
+      await resetPositionalKxResultColumnWidths();
+      await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
+      return;
+    }
 
     const liveResults = this.options.liveResults;
     const notebookUri = event.editor.notebook.uri.toString();
@@ -295,17 +318,52 @@ export class NotebookIntegration implements vscode.Disposable {
       authorizedCellUri = cellUri;
     }
     if (message.type === 'requestLiveResult') {
+      const result = liveResultMessage(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        message.requestId,
+        displayOptions,
+        authorizedCellUri
+      );
       await this.messaging.postMessage(
-        liveResultMessage(
+        result,
+        event.editor
+      );
+      if (result.available &&
+        result.mode === 'table' &&
+        resultSettings.autoFitColumns &&
+        resultSettings.autoFitMode === 'wholeResult') {
+        const sizing = await liveColumnTextLengthsMessage(
           liveResults,
           notebookUri,
           message.liveId,
           message.requestId,
           displayOptions,
           authorizedCellUri
-        ),
-        event.editor
+        );
+        if (sizing) {
+          await this.messaging.postMessage(sizing, event.editor);
+        }
+      }
+      return;
+    }
+    if (message.type === 'requestLiveColumnTextLengths') {
+      if (!resultSettings.autoFitColumns ||
+        resultSettings.autoFitMode !== 'wholeResult') {
+        return;
+      }
+      const sizing = await liveColumnTextLengthsMessage(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        message.requestId,
+        displayOptions,
+        authorizedCellUri
       );
+      if (sizing) {
+        await this.messaging.postMessage(sizing, event.editor);
+      }
       return;
     }
     if (message.type === 'requestLiveSlice') {
@@ -2002,6 +2060,48 @@ export function liveResultMessage(
       elapsedMs: view.elapsedMs,
       messages,
     },
+  };
+}
+
+export async function liveColumnTextLengthsMessage(
+  liveResults: LiveNotebookResultStore | undefined,
+  notebookUri: string,
+  liveId: string,
+  requestId: number,
+  displayOptions: LiveNotebookDisplayOptions,
+  cellUri?: string
+): Promise<NotebookLiveColumnTextLengthsMessage | undefined> {
+  let view: ReturnType<LiveNotebookResultStore['view']>;
+  try {
+    view = liveResults?.view(liveId, notebookUri, displayOptions, cellUri);
+  } catch {
+    return undefined;
+  }
+  if (!view || view.mode !== 'table') {
+    return undefined;
+  }
+  const lengths = await liveResults?.columnTextLengths(
+    liveId,
+    notebookUri,
+    displayOptions,
+    cellUri,
+    MAX_NOTEBOOK_LIVE_COLUMNS
+  );
+  if (!lengths) {
+    return undefined;
+  }
+  const rawColumns = view.columns.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS);
+  const columns = safeLiveColumnNames(rawColumns);
+  return {
+    type: 'liveColumnTextLengths',
+    liveId,
+    requestId,
+    lengths: lengths
+      .slice(0, columns.length)
+      .map((length, index) => Math.min(
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+        Math.max(length, columns[index].length)
+      )),
   };
 }
 

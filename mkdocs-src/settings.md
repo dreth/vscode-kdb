@@ -96,6 +96,9 @@ Enabled performance records also retain their `[vscode-kdb:perf]` Extension Host
 | `vscode-kdb.results.viewer.dictionaryDisplayStrategy` | `grid` | `grid`, `qText` | Top-level dictionaries. |
 | `vscode-kdb.results.viewer.listDisplayStrategy` | `grid` | `grid`, `qText` | Top-level general/mixed/object lists. |
 | `vscode-kdb.results.viewer.objectDisplayStrategy` | `grid` | `grid`, `qText` | Other top-level composite objects. |
+| `vscode-kdb.results.viewer.autoFitColumns` | `true` | Boolean | Enable automatic column sizing. `false` performs no automatic width calculation. |
+| `vscode-kdb.results.viewer.autoFitMode` | `wholeResult` | `wholeResult`, `visibleRows` | Measure the complete available result once, or adapt to currently rendered rows. |
+| `vscode-kdb.results.viewer.columnWidths` | `{}` | Sparse position-to-width map, 80-2,000 px | Extension-managed zero-based original/source-position manual widths. Legacy array-shaped state is normalized into this map. |
 | `vscode-kdb.results.qText.syntaxHighlighting` | `false` | Boolean | Apply lightweight, theme-aware q token colors only to qText result display. Raw text is rendered through text nodes/spans, never raw HTML. |
 | `vscode-kdb.results.qText.displayFormatting` | `false` | Boolean | Apply conservative view-only layout to supported balanced q lambda/block structures; malformed or ambiguous input remains exact raw qText. |
 | `vscode-kdb.results.density` | `standard` | `compact`, `standard`, `comfortable` | Active grid density. |
@@ -104,7 +107,7 @@ Enabled performance records also retain their `[vscode-kdb:perf]` Extension Host
 
 True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels and live direct notebook results.
 
-The KX Results panel and notebook renderer use the same `vscode-kdb.results.*` schema for density/dimensions, row-index display, output defaults, copy/export threshold, elapsed time, qText/value strategies, and chart precision/source/sampling. A supported change made in either surface updates the same global setting and propagates to open panels and KX notebook outputs. `vscode-kdb.notebook.*` remains separate only for genuine notebook lifecycle/presentation concerns such as portable snapshot limits, direct-controller registration, and companion-output presentation. Per-output selection, visible-column order, sort, search, height, chart selection, hidden series, and zoom are transient and are not written into `.ipynb`.
+The KX Results panel and notebook renderer use the same `vscode-kdb.results.*` schema for density/dimensions, positional widths/auto-fit, row-index display, output defaults, copy/export threshold, elapsed time, qText/value strategies, and chart precision/source limits. A supported change made in either surface updates the same global setting and propagates to open panels and KX notebook outputs. The two legacy chart sampling keys remain schema-compatible but are deprecated and ignored as described below. `vscode-kdb.notebook.*` remains separate only for genuine notebook lifecycle/presentation concerns such as portable snapshot limits, direct-controller registration, and companion-output presentation. Per-output selection, visible-column order, sort, search, height, chart selection, hidden series, and zoom are transient and are not written into `.ipynb`.
 
 Font size keeps its existing numeric storage contract. A value of `0` still means “use the VS Code default,” but notebook Settings presents that state as **Auto** rather than an ambiguous raw zero. Entering `0` or clearing the field writes `0`; no second preference or per-output font-size state is created.
 
@@ -130,14 +133,22 @@ Array display examples:
 | `vscode-kdb.results.comfortable.rowHeight` | `32` | 20-80 px |
 | `vscode-kdb.results.comfortable.fontSize` | `0` (**Auto**) | 0-32 px; stored `0` uses the VS Code default |
 
+Width precedence is: a manual positional width, then the selected auto-fit result when enabled, then the active density's base `cellWidth`. **Whole result** scans the complete available displayed table once, including array/list values outside the virtual viewport, and remains stable while scrolling. **Visible rows** deliberately recomputes from the current virtual slice or saved-result page. For a saved notebook preview, “whole result” means all persisted rows; omitted rows are unavailable.
+
+Dragging a header edge writes its zero-based original/source position to the global sparse `columnWidths` map. Hiding or reordering a column does not retarget its width; the same ordinal source slot is reused across later query schemas, panels, notebook outputs, and VS Code/machine restarts. The map has no notebook-transport column cap, so every ordinary-panel source position can persist independently. Double-click the edge to clear one position or use **Reset column widths** to clear all positions. Manual widths remain authoritative even while auto-fit is enabled.
+
+The **Cell width** textbox edits the active density's all-column base preset. Changing it or switching density intentionally clears all positional manual widths, including column zero. With auto-fit unchecked, the base preset then applies to every data column; with auto-fit enabled, its selected scope supplies non-manual widths.
+
 ## Charting
 
 | Setting | Default | Use |
 | --- | --- | --- |
 | `vscode-kdb.results.viewer.chartMaxSourceRows` | `2000000` | Maximum source rows scanned for a built-in chart; minimum `1`. |
 | `vscode-kdb.results.viewer.chartDecimalPlaces` | `4` | Numeric axes, tooltip, legend, box, and OHLC precision; `0`-`12`. |
-| `vscode-kdb.results.viewer.chartZoomMinSampledPoints` | `3000` | Minimum visible sampled points before eligible settled zooms auto-refine; minimum `1`. |
-| `vscode-kdb.results.viewer.chartZoomMaxSampledPoints` | `7000` | Maximum refined sample size; clamped to at least the minimum setting. |
+| `vscode-kdb.results.viewer.chartZoomMinSampledPoints` | `3000` | Deprecated compatibility key; ignored. Refined ranges use the fixed 3,000-through-7,000 density contract. |
+| `vscode-kdb.results.viewer.chartZoomMaxSampledPoints` | `7000` | Deprecated compatibility key; ignored. Ranges above 7,000 eligible rows use a fixed target of about 7,000 points. |
+
+Every refined absolute range renders all eligible rows when fewer than 3,000 exist, retains all available density from 3,000 through 7,000, and applies the chart type's bounded reduction above 7,000. It never upsamples to the minimum. The deprecated keys stay in the schema so existing user/workspace configuration remains valid, but overrides are ignored.
 
 ## Copy, export, and warnings
 

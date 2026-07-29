@@ -5,6 +5,8 @@ const fs = require('fs');
 const Module = require('module');
 const net = require('net');
 const path = require('path');
+const typescript = require('typescript');
+const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..');
 const {
@@ -33,12 +35,20 @@ const {
 } = requireOut('q-text');
 const {
   captureChartFullXRange,
+  applyChartZoomLifecycleFailure,
+  applyChartZoomLifecycleResponse,
   chartRequestIsCurrent,
   chartZoomDataAfterResponse,
+  chartZoomCanReset,
   chartZoomRangeKey,
+  chartZoomRangeMatchesRequest,
+  chartZoomRequestedRenderRange,
   chartRangeIsZoomed,
+  issueChartZoomLifecycleRequest,
   planChartAutoRefine,
   planChartZoomReset,
+  reduceChartZoomLifecycle,
+  resetChartZoomLifecycle,
 } = requireOut('chart-zoom');
 const { buildChartData, chartColumnOptions } = requireOut('charting');
 const {
@@ -47,6 +57,24 @@ const {
   chartSeriesVisible,
   updateHiddenChartSeriesKeys,
 } = requireOut('chart-series-state');
+const {
+  KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+  KX_COLUMN_AUTO_WIDTH_CAP,
+  KX_COLUMN_MAX_WIDTH,
+  PositionalColumnWidthPersistenceQueue,
+  automaticColumnWidthsForLengths,
+  displayedSourceColumnPositions,
+  hasPositionalColumnWidths,
+  normalizeColumnAutoFitMode,
+  normalizePositionalColumnWidths,
+  positionalColumnWidthEntries,
+  resolvedColumnWidth,
+  updatePositionalColumnWidth,
+  variableColumnMetrics,
+  variableVisibleColumnRange,
+  widestDisplayedColumnTextLengths,
+  widestDisplayedColumnTextLengthsAsync,
+} = requireOut('column-sizing');
 const {
   DEFAULT_CONNECTION_TIMEOUT_MS,
   DEFAULT_QUERY_TIMEOUT_MS,
@@ -110,10 +138,12 @@ const {
   cellValueToBoundedText,
   compareColumnarCellText,
   createColumnarPanelResult,
+  filterColumnarPanelResult,
   kxResultJsonCharacterLength,
   kxResultJsonStringCharacterLength,
   kxResultJsonStringUtf8ByteLength,
   kxResultJsonStringify,
+  projectColumnarPanelResult,
   rowsToColumnarPanelResult,
   sortedColumnarRowOrder,
 } = requireOut('kx-results');
@@ -183,6 +213,7 @@ const {
   notebookSelectionToolsState,
   reconcileNotebookChartConfiguration,
   reconcileNotebookChartYColumns,
+  reconcileNotebookHiddenColumnIndexes,
   toggleNotebookChartYColumn,
 } = requireOut('notebook-renderer-model');
 const {
@@ -270,6 +301,7 @@ const tests = [
   ['diagnostics and performance trace redaction', testDiagnostics],
   ['exact q selection/current-line text', testQText],
   ['qText result settings and live panel updates', testQTextResultPanelSettings],
+  ['ordinary panel duplicate-column ordinal lifecycle', testDuplicateOrdinalResultsPanel],
   ['connection validation and namespace wrapping', testConnections],
   ['SQLTools migration parsing and mapping', testSqlToolsMigrationParsing],
   ['SQLTools migration configuration discovery', testSqlToolsMigrationDiscovery],
@@ -287,7 +319,9 @@ const tests = [
   ['post-persist active connection lifecycle', testConnectionUpdateLifecycle],
   ['connection manager lifecycle races', testConnectionManagerLifecycle],
   ['chart zoom baseline and reset lifecycle', testChartZoomLifecycle],
+  ['panel and notebook executable nested chart zoom lifecycle', testHostedChartZoomLifecycle],
   ['columnar result windows and exports', testColumnarResults],
+  ['result column sizing and positional persistence model', testResultColumnSizing],
   ['shared KX Results panel/notebook UI parity contract', testKxResultsUiParityContract],
   ['shared result export metadata, PNG validation, and XLSX generation', testKxResultsExport],
   ['actual notebook cell language provider and q preparation', testNotebookCellLanguage],
@@ -405,6 +439,283 @@ function testChartZoomLifecycle() {
   assert.strictEqual(refinedReset.clearSelection, true);
   assert.strictEqual(refinedReset.hideTooltip, true);
 
+  const fullChartSample = {
+    version: 1,
+    requestId: 1,
+    chartType: 'line',
+    x: [0, 50, 100],
+    series: [{ columnName: 'price', values: [10, 20, 30] }],
+    algorithm: 'minmax-bucket/3',
+  };
+  let lifecycle = reduceChartZoomLifecycle(null, { type: 'clear', requestId: 0 });
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'request',
+    requestId: 1,
+    range: null,
+  });
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'response',
+    requestId: 1,
+    data: fullChartSample,
+  });
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'rendered',
+    requestId: 1,
+    naturalRange: { min: 0, max: 100 },
+  });
+  assert.strictEqual(lifecycle.fullData, fullChartSample);
+  assert.deepStrictEqual(lifecycle.fullRange, { min: 0, max: 100 });
+  assert.ok(Object.isFrozen(lifecycle.fullRange), 'the lifecycle full domain must remain immutable');
+
+  const firstRequestedRange = { min: 20, max: 80 };
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'request',
+    requestId: 2,
+    range: firstRequestedRange,
+  });
+  firstRequestedRange.min = 25;
+  assert.deepStrictEqual(
+    lifecycle.requestedRange,
+    { min: 20, max: 80 },
+    'a refinement must retain an immutable copy of its absolute requested viewport'
+  );
+  assert.strictEqual(
+    chartZoomCanReset(lifecycle, false),
+    true,
+    'Reset must remain enabled while a refinement request is pending'
+  );
+  assert.strictEqual(
+    reduceChartZoomLifecycle(lifecycle, {
+      type: 'cancel',
+      requestId: 999,
+    }),
+    lifecycle,
+    'a cancellation for another request must be ignored'
+  );
+  const cancelledFirstRefinement = reduceChartZoomLifecycle(lifecycle, {
+    type: 'cancel',
+    requestId: 2,
+  });
+  assert.strictEqual(cancelledFirstRefinement.data, fullChartSample);
+  assert.strictEqual(cancelledFirstRefinement.requestedRange, null);
+  assert.strictEqual(cancelledFirstRefinement.settledRange, null);
+  assert.strictEqual(cancelledFirstRefinement.dataIsRefinement, false);
+  const beforeStaleResponse = lifecycle;
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'response',
+    requestId: 1,
+    data: { ...fullChartSample, x: [-100, 1000] },
+  });
+  assert.strictEqual(lifecycle, beforeStaleResponse, 'stale responses must not alter the chart lifecycle');
+
+  const firstRefinedSample = {
+    ...fullChartSample,
+    requestId: 2,
+    x: [21, 40, 79],
+    series: [{ columnName: 'price', values: [14, 16, 18] }],
+  };
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'response',
+    requestId: 2,
+    data: firstRefinedSample,
+  });
+  assert.strictEqual(lifecycle.fullData, fullChartSample, 'refinement must retain the full source sample');
+  assert.deepStrictEqual(
+    chartZoomRequestedRenderRange(lifecycle),
+    { min: 20, max: 80 },
+    'response reconstruction must restore the requested range, not the refined sample domain'
+  );
+  assert.strictEqual(
+    chartZoomRangeMatchesRequest(lifecycle, { min: 20, max: 80 }),
+    true,
+    'the programmatic requested scale must deduplicate its setScale notification'
+  );
+  assert.strictEqual(
+    chartZoomRangeMatchesRequest(lifecycle, { min: 30, max: 60 }),
+    false,
+    'a distinct nested zoom must not be suppressed by the prior request'
+  );
+
+  const pendingNestedRefinement = reduceChartZoomLifecycle(lifecycle, {
+    type: 'request',
+    requestId: 3,
+    range: { min: 30, max: 60 },
+  });
+  const cancelledNestedRefinement = reduceChartZoomLifecycle(
+    pendingNestedRefinement,
+    { type: 'cancel', requestId: 3 }
+  );
+  assert.strictEqual(cancelledNestedRefinement.data, firstRefinedSample);
+  assert.deepStrictEqual(
+    cancelledNestedRefinement.requestedRange,
+    { min: 20, max: 80 }
+  );
+  assert.deepStrictEqual(
+    cancelledNestedRefinement.settledRange,
+    { min: 20, max: 80 }
+  );
+  assert.strictEqual(cancelledNestedRefinement.dataIsRefinement, true);
+  lifecycle = pendingNestedRefinement;
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'response',
+    requestId: 3,
+    data: { ...firstRefinedSample, requestId: 3, x: [31, 45, 59] },
+  });
+  assert.deepStrictEqual(chartZoomRequestedRenderRange(lifecycle), { min: 30, max: 60 });
+  assert.strictEqual(lifecycle.fullData, fullChartSample);
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'rendered',
+    requestId: 3,
+    naturalRange: { min: 30, max: 60 },
+  });
+  assert.strictEqual(
+    chartZoomRequestedRenderRange(lifecycle),
+    null,
+    'the latest nested response must be settled before exercising late failure races'
+  );
+  const latestAcceptedLifecycle = lifecycle;
+  const latestAcceptedData = lifecycle.data;
+  const panelFailureRace = {
+    lifecycle,
+    chartData: latestAcceptedData,
+    status: 'latest panel chart accepted',
+  };
+  const receivePanelChartError = (requestId, message) => {
+    let acceptedFailure;
+    panelFailureRace.lifecycle = applyChartZoomLifecycleFailure(
+      panelFailureRace.lifecycle,
+      requestId,
+      value => {
+        acceptedFailure = value;
+      }
+    );
+    if (!acceptedFailure) {
+      return;
+    }
+    panelFailureRace.lifecycle = acceptedFailure.state;
+    if (acceptedFailure.requestWasRefinement &&
+      panelFailureRace.lifecycle.fullData &&
+      panelFailureRace.lifecycle.fullRange) {
+      panelFailureRace.lifecycle = reduceChartZoomLifecycle(panelFailureRace.lifecycle, {
+        type: 'reset',
+        requestId,
+      });
+    }
+    panelFailureRace.chartData = panelFailureRace.lifecycle.data;
+    panelFailureRace.status = message;
+  };
+  receivePanelChartError(2, 'stale panel refinement failed');
+  assert.strictEqual(
+    panelFailureRace.lifecycle,
+    latestAcceptedLifecycle,
+    'an older ordinary-panel chartError must retain the latest accepted lifecycle'
+  );
+  assert.strictEqual(
+    panelFailureRace.chartData,
+    latestAcceptedData,
+    'an older ordinary-panel chartError must not replace or reset the latest chart'
+  );
+  assert.strictEqual(panelFailureRace.status, 'latest panel chart accepted');
+
+  const notebookFailureRace = {
+    lifecycle,
+    chartData: latestAcceptedData,
+    error: undefined,
+    pending: false,
+  };
+  const receiveNotebookChartFailure = (requestId, message) => {
+    let acceptedFailure;
+    notebookFailureRace.lifecycle = applyChartZoomLifecycleFailure(
+      notebookFailureRace.lifecycle,
+      requestId,
+      value => {
+        acceptedFailure = value;
+      }
+    );
+    if (!acceptedFailure) {
+      return;
+    }
+    notebookFailureRace.lifecycle = acceptedFailure.state;
+    notebookFailureRace.chartData = acceptedFailure.state.data;
+    notebookFailureRace.error = message;
+    notebookFailureRace.pending = false;
+  };
+  receiveNotebookChartFailure(2, 'stale notebook refinement failed');
+  assert.strictEqual(
+    notebookFailureRace.lifecycle,
+    latestAcceptedLifecycle,
+    'an older notebook chart failure must retain the latest accepted lifecycle'
+  );
+  assert.strictEqual(
+    notebookFailureRace.chartData,
+    latestAcceptedData,
+    'an older notebook chart failure must not replace or reset the latest chart'
+  );
+  assert.strictEqual(notebookFailureRace.error, undefined);
+  const currentFailurePending = reduceChartZoomLifecycle(lifecycle, {
+    type: 'request',
+    requestId: 4,
+    range: { min: 35, max: 55 },
+  });
+  let currentFailureAccepted;
+  const currentFailureCancelled = applyChartZoomLifecycleFailure(
+    currentFailurePending,
+    4,
+    value => {
+      currentFailureAccepted = value;
+    }
+  );
+  assert.ok(currentFailureAccepted, 'the failure boundary must still accept the active ranged request');
+  assert.strictEqual(currentFailureAccepted.requestWasRefinement, true);
+  assert.strictEqual(currentFailureCancelled.data, latestAcceptedData);
+  assert.deepStrictEqual(currentFailureCancelled.requestedRange, { min: 30, max: 60 });
+  const resetLifecycle = reduceChartZoomLifecycle(lifecycle, { type: 'reset', requestId: 4 });
+  assert.strictEqual(resetLifecycle.activeRequestId, 4);
+  assert.strictEqual(resetLifecycle.requestedRange, null);
+  assert.strictEqual(resetLifecycle.fullData, fullChartSample);
+  assert.deepStrictEqual(resetLifecycle.fullRange, { min: 0, max: 100 });
+  assert.strictEqual(chartZoomCanReset(resetLifecycle, false), false);
+  assert.strictEqual(
+    reduceChartZoomLifecycle(resetLifecycle, {
+      type: 'response',
+      requestId: 3,
+      data: { ...firstRefinedSample, requestId: 3, x: [35] },
+    }),
+    resetLifecycle,
+    'reset must invalidate a late refinement response without backend I/O'
+  );
+  panelFailureRace.lifecycle = resetLifecycle;
+  panelFailureRace.chartData = resetLifecycle.data;
+  panelFailureRace.status = 'panel reset complete';
+  receivePanelChartError(3, 'late panel refinement failed');
+  assert.strictEqual(
+    panelFailureRace.lifecycle,
+    resetLifecycle,
+    'an ordinary-panel chartError arriving after Reset must be ignored'
+  );
+  assert.strictEqual(
+    panelFailureRace.chartData,
+    resetLifecycle.data,
+    'a late ordinary-panel chartError must not clear the restored full chart'
+  );
+  assert.strictEqual(panelFailureRace.status, 'panel reset complete');
+
+  notebookFailureRace.lifecycle = resetLifecycle;
+  notebookFailureRace.chartData = resetLifecycle.data;
+  notebookFailureRace.error = undefined;
+  receiveNotebookChartFailure(3, 'late notebook refinement failed');
+  assert.strictEqual(
+    notebookFailureRace.lifecycle,
+    resetLifecycle,
+    'a notebook chart failure arriving after Reset must be ignored'
+  );
+  assert.strictEqual(
+    notebookFailureRace.chartData,
+    resetLifecycle.data,
+    'a late notebook chart failure must not clear the restored full chart'
+  );
+  assert.strictEqual(notebookFailureRace.error, undefined);
+
   const numericEpsilonFull = { min: -50, max: 50 };
   assert.strictEqual(chartRangeIsZoomed(numericEpsilonFull, { min: -50 + 5e-8, max: 50 - 5e-8 }), false);
   assert.strictEqual(chartRangeIsZoomed(numericEpsilonFull, { min: -50 + 2e-7, max: 50 }), true);
@@ -412,6 +723,18 @@ function testChartZoomLifecycle() {
   const temporalFull = { min: 1700000000000, max: 1700000000000 + day };
   assert.strictEqual(chartRangeIsZoomed(temporalFull, { min: temporalFull.min + 0.01, max: temporalFull.max }), false);
   assert.strictEqual(chartRangeIsZoomed(temporalFull, { min: temporalFull.min + 1, max: temporalFull.max }), true);
+  const firstEpochRange = { min: temporalFull.min + 1, max: temporalFull.max - 1 };
+  const secondEpochRange = { min: temporalFull.min + 2, max: temporalFull.max - 2 };
+  assert.notStrictEqual(
+    chartZoomRangeKey(firstEpochRange),
+    chartZoomRangeKey(secondEpochRange),
+    'distinct millisecond ranges on epoch-sized axes must not collapse to one dedupe key'
+  );
+  assert.deepStrictEqual(
+    planChartAutoRefine(temporalFull, secondEpochRange, chartZoomRangeKey(firstEpochRange), false)?.range,
+    secondEpochRange,
+    'a nearby nested temporal zoom must still plan a fresh ranged source request'
+  );
   assert.strictEqual(captureChartFullXRange(null, { min: 4, max: 4 }, false), null);
   assert.strictEqual(chartRangeIsZoomed(full, { min: NaN, max: 40 }), false);
 
@@ -502,6 +825,206 @@ function testChartZoomLifecycle() {
     /Chart source has 3 rows; limit the q result .* above 2 rows\./,
     'saved inline chart preparation must retain the actionable shared source-limit error'
   );
+  for (const eligibleRowCount of [2999, 3000, 7000, 7001]) {
+    const densityTable = createColumnarPanelResult(
+      ['x', 'y', 'open', 'high', 'low', 'close'],
+      eligibleRowCount,
+      (rowIndex, columnIndex) => {
+        if (columnIndex === 0) {
+          return rowIndex;
+        }
+        if (columnIndex === 1 || columnIndex === 2) {
+          return rowIndex + 10;
+        }
+        if (columnIndex === 3) {
+          return rowIndex + 12;
+        }
+        if (columnIndex === 4) {
+          return rowIndex + 8;
+        }
+        return rowIndex + 11;
+      },
+      ['int', 'int', 'int', 'int', 'int', 'int']
+    );
+    for (const chartType of ['line', 'scatter', 'step', 'bar', 'box', 'candlestick']) {
+      const ranged = buildChartData(densityTable, {
+        chartType,
+        xColumn: 'x',
+        yColumns: chartType === 'candlestick' ? [] : ['y'],
+        openColumn: 'open',
+        highColumn: 'high',
+        lowColumn: 'low',
+        closeColumn: 'close',
+        xMin: 0,
+        xMax: eligibleRowCount - 1,
+        width: 1,
+        minSampledPoints: 1,
+        maxSampledPoints: eligibleRowCount <= 7000 ? 1 : 9000,
+        maxSourceRows: 8000,
+        version: 1,
+        requestId: eligibleRowCount,
+      });
+      const expectedPointCount = Math.min(eligibleRowCount, 7000);
+      assert.strictEqual(
+        ranged.eligibleRowCount,
+        eligibleRowCount,
+        `${chartType} must count every source row eligible for the ranged request at ${eligibleRowCount}`
+      );
+      assert.strictEqual(
+        ranged.sampledPointCount,
+        expectedPointCount,
+        `${chartType} must retain all ranged density through 7,000 and cap 7,001 at exactly 7,000`
+      );
+      assert.strictEqual(
+        ranged.x.length,
+        expectedPointCount,
+        `${chartType} ranged output x count must match its reported sampled count`
+      );
+      assert.strictEqual(
+        new Set(ranged.x).size,
+        expectedPointCount,
+        `${chartType} must preserve the exact unique-x count for the threshold fixture`
+      );
+      const expectedAlgorithm = chartType === 'bar'
+        ? (eligibleRowCount <= 7000
+          ? `bar-cluster/${eligibleRowCount}`
+          : 'bar-cluster-even/7000')
+        : chartType === 'box'
+          ? (eligibleRowCount <= 7000
+            ? `box-exact/${eligibleRowCount}`
+            : 'box-bucket/7000')
+          : chartType === 'candlestick'
+            ? (eligibleRowCount <= 7000
+              ? `ohlc-exact/${eligibleRowCount}`
+              : 'ohlc-bucket/7000')
+            : (eligibleRowCount <= 7000 ? 'none' : 'minmax-bucket/7000');
+      assert.strictEqual(
+        ranged.algorithm,
+        expectedAlgorithm,
+        `${chartType} must report the exact ranged threshold algorithm at ${eligibleRowCount}`
+      );
+      if (chartType === 'candlestick') {
+        assert.strictEqual(ranged.candlesticks.length, expectedPointCount);
+      }
+      if (chartType === 'box') {
+        assert.strictEqual(ranged.boxSeries[0].stats.length, expectedPointCount);
+      }
+      if (chartType !== 'box' && chartType !== 'candlestick') {
+        assert.strictEqual(
+          ranged.series[0].values.length,
+          expectedPointCount,
+          `${chartType} ranged series values must retain the asserted threshold density`
+        );
+      }
+    }
+  }
+  const overviewDensityTable = createColumnarPanelResult(
+    ['x', 'y'],
+    7001,
+    (rowIndex, columnIndex) => columnIndex === 0 ? rowIndex : rowIndex + 10,
+    ['int', 'int']
+  );
+  for (const chartType of ['line', 'scatter', 'step', 'bar']) {
+    const overview = buildChartData(overviewDensityTable, {
+      chartType,
+      xColumn: 'x',
+      yColumns: ['y'],
+      width: 17,
+      minSampledPoints: 1,
+      maxSampledPoints: 9000,
+      maxSourceRows: 8000,
+      version: 1,
+      requestId: 1,
+    });
+    assert.strictEqual(overview.eligibleRowCount, 7001);
+    assert.strictEqual(
+      overview.sampledPointCount,
+      200,
+      `${chartType} overview density must keep its viewport-derived 200-point cap distinct from the 7,000-point ranged cap`
+    );
+    assert.strictEqual(
+      overview.algorithm,
+      chartType === 'bar' ? 'bar-cluster-even/200' : 'minmax-bucket/200'
+    );
+  }
+  const repeatedXRowCount = 7001;
+  const repeatedXCount = 3501;
+  const repeatedXTable = createColumnarPanelResult(
+    ['x', 'y', 'open', 'high', 'low', 'close'],
+    repeatedXRowCount,
+    (rowIndex, columnIndex) => {
+      if (columnIndex === 0) {
+        return Math.floor(rowIndex / 2);
+      }
+      if (columnIndex === 1 || columnIndex === 2) {
+        return rowIndex + 10;
+      }
+      if (columnIndex === 3) {
+        return rowIndex + 12;
+      }
+      if (columnIndex === 4) {
+        return rowIndex + 8;
+      }
+      return rowIndex + 11;
+    },
+    ['int', 'int', 'int', 'int', 'int', 'int']
+  );
+  for (const chartType of ['candlestick', 'box']) {
+    const ranged = buildChartData(repeatedXTable, {
+      chartType,
+      xColumn: 'x',
+      yColumns: chartType === 'candlestick' ? [] : ['y'],
+      openColumn: 'open',
+      highColumn: 'high',
+      lowColumn: 'low',
+      closeColumn: 'close',
+      xMin: 0,
+      xMax: repeatedXCount - 1,
+      width: 1,
+      maxSampledPoints: 1,
+      maxSourceRows: 8000,
+      version: 1,
+      requestId: repeatedXRowCount,
+    });
+    assert.strictEqual(ranged.eligibleRowCount, repeatedXRowCount);
+    assert.strictEqual(ranged.sampledPointCount, repeatedXCount);
+    assert.strictEqual(new Set(ranged.x).size, repeatedXCount);
+    assert.strictEqual(
+      ranged.algorithm,
+      `${chartType === 'candlestick' ? 'ohlc' : 'box'}-exact/${repeatedXCount}`,
+      `${chartType} must aggregate repeated source rows into exact unique-x groups before applying the ranged cap`
+    );
+  }
+  const candlestickOverview = buildChartData(repeatedXTable, {
+    chartType: 'candlestick',
+    xColumn: 'x',
+    yColumns: [],
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    width: 17,
+    maxSampledPoints: 9000,
+    maxSourceRows: 8000,
+    version: 1,
+    requestId: 1,
+  });
+  assert.strictEqual(candlestickOverview.eligibleRowCount, repeatedXRowCount);
+  assert.strictEqual(candlestickOverview.sampledPointCount, 17);
+  assert.strictEqual(candlestickOverview.algorithm, 'ohlc-bucket/17');
+  const boxOverview = buildChartData(repeatedXTable, {
+    chartType: 'box',
+    xColumn: 'x',
+    yColumns: ['y'],
+    width: 80,
+    maxSampledPoints: 9000,
+    maxSourceRows: 8000,
+    version: 1,
+    requestId: 2,
+  });
+  assert.strictEqual(boxOverview.eligibleRowCount, repeatedXRowCount);
+  assert.strictEqual(boxOverview.sampledPointCount, 30);
+  assert.strictEqual(boxOverview.algorithm, 'box-bucket/30');
   const hiddenRefreshPaths = [
     'zoom',
     'reset zoom',
@@ -581,14 +1104,33 @@ function testChartZoomLifecycle() {
 
   const panelSource = readSource('kx-results-panel.ts');
   const zoomSource = readSource('chart-zoom.ts');
-  assert.match(zoomSource, /return Object\.freeze\(\{ min: rendered\.min, max: rendered\.max \}\)/);
-  assert.match(panelSource, /let chartOriginalData = null;/);
-  assert.match(panelSource, /let chartDataIsRefinement = false;/);
+  const rendererSource = fs.readFileSync(path.join(ROOT, 'renderer', 'index.ts'), 'utf8');
+  assertExecutableChartFailureHandlerRaces(
+    panelSource,
+    rendererSource,
+    latestAcceptedLifecycle,
+    latestAcceptedData,
+    resetLifecycle
+  );
+  assert.match(zoomSource, /export function reduceChartZoomLifecycle/);
+  assert.match(zoomSource, /export function issueChartZoomLifecycleRequest/);
+  assert.match(zoomSource, /export function applyChartZoomLifecycleFailure/);
+  assert.match(zoomSource, /export function applyChartZoomLifecycleResponse/);
+  assert.match(zoomSource, /export function resetChartZoomLifecycle/);
+  assert.match(zoomSource, /export function chartZoomCanReset/);
+  assert.match(zoomSource, /\? Object\.freeze\(\{ min: action\.range\.min, max: action\.range\.max \}\)/);
+  assert.match(panelSource, /let chartZoomLifecycle = reduceChartZoomLifecycle\(/);
   assert.match(panelSource, /\$\{isValidChartRange\.toString\(\)\}/);
-  assert.match(panelSource, /\$\{captureChartFullXRange\.toString\(\)\}/);
-  assert.match(panelSource, /\$\{chartZoomDataAfterResponse\.toString\(\)\}/);
-  assert.match(panelSource, /\$\{planChartZoomReset\.toString\(\)\}/);
   assert.match(panelSource, /\$\{chartRangeIsZoomed\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartZoomCanReset\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartZoomRangeKey\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartZoomRangeMatchesRequest\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{chartZoomRequestedRenderRange\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{reduceChartZoomLifecycle\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{issueChartZoomLifecycleRequest\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{applyChartZoomLifecycleFailure\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{applyChartZoomLifecycleResponse\.toString\(\)\}/);
+  assert.match(panelSource, /\$\{resetChartZoomLifecycle\.toString\(\)\}/);
   assert.match(panelSource, /\$\{chartLegendToggleKey\.toString\(\)\}/);
   assert.match(panelSource, /\$\{chartSeriesVisible\.toString\(\)\}/);
   assert.match(panelSource, /\$\{updateHiddenChartSeriesKeys\.toString\(\)\}/);
@@ -610,46 +1152,107 @@ function testChartZoomLifecycle() {
     /<button id="resetChartZoom" disabled>\$\{KX_RESULT_UI_LABELS\.resetZoom\}<\/button>/
   );
   assert.match(panelSource, /resetChartZoomButton\.addEventListener\('click', resetChartZoom\)/);
+  assert.match(
+    panelSource,
+    /resetChartZoomButton\.disabled = !chartZoomCanReset\(chartZoomLifecycle, chartZoomed\);/,
+    'Reset must remain callable while a refinement response is pending'
+  );
   assert.match(panelSource, /setScale: \[updateChartZoomState\]/);
-  assert.match(panelSource, /chartFullXRange = captureChartFullXRange\([\s\S]*?chartDataIsRefinement \|\| !!chartFullXRange[\s\S]*?\);/);
+  const chartOptionsSource = sourceSection(
+    panelSource,
+    '      function chartUPlotOptions(dimensions) {',
+    '      function chartSeriesKeys(value) {'
+  );
+  assert.match(chartOptionsSource, /ready: \[settleChartReadyZoomState\]/);
+  assert.match(
+    chartOptionsSource,
+    /function settleChartReadyZoomState\(self\) \{[\s\S]*?type: 'rendered',[\s\S]*?naturalRange: chartXScaleRange\(self\)[\s\S]*?updateChartZoomState\(self\);/,
+    'ordinary panel must capture the natural full range only after uPlot finishes its queued initial scale commit'
+  );
+  const drawChartSource = sourceSection(panelSource, '      function drawChart() {', '      function chartDimensions() {');
+  assert.match(drawChartSource, /const requestedRange = chartZoomRequestedRenderRange\(chartZoomLifecycle\);/);
+  assert.match(drawChartSource, /chartUPlot\.setScale\('x', \{ min: requestedRange\.min, max: requestedRange\.max \}\);/);
+  assert.ok(
+    drawChartSource.indexOf("chartUPlot.setScale('x', { min: requestedRange.min, max: requestedRange.max });") <
+      drawChartSource.indexOf('chartZoomStateSuspended = false;'),
+    'refined reconstruction must restore the exact request while scale hooks are suspended'
+  );
+  assert.doesNotMatch(
+    drawChartSource,
+    /type: 'rendered'[\s\S]*?naturalRange: chartXScaleRange\(chartUPlot\)/,
+    'drawChart must not capture uPlot scales before its queued ready commit'
+  );
   const zoomStateSource = sourceSection(panelSource, '      function updateChartZoomState(self) {', '      function currentChartZoomRange() {');
   assert.match(zoomStateSource, /const currentRange = chartXScaleRange\(self\);/);
-  assert.match(zoomStateSource, /if \(!chartFullXRange && !chartDataIsRefinement\)/);
-  assert.match(zoomStateSource, /chartFullXRange = captureChartFullXRange\(null, currentRange, false\);/);
-  assert.match(zoomStateSource, /chartZoomed = chartRangeIsZoomed\(chartFullXRange, currentRange\);/);
+  assert.match(zoomStateSource, /chartZoomed = chartRangeIsZoomed\(chartZoomLifecycle\.fullRange, currentRange\);/);
 
   const chartDataSource = sourceSection(panelSource, '      function setChartData(value) {', '      function normalizeChartData(value) {');
-  assert.match(chartDataSource, /const chartDataState = chartZoomDataAfterResponse\(/);
-  assert.match(chartDataSource, /chartOriginalData = chartDataState\.originalData;/);
-  assert.match(chartDataSource, /chartDataIsRefinement = chartDataState\.dataIsRefinement;/);
+  assert.match(
+    chartDataSource,
+    /applyChartZoomLifecycleResponse\(\s*chartZoomLifecycle,\s*normalized\.requestId,\s*normalized,/
+  );
+  assert.match(chartDataSource, /chartZoomLifecycle = accepted\.state;/);
+  assert.match(chartDataSource, /chartData = accepted\.data;/);
+  const chartErrorSource = sourceSection(panelSource, '      function setChartError(msg) {', '      function drawChart() {');
+  assert.match(
+    chartErrorSource,
+    /applyChartZoomLifecycleFailure\(\s*chartZoomLifecycle,\s*toNonNegativeInteger\(msg\.requestId, -1\),/
+  );
+  assert.match(
+    chartErrorSource,
+    /if \(!acceptedFailure\) \{[\s\S]*?return;[\s\S]*?\}[\s\S]*?chartZoomLifecycle = acceptedFailure\.state;/,
+    'ordinary panel chartError handling must reject stale failures before replacing or resetting chart state'
+  );
+  const rendererChartMessageSource = sourceSection(
+    rendererSource,
+    "    } else if (message.type === 'liveChart') {",
+    "    } else if (message.type === 'liveCopy') {"
+  );
+  assert.match(
+    rendererChartMessageSource,
+    /applyChartZoomLifecycleFailure\(\s*state\.liveChart\.zoomLifecycle,\s*message\.requestId,/
+  );
+  assert.match(
+    rendererChartMessageSource,
+    /if \(!failed\.value\) \{[\s\S]*?continue;[\s\S]*?\}[\s\S]*?state\.liveChart\.pending = false;/,
+    'notebook chart failures must reject stale request ids before mutating the accepted chart state'
+  );
 
   const resetSource = sourceSection(panelSource, '      function resetChartZoom() {', '      function clearChartZoomTransientState() {');
-  assert.match(resetSource, /const reset = planChartZoomReset\(/);
-  assert.match(resetSource, /chartData = reset\.data;/);
-  assert.match(resetSource, /chartDataIsRefinement = reset\.dataIsRefinement;/);
-  assert.match(resetSource, /chartRequestIsRefinement = reset\.requestIsRefinement;/);
-  assert.match(resetSource, /if \(reset\.restoredOriginalData\) \{[\s\S]*?drawChart\(\);[\s\S]*?\}/);
-  assert.match(resetSource, /chartUPlot\.setScale\('x', reset\.xScale\);/);
-  assert.match(resetSource, /chartUPlot\.setScale\('y', reset\.yScale\);/);
-  assert.match(resetSource, /chartLastAutoRefineKey = reset\.autoRefineKey;/);
-  assert.match(resetSource, /if \(reset\.clearAutoRefineTimer\) \{[\s\S]*?clearChartAutoRefineTimer\(\);/);
-  assert.match(resetSource, /if \(reset\.clearSelection\) \{[\s\S]*?clearChartSelection\(\);/);
-  assert.match(resetSource, /if \(reset\.hideTooltip\) \{[\s\S]*?hideChartTooltip\(\);/);
+  assert.match(resetSource, /const fullData = chartZoomLifecycle\.fullData;/);
+  assert.match(resetSource, /if \(chartZoomLifecycle\.requestedRange\) \{[\s\S]*?latestChartRequestId \+= 1;/);
+  assert.match(resetSource, /resetChartZoomLifecycle\(/);
+  assert.match(resetSource, /type: 'chartZoomReset'[\s\S]*?requestId\s*\n/);
+  assert.match(resetSource, /chartData = restoredData;/);
+  assert.match(resetSource, /drawChart\(\);/);
+  assert.match(resetSource, /chartUPlot\.setScale\('x', \{ min: xRange\.min, max: xRange\.max \}\);/);
+  assert.match(resetSource, /chartUPlot\.setScale\('y', \{ min: null, max: null \}\);/);
+  assert.match(resetSource, /clearChartZoomTransientState\(\);/);
 
   const optionsSource = sourceSection(panelSource, '      function renderChartOptions() {', '      function populateCandlestickColumnSelect');
   assert.match(optionsSource, /if \(!chartRendered\) \{[\s\S]*?clearChartZoomBaseline\(\);[\s\S]*?\}/);
   assert.ok(!/clearChartZoomBaseline\(\);\s*chartXColumn/.test(optionsSource), 'option refresh must preserve a rendered chart baseline');
 
   const requestSource = sourceSection(panelSource, '      function requestChartDataForRange(xRange, messageText) {', '      function exportChartPng() {');
+  assert.match(
+    requestSource,
+    /issueChartZoomLifecycleRequest\(\s*chartZoomLifecycle,\s*latestChartRequestId,\s*xRange,/
+  );
   assert.match(requestSource, /type: 'requestChart'/);
   assert.match(requestSource, /version: data\.version/);
   assert.match(requestSource, /requestId: latestChartRequestId/);
-  assert.match(requestSource, /message\.xMin = xRange\.min;/);
-  assert.match(requestSource, /message\.xMax = xRange\.max;/);
+  assert.match(requestSource, /message\.xMin = request\.range\.min;/);
+  assert.match(requestSource, /message\.xMax = request\.range\.max;/);
   assert.match(chartDataSource, /toNonNegativeInteger\(value\.version, -1\) !== data\.version/);
   assert.match(chartDataSource, /toNonNegativeInteger\(value\.requestId, -1\) !== latestChartRequestId/);
   const messageSource = sourceSection(panelSource, "        } else if (msg.type === 'chartData' && msg.data) {", "      actionFormat.addEventListener('change'");
   assert.match(messageSource, /setChartData\(msg\.data\);/);
+  assert.match(panelSource, /if \(message\.type === 'chartZoomReset'\) \{[\s\S]*?this\.invalidateChartRequest\(message\)/);
+  assert.match(
+    panelSource,
+    /private invalidateChartRequest\([\s\S]*?this\.activeChartRequestId = requestId;/,
+    'local Reset must invalidate a pending host response while retaining PNG/selection request correlation'
+  );
   const autoRefineSource = sourceSection(
     panelSource,
     '      function queueChartAutoRefine() {',
@@ -665,15 +1268,292 @@ function testChartZoomLifecycle() {
       !panelSource.includes('chartAutoRefineMinVisiblePoints'),
     'panel auto-refine must not suppress valid zooms by sampling algorithm or visible-point count'
   );
-  assert.match(panelSource, /updateChartZoomStateAfterRender\(chartUPlot\)/);
   assert.match(
-    panelSource,
-    /function updateChartZoomStateAfterRender\(self\) \{[\s\S]*?updateChartZoomStateInternal\(self, true\)/
+    autoRefineSource,
+    /chartZoomRangeMatchesRequest\(chartZoomLifecycle, range\)/,
+    'a programmatic requested-scale notification must deduplicate without suppressing a distinct nested range'
   );
-  assert.match(
+}
+
+function assertExecutableChartFailureHandlerRaces(
+  panelSource,
+  rendererSource,
+  latestLifecycle,
+  latestData,
+  resetLifecycle
+) {
+  const pendingLifecycle = reduceChartZoomLifecycle(latestLifecycle, {
+    type: 'request',
+    requestId: 5,
+    range: { min: 35, max: 55 },
+  });
+  const panelContext = {
+    applyChartZoomLifecycleFailure,
+    reduceChartZoomLifecycle,
+    __latestLifecycle: latestLifecycle,
+    __latestData: latestData,
+    __resetLifecycle: resetLifecycle,
+    __resetData: resetLifecycle.data,
+  };
+  const panelIntegerSource = sourceSection(
     panelSource,
-    /chartZoomed && suppressAutoRefine[\s\S]*?chartLastAutoRefineKey = chartZoomRangeKey\(renderedRange\)/,
-    'a programmatic refined response must become the dedupe baseline instead of recursively refining itself'
+    '      function toNonNegativeInteger(value, fallback) {',
+    '      function clampInteger(value, min, max) {'
+  );
+  const panelErrorSource = sourceSection(
+    panelSource,
+    '      function setChartError(msg) {',
+    '      function drawChart() {'
+  );
+  vm.runInNewContext(`
+    let chartControlsDirty = false;
+    let chartZoomLifecycle = __latestLifecycle;
+    let chartData = __latestData;
+    let latestChartRequestId = 3;
+    let chartRendered = { requestId: 3 };
+    const chartStatus = { textContent: 'latest panel chart accepted' };
+    const chartLegend = { textContent: 'legend' };
+    let drawCount = 0;
+    let transientClearCount = 0;
+    let baselineClearCount = 0;
+    function clearChartZoomTransientState() {
+      transientClearCount += 1;
+    }
+    function drawChart() {
+      drawCount += 1;
+    }
+    function clearChartZoomBaseline() {
+      baselineClearCount += 1;
+      chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
+        type: 'clear',
+        requestId: latestChartRequestId
+      });
+    }
+    function clearChartAutoRefineTimer() {}
+    function notifyChartPanelState() {}
+    ${panelIntegerSource}
+    ${panelErrorSource}
+
+    setChartError({ requestId: 2, message: 'stale panel refinement failed' });
+    const staleIgnored =
+      chartZoomLifecycle === __latestLifecycle &&
+      chartData === __latestData &&
+      chartStatus.textContent === 'latest panel chart accepted' &&
+      drawCount === 0;
+
+    chartZoomLifecycle = __resetLifecycle;
+    chartData = __resetData;
+    latestChartRequestId = 4;
+    chartStatus.textContent = 'panel reset complete';
+    setChartError({ requestId: 3, message: 'late panel refinement failed' });
+    const resetLateIgnored =
+      chartZoomLifecycle === __resetLifecycle &&
+      chartData === __resetData &&
+      chartStatus.textContent === 'panel reset complete' &&
+      drawCount === 0;
+
+    chartZoomLifecycle = reduceChartZoomLifecycle(__latestLifecycle, {
+      type: 'request',
+      requestId: 5,
+      range: { min: 35, max: 55 }
+    });
+    chartData = __latestData;
+    latestChartRequestId = 5;
+    setChartError({ requestId: 5, message: 'current panel refinement failed' });
+    globalThis.__result = {
+      staleIgnored,
+      resetLateIgnored,
+      currentAccepted:
+        chartZoomLifecycle.dataIsRefinement === false &&
+        chartData.requestId === 5 &&
+        chartStatus.textContent.includes('Original full chart restored.') &&
+        drawCount === 1 &&
+        transientClearCount === 1,
+      baselineClearCount
+    };
+  `, panelContext, { timeout: 2_000 });
+  assert.strictEqual(
+    panelContext.__result.staleIgnored,
+    true,
+    'the actual ordinary webview setChartError handler must ignore an older ranged failure'
+  );
+  assert.strictEqual(
+    panelContext.__result.resetLateIgnored,
+    true,
+    'the actual ordinary webview setChartError handler must ignore a late failure after Reset'
+  );
+  assert.strictEqual(
+    panelContext.__result.currentAccepted,
+    true,
+    'the actual ordinary webview setChartError handler must still restore the full chart for the current ranged failure'
+  );
+  assert.strictEqual(panelContext.__result.baselineClearCount, 0);
+
+  const transpileRendererSource = source => typescript.transpileModule(source, {
+    compilerOptions: {
+      module: typescript.ModuleKind.None,
+      target: typescript.ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const receiveHostMessageSource = transpileRendererSource(sourceSection(
+    rendererSource,
+    'function receiveHostMessage(',
+    '\nfunction receiveLiveResult('
+  ));
+  const applyLifecycleSource = transpileRendererSource(sourceSection(
+    rendererSource,
+    'function applyLiveChartZoomLifecycle(',
+    '\nfunction chartDataXRange('
+  ));
+  const configurationSignatureSource = transpileRendererSource(sourceSection(
+    rendererSource,
+    'function liveChartConfigurationSignature(',
+    '\nfunction drawLiveChart('
+  ));
+  const notebookState = {
+    liveId: 'chart-failure-race',
+    liveChart: {
+      requestId: 3,
+      requestRange: undefined,
+      pending: false,
+      zoomLifecycle: latestLifecycle,
+      data: latestData,
+      fullData: latestLifecycle.fullData,
+      fullRange: latestLifecycle.fullRange,
+      requestedRenderRange: undefined,
+      refined: true,
+      error: undefined,
+      errorWasRefinement: false,
+      chartType: 'line',
+      xColumn: 'x',
+      yColumns: ['y'],
+      groupByColumn: '',
+      openColumn: '',
+      highColumn: '',
+      lowColumn: '',
+      closeColumn: '',
+      maxPoints: 7_000,
+      requestSignature: JSON.stringify([
+        'line',
+        'x',
+        ['y'],
+        '',
+        '',
+        '',
+        '',
+        '',
+        7_000,
+        2_000_000,
+        3_000,
+      ]),
+    },
+  };
+  const rendererContext = {
+    applyChartZoomLifecycleFailure,
+    applyChartZoomLifecycleResponse,
+    chartRequestIsCurrent,
+    reduceChartZoomLifecycle,
+    __states: new Map([['output', notebookState]]),
+    __latestLifecycle: latestLifecycle,
+    __latestData: latestData,
+    __pendingLifecycle: pendingLifecycle,
+    __resetLifecycle: resetLifecycle,
+    __resetData: resetLifecycle.data,
+  };
+  vm.runInNewContext(`
+    const states = __states;
+    const resultSettings = {
+      chartMaxSourceRows: 2000000,
+      chartZoomMinSampledPoints: 3000
+    };
+    let renderCount = 0;
+    function renderState() {
+      renderCount += 1;
+    }
+    ${applyLifecycleSource}
+    ${configurationSignatureSource}
+    ${receiveHostMessageSource}
+
+    const state = states.values().next().value;
+    receiveHostMessage({}, {
+      type: 'liveChart',
+      liveId: 'chart-failure-race',
+      requestId: 2,
+      error: 'stale notebook refinement failed'
+    });
+    const staleIgnored =
+      state.liveChart.zoomLifecycle === __latestLifecycle &&
+      state.liveChart.data === __latestData &&
+      state.liveChart.error === undefined &&
+      renderCount === 0;
+
+    Object.assign(state.liveChart, {
+      requestId: 4,
+      requestRange: undefined,
+      pending: false,
+      zoomLifecycle: __resetLifecycle,
+      data: __resetData,
+      fullData: __resetLifecycle.fullData,
+      fullRange: __resetLifecycle.fullRange,
+      refined: false,
+      error: undefined,
+      errorWasRefinement: false
+    });
+    receiveHostMessage({}, {
+      type: 'liveChart',
+      liveId: 'chart-failure-race',
+      requestId: 3,
+      error: 'late notebook refinement failed'
+    });
+    const resetLateIgnored =
+      state.liveChart.zoomLifecycle === __resetLifecycle &&
+      state.liveChart.data === __resetData &&
+      state.liveChart.error === undefined &&
+      renderCount === 0;
+
+    Object.assign(state.liveChart, {
+      requestId: 5,
+      requestRange: { min: 35, max: 55 },
+      pending: true,
+      zoomLifecycle: __pendingLifecycle,
+      data: __latestData,
+      refined: true,
+      error: undefined,
+      errorWasRefinement: false
+    });
+    receiveHostMessage({}, {
+      type: 'liveChart',
+      liveId: 'chart-failure-race',
+      requestId: 5,
+      error: 'current notebook refinement failed'
+    });
+    globalThis.__result = {
+      staleIgnored,
+      resetLateIgnored,
+      currentAccepted:
+        state.liveChart.pending === false &&
+        state.liveChart.error === 'current notebook refinement failed' &&
+        state.liveChart.errorWasRefinement === true &&
+        state.liveChart.requestRange === undefined &&
+        state.liveChart.data === __latestData &&
+        state.liveChart.dirty === false &&
+        renderCount === 1
+    };
+  `, rendererContext, { timeout: 2_000 });
+  assert.strictEqual(
+    rendererContext.__result.staleIgnored,
+    true,
+    'the actual notebook receiveHostMessage handler must ignore an older ranged failure'
+  );
+  assert.strictEqual(
+    rendererContext.__result.resetLateIgnored,
+    true,
+    'the actual notebook receiveHostMessage handler must ignore a late failure after Reset'
+  );
+  assert.strictEqual(
+    rendererContext.__result.currentAccepted,
+    true,
+    'the actual notebook receiveHostMessage handler must still accept the current ranged failure'
   );
 }
 
@@ -1628,9 +2508,14 @@ function testQText() {
 
 async function testQTextResultPanelSettings() {
   const harness = createQTextResultsPanelHarness();
+  harness.setSetting(
+    'vscode-kdb.results.viewer.columnWidths',
+    [210, 0, 330]
+  );
   const {
     KxResultsPanel,
     sharedKxResultSettings,
+    updatePositionalKxResultColumnWidth,
     updateSharedKxResultSetting,
   } = requireOutWithVscode('kx-results-panel', harness.vscode);
   const firstRaw = '{[x;y]a:x+y;b:a*2;b}[1]';
@@ -1709,6 +2594,11 @@ async function testQTextResultPanelSettings() {
 
   const sharedBefore = sharedKxResultSettings();
   assert.deepStrictEqual(
+    sharedBefore.columnWidths,
+    { 0: 210, 2: 330 },
+    'legacy array-shaped configuration must migrate to the shared sparse map'
+  );
+  assert.deepStrictEqual(
     parseNotebookRendererHostMessage(notebookRendererSettingsMessage({
       presentation: 'inline',
       rowLimit: DEFAULT_NOTEBOOK_ROW_LIMIT,
@@ -1716,6 +2606,43 @@ async function testQTextResultPanelSettings() {
     }, sharedBefore)).resultSettings,
     sharedBefore,
     'the notebook renderer must validate the same durable setting values used by the KX panel'
+  );
+  await Promise.all([
+    updatePositionalKxResultColumnWidth(0, 240),
+    updatePositionalKxResultColumnWidth(2, 360),
+    updatePositionalKxResultColumnWidth(8_192, 512),
+  ]);
+  assert.deepStrictEqual(
+    sharedKxResultSettings().columnWidths,
+    { 0: 240, 2: 360, 8192: 512 },
+    'rapid panel/notebook writes must serialize without losing arbitrary sparse source positions'
+  );
+  const reloadedPanelModule = requireOutWithVscode(
+    'kx-results-panel',
+    harness.vscode
+  );
+  assert.deepStrictEqual(
+    reloadedPanelModule.sharedKxResultSettings().columnWidths,
+    { 0: 240, 2: 360, 8192: 512 },
+    'a fresh extension module/panel lifecycle must reload widths from durable configuration'
+  );
+  await reloadedPanelModule.resetPositionalKxResultColumnWidths();
+  assert.deepStrictEqual(
+    reloadedPanelModule.sharedKxResultSettings().columnWidths,
+    {},
+    'the all-column reset must persist across a simulated extension reload'
+  );
+  await updatePositionalKxResultColumnWidth(0, 260);
+  await updateSharedKxResultSetting('cellWidth', 180, 'standard');
+  assert.deepStrictEqual(
+    sharedKxResultSettings().columnWidths,
+    {},
+    'the all-column Cell width textbox/preset must replace manual source widths'
+  );
+  assert.strictEqual(
+    sharedKxResultSettings().cellWidth,
+    180,
+    'the selected all-column base width must persist with the active density'
   );
   assert.strictEqual(
     await updateSharedKxResultSetting('arrayDisplayFormat', 'space'),
@@ -1765,6 +2692,271 @@ async function testQTextResultPanelSettings() {
 
   firstPanel.dispose();
   secondPanel.dispose();
+}
+
+async function testDuplicateOrdinalResultsPanel() {
+  const harness = createQTextResultsPanelHarness();
+  const manualWidths = { 0: 211, 1: 322, 2: 433 };
+  harness.setSetting(
+    'vscode-kdb.results.viewer.columnWidths',
+    manualWidths
+  );
+  const { KxResultsPanel } = requireOutWithVscode(
+    'kx-results-panel',
+    harness.vscode
+  );
+  const duplicateTable = prefix => createColumnarPanelResult(
+    ['dup', 'dup', 'tail'],
+    2,
+    (rowIndex, columnIndex) => [
+      [
+        `${prefix}-left-a`,
+        `${prefix}-right-z`,
+        `${prefix}-tail-0`,
+      ],
+      [
+        `${prefix}-left-z`,
+        `${prefix}-right-a`,
+        `${prefix}-tail-1`,
+      ],
+    ][rowIndex][columnIndex],
+    ['symbol', 'string', 'string']
+  );
+  const showTable = table => KxResultsPanel.showResult(harness.context, {
+    mode: 'table',
+    table,
+    query: 'duplicate ordinal panel regression',
+    connectionName: 'test',
+    elapsedMs: 1,
+    messages: [],
+  });
+
+  showTable(duplicateTable('initial'));
+  await harness.emitMessage(0, { type: 'ready' });
+  const panel = harness.panels[0];
+  assert.match(
+    panel.webview.html,
+    /allColumnPositions:\s*nextAllColumnPositions[\s\S]*?hiddenColumnPositions:\s*nextHiddenColumnPositions/,
+    'the browser checklist must retain source ordinals for duplicate labels'
+  );
+  assert.match(
+    panel.webview.html,
+    /sourceColumnPosition,\s*targetColumnPosition,\s*sourceColumnName,\s*targetColumnName/,
+    'the browser drag message must carry occurrence-aware source ordinals'
+  );
+  const latestMetadata = () => panel.posted
+    .filter(message => message.type === 'resultMeta')
+    .at(-1).result;
+  const waitForMetadataAfter = async version => {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const candidate = latestMetadata();
+      if (candidate.version > version) {
+        return candidate;
+      }
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    assert.fail(`ordinary panel metadata did not advance beyond version ${version}`);
+  };
+  let nextSliceRequestId = 1;
+  const requestAllCells = async metadata => {
+    const postedStart = panel.posted.length;
+    const requestId = nextSliceRequestId++;
+    await harness.emitMessage(0, {
+      type: 'requestSlice',
+      version: metadata.version,
+      requestId,
+      rows: { start: 0, end: metadata.rowCount - 1 },
+      columns: { start: 0, end: metadata.columns.length - 1 },
+    });
+    const response = panel.posted
+      .slice(postedStart)
+      .find(message => message.type === 'slice' && message.requestId === requestId);
+    assert.ok(response, `ordinary panel did not answer slice ${requestId}`);
+    return response.slice.cells;
+  };
+  const assertWidthsFollowPositions = metadata => {
+    assert.deepStrictEqual(
+      metadata.columnPositions.map(position =>
+        metadata.settings.columnWidths[String(position)]),
+      metadata.columnPositions.map(position => manualWidths[position]),
+      'manual widths must remain attached to each displayed source ordinal'
+    );
+  };
+
+  let metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columns, ['dup', 'dup', 'tail']);
+  assert.deepStrictEqual(metadata.columnPositions, [0, 1, 2]);
+  assert.deepStrictEqual(metadata.allColumnPositions, [0, 1, 2]);
+  assert.deepStrictEqual(metadata.hiddenColumnPositions, []);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['initial-left-a', 'initial-right-z', 'initial-tail-0'],
+    ['initial-left-z', 'initial-right-a', 'initial-tail-1'],
+  ]);
+
+  await harness.emitMessage(0, {
+    type: 'hideColumn',
+    version: metadata.version,
+    columnName: 'dup',
+    columnPosition: 0,
+  });
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columns, ['dup', 'tail']);
+  assert.deepStrictEqual(metadata.columnPositions, [1, 2]);
+  assert.deepStrictEqual(metadata.hiddenColumnNames, ['dup']);
+  assert.deepStrictEqual(metadata.hiddenColumnPositions, [0]);
+  assert.strictEqual(metadata.hiddenColumnCount, 1);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['initial-right-z', 'initial-tail-0'],
+    ['initial-right-a', 'initial-tail-1'],
+  ], 'hiding one duplicate must retain the other occurrence and its own values');
+
+  showTable(duplicateTable('hidden-refresh'));
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columnPositions, [1, 2]);
+  assert.deepStrictEqual(metadata.hiddenColumnPositions, [0]);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['hidden-refresh-right-z', 'hidden-refresh-tail-0'],
+    ['hidden-refresh-right-a', 'hidden-refresh-tail-1'],
+  ], 'a same-schema query refresh must retain the exact hidden occurrence');
+
+  await harness.emitMessage(0, {
+    type: 'showColumn',
+    version: metadata.version,
+    columnName: 'dup',
+    columnPosition: 0,
+  });
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columnPositions, [0, 1, 2]);
+  await harness.emitMessage(0, {
+    type: 'reorderColumn',
+    version: metadata.version,
+    sourceColumn: 1,
+    targetColumn: 0,
+    sourceColumnName: 'dup',
+    targetColumnName: 'dup',
+    sourceColumnPosition: 1,
+    targetColumnPosition: 0,
+  });
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columns, ['dup', 'dup', 'tail']);
+  assert.deepStrictEqual(metadata.columnPositions, [1, 0, 2]);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['hidden-refresh-right-z', 'hidden-refresh-left-a', 'hidden-refresh-tail-0'],
+    ['hidden-refresh-right-a', 'hidden-refresh-left-z', 'hidden-refresh-tail-1'],
+  ], 'duplicate occurrences must reorder independently without aliasing their values');
+
+  showTable(duplicateTable('reordered-refresh'));
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columnPositions, [1, 0, 2]);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['reordered-refresh-right-z', 'reordered-refresh-left-a', 'reordered-refresh-tail-0'],
+    ['reordered-refresh-right-a', 'reordered-refresh-left-z', 'reordered-refresh-tail-1'],
+  ], 'same-schema query refresh must preserve duplicate order and positional widths');
+
+  const beforeSortVersion = metadata.version;
+  await harness.emitMessage(0, {
+    type: 'sortColumn',
+    version: beforeSortVersion,
+    columnIndex: 0,
+    columnName: 'dup',
+    columnPosition: 1,
+  });
+  metadata = await waitForMetadataAfter(beforeSortVersion);
+  assert.deepStrictEqual(metadata.sort, {
+    columnName: 'dup',
+    columnPosition: 1,
+    direction: 'asc',
+  });
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['reordered-refresh-right-a', 'reordered-refresh-left-z', 'reordered-refresh-tail-1'],
+    ['reordered-refresh-right-z', 'reordered-refresh-left-a', 'reordered-refresh-tail-0'],
+  ], 'sorting one duplicate must use that occurrence');
+
+  await harness.emitMessage(0, {
+    type: 'hideColumn',
+    version: metadata.version,
+    columnName: 'dup',
+    columnPosition: 0,
+  });
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columnPositions, [1, 2]);
+  assert.deepStrictEqual(metadata.sort, {
+    columnName: 'dup',
+    columnPosition: 1,
+    direction: 'asc',
+  }, 'hiding the other duplicate must not clear the active occurrence sort');
+  await harness.emitMessage(0, {
+    type: 'showColumn',
+    version: metadata.version,
+    columnName: 'dup',
+    columnPosition: 0,
+  });
+  metadata = latestMetadata();
+  await harness.emitMessage(0, {
+    type: 'hideColumn',
+    version: metadata.version,
+    columnName: 'dup',
+    columnPosition: 1,
+  });
+  metadata = latestMetadata();
+  assert.strictEqual(metadata.sort, null, 'hiding the sorted occurrence must clear its sort');
+  await harness.emitMessage(0, {
+    type: 'showColumn',
+    version: metadata.version,
+    columnName: 'dup',
+    columnPosition: 1,
+  });
+
+  const uniqueTable = createColumnarPanelResult(
+    ['alpha', 'beta', 'tail'],
+    1,
+    (_rowIndex, columnIndex) => ['alpha-value', 'beta-value', 'tail-value'][columnIndex]
+  );
+  showTable(uniqueTable);
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columns, ['alpha', 'beta', 'tail']);
+  assert.deepStrictEqual(metadata.columnPositions, [0, 1, 2]);
+  assert.deepStrictEqual(metadata.hiddenColumnPositions, []);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['alpha-value', 'beta-value', 'tail-value'],
+  ]);
+
+  await harness.emitMessage(0, {
+    type: 'hideColumn',
+    version: metadata.version,
+    columnName: 'beta',
+  });
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columnPositions, [0, 2]);
+  await harness.emitMessage(0, {
+    type: 'showColumn',
+    version: metadata.version,
+    columnName: 'beta',
+  });
+  metadata = latestMetadata();
+  await harness.emitMessage(0, {
+    type: 'reorderColumn',
+    version: metadata.version,
+    sourceColumn: 1,
+    targetColumn: 0,
+    sourceColumnName: 'beta',
+    targetColumnName: 'alpha',
+  });
+  metadata = latestMetadata();
+  assert.deepStrictEqual(metadata.columns, ['beta', 'alpha', 'tail']);
+  assert.deepStrictEqual(metadata.columnPositions, [1, 0, 2]);
+  assertWidthsFollowPositions(metadata);
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['beta-value', 'alpha-value', 'tail-value'],
+  ], 'legacy unique-name messages must retain hide/show/reorder behavior');
+
+  panel.dispose();
 }
 
 function testConnections() {
@@ -6688,6 +7880,446 @@ async function testConnectionManagerLifecycle() {
   timeoutManager.dispose();
 }
 
+async function testHostedChartZoomLifecycle() {
+  const adapters = [
+    await createHostedPanelChartAdapter(),
+    await createHostedNotebookChartAdapter(),
+  ];
+  try {
+    for (const adapter of adapters) {
+      await exerciseHostedChartZoomLifecycle(adapter);
+    }
+  } finally {
+    adapters.forEach(adapter => adapter.dispose());
+  }
+}
+
+async function exerciseHostedChartZoomLifecycle(adapter) {
+  let requestId = 0;
+  let lifecycle = reduceChartZoomLifecycle(null, {
+    type: 'clear',
+    requestId,
+  });
+  const plot = {
+    data: undefined,
+    range: undefined,
+    setData(data) {
+      this.data = data;
+    },
+    setScale(range) {
+      this.range = { min: range.min, max: range.max };
+    },
+  };
+  const begin = async range => {
+    requestId += 1;
+    let responsePromise;
+    lifecycle = issueChartZoomLifecycleRequest(
+      lifecycle,
+      requestId,
+      range,
+      request => {
+        responsePromise = adapter.issue(
+          request.requestId,
+          request.range || undefined
+        );
+      }
+    );
+    assert.ok(
+      responsePromise,
+      `${adapter.name} production request transition must enqueue host work`
+    );
+    const response = await responsePromise;
+    assert.ok(response?.data, `${adapter.name} host must return chart data`);
+    return { requestId, range, response };
+  };
+  const settle = ticket => {
+    const before = lifecycle;
+    const applied = {};
+    const next = applyChartZoomLifecycleResponse(
+      lifecycle,
+      ticket.requestId,
+      ticket.response.data,
+      value => {
+        applied.value = value;
+        plot.setData(value.data);
+        if (value.requestedRenderRange) {
+          plot.setScale(value.requestedRenderRange);
+        } else {
+          const xDomain = value.data.xDomain;
+          plot.setScale(isFiniteChartRange(xDomain)
+            ? xDomain
+            : {
+              min: Math.min(...value.data.x),
+              max: Math.max(...value.data.x),
+            });
+        }
+      }
+    );
+    assert.notStrictEqual(
+      next,
+      before,
+      `${adapter.name} current host response must be accepted`
+    );
+    assert.ok(applied.value, `${adapter.name} must apply the current host response`);
+    lifecycle = applied.value.state;
+    assert.strictEqual(
+      plot.data,
+      ticket.response.data,
+      `${adapter.name} must reconstruct the plot dataset from the current response`
+    );
+    if (ticket.range) {
+      assert.deepStrictEqual(
+        applied.value.requestedRenderRange,
+        ticket.range,
+        `${adapter.name} must restore the exact absolute requested viewport`
+      );
+    }
+    lifecycle = reduceChartZoomLifecycle(lifecycle, {
+      type: 'rendered',
+      requestId: ticket.requestId,
+      naturalRange: plot.range,
+    });
+    return ticket.response.data;
+  };
+
+  const base = await begin(undefined);
+  const originalData = settle(base);
+  const originalDomain = { ...plot.range };
+  assert.deepStrictEqual(originalDomain, { min: 0, max: 20_000 });
+  assert.strictEqual(lifecycle.fullData, originalData);
+
+  const first = await begin({ min: 1_000, max: 19_000 });
+  const firstData = settle(first);
+  assert.deepStrictEqual(plot.range, first.range);
+  assert.strictEqual(firstData.x[0], 1_000);
+  assert.strictEqual(firstData.x.at(-1), 19_000);
+  assert.strictEqual(firstData.eligibleRowCount, 18_001);
+  assert.strictEqual(firstData.sampledPointCount, 7_000);
+
+  const second = await begin({ min: 5_000, max: 15_000 });
+  assert.notStrictEqual(
+    second.response,
+    first.response,
+    `${adapter.name} nested requests must produce distinct host responses`
+  );
+  assert.notDeepStrictEqual(
+    second.response.data.x,
+    first.response.data.x,
+    `${adapter.name} nested responses must contain distinct ranged datasets`
+  );
+  const pendingSecond = lifecycle;
+  let staleApplied = false;
+  assert.strictEqual(
+    applyChartZoomLifecycleResponse(
+      lifecycle,
+      first.requestId,
+      first.response.data,
+      () => {
+        staleApplied = true;
+      }
+    ),
+    pendingSecond,
+    `${adapter.name} must reject a stale first-zoom response after the nested request`
+  );
+  assert.strictEqual(staleApplied, false);
+  const secondData = settle(second);
+  assert.deepStrictEqual(plot.range, second.range);
+  assert.strictEqual(secondData.x[0], 5_000);
+  assert.strictEqual(secondData.x.at(-1), 15_000);
+  assert.strictEqual(secondData.eligibleRowCount, 10_001);
+  assert.strictEqual(secondData.sampledPointCount, 7_000);
+  const firstSampledX = new Set(firstData.x);
+  assert.ok(
+    secondData.x.some(x => !firstSampledX.has(x)),
+    `${adapter.name} nested reconstruction must contain original-source values omitted by the first sample`
+  );
+  assert.strictEqual(lifecycle.fullData, originalData);
+  assert.deepStrictEqual(lifecycle.fullRange, originalDomain);
+
+  assert.deepStrictEqual(
+    adapter.ranges,
+    [
+      undefined,
+      { min: 1_000, max: 19_000 },
+      { min: 5_000, max: 15_000 },
+    ],
+    `${adapter.name} must issue a fresh host request for each exact absolute range`
+  );
+  const issuedBeforeReset = adapter.ranges.length;
+  requestId += 1;
+  let resetApplied;
+  let resetInvalidation;
+  lifecycle = resetChartZoomLifecycle(
+    lifecycle,
+    requestId,
+    value => {
+      resetApplied = value;
+      plot.setData(value.data);
+      if (value.requestedRenderRange) {
+        plot.setScale(value.requestedRenderRange);
+      }
+    },
+    adapter.invalidate
+      ? invalidatedRequestId => {
+        resetInvalidation = adapter.invalidate(invalidatedRequestId);
+      }
+      : undefined
+  );
+  await resetInvalidation;
+  assert.ok(resetApplied, `${adapter.name} Reset must apply the local baseline`);
+  assert.deepStrictEqual(resetApplied.requestedRenderRange, originalDomain);
+  lifecycle = reduceChartZoomLifecycle(lifecycle, {
+    type: 'rendered',
+    requestId,
+    naturalRange: plot.range,
+  });
+  assert.strictEqual(
+    adapter.ranges.length,
+    issuedBeforeReset,
+    `${adapter.name} Reset must not request chart data`
+  );
+  const resetComparable = { ...plot.data };
+  if (Object.prototype.hasOwnProperty.call(originalData, 'requestId')) {
+    resetComparable.requestId = originalData.requestId;
+  } else {
+    delete resetComparable.requestId;
+  }
+  assert.deepStrictEqual(
+    resetComparable,
+    originalData,
+    `${adapter.name} Reset must reconstruct the original dataset`
+  );
+  if (Object.prototype.hasOwnProperty.call(originalData, 'requestId')) {
+    assert.strictEqual(plot.data.requestId, requestId);
+  } else {
+    assert.strictEqual(
+      Object.prototype.hasOwnProperty.call(plot.data, 'requestId'),
+      false,
+      `${adapter.name} Reset must not invent transport fields on renderer data`
+    );
+  }
+  assert.deepStrictEqual(plot.range, originalDomain);
+  const afterReset = lifecycle;
+  let lateApplied = false;
+  assert.strictEqual(
+    applyChartZoomLifecycleResponse(
+      lifecycle,
+      second.requestId,
+      second.response.data,
+      () => {
+        lateApplied = true;
+      }
+    ),
+    afterReset,
+    `${adapter.name} Reset must reject a late nested response`
+  );
+  assert.strictEqual(lateApplied, false);
+}
+
+function isFiniteChartRange(range) {
+  return !!range &&
+    Number.isFinite(range.min) &&
+    Number.isFinite(range.max) &&
+    range.max > range.min;
+}
+
+async function createHostedPanelChartAdapter() {
+  const harness = createQTextResultsPanelHarness();
+  const { KxResultsPanel } = requireOutWithVscode('kx-results-panel', harness.vscode);
+  const table = createColumnarPanelResult(
+    ['x', 'y'],
+    20_001,
+    (rowIndex, columnIndex) => columnIndex === 0 ? rowIndex : rowIndex * 10,
+    ['int', 'int']
+  );
+  KxResultsPanel.showResult(harness.context, {
+    mode: 'table',
+    table,
+    query: 'select x,y from zoomLifecycle',
+    connectionName: 'test',
+    elapsedMs: 1,
+    messages: [],
+  }, 'new');
+  await harness.emitMessage(0, { type: 'ready' });
+  const panel = harness.panels[0];
+  const version = panel.posted.find(message => message.type === 'resultMeta').result.version;
+  const ranges = [];
+  return {
+    name: 'panel',
+    ranges,
+    async issue(requestId, range) {
+      ranges.push(range ? { ...range } : undefined);
+      const responsePromise = new Promise(resolve => {
+        const listener = message => {
+          if ((message.type === 'chartData' || message.type === 'chartError') &&
+            (message.data?.requestId === requestId || message.requestId === requestId)) {
+            panel.postListeners.delete(listener);
+            resolve(message);
+          }
+        };
+        panel.postListeners.add(listener);
+      });
+      await harness.emitMessage(0, {
+        type: 'requestChart',
+        version,
+        requestId,
+        chartType: 'line',
+        xColumn: 'x',
+        yColumns: ['y'],
+        width: 800,
+        ...(range ? { xMin: range.min, xMax: range.max } : {}),
+      });
+      const response = await responsePromise;
+      assert.strictEqual(
+        response.type,
+        'chartData',
+        `panel host chart request ${requestId} failed: ${response.message || 'unknown error'}`
+      );
+      return response;
+    },
+    async invalidate(requestId) {
+      const responseCount = panel.posted
+        .filter(message => message.type === 'chartData').length;
+      await harness.emitMessage(0, {
+        type: 'chartZoomReset',
+        version,
+        requestId,
+      });
+      assert.strictEqual(
+        panel.posted.filter(message => message.type === 'chartData').length,
+        responseCount,
+        'panel reset handler must only invalidate pending chart work'
+      );
+    },
+    dispose() {
+      panel.dispose();
+    },
+  };
+}
+
+async function createHostedNotebookChartAdapter() {
+  const runtime = createNotebookIntegrationRuntime();
+  const resultSettings = {
+    cellWidth: 160,
+    columnWidths: {},
+    autoFitColumns: false,
+    autoFitMode: 'wholeResult',
+    rowHeight: 28,
+    fontSize: 0,
+    density: 'standard',
+    showRowIndex: true,
+    includeHeaders: true,
+    includeRowIndex: true,
+    copyExportConfirmCellThreshold: 1,
+    elapsedTimeDisplay: 'auto',
+    chartDecimalPlaces: 4,
+    chartMaxSourceRows: 2_000_000,
+    chartZoomMinSampledPoints: 3_000,
+    chartZoomMaxSampledPoints: 7_000,
+    qTextSyntaxHighlighting: false,
+    qTextDisplayFormatting: false,
+    arrayDisplayFormat: 'commaSpace',
+    functionDisplayStrategy: 'qText',
+    dictionaryDisplayStrategy: 'grid',
+    listDisplayStrategy: 'grid',
+    objectDisplayStrategy: 'grid',
+  };
+  const { NotebookIntegration } = requireOutWithMocks('notebook-integration', {
+    vscode: runtime.vscode,
+    './kx-results-panel': {
+      KxResultsPanel: { showResult() {} },
+      sharedKxResultSettings: () => ({ ...resultSettings }),
+      updateSharedKxResultSetting: async () => undefined,
+      updatePositionalKxResultColumnWidth: async () => undefined,
+      resetPositionalKxResultColumnWidths: async () => undefined,
+    },
+  });
+  const notebook = {
+    uri: testUri('file:///workspace/hosted-chart-zoom.ipynb'),
+    notebookType: 'jupyter-notebook',
+    metadata: {},
+    cellCount: 0,
+    cells: [],
+    cellAt(index) {
+      return this.cells[index];
+    },
+  };
+  const cell = runtime.cell(notebook, 0, 'q', 'select x,y from zoomLifecycle');
+  notebook.cells.push(cell);
+  notebook.cellCount = 1;
+  const liveId = `hosted-chart-zoom-${'a'.repeat(32)}`;
+  const outputId = liveId;
+  const preview = createPortableKxResult({
+    columns: ['x', 'y'],
+    rows: [[0, 0]],
+    rowCount: 20_001,
+    rowLimit: 1,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  });
+  cell.outputs = [{
+    metadata: {
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: outputId },
+    },
+    items: [{
+      mime: KX_NOTEBOOK_MIME,
+      data: new TextEncoder().encode(JSON.stringify(preview)),
+    }],
+  }];
+  const editor = { notebook, selections: [{ start: 0, end: 1 }] };
+  runtime.vscode.window.activeNotebookEditor = editor;
+  runtime.vscode.window.activeTextEditor = { document: cell.document };
+  const liveResults = new LiveNotebookResultStore(4, () => liveId);
+  liveResults.register({
+    notebookUri: notebook.uri.toString(),
+    cellUri: cell.document.uri.toString(),
+    query: 'select x,y from zoomLifecycle',
+    connectionName: 'test',
+    elapsedMs: 1,
+    value: modelQTable(
+      ['x', 'y'],
+      Array.from({ length: 20_001 }, (_unused, index) => ({
+        x: index,
+        y: index * 10,
+      }))
+    ),
+  });
+  const integration = new NotebookIntegration(
+    { subscriptions: [], extensionPath: ROOT },
+    { liveResults }
+  );
+  const ranges = [];
+  return {
+    name: 'notebook',
+    ranges,
+    async issue(requestId, range) {
+      ranges.push(range ? { ...range } : undefined);
+      const start = runtime.postedMessages.length;
+      await runtime.emitRendererMessage(editor, {
+        type: 'requestLiveChart',
+        outputId,
+        liveId,
+        requestId,
+        chartType: 'line',
+        xColumn: 'x',
+        yColumns: ['y'],
+        maxPoints: 7_000,
+        ...(range ? { xMin: range.min, xMax: range.max } : {}),
+      });
+      const response = runtime.postedMessages
+        .slice(start)
+        .map(entry => entry.message)
+        .find(message => message.type === 'liveChart' && message.requestId === requestId);
+      assert.ok(response, `notebook host did not answer chart request ${requestId}`);
+      return response;
+    },
+    dispose() {
+      integration.dispose();
+    },
+  };
+}
+
 function testColumnarResults() {
   let reads = 0;
   const millionRows = createColumnarPanelResult(['id', 'value', 'note'], 1_000_000, (row, column) => {
@@ -6708,6 +8340,48 @@ function testColumnarResults() {
   assert.deepStrictEqual(
     millionRows.cellWindow({ start: -5, end: 0 }, { start: 2, end: 99 }).cells,
     [['row 0']]
+  );
+
+  const duplicateColumns = createColumnarPanelResult(
+    ['dup', 'dup', 'tail'],
+    2,
+    (rowIndex, columnIndex) => [
+      ['left-0', 'right-0', 'tail-0'],
+      ['left-1', 'right-1', 'tail-1'],
+    ][rowIndex][columnIndex],
+    ['symbol', 'string', 'string']
+  );
+  const filteredDuplicates = filterColumnarPanelResult(
+    duplicateColumns,
+    ['dup', 'dup', 'tail']
+  );
+  assert.deepStrictEqual(
+    filteredDuplicates.cellWindow(
+      { start: 0, end: 1 },
+      { start: 0, end: 2 }
+    ).cells,
+    [
+      ['left-0', 'right-0', 'tail-0'],
+      ['left-1', 'right-1', 'tail-1'],
+    ],
+    'name-compatible filtering must consume duplicate occurrences instead of aliasing the first one'
+  );
+  const reorderedDuplicates = projectColumnarPanelResult(
+    duplicateColumns,
+    [1, 0, 2]
+  );
+  assert.deepStrictEqual(reorderedDuplicates.columns, ['dup', 'dup', 'tail']);
+  assert.deepStrictEqual(reorderedDuplicates.columnTypes, ['string', 'symbol', 'string']);
+  assert.deepStrictEqual(
+    reorderedDuplicates.cellWindow(
+      { start: 0, end: 1 },
+      { start: 0, end: 2 }
+    ).cells,
+    [
+      ['right-0', 'left-0', 'tail-0'],
+      ['right-1', 'left-1', 'tail-1'],
+    ],
+    'ordinal projection must preserve distinct duplicate values through reordering'
   );
 
   const result = rowsToColumnarPanelResult([
@@ -6863,6 +8537,410 @@ function testColumnarResults() {
   );
 }
 
+async function testResultColumnSizing() {
+  assert.strictEqual(KX_COLUMN_MAX_WIDTH, 2_000);
+  assert.strictEqual(KX_COLUMN_AUTO_WIDTH_CAP, 1_200);
+  assert.strictEqual(normalizeColumnAutoFitMode('wholeResult'), 'wholeResult');
+  assert.strictEqual(normalizeColumnAutoFitMode('visibleRows'), 'visibleRows');
+  assert.strictEqual(
+    normalizeColumnAutoFitMode('unknown'),
+    'wholeResult',
+    'whole-result sizing must be the safe/default mode'
+  );
+
+  assert.deepStrictEqual(normalizePositionalColumnWidths(null), {});
+  assert.deepStrictEqual(
+    normalizePositionalColumnWidths([79, 80, 123.6, Infinity, 9_999, 0]),
+    { 1: 80, 2: 123, 4: 2_000 },
+    'legacy array state must migrate valid widths while retaining zero/sub-minimum unset slots'
+  );
+  const legacyBeyondNotebookTransport = [];
+  legacyBeyondNotebookTransport[8_192] = 321;
+  assert.deepStrictEqual(
+    normalizePositionalColumnWidths(legacyBeyondNotebookTransport),
+    { 8192: 321 },
+    'legacy array migration must not inherit the notebook live-column transport bound'
+  );
+  assert.deepStrictEqual(
+    normalizePositionalColumnWidths({
+      0: 79,
+      3: 444.9,
+      '03': 555,
+      '-1': 666,
+      '1.5': 777,
+      name: 888,
+      9: true,
+    }),
+    { 0: 80, 3: 444 },
+    'map normalization must clamp values and retain only canonical nonnegative integer keys'
+  );
+
+  let positional = updatePositionalColumnWidth({}, 0, 240);
+  assert.deepStrictEqual(positional, { 0: 240 }, 'the first column must support manual sizing');
+  positional = updatePositionalColumnWidth(positional, 2, 360);
+  assert.deepStrictEqual(
+    positional,
+    { 0: 240, 2: 360 },
+    'later columns must use sparse keys without allocating intermediate slots'
+  );
+  positional = updatePositionalColumnWidth(positional, 0, null);
+  assert.deepStrictEqual(
+    positional,
+    { 2: 360 },
+    'clearing the first column must not shift a later positional width'
+  );
+  positional = updatePositionalColumnWidth(positional, 2, undefined);
+  assert.deepStrictEqual(
+    positional,
+    {},
+    'clearing the last manual width must leave an empty sparse map'
+  );
+  const arbitraryPosition = 1_000_000;
+  positional = updatePositionalColumnWidth(positional, arbitraryPosition, 512);
+  assert.deepStrictEqual(positional, { [arbitraryPosition]: 512 });
+  assert.strictEqual(
+    resolvedColumnWidth(arbitraryPosition, 160, positional, false),
+    512,
+    'ordinary-panel source positions beyond notebook transport bounds must persist and resolve'
+  );
+  assert.deepStrictEqual(
+    positionalColumnWidthEntries({ 50: 500, 2: 200, 10: 300 }),
+    [[2, 200], [10, 300], [50, 500]]
+  );
+  assert.strictEqual(hasPositionalColumnWidths(positional), true);
+  assert.strictEqual(hasPositionalColumnWidths({}), false);
+  assert.deepStrictEqual(
+    updatePositionalColumnWidth({ 0: 240 }, -1, 500),
+    { 0: 240 },
+    'invalid source positions must not alter persisted widths'
+  );
+
+  let queuedStoredWidths = {};
+  let releaseFirstQueuedWrite;
+  let markFirstQueuedWriteStarted;
+  const firstQueuedWriteGate = new Promise(resolve => {
+    releaseFirstQueuedWrite = resolve;
+  });
+  const firstQueuedWriteStarted = new Promise(resolve => {
+    markFirstQueuedWriteStarted = resolve;
+  });
+  const queuedWriteSnapshots = [];
+  const queuedBroadcastSnapshots = [];
+  let queuedWriteCount = 0;
+  const widthPersistenceQueue = new PositionalColumnWidthPersistenceQueue(
+    () => ({ ...queuedStoredWidths }),
+    async widths => {
+      queuedWriteCount += 1;
+      queuedWriteSnapshots.push({ ...widths });
+      if (queuedWriteCount === 1) {
+        markFirstQueuedWriteStarted();
+        await firstQueuedWriteGate;
+      }
+      queuedStoredWidths = { ...widths };
+    }
+  );
+  const queuedWidthOperations = [
+    widthPersistenceQueue.update(
+      current => updatePositionalColumnWidth(current, 0, 210),
+      widths => queuedBroadcastSnapshots.push({ ...widths })
+    ),
+    widthPersistenceQueue.update(
+      current => updatePositionalColumnWidth(current, 8_192, 220),
+      widths => queuedBroadcastSnapshots.push({ ...widths })
+    ),
+    widthPersistenceQueue.update(
+      () => ({}),
+      widths => queuedBroadcastSnapshots.push({ ...widths })
+    ),
+    widthPersistenceQueue.update(
+      current => updatePositionalColumnWidth(current, 2, 230),
+      widths => queuedBroadcastSnapshots.push({ ...widths })
+    ),
+  ];
+  await firstQueuedWriteStarted;
+  assert.deepStrictEqual(
+    queuedStoredWidths,
+    {},
+    'a delayed configuration write must remain pending'
+  );
+  releaseFirstQueuedWrite();
+  const queuedWidthResults = await Promise.all(queuedWidthOperations);
+  assert.deepStrictEqual(queuedWidthResults, [
+    { 0: 210 },
+    { 0: 210, 8192: 220 },
+    {},
+    { 2: 230 },
+  ]);
+  assert.deepStrictEqual(queuedWriteSnapshots, queuedWidthResults);
+  assert.deepStrictEqual(
+    queuedBroadcastSnapshots,
+    queuedWidthResults,
+    'persisted width broadcasts must follow serialized configuration writes'
+  );
+  assert.deepStrictEqual(
+    queuedStoredWidths,
+    { 2: 230 },
+    'a queued reset must not be overwritten by an older delayed drag'
+  );
+  assert.deepStrictEqual(
+    displayedSourceColumnPositions(
+      ['sym', 'price', 'size'],
+      ['size', 'sym']
+    ),
+    [2, 0],
+    'hidden/reordered columns must retain their original source-position width slots'
+  );
+  assert.deepStrictEqual(
+    displayedSourceColumnPositions(
+      ['dup', 'dup', 'tail'],
+      ['dup', 'dup']
+    ),
+    [0, 1],
+    'duplicate labels must map to distinct source positions deterministically'
+  );
+
+  const renamedSchemas = [
+    ['sym', 'price'],
+    ['unrelated', 'renamed'],
+  ];
+  const secondColumnManual = { 1: 333 };
+  for (const schema of renamedSchemas) {
+    assert.deepStrictEqual(
+      schema.map((_column, position) =>
+        resolvedColumnWidth(position, 160, secondColumnManual, false)
+      ),
+      [160, 333],
+      'manual widths must follow ordinal position across unrelated result schemas'
+    );
+  }
+
+  const presetWidth = 180;
+  const presetWidths = Array.from({ length: 4 }, (_value, position) =>
+    resolvedColumnWidth(
+      position,
+      presetWidth,
+      {},
+      false,
+      [400, 500, 600, 700]
+    )
+  );
+  assert.deepStrictEqual(
+    presetWidths,
+    [presetWidth, presetWidth, presetWidth, presetWidth],
+    'an all-column preset/reset must replace every manual width and ignore automatic widths when disabled'
+  );
+  assert.strictEqual(
+    resolvedColumnWidth(0, 160, { 0: 220 }, true, [500]),
+    220,
+    'a manual drag must remain authoritative over automatic sizing'
+  );
+  assert.strictEqual(
+    resolvedColumnWidth(0, 160, {}, false, [500]),
+    160,
+    'an unchecked auto-fit control must perform no automatic sizing'
+  );
+  assert.strictEqual(
+    resolvedColumnWidth(0, 160, { 0: 220 }, false, [500]),
+    220,
+    'disabling auto-fit must retain an explicit manual width'
+  );
+  const veryWideAutomaticWidths = automaticColumnWidthsForLengths(
+    new Array(4_097).fill(10),
+    13,
+    8
+  );
+  assert.strictEqual(
+    veryWideAutomaticWidths.length,
+    4_097,
+    'automatic sizing must cover every displayed column independently'
+  );
+  assert.strictEqual(
+    variableColumnMetrics(veryWideAutomaticWidths).widths.length,
+    4_097,
+    'variable-width virtualization must not truncate automatically sized columns'
+  );
+
+  const columns = ['sym', 'description', 'nested'];
+  const firstViewportRow = {
+    sym: 'A',
+    description: 'short',
+    nested: [1, 2],
+  };
+  const offViewportRow = {
+    sym: 'B',
+    description: 'x'.repeat(120),
+    nested: [
+      ['nested-list-value-'.repeat(6)],
+      ['tail'],
+    ],
+  };
+  const wholeTable = rowsToColumnarPanelResult(
+    [firstViewportRow, offViewportRow],
+    columns
+  );
+  const firstViewportTable = rowsToColumnarPanelResult([firstViewportRow], columns);
+  const secondViewportTable = rowsToColumnarPanelResult([offViewportRow], columns);
+  const textOptions = { arrayDisplayFormat: 'commaSpace' };
+  const wholeLengths = widestDisplayedColumnTextLengths(wholeTable, textOptions);
+  const firstViewportLengths = widestDisplayedColumnTextLengths(
+    firstViewportTable,
+    textOptions
+  );
+  const secondViewportLengths = widestDisplayedColumnTextLengths(
+    secondViewportTable,
+    textOptions
+  );
+  assert.ok(
+    wholeLengths[1] > firstViewportLengths[1] &&
+      wholeLengths[2] > firstViewportLengths[2],
+    'whole-result auto-fit must include scalar and nested list values outside the viewport'
+  );
+  const wholeAutomatic = automaticColumnWidthsForLengths(wholeLengths, 13, 8);
+  const firstViewportAutomatic = automaticColumnWidthsForLengths(
+    firstViewportLengths,
+    13,
+    8
+  );
+  const secondViewportAutomatic = automaticColumnWidthsForLengths(
+    secondViewportLengths,
+    13,
+    8
+  );
+  assert.ok(wholeAutomatic[1] > firstViewportAutomatic[1]);
+  assert.ok(wholeAutomatic[2] > firstViewportAutomatic[2]);
+  assert.notDeepStrictEqual(
+    firstViewportAutomatic,
+    secondViewportAutomatic,
+    'visible-row mode must explicitly track the currently rendered rows'
+  );
+
+  assert.deepStrictEqual(
+    variableColumnMetrics([100, 220, 80, 300]),
+    {
+      lefts: [0, 100, 320, 400],
+      widths: [100, 220, 80, 300],
+      totalWidth: 700,
+    }
+  );
+  assert.deepStrictEqual(variableVisibleColumnRange([100, 220, 80, 300], 0, 100), {
+    start: 0,
+    end: 0,
+  });
+  assert.deepStrictEqual(variableVisibleColumnRange([100, 220, 80, 300], 100, 100), {
+    start: 1,
+    end: 1,
+  });
+  assert.deepStrictEqual(variableVisibleColumnRange([100, 220, 80, 300], 250, 200), {
+    start: 1,
+    end: 3,
+  });
+  assert.deepStrictEqual(variableVisibleColumnRange([100, 220, 80, 300], 250, 200, 1), {
+    start: 0,
+    end: 3,
+  });
+  const stableWholeWidths = columns.map((_column, position) =>
+    resolvedColumnWidth(position, 160, { 1: 333 }, true, wholeAutomatic)
+  );
+  const stableWholeWidthsAfterViewportChange = columns.map((_column, position) =>
+    resolvedColumnWidth(position, 160, { 1: 333 }, true, wholeAutomatic)
+  );
+  const firstViewportMetrics = variableColumnMetrics(stableWholeWidths);
+  const secondViewportMetrics = variableColumnMetrics(
+    stableWholeWidthsAfterViewportChange
+  );
+  assert.deepStrictEqual(
+    secondViewportMetrics,
+    firstViewportMetrics,
+    'whole-result metrics must remain stable while the visible row window changes'
+  );
+  assert.deepStrictEqual(
+    variableVisibleColumnRange(stableWholeWidthsAfterViewportChange, 100, 300, 1),
+    variableVisibleColumnRange(stableWholeWidths, 100, 300, 1),
+    'a stable width vector must produce a stable horizontal virtual window'
+  );
+
+  let largeArrayElementReads = 0;
+  const largeArray = new Proxy(
+    new Array(100_000).fill('bounded-width-value-'.repeat(4)),
+    {
+      get(target, property, receiver) {
+        if (typeof property === 'string' && /^\d+$/.test(property)) {
+          largeArrayElementReads += 1;
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    }
+  );
+  const cellReads = [0, 0];
+  const boundedTable = createColumnarPanelResult(
+    ['payload', 'tail'],
+    500,
+    (row, column) => {
+      cellReads[column] += 1;
+      if (column === 0) {
+        return row === 0 ? largeArray : 'later';
+      }
+      return 'ok';
+    }
+  );
+  const boundedLengths = widestDisplayedColumnTextLengths(boundedTable);
+  assert.strictEqual(boundedLengths[0], KX_COLUMN_AUTO_TEXT_CHAR_LIMIT);
+  assert.strictEqual(
+    cellReads[0],
+    1,
+    'a column that reaches the automatic width cap must skip all later rows'
+  );
+  assert.strictEqual(cellReads[1], 500, 'uncapped columns must still scan the full result');
+  assert.ok(
+    largeArrayElementReads < 20,
+    `nested/list text measurement must stop at its bound; read ${largeArrayElementReads} items`
+  );
+
+  const cappedHeader = 'h'.repeat(KX_COLUMN_AUTO_TEXT_CHAR_LIMIT);
+  const cooperativeTable = createColumnarPanelResult(
+    [cappedHeader, cappedHeader, cappedHeader, 'narrow'],
+    4,
+    (_row, column) => column === 3 ? 'value' : 'skipped'
+  );
+  let yieldCount = 0;
+  const cooperativeLengths = await widestDisplayedColumnTextLengthsAsync(
+    cooperativeTable,
+    {},
+    {
+      yieldEveryCells: 2,
+      yieldNow: async () => {
+        yieldCount += 1;
+      },
+    }
+  );
+  assert.deepStrictEqual(
+    cooperativeLengths,
+    widestDisplayedColumnTextLengths(cooperativeTable)
+  );
+  assert.ok(
+    yieldCount >= 4,
+    'cooperative sizing must count capped/skipped column iterations toward yielding'
+  );
+
+  let continueScan = true;
+  const canceledLengths = await widestDisplayedColumnTextLengthsAsync(
+    cooperativeTable,
+    {},
+    {
+      yieldEveryCells: 2,
+      continueScanning: () => continueScan,
+      yieldNow: async () => {
+        continueScan = false;
+      },
+    }
+  );
+  assert.strictEqual(
+    canceledLengths,
+    undefined,
+    'a stale whole-result scan must stop at its next cooperative yield'
+  );
+}
+
 function testKxResultsUiParityContract() {
   assert.strictEqual(
     KX_RESULT_EXPORT_FORMATS,
@@ -6920,6 +8998,8 @@ function testKxResultsUiParityContract() {
   assert.deepStrictEqual(settingKeys, [
     'density',
     'cellWidth',
+    'autoFitColumns',
+    'autoFitMode',
     'rowHeight',
     'fontSize',
     'showRowIndex',
@@ -6952,6 +9032,20 @@ function testKxResultsUiParityContract() {
     'Auto presentation must retain the numeric zero storage and message contract'
   );
   assert.strictEqual(fontSizeDefinition.autoLabel, 'Auto (VS Code default)');
+  const autoFitDefinition = KX_RESULT_SETTING_DEFINITIONS.find(
+    definition => definition.key === 'autoFitColumns'
+  );
+  assert(autoFitDefinition, 'the shared settings schema must expose the auto-fit checkbox');
+  assert.strictEqual(autoFitDefinition.control, 'checkbox');
+  const autoFitModeDefinition = KX_RESULT_SETTING_DEFINITIONS.find(
+    definition => definition.key === 'autoFitMode'
+  );
+  assert(autoFitModeDefinition, 'the shared settings schema must expose the auto-fit scope');
+  assert.strictEqual(autoFitModeDefinition.control, 'select');
+  assert.deepStrictEqual(autoFitModeDefinition.values, [
+    { value: 'wholeResult', label: 'Whole result' },
+    { value: 'visibleRows', label: 'Visible rows' },
+  ]);
   assert.strictEqual(kxResultSelectionSummary(undefined), 'No cells selected');
   assert.strictEqual(
     kxResultSelectionSummary({
@@ -7017,6 +9111,112 @@ function testKxResultsUiParityContract() {
   );
   assert.match(panelSource, /interface KxPanelSettings extends SharedKxResultSettings/);
   assert.match(panelSource, /function sharedKxResultSettings\(\): SharedKxResultSettings/);
+  assert.match(panelSource, /message\.type === 'setResultColumnWidth'/);
+  assert.match(panelSource, /message\.type === 'resetResultColumnWidths'/);
+  assert.match(
+    panelSource,
+    /if \(resizeState\.moved\) \{[\s\S]*?position:\s*Number\(columnWidthKey\(resizeState\.column\)\),[\s\S]*?width:\s*columnWidth\(resizeState\.column\)/,
+    'only a real drag may persist the original zero-based source-column position'
+  );
+  assert.match(
+    panelSource,
+    /columnPositions:\s*this\.visibleColumnPositions\(result\)/,
+    'ordinary results must send source ordinals through hide/reorder projection'
+  );
+  assert.match(
+    rendererSource,
+    /visibleSourceIndexes\[columnIndex\]\s*\?\?\s*columnIndex/,
+    'live notebook resize handles must persist source ordinals'
+  );
+  assert.match(
+    rendererSource,
+    /columnResizeHandle\(\s*context,\s*state,\s*sourceColumnIndex,/,
+    'saved notebook resize handles must persist source ordinals'
+  );
+  assert.match(
+    rendererSource,
+    /if \(nextWidth !== currentWidth\) \{\s*applyRendererColumnWidth\(context, state, position, nextWidth\);\s*\}/,
+    'a resize-handle click must not rerender away the handle before its double-click reset'
+  );
+  assert.match(
+    rendererSource,
+    /table\.style\.width = `\$\{[\s\S]*?columnWidths\.reduce\(\(total, width\) => total \+ width, 0\)[\s\S]*?LIVE_ROW_INDEX_WIDTH/,
+    'saved notebook tables must use the exact resolved positional pixel sum'
+  );
+  assert.ok(
+    !/\.kx-table-wrap table\{[^}]*min-width:100%/.test(rendererSource),
+    'saved notebook tables must not expand manual widths to fill surplus viewport space'
+  );
+  assert.match(
+    rendererSource,
+    /wholeResultSizingNeedsRefresh[\s\S]*?if \(conversionChanged\) \{[\s\S]*?requestLiveResult\(context, state\);[\s\S]*?\} else \{[\s\S]*?requestLiveColumnTextLengths\(context, state\);/,
+    'a sizing-only live refresh must preserve selection, sort, and search state'
+  );
+  const rendererSettingsHandler = sourceSection(
+    rendererSource,
+    "if (message.type === 'settings') {",
+    "if (message.type === 'actionResult') {"
+  );
+  assert.match(
+    rendererSettingsHandler,
+    /sliceTextChanged && state\.liveMode === 'table'[\s\S]*?state\.liveSlice = undefined;[\s\S]*?state\.liveSliceRequestId = nextRequestId\(\);[\s\S]*?if \(\(conversionChanged \|\| wholeResultSizingNeedsRefresh\)/,
+    'array-format settings must invalidate an old live slice before the whole-result sizing-only return path'
+  );
+  assert.match(
+    rendererSettingsHandler,
+    /liveSearchQueryToRefresh[\s\S]*?requestLiveSearch\(context, state\);[\s\S]*?renderState\(context, state\);/,
+    'array-format settings must rerun active live search and immediately request newly formatted visible cells'
+  );
+  assert.match(
+    panelSource,
+    /msg\.type === 'settings'[\s\S]*?arrayDisplayFormatChanged[\s\S]*?invalidateRenderedCellText\(\);[\s\S]*?applySettings\(msg\.settings\)/,
+    'ordinary KX Results must invalidate rendered cell text for externally posted array-format settings'
+  );
+  assert.match(
+    panelSource,
+    /function invalidateRenderedCellText\(\) \{[\s\S]*?slice = emptySlice\(\);[\s\S]*?latestRequestId \+= 1;[\s\S]*?autoColumnWidths = Object\.create\(null\);[\s\S]*?queueSearchRows\(\);/,
+    'ordinary KX Results must reject stale slices and recompute active search after array-format changes'
+  );
+  assert.match(
+    panelSource,
+    /this\.post\(\{ type: 'resultMeta', result: metadata \}\);\s*this\.scheduleWholeResultColumnTextLengths\(metadata\.settings\);/,
+    'ordinary result metadata must post before cooperative whole-result measurement'
+  );
+  assert.match(
+    panelSource,
+    /msg\.type === 'wholeResultColumnTextLengths'[\s\S]*?refreshAutoColumnWidths\(\);[\s\S]*?renderNow\(\);/,
+    'ordinary grids must apply completed asynchronous width hints'
+  );
+  assert.match(
+    panelSource,
+    /new PositionalColumnWidthPersistenceQueue\([\s\S]*?get<unknown>\('viewer\.columnWidths'\)[\s\S]*?update\([\s\S]*?'viewer\.columnWidths',[\s\S]*?vscode\.ConfigurationTarget\.Global/,
+    'positional widths must persist in global VS Code configuration across panels and restarts'
+  );
+  assert.match(
+    panelSource,
+    /columnWidths:\s*normalizePositionalColumnWidths\(\s*config\.get<unknown>\('viewer\.columnWidths'\)\s*\)/,
+    'new panels and extension sessions must restore the global sparse positional map'
+  );
+  assert.match(
+    panelSource,
+    /return positionalColumnWidthPersistence\.update\(update\)/,
+    'panel and notebook updates must share the serialized positional persistence queue'
+  );
+  assert.match(
+    panelSource,
+    /columnWidths:\s*\{ \.\.\.settings\.columnWidths \}/,
+    'notebook renderer settings must receive the same persisted sparse map'
+  );
+  assert.match(
+    panelSource,
+    /const columnWidthReset =[\s\S]*?normalized\.key === 'cellWidth' \|\| normalized\.key === 'density'[\s\S]*?persistPositionalKxResultColumnWidths\(\(\) => \(\{\}\)\)[\s\S]*?Promise\.all\(\[settingUpdate, columnWidthReset\]\)/,
+    'all-column presets must enqueue their serialized width reset before awaiting the setting write'
+  );
+  assert.doesNotMatch(
+    panelSource,
+    /MAX_PERSISTED_COLUMN_POSITIONS|position >= 4_096/,
+    'ordinary panel persistence must not inherit the notebook transport column bound'
+  );
   assert.match(panelSource, /estimateCopyExport,[\s\S]*largeCopyExportConfirmationMessage/);
   assert.ok(
     !/function estimateCopyExport\(/.test(panelSource),
@@ -8004,6 +10204,15 @@ function testNotebookContract() {
   );
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
+      type: 'requestLiveColumnTextLengths',
+      outputId,
+      liveId,
+      requestId: 2,
+    }),
+    { type: 'requestLiveColumnTextLengths', outputId, liveId, requestId: 2 }
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
       type: 'requestLiveSlice',
       outputId,
       liveId,
@@ -8223,6 +10432,87 @@ function testNotebookContract() {
   }), undefined);
   assert.deepStrictEqual(
     parseNotebookRendererMessage({
+      type: 'updateResultSetting',
+      key: 'autoFitColumns',
+      value: false,
+    }),
+    { type: 'updateResultSetting', key: 'autoFitColumns', value: false },
+    'the notebook auto-fit checkbox must preserve boolean semantics'
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'updateResultSetting',
+    key: 'autoFitColumns',
+    value: 'false',
+  }), undefined);
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'updateResultSetting',
+      key: 'autoFitMode',
+      value: 'visibleRows',
+    }),
+    { type: 'updateResultSetting', key: 'autoFitMode', value: 'visibleRows' }
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'updateResultSetting',
+    key: 'autoFitMode',
+    value: 'viewport',
+  }), undefined);
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'setResultColumnWidth',
+      position: 0,
+      width: 240,
+    }),
+    { type: 'setResultColumnWidth', position: 0, width: 240 },
+    'notebook drag completion must persist the first source position'
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'setResultColumnWidth',
+      position: 2,
+      width: 0,
+    }),
+    { type: 'setResultColumnWidth', position: 2, width: 0 },
+    'notebook single-column reset must preserve sparse positional semantics'
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
+      type: 'setResultColumnWidth',
+      position: 1_000_000,
+      width: 240,
+    }),
+    {
+      type: 'setResultColumnWidth',
+      position: 1_000_000,
+      width: 240,
+    },
+    'the renderer protocol must not inherit the notebook live-column transport bound'
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'setResultColumnWidth',
+    position: Number.MAX_SAFE_INTEGER + 1,
+    width: 240,
+  }), undefined);
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'setResultColumnWidth',
+    position: -1,
+    width: 240,
+  }), undefined);
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'setResultColumnWidth',
+    position: 0,
+    width: 79,
+  }), undefined);
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({ type: 'resetResultColumnWidths' }),
+    { type: 'resetResultColumnWidths' }
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    type: 'resetResultColumnWidths',
+    scope: 'all',
+  }), undefined);
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage({
       type: 'openLiveResult',
       outputId,
       liveId,
@@ -8233,6 +10523,9 @@ function testNotebookContract() {
 
   const completeResultSettings = {
     cellWidth: 160,
+    columnWidths: { 0: 240, 2: 360, 1_000_000: 512 },
+    autoFitColumns: true,
+    autoFitMode: 'wholeResult',
     rowHeight: 28,
     fontSize: 0,
     density: 'standard',
@@ -8262,6 +10555,38 @@ function testNotebookContract() {
     parseNotebookRendererHostMessage(completeSettingsMessage),
     completeSettingsMessage,
     'shared durable KX result settings must survive the validated host-to-renderer path'
+  );
+  assert.strictEqual(parseNotebookRendererHostMessage({
+    ...completeSettingsMessage,
+    resultSettings: {
+      ...completeResultSettings,
+      columnWidths: { 0: 79 },
+    },
+  }), undefined, 'host settings must reject an out-of-range persisted manual width');
+  assert.strictEqual(parseNotebookRendererHostMessage({
+    ...completeSettingsMessage,
+    resultSettings: {
+      ...completeResultSettings,
+      columnWidths: { '01': 80 },
+    },
+  }), undefined, 'host settings must reject non-canonical positional map keys');
+  const legacyArraySettingsMessage = {
+    ...completeSettingsMessage,
+    resultSettings: {
+      ...completeResultSettings,
+      columnWidths: [240, 0, 360],
+    },
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(legacyArraySettingsMessage),
+    {
+      ...legacyArraySettingsMessage,
+      resultSettings: {
+        ...legacyArraySettingsMessage.resultSettings,
+        columnWidths: { 0: 240, 2: 360 },
+      },
+    },
+    'strict notebook settings messages must normalize legacy array-shaped widths'
   );
   assert.deepStrictEqual(parseNotebookRendererHostMessage({
     type: 'liveResult',
@@ -8312,6 +10637,20 @@ function testNotebookContract() {
     rowCount: 1,
     metadata: {},
   }), undefined, 'live total column count cannot understate inline columns');
+  const liveColumnTextLengths = {
+    type: 'liveColumnTextLengths',
+    liveId,
+    requestId: 7,
+    lengths: [3, KX_COLUMN_AUTO_TEXT_CHAR_LIMIT],
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(liveColumnTextLengths),
+    liveColumnTextLengths
+  );
+  assert.strictEqual(parseNotebookRendererHostMessage({
+    ...liveColumnTextLengths,
+    lengths: [KX_COLUMN_AUTO_TEXT_CHAR_LIMIT + 1],
+  }), undefined);
   const candleData = {
     chartType: 'candlestick',
     xColumn: 'time',
@@ -8726,10 +11065,10 @@ function testNotebookContract() {
   assert.match(rendererSource, /const LIVE_CHART_AUTO_REFINE_DELAY_MS = 450;/);
   assert.match(rendererSource, /autoRefineTimer\?: number;/);
   assert.match(rendererSource, /lastAutoRefineRangeKey: string;/);
-  assert.match(rendererSource, /syncAutoRefineRangeOnNextPlot: boolean;/);
+  assert.match(rendererSource, /requestedRenderRange\?: PlotScaleRange;/);
   assert.match(
     rendererSource,
-    /state\.liveChart\.requestRange\)[\s\S]*?state\.liveChart\.syncAutoRefineRangeOnNextPlot = true/
+    /applyChartZoomLifecycleResponse\(\s*state\.liveChart\.zoomLifecycle,\s*message\.requestId,\s*message\.data,/
   );
   assert.match(
     rendererSource,
@@ -8741,8 +11080,31 @@ function testNotebookContract() {
     'function chartDataXRange('
   );
   assert.match(renderedRangeSyncSource, /clearLiveChartAutoRefine\(chart\)/);
-  assert.match(renderedRangeSyncSource, /plotScaleRange\(state\.plot, 'x'\)/);
-  assert.match(renderedRangeSyncSource, /chart\.lastAutoRefineRangeKey = rendered\?\.key \|\| ''/);
+  assert.match(
+    renderedRangeSyncSource,
+    /const requestedRange = chartZoomRequestedRenderRange\(chart\.zoomLifecycle\);/
+  );
+  assert.match(renderedRangeSyncSource, /chart\.lastAutoRefineRangeKey = chartZoomRangeKey\(requestedRange\)/);
+  assert.match(
+    renderedRangeSyncSource,
+    /state\.plot\.setScale\('x', \{ min: requestedRange\.min, max: requestedRange\.max \}\)/,
+    'live refined reconstruction must restore the exact absolute requested range'
+  );
+  assert.match(
+    renderedRangeSyncSource,
+    /type: 'rendered',[\s\S]*?requestId: chart\.requestId/,
+    'the exact programmatic range must settle through the shared lifecycle after setScale'
+  );
+  const clearLiveAutoRefineSource = sourceSection(
+    rendererSource,
+    'function clearLiveChartAutoRefine(',
+    'function syncLiveChartRenderedAutoRefineRange('
+  );
+  assert.match(
+    clearLiveAutoRefineSource,
+    /if \(resetRangeKey\) \{[\s\S]*?chart\.lastAutoRefineRangeKey = '';[\s\S]*?type: 'rendered'/,
+    'live Reset must clear both dedupe and pending programmatic range state'
+  );
   assert.match(
     rendererSource,
     /state\.liveChart\.visible = !state\.liveChart\.visible;[\s\S]*?if \(!state\.liveChart\.visible\) \{[\s\S]*?clearLiveChartAutoRefine\(state\.liveChart\);/,
@@ -8763,6 +11125,11 @@ function testNotebookContract() {
   );
   assert.match(liveAutoRefineSource, /planChartAutoRefine\(/);
   assert.match(liveAutoRefineSource, /state\.plot !== plot \|\| chart\.pending \|\| chart\.dirty/);
+  assert.match(
+    liveAutoRefineSource,
+    /!!chart\.requestedRenderRange/,
+    'programmatic refined range restoration must suspend automatic refinement'
+  );
   assert.match(liveAutoRefineSource, /current\.key !== plan\.key/);
   assert.match(liveAutoRefineSource, /requestLiveChart\(context, state, current\.range\)/);
   assert.match(liveAutoRefineSource, /LIVE_CHART_AUTO_REFINE_DELAY_MS/);
@@ -8772,7 +11139,7 @@ function testNotebookContract() {
   );
   assert.match(
     rendererSource,
-    /state\.liveChart\.fullRange = chartDataXRange\(message\.data\)/
+    /type: 'rendered',[\s\S]*?naturalRange: chartDataXRange\(message\.data\)/
   );
   assert.match(
     rendererSource,
@@ -8782,16 +11149,34 @@ function testNotebookContract() {
     rendererSource,
     /function resetPlotZoom\([\s\S]*?clearLiveChartAutoRefine\(state\.liveChart, true\)/
   );
-  assert.match(
+  const liveResetSource = sourceSection(
     rendererSource,
-    /const reset = button\(KX_RESULT_UI_LABELS\.resetZoom[\s\S]*?clearLiveChartAutoRefine\(chart, true\);[\s\S]*?if \(chart\.pending && chart\.requestRange\) \{[\s\S]*?chart\.requestId = nextRequestId\(\);[\s\S]*?chart\.pending = false;[\s\S]*?chart\.requestRange = undefined;/,
+    'function resetLiveChartZoom(',
+    'function markLiveChartDirty('
+  );
+  assert.match(
+    liveResetSource,
+    /clearLiveChartAutoRefine\(chart, true\);[\s\S]*?chart\.pending && chart\.requestRange[\s\S]*?chart\.zoomLifecycle\.dataIsRefinement[\s\S]*?chart\.requestId = nextRequestId\(\);[\s\S]*?chart\.pending = false;[\s\S]*?chart\.requestRange = undefined;/,
     'Reset must invalidate an in-flight ranged request before restoring the full chart'
   );
   assert.match(
-    rendererSource,
-    /function requestLiveChart\([\s\S]*?clearLiveChartAutoRefine\(chart\)[\s\S]*?chart\.lastAutoRefineRangeKey = range \? chartZoomRangeKey\(range\) : ''/
+    liveResetSource,
+    /resetChartZoomLifecycle\(\s*chart\.zoomLifecycle,\s*chart\.requestId,[\s\S]*?applyLiveChartZoomLifecycle\(chart, restored\.value\?\.state \|\| lifecycle\);[\s\S]*?if \(chart\.data\) \{[\s\S]*?renderState\(context, state\)/,
+    'live Reset must restore the original full sample without backend I/O'
   );
-  assert.match(rendererSource, /\.\.\.\(range \? \{ xMin: range\.min, xMax: range\.max \} : \{\}\)/);
+  assert.match(
+    rendererSource,
+    /autoRefine \? \(\) => resetLiveChartZoom\(context, state\) : undefined/,
+    'live chart double-click reset must use the same full-sample lifecycle as the Reset button'
+  );
+  assert.match(
+    rendererSource,
+    /function requestLiveChart\([\s\S]*?clearLiveChartAutoRefine\(chart\)[\s\S]*?chart\.lastAutoRefineRangeKey = range \? chartZoomRangeKey\(range\) : ''[\s\S]*?issueChartZoomLifecycleRequest\([\s\S]*?requestId,[\s\S]*?range/
+  );
+  assert.match(
+    rendererSource,
+    /\.\.\.\(request\.range[\s\S]*?\{ xMin: request\.range\.min, xMax: request\.range\.max \}/
+  );
   assert.match(rendererSource, /preparedSavedChartData\(state, state\.payload, renderedChart\)/);
   const savedSortSource = sourceSection(
     rendererSource,
@@ -8842,8 +11227,20 @@ function testNotebookContract() {
     !/hiddenChartSeriesKeys\s*=/.test(receiveLiveResultSource),
     'a shared-settings live-result refresh must retain stable hidden-series identities'
   );
+  assert.match(
+    receiveLiveResultSource,
+    /reconcileNotebookHiddenColumnIndexes\([\s\S]*?previousColumns,[\s\S]*?previousHiddenColumnIndexes,[\s\S]*?state\.liveAllColumns/,
+    'live-result refresh must preserve hidden columns by source occurrence'
+  );
+  assert.ok(
+    !/previousHiddenNames\s*=\s*new Set/.test(receiveLiveResultSource),
+    'live-result refresh must not collapse duplicate hidden-column occurrences into a label Set'
+  );
   assert.match(receiveLiveResultSource, /visible: previous\.visible|reconciledChart\.configuration/);
-  assert.match(receiveLiveResultSource, /requestId: nextRequestId\(\)/);
+  assert.match(
+    receiveLiveResultSource,
+    /const chartRequestId = nextRequestId\(\);[\s\S]*?requestId: chartRequestId/
+  );
   assert.match(
     receiveLiveResultSource,
     /if \(!message\.available\) \{[\s\S]*?if \(!isOutstandingLiveRequest\(state, message\.requestId\)\) \{[\s\S]*?return;[\s\S]*?transitionLiveResultUnavailable\(state, message\.message\)/,
@@ -8975,7 +11372,7 @@ function testNotebookContract() {
   );
   assert.match(
     rendererSource,
-    /state\.liveChart\.errorWasRefinement =[\s\S]*?!!message\.error && !!state\.liveChart\.requestRange[\s\S]*?function markLiveChartDirty\([\s\S]*?chart\.errorWasRefinement = false/,
+    /const responseWasRefinement = !!state\.liveChart\.requestRange;[\s\S]*?state\.liveChart\.errorWasRefinement =[\s\S]*?!!message\.error && responseWasRefinement[\s\S]*?function markLiveChartDirty\([\s\S]*?chart\.errorWasRefinement = false/,
     'live configuration changes must re-enable Render while refinement errors retain a base retry'
   );
   assert.match(
@@ -9019,6 +11416,7 @@ function testNotebookContract() {
   );
   for (const type of [
     'requestLiveResult',
+    'requestLiveColumnTextLengths',
     'requestLiveSlice',
     'searchLiveResult',
     'requestLiveChart',
@@ -9335,8 +11733,21 @@ function testNotebookContract() {
     /headingWrap\.append\(node\('strong', 'kx-heading', KX_RESULT_UI_LABELS\.title\)\)/,
     'the compact renderer header must use KX Results vocabulary'
   );
-  assert.match(rendererSource, /function notebookChartPointLimit\(\)/);
-  assert.match(rendererSource, /resultSettings\.chartZoomMaxSampledPoints/);
+  const notebookChartPointLimitSource = sourceSection(
+    rendererSource,
+    'function notebookChartPointLimit()',
+    'function notebookSavedChartSourceRowLimit('
+  );
+  assert.doesNotMatch(
+    notebookChartPointLimitSource,
+    /resultSettings\.chartZoomMaxSampledPoints/,
+    'the deprecated zoom cap must not alter notebook overview or ranged density'
+  );
+  assert.match(
+    notebookChartPointLimitSource,
+    /Math\.min\(MAX_NOTEBOOK_LIVE_CHART_POINTS, CHART_MAX_SAMPLED_POINTS\)/,
+    'notebook overview must retain width-based sampling under only the hard inline/chart ceiling'
+  );
   assert.match(rendererSource, /maxPoints:\s*notebookChartPointLimit\(\)/);
   assert.match(rendererSource, /notebookGridDefaultHeight/);
   assert.match(rendererSource, /resize:\s*vertical/);
@@ -9355,6 +11766,27 @@ function testNotebookContract() {
 }
 
 function testNotebookRendererModel() {
+  const duplicateColumns = ['time', 'price', 'price', 'size'];
+  assert.deepStrictEqual(
+    reconcileNotebookHiddenColumnIndexes(duplicateColumns, [2], duplicateColumns),
+    [2],
+    'refresh must keep only the hidden second duplicate-label occurrence hidden'
+  );
+  assert.deepStrictEqual(
+    reconcileNotebookHiddenColumnIndexes(
+      duplicateColumns,
+      [2],
+      ['price', 'time', 'size', 'price']
+    ),
+    [3],
+    'refresh must follow the same duplicate-label occurrence when source positions move'
+  );
+  assert.deepStrictEqual(
+    reconcileNotebookHiddenColumnIndexes(duplicateColumns, [2], ['time', 'price', 'size']),
+    [],
+    'refresh must not hide a different occurrence when the hidden duplicate disappears'
+  );
+
   assert.strictEqual(notebookGridDefaultHeight(2, 28, 30), 88);
   assert.strictEqual(notebookGridDefaultHeight(10_000, 28, 30), 420);
   assert.strictEqual(notebookGridDefaultHeight(0, 28, 30), 72);
@@ -9688,9 +12120,10 @@ function testNotebookRendererModel() {
   );
 }
 
-function testLiveNotebookResultStore() {
+async function testLiveNotebookResultStore() {
   const {
     liveChartMessage,
+    liveColumnTextLengthsMessage,
     liveNotebookDisplayOptions,
     liveResultMessage,
     liveSliceMessage,
@@ -9750,6 +12183,57 @@ function testLiveNotebookResultStore() {
   assert.deepStrictEqual(hostLiveResult.columns, ['n', 'name', 'values']);
   assert.deepStrictEqual(hostLiveResult.metadata.messages, []);
   assert.ok(!/(snapshot|decoded|in-session|full live)/i.test(JSON.stringify(hostLiveResult)));
+  const wholeFitLengths = await liveColumnTextLengthsMessage(
+    store,
+    notebookUri,
+    baseId,
+    2,
+    hostDisplayOptions
+  );
+  assert.deepStrictEqual(
+    wholeFitLengths.lengths,
+    await store.columnTextLengths(baseId, notebookUri, hostDisplayOptions),
+    'live whole-result sizing hints must cooperatively scan the complete host-owned result'
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(wholeFitLengths),
+    wholeFitLengths,
+    'strict renderer messages must retain validated asynchronous whole-result sizing hints'
+  );
+  const cancelScanId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/cancel-column-scan',
+    query: 'cancelColumnScan',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: modelQTable(
+      ['n'],
+      Array.from({ length: 10_001 }, (_value, n) => ({ n }))
+    ),
+  });
+  const canceledScan = store.columnTextLengths(
+    cancelScanId,
+    notebookUri,
+    hostDisplayOptions
+  );
+  store.cancelColumnTextLengthScans();
+  assert.strictEqual(
+    await canceledScan,
+    undefined,
+    'disabling or changing whole-result sizing must cancel an in-flight live scan'
+  );
+  const fixedWidthLiveResult = liveResultMessage(
+    store,
+    notebookUri,
+    baseId,
+    3,
+    hostDisplayOptions
+  );
+  assert.strictEqual(
+    fixedWidthLiveResult.wholeResultColumnTextLengths,
+    undefined,
+    'live metadata must remain nonblocking and send sizing hints separately'
+  );
   assert.deepStrictEqual(
     safeLiveColumnNames(['bad\nname', 'badname', '', 'badname']),
     ['badname', 'badname_2', 'column3', 'badname_3']
@@ -9829,6 +12313,22 @@ function testLiveNotebookResultStore() {
   assert.deepStrictEqual(
     parseNotebookRendererHostMessage(chartCapMessage),
     chartCapMessage
+  );
+  const chartCapLengths = await liveColumnTextLengthsMessage(
+    store,
+    notebookUri,
+    chartCapId,
+    3,
+    hostDisplayOptions
+  );
+  assert.strictEqual(
+    chartCapLengths.lengths.length,
+    MAX_NOTEBOOK_LIVE_COLUMNS,
+    'whole-result notebook sizing must scan exactly the columns the bounded renderer can display'
+  );
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(chartCapLengths),
+    chartCapLengths
   );
   const hostLiveSlice = liveSliceMessage(
     store,
@@ -12367,8 +14867,13 @@ async function testNotebookRendererHostActions() {
   const runtime = createNotebookIntegrationRuntime();
   const panelCalls = [];
   const settingUpdates = [];
+  const positionalWidthUpdates = [];
+  let positionalWidthResets = 0;
   const resultSettings = {
     cellWidth: 160,
+    columnWidths: {},
+    autoFitColumns: true,
+    autoFitMode: 'wholeResult',
     rowHeight: 28,
     fontSize: 0,
     density: 'standard',
@@ -12402,6 +14907,12 @@ async function testNotebookRendererHostActions() {
       sharedKxResultSettings: () => ({ ...resultSettings }),
       updateSharedKxResultSetting: async (key, value) => {
         settingUpdates.push({ key, value });
+      },
+      updatePositionalKxResultColumnWidth: async (position, width) => {
+        positionalWidthUpdates.push({ position, width });
+      },
+      resetPositionalKxResultColumnWidths: async () => {
+        positionalWidthResets += 1;
       },
     },
   });
@@ -12553,14 +15064,51 @@ async function testNotebookRendererHostActions() {
       message: 'Live result unavailable. Only the bounded saved preview remains.',
     });
 
+    const liveResultMessageStart = runtime.postedMessages.length;
     await runtime.emitRendererMessage(editor, {
       type: 'requestLiveResult',
       outputId: firstBindingId,
       liveId,
       requestId: 202,
     });
-    assert.strictEqual(runtime.postedMessages.at(-1).message.available, true);
-    assert.strictEqual(runtime.postedMessages.at(-1).message.rowCount, 3);
+    const liveResultMessages = runtime.postedMessages
+      .slice(liveResultMessageStart)
+      .map(entry => entry.message);
+    assert.deepStrictEqual(
+      liveResultMessages.map(message => message.type),
+      ['liveResult', 'liveColumnTextLengths'],
+      'live metadata must post before the cooperative whole-result sizing scan completes'
+    );
+    assert.strictEqual(liveResultMessages[0].available, true);
+    assert.strictEqual(liveResultMessages[0].rowCount, 3);
+    assert.strictEqual(liveResultMessages[1].requestId, 202);
+    assert.strictEqual(liveResultMessages[1].lengths.length, 6);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveColumnTextLengths',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 203,
+    });
+    assert.deepStrictEqual(
+      runtime.postedMessages.at(-1).message,
+      { ...liveResultMessages[1], requestId: 203 },
+      'a sizing-only refresh must not rebuild the live result or transient grid state'
+    );
+    resultSettings.autoFitColumns = false;
+    const messagesBeforeDisabledSizing = runtime.postedMessages.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveColumnTextLengths',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 204,
+    });
+    assert.strictEqual(
+      runtime.postedMessages.length,
+      messagesBeforeDisabledSizing,
+      'unchecked auto-fit must not run or return a whole-result sizing scan'
+    );
+    resultSettings.autoFitColumns = true;
 
     await runtime.emitRendererMessage(editor, {
       type: 'requestLiveSlice',
@@ -12613,6 +15161,28 @@ async function testNotebookRendererHostActions() {
       key: 'density',
       value: 'compact',
     });
+    assert.strictEqual(runtime.postedMessages.at(-1).message.type, 'settings');
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'setResultColumnWidth',
+      position: 0,
+      width: 240,
+    });
+    assert.deepStrictEqual(
+      positionalWidthUpdates,
+      [{ position: 0, width: 240 }],
+      'notebook drag completion must reach the shared positional persistence path'
+    );
+    assert.strictEqual(runtime.postedMessages.at(-1).message.type, 'settings');
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'resetResultColumnWidths',
+    });
+    assert.strictEqual(
+      positionalWidthResets,
+      1,
+      'notebook all-column reset must reach the shared persistence path'
+    );
     assert.strictEqual(runtime.postedMessages.at(-1).message.type, 'settings');
 
     runtime.setWarningResponse('Continue');
@@ -13333,10 +15903,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.11');
+  assert.strictEqual(manifest.version, '0.2.12');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.11');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.11');
+  assert.strictEqual(packageLock.version, '0.2.12');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.12');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -13761,6 +16331,38 @@ function testManifestAndSources() {
     ? contributions.configuration
     : [contributions.configuration || {}];
   const configurationProperties = Object.assign({}, ...configuration.map(item => item.properties || {}));
+  const autoFitColumnsSetting =
+    configurationProperties['vscode-kdb.results.viewer.autoFitColumns'];
+  assert.strictEqual(autoFitColumnsSetting.type, 'boolean');
+  assert.strictEqual(autoFitColumnsSetting.default, true);
+  assert.match(autoFitColumnsSetting.description, /Automatically size result columns/i);
+  const autoFitModeSetting =
+    configurationProperties['vscode-kdb.results.viewer.autoFitMode'];
+  assert.strictEqual(autoFitModeSetting.type, 'string');
+  assert.strictEqual(autoFitModeSetting.default, 'wholeResult');
+  assert.deepStrictEqual(autoFitModeSetting.enum, ['wholeResult', 'visibleRows']);
+  assert.match(autoFitModeSetting.description, /Rows used/i);
+  const columnWidthsSetting =
+    configurationProperties['vscode-kdb.results.viewer.columnWidths'];
+  assert.strictEqual(columnWidthsSetting.type, 'object');
+  assert.deepStrictEqual(columnWidthsSetting.default, {});
+  assert.strictEqual(columnWidthsSetting.additionalProperties.type, 'number');
+  assert.strictEqual(columnWidthsSetting.additionalProperties.minimum, 80);
+  assert.strictEqual(columnWidthsSetting.additionalProperties.maximum, 2_000);
+  assert.match(columnWidthsSetting.description, /source-column position/i);
+  assert.match(columnWidthsSetting.description, /sparse map/i);
+  for (const [key, defaultValue] of [
+    ['vscode-kdb.results.viewer.chartZoomMinSampledPoints', 3_000],
+    ['vscode-kdb.results.viewer.chartZoomMaxSampledPoints', 7_000],
+  ]) {
+    const setting = configurationProperties[key];
+    assert.strictEqual(setting.type, 'integer');
+    assert.strictEqual(setting.default, defaultValue);
+    assert.strictEqual(setting.minimum, 1);
+    assert.match(setting.description, /Deprecated compatibility setting/i);
+    assert.match(setting.deprecationMessage, /setting is ignored/i);
+    assert.match(setting.deprecationMessage, /7,000/);
+  }
   const notebookPresentation = configurationProperties['vscode-kdb.notebook.presentation'];
   assert.strictEqual(notebookPresentation.type, 'string');
   assert.strictEqual(notebookPresentation.scope, 'window');
@@ -13908,6 +16510,42 @@ function testManifestAndSources() {
   const sourceFiles = walkFiles(path.join(ROOT, 'src')).filter(file => file.endsWith('.ts'));
   assert.ok(sourceFiles.length >= 5, 'expected standalone TypeScript implementation files');
   const sources = sourceFiles.map(file => [file, fs.readFileSync(file, 'utf8')]);
+  const visualAcceptanceSource = fs.readFileSync(
+    path.join(ROOT, 'test', 'extension-host', 'notebook-results-visual.js'),
+    'utf8'
+  );
+  const visualAcceptanceRunnerSource = fs.readFileSync(
+    path.join(ROOT, 'scripts', 'run-notebook-results-visual.js'),
+    'utf8'
+  );
+  for (const helper of [
+    'configureColumnSizingAcceptance',
+    'exerciseOrdinaryResultColumnSizing',
+    'exerciseNotebookResultColumnSizing',
+    'snapshotGlobalConfiguration',
+    'restoreGlobalConfiguration',
+  ]) {
+    assert.match(
+      visualAcceptanceSource,
+      new RegExp(`(?:async )?function ${helper}\\(`),
+      `real visual column-sizing helper ${helper} must be executable, not only called`
+    );
+  }
+  assert.match(
+    visualAcceptanceSource,
+    /viewer\.columnWidths'[\s\S]*?\{\}/,
+    'real visual acceptance must configure sparse map-shaped width state'
+  );
+  assert.match(
+    visualAcceptanceSource,
+    /ordinary-real-runtime-column-sizing[\s\S]*?notebook-real-runtime-column-sizing/,
+    'real visual acceptance must retain ordinary and notebook width evidence'
+  );
+  assert.match(
+    visualAcceptanceRunnerSource,
+    /ordinary-real-runtime-column-sizing[\s\S]*?notebook-real-runtime-column-sizing[\s\S]*?persistedShape !== 'sparse-map'/,
+    'the real visual artifact validator must require both sparse-map sizing interactions'
+  );
   const controllerSource = sources.find(([file]) => path.basename(file) === 'notebook-controller.ts');
   assert.ok(controllerSource, 'native q notebook controller source is missing');
   assert.match(controllerSource[1], /vscode\.notebooks\.createNotebookController\(/);
@@ -14002,6 +16640,16 @@ function testManifestAndSources() {
   const notebookIntegrationSource = readSource('notebook-integration.ts');
   const notebookControllerSource = readSource('notebook-controller.ts');
   const liveNotebookResultsSource = readSource('notebook-live-results.ts');
+  assert.match(
+    notebookIntegrationSource,
+    /viewer\.autoFitColumns[\s\S]*?cancelColumnTextLengthScans\(\)/,
+    'turning off/changing whole-result sizing must cancel live host scans'
+  );
+  assert.match(
+    liveNotebookResultsSource,
+    /widestDisplayedColumnTextLengthsAsync\([\s\S]*?continueScanning:/,
+    'live whole-result measurement must yield cooperatively and reject stale work'
+  );
   assert.match(extensionSource, /new KxQNotebookRunner\(/);
   assert.match(extensionSource, /directQNotebookBridge\(store, manager, tree\)/);
   assert.match(
@@ -15707,6 +18355,9 @@ function createQTextResultsPanelHarness() {
         Two: 'two',
         Three: 'three',
       },
+      ProgressLocation: {
+        Window: 'window',
+      },
       env: {
         clipboard: {
           async writeText(value) {
@@ -15735,6 +18386,7 @@ function createQTextResultsPanelHarness() {
           const disposeListeners = new Set();
           const messageListeners = new Set();
           const viewStateListeners = new Set();
+          const postListeners = new Set();
           const posted = [];
           const webview = {
             cspSource: 'vscode-webview://qtext-results-test',
@@ -15744,6 +18396,7 @@ function createQTextResultsPanelHarness() {
             },
             async postMessage(message) {
               posted.push(message);
+              [...postListeners].forEach(listener => listener(message));
               return true;
             },
             onDidReceiveMessage(listener) {
@@ -15759,6 +18412,7 @@ function createQTextResultsPanelHarness() {
             webview,
             posted,
             messageListeners,
+            postListeners,
             active: true,
             visible: true,
             disposed: false,
@@ -15793,6 +18447,9 @@ function createQTextResultsPanelHarness() {
         },
         showWarningMessage() {
           return undefined;
+        },
+        async withProgress(_options, task) {
+          return task();
         },
       },
     },

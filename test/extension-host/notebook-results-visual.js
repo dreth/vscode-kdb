@@ -18,6 +18,87 @@ const RUN_Q_NOTEBOOK_CELL_COMMAND = 'vscode-kdb.runQNotebookCell';
 const LIVE_RESULT_METADATA_KEY = 'vscode-kdb.liveResult';
 const VISUAL_CONNECTION_ID = 'notebook-results-visual';
 const VISUAL_CONNECTION_NAME = 'Visual gallery q';
+const COLUMN_SIZING_WIDEST_ROW = 350;
+const COLUMN_SIZING_FIXTURE = Object.freeze({
+  id: 'column-sizing-real-runtime',
+  title: 'Column sizing real runtime',
+  source:
+    '([] acceptance_row:til 400;acceptance_label:400#`short;' +
+    'acceptance_widest_list:{?[x=350;til 45;enlist x]} each til 400)',
+});
+const ORDINARY_CHART_LIFECYCLE_FIXTURE = Object.freeze({
+  id: 'ordinary-chart-lifecycle-real-runtime',
+  title: 'Ordinary chart lifecycle real runtime',
+  marker: 'ordinary_zoom_x',
+  rowCount: 20_001,
+  fullRange: Object.freeze({ min: 0, max: 20_000 }),
+  source:
+    '([] ordinary_zoom_x:til 20001;' +
+    'ordinary_zoom_y:10*til 20001)',
+});
+const RESTART_WIDTHS_BY_POSITION = Object.freeze({
+  0: 233,
+  2: 317,
+});
+const RESTART_COLUMN_SIZING_FIXTURES = Object.freeze({
+  phaseOne: Object.freeze({
+    id: 'column-sizing-restart-phase-one',
+    title: 'Column sizing restart phase one',
+    marker: 'phase_one_later',
+    headers: Object.freeze([
+      'phase_one_zero',
+      'phase_one_payload',
+      'phase_one_later',
+      'phase_one_tail',
+    ]),
+    source:
+      '([] phase_one_zero:til 400;' +
+      'phase_one_payload:{?[x=350;til 45;enlist x]} each til 400;' +
+      'phase_one_later:400#`later;phase_one_tail:400#0b)',
+  }),
+  renamed: Object.freeze({
+    id: 'column-sizing-restart-renamed',
+    title: 'Column sizing restart renamed',
+    marker: 'renamed_later',
+    headers: Object.freeze([
+      'renamed_zero',
+      'different_payload',
+      'renamed_later',
+      'extra_schema',
+    ]),
+    source:
+      '([] renamed_zero:400#`renamed;different_payload:til 400;' +
+      'renamed_later:{?[x=350;til 12;enlist x]} each til 400;' +
+      'extra_schema:400#42f)',
+  }),
+  reloaded: Object.freeze({
+    id: 'column-sizing-restart-reloaded',
+    title: 'Column sizing restart reloaded',
+    marker: 'restarted_later',
+    headers: Object.freeze([
+      'restarted_zero',
+      'restart_payload',
+      'restarted_later',
+      'restart_tail',
+    ]),
+    source:
+      '([] restarted_zero:400#42f;restart_payload:400#`payload;' +
+      'restarted_later:til 400;restart_tail:400#1b)',
+  }),
+});
+const EXPANDED_LIVE_FIXTURE_IDS = new Set([
+  'live-full-result',
+  COLUMN_SIZING_FIXTURE.id,
+  ...Object.values(RESTART_COLUMN_SIZING_FIXTURES).map(fixture => fixture.id),
+]);
+const RESULT_COLUMN_SETTING_KEYS = Object.freeze([
+  'viewer.autoFitColumns',
+  'viewer.autoFitMode',
+  'viewer.columnWidths',
+  'density',
+  'standard.cellWidth',
+  'comfortable.cellWidth',
+]);
 const LIGHT_THEME = 'Default Light Modern';
 const DARK_THEME = 'Default Dark Modern';
 const TRACKED_NOTEBOOK_FIXTURE = path.resolve(
@@ -82,6 +163,10 @@ async function run() {
     process.env.VSCODE_KDB_VISUAL_ARTIFACT_DIR,
     'VSCODE_KDB_VISUAL_ARTIFACT_DIR'
   );
+  const profilePath = requiredAbsoluteDirectory(
+    process.env.VSCODE_KDB_VISUAL_USER_DATA_DIR,
+    'VSCODE_KDB_VISUAL_USER_DATA_DIR'
+  );
   const qPort = positiveInteger(process.env.VSCODE_KDB_VISUAL_Q_PORT, 'VSCODE_KDB_VISUAL_Q_PORT');
   const cdpPort = positiveInteger(
     process.env.VSCODE_KDB_VISUAL_CDP_PORT,
@@ -104,11 +189,50 @@ async function run() {
   const commands = new Set(await vscode.commands.getCommands(true));
   assert(commands.has(RUN_Q_NOTEBOOK_CELL_COMMAND),
     `activated extension must register ${RUN_Q_NOTEBOOK_CELL_COMMAND}`);
+  assert(commands.has('vscode-kdb.runSelectionOrCurrentLine'),
+    'visual acceptance requires the ordinary KX query command');
   assert(commands.has('workbench.action.revertAndCloseActiveEditor'),
     'visual acceptance requires the built-in discard-and-close editor command');
+  assert(commands.has('workbench.action.reloadWindow'),
+    'visual acceptance requires the real VS Code reload-window command');
 
   const workbenchConfiguration = vscode.workspace.getConfiguration('workbench');
-  const previousTheme = workbenchConfiguration.inspect('colorTheme')?.globalValue;
+  const resultConfiguration = vscode.workspace.getConfiguration('vscode-kdb.results');
+  const restartMarkerPath = path.join(
+    artifactDirectory,
+    'visual-restart-marker.json'
+  );
+  const restartMarker = readJsonIfPresent(restartMarkerPath);
+  const launchPhase = Number(process.env.VSCODE_KDB_VISUAL_PHASE);
+  if (restartMarker) {
+    assert.strictEqual(
+      launchPhase,
+      2,
+      'persisted-profile phase 2 must be launched as a second VS Code process'
+    );
+    return runPostReloadColumnSizing({
+      artifactDirectory,
+      cdpPort,
+      profilePath,
+      qPort,
+      restartMarker,
+      restartMarkerPath,
+      resultConfiguration,
+      testApi,
+      workbenchConfiguration,
+    });
+  }
+  assert.strictEqual(launchPhase, 1, 'visual phase 1 launch identity is invalid');
+
+  const previousTheme = snapshotGlobalConfiguration(
+    workbenchConfiguration,
+    ['colorTheme']
+  );
+  const previousResultColumnSettings = snapshotGlobalConfiguration(
+    resultConfiguration,
+    RESULT_COLUMN_SETTING_KEYS
+  );
+  const previousActiveConnectionId = testApi.activeConnectionId();
   let liveNotebook;
   let contractNotebook;
   let savedInteractionNotebook;
@@ -123,7 +247,13 @@ async function run() {
   let lightThemeSelectorEvidence;
   const screenshots = [];
   const interactions = [];
+  let preserveForReload = false;
+  let visualConnectionAdded = false;
   try {
+    assert(
+      !testApi.connection(VISUAL_CONNECTION_ID),
+      `visual profile already contains connection ${VISUAL_CONNECTION_ID}`
+    );
     await testApi.addConnection({
       id: VISUAL_CONNECTION_ID,
       name: VISUAL_CONNECTION_NAME,
@@ -134,7 +264,26 @@ async function run() {
       connectTimeoutMs: 5_000,
       queryTimeoutMs: 30_000,
     });
+    visualConnectionAdded = true;
     await testApi.setActiveConnection(VISUAL_CONNECTION_ID);
+
+    await configureColumnSizingAcceptance(resultConfiguration);
+    interactions.push(await exerciseOrdinaryResultColumnSizing(
+      cdpPort,
+      resultConfiguration
+    ));
+    console.log('KX Results visual interaction: real-runtime column sizing passed');
+    interactions.push(await exerciseOrdinaryResultChartLifecycle(cdpPort));
+    console.log('KX Results visual interaction: real two-drag chart lifecycle passed');
+    interactions.push(await exerciseNotebookResultColumnSizing(
+      cdpPort,
+      resultConfiguration
+    ));
+    console.log('Notebook visual interaction: real-runtime column sizing passed');
+    await configureColumnSizingAcceptance(resultConfiguration, {
+      autoFitColumns: true,
+      autoFitMode: 'wholeResult',
+    });
 
     const fullResultFixture = liveQueries[caseIndex(liveQueries, 'live-full-result')];
     liveNotebook = await openLiveGalleryNotebook(fullResultFixture);
@@ -479,7 +628,28 @@ async function run() {
     await discardActiveVisualNotebook();
     console.log('Notebook visual stage: complete live gallery executed');
 
-    const report = {
+    const restartSurfaces = await exercisePreReloadColumnSizing(
+      cdpPort,
+      resultConfiguration
+    );
+    interactions.push({
+      name: 'ordinary-positional-widths-before-restart',
+      ...restartSurfaces.ordinary,
+    });
+    interactions.push({
+      name: 'notebook-positional-widths-before-restart',
+      ...restartSurfaces.notebook,
+    });
+    const persistedBeforeReload = normalizedWidthMap(
+      currentResultSetting('viewer.columnWidths')
+    );
+    assert.deepStrictEqual(
+      persistedBeforeReload,
+      RESTART_WIDTHS_BY_POSITION,
+      'canonical positional widths must be durable before reload'
+    );
+
+    const galleryReport = {
       version: 1,
       vscodeVersion: vscode.version,
       display: process.env.DISPLAY,
@@ -500,22 +670,2326 @@ async function run() {
         'Live cells were executed against the private loopback q process. A file-backed copy of the tracked bounded .ipynb preview was saved, closed, and reopened before capture; it contains no omitted rows.',
       nonAutomatedBoundaries: visualInteractionBoundaries(),
     };
-    fs.writeFileSync(
-      path.join(artifactDirectory, 'visual-report.json'),
-      `${JSON.stringify(report, null, 2)}\n`,
-      'utf8'
+    const phaseOne = {
+      version: 1,
+      complete: true,
+      reloadCommand: 'workbench.action.reloadWindow',
+      reloadCommandIssued: true,
+      profilePath,
+      extensionHostPid: process.pid,
+      widthsByPosition: persistedBeforeReload,
+      surfaces: restartSurfaces,
+      galleryReport,
+    };
+    writeJsonAtomic(
+      path.join(artifactDirectory, 'visual-phase-1.json'),
+      phaseOne
     );
     console.log(
-      `KX notebook visual gallery captured ${screenshots.length} screenshots in ${artifactDirectory}`
+      `KX notebook visual phase 1 captured ${screenshots.length} screenshots and ` +
+      `persisted widths ${JSON.stringify(persistedBeforeReload)}`
     );
+    const markerValue = {
+      version: 1,
+      phaseOneComplete: true,
+      reloadCommand: 'workbench.action.reloadWindow',
+      reloadCommandIssued: true,
+      profilePath,
+      extensionHostPid: process.pid,
+      widthsByPosition: persistedBeforeReload,
+      resultSettingsSnapshot: previousResultColumnSettings,
+      workbenchSettingsSnapshot: previousTheme,
+      previousActiveConnectionId,
+      connectionId: VISUAL_CONNECTION_ID,
+      qPort,
+    };
+    writeJsonAtomic(restartMarkerPath, markerValue);
+    preserveForReload = true;
+    try {
+      await vscode.commands.executeCommand('workbench.action.reloadWindow');
+    } catch (error) {
+      if (!isReloadCancellation(error)) {
+        preserveForReload = false;
+        removeFileIfPresent(restartMarkerPath);
+        throw error;
+      }
+      writeJsonAtomic(restartMarkerPath, {
+        ...markerValue,
+        reloadPromiseCancellation: {
+          name: error.name,
+          message: error.message,
+        },
+      });
+      throw error;
+    }
+    await new Promise(() => {});
   } finally {
-    await workbenchConfiguration.update(
-      'colorTheme',
-      previousTheme,
+    if (!preserveForReload) {
+      try {
+        await cleanupVisualProfile({
+          resultConfiguration,
+          resultSettingsSnapshot: previousResultColumnSettings,
+          testApi,
+          workbenchConfiguration,
+          workbenchSettingsSnapshot: previousTheme,
+          previousActiveConnectionId,
+          removeVisualConnection: visualConnectionAdded,
+        });
+      } finally {
+        removeFileIfPresent(restartMarkerPath);
+      }
+    }
+  }
+}
+
+function snapshotGlobalConfiguration(configuration, keys) {
+  return keys.map(key => {
+    const globalValue = configuration.inspect(key)?.globalValue;
+    return {
+      key,
+      hadGlobalValue: globalValue !== undefined,
+      ...(globalValue === undefined
+        ? {}
+        : { globalValue: cloneConfigurationValue(globalValue) }),
+    };
+  });
+}
+
+async function cleanupVisualProfile({
+  resultConfiguration,
+  resultSettingsSnapshot,
+  testApi,
+  workbenchConfiguration,
+  workbenchSettingsSnapshot,
+  previousActiveConnectionId,
+  removeVisualConnection = true,
+}) {
+  const failures = [];
+  await restoreGlobalConfiguration(
+    resultConfiguration,
+    resultSettingsSnapshot,
+    'result setting',
+    failures
+  );
+  await restoreGlobalConfiguration(
+    workbenchConfiguration,
+    workbenchSettingsSnapshot,
+    'workbench setting',
+    failures
+  );
+  try {
+    if (removeVisualConnection && testApi.connection(VISUAL_CONNECTION_ID)) {
+      await testApi.removeConnection(VISUAL_CONNECTION_ID);
+    }
+  } catch (error) {
+    failures.push(error);
+  }
+  try {
+    await testApi.setActiveConnection(previousActiveConnectionId);
+  } catch (error) {
+    failures.push(error);
+  }
+  if (removeVisualConnection) {
+    try {
+      assert.strictEqual(
+        testApi.connection(VISUAL_CONNECTION_ID),
+        undefined,
+        'visual connection fixture must be removed after acceptance'
+      );
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  try {
+    assert.strictEqual(
+      testApi.activeConnectionId(),
+      previousActiveConnectionId,
+      'active connection fixture must be restored after acceptance'
+    );
+  } catch (error) {
+    failures.push(error);
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(
+      failures,
+      `visual profile cleanup failed in ${failures.length} operation(s)`
+    );
+  }
+}
+
+async function restoreGlobalConfiguration(
+  configuration,
+  snapshot,
+  label,
+  failures
+) {
+  if (!Array.isArray(snapshot)) {
+    failures.push(new Error(`${label} snapshot must be an array`));
+    return;
+  }
+  for (const entry of snapshot) {
+    try {
+      assert(entry && typeof entry.key === 'string', `invalid ${label} snapshot`);
+      await configuration.update(
+        entry.key,
+        entry.hadGlobalValue
+          ? cloneConfigurationValue(entry.globalValue)
+          : undefined,
+        vscode.ConfigurationTarget.Global
+      );
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  for (const entry of snapshot) {
+    try {
+      assertGlobalConfigurationRestored(configuration, [entry]);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+}
+
+function cloneConfigurationValue(value) {
+  return value === undefined ? undefined : JSON.parse(JSON.stringify(value));
+}
+
+async function exercisePreReloadColumnSizing(cdpPort, resultConfiguration) {
+  await configureColumnSizingAcceptance(resultConfiguration, {
+    autoFitColumns: false,
+  });
+  const ordinary = await exerciseOrdinaryRestartWidths(
+    cdpPort,
+    RESTART_COLUMN_SIZING_FIXTURES.phaseOne,
+    RESTART_COLUMN_SIZING_FIXTURES.renamed
+  );
+
+  await configureColumnSizingAcceptance(resultConfiguration, {
+    autoFitColumns: false,
+  });
+  const notebook = await exerciseNotebookRestartWidths(
+    cdpPort,
+    RESTART_COLUMN_SIZING_FIXTURES.phaseOne,
+    RESTART_COLUMN_SIZING_FIXTURES.renamed
+  );
+
+  await waitFor(
+    'canonical positional widths before reload',
+    () => widthMapsEqual(
+      currentResultSetting('viewer.columnWidths'),
+      RESTART_WIDTHS_BY_POSITION
+    ),
+    8_000
+  );
+  return { ordinary, notebook };
+}
+
+async function exerciseOrdinaryRestartWidths(
+  cdpPort,
+  initialFixture,
+  recreatedFixture
+) {
+  let initial;
+  let recreated;
+  try {
+    initial = await openOrdinaryColumnSizingFixture(cdpPort, initialFixture);
+    await waitForRenderer(
+      'ordinary restart fixture fixed baseline',
+      initial.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotHasHeaders(value, initialFixture.headers) &&
+        snapshotAllColumnsHaveWidth(value, 160)
+    );
+    await dragOrdinaryColumnToWidth(initial.renderer, 0, RESTART_WIDTHS_BY_POSITION[0]);
+    await dragOrdinaryColumnToWidth(initial.renderer, 2, RESTART_WIDTHS_BY_POSITION[2]);
+    const afterDrag = await waitForRenderer(
+      'ordinary real first/later drag widths',
+      initial.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    await waitFor(
+      'ordinary real first/later persisted width map',
+      () => widthMapsEqual(
+        currentResultSetting('viewer.columnWidths'),
+        RESTART_WIDTHS_BY_POSITION
+      ),
+      8_000
+    );
+
+    await initial.renderer.evaluate(
+      scrollOrdinaryGridToRow,
+      COLUMN_SIZING_WIDEST_ROW
+    );
+    const afterVirtualScroll = await waitForRenderer(
+      'ordinary first/later widths after virtual scroll',
+      initial.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+
+    await closeOrdinaryColumnSizingFixture(initial);
+    initial = undefined;
+    recreated = await openOrdinaryColumnSizingFixture(cdpPort, recreatedFixture);
+    const recreatedSnapshot = await waitForRenderer(
+      'ordinary renamed-schema positional widths',
+      recreated.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotHasHeaders(value, recreatedFixture.headers) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    assert.notDeepStrictEqual(
+      recreatedSnapshot.headers,
+      afterDrag.headers,
+      'ordinary recreation must use renamed, different-schema columns'
+    );
+    return {
+      draggedPositions: [0, 2],
+      afterDrag,
+      afterVirtualScroll,
+      recreated: recreatedSnapshot,
+    };
+  } finally {
+    await closeOrdinaryColumnSizingFixture(recreated).catch(() => undefined);
+    await closeOrdinaryColumnSizingFixture(initial).catch(() => undefined);
+  }
+}
+
+async function exerciseNotebookRestartWidths(
+  cdpPort,
+  initialFixture,
+  recreatedFixture
+) {
+  let notebook;
+  let renderer;
+  try {
+    ({ notebook, renderer } = await openColumnSizingNotebook(
+      cdpPort,
+      initialFixture
+    ));
+    await waitForRenderer(
+      'notebook restart fixture fixed baseline',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => snapshotHasHeaders(value, initialFixture.headers) &&
+        snapshotAllColumnsHaveWidth(value, 160)
+    );
+    await dragNotebookColumnToWidth(renderer, 0, RESTART_WIDTHS_BY_POSITION[0]);
+    await dragNotebookColumnToWidth(renderer, 2, RESTART_WIDTHS_BY_POSITION[2]);
+    const afterDrag = await waitForRenderer(
+      'notebook real first/later drag widths',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    await waitFor(
+      'notebook real first/later persisted width map',
+      () => widthMapsEqual(
+        currentResultSetting('viewer.columnWidths'),
+        RESTART_WIDTHS_BY_POSITION
+      ),
+      8_000
+    );
+
+    await renderer.evaluate(
+      scrollNotebookGridToRow,
+      COLUMN_SIZING_WIDEST_ROW
+    );
+    const afterVirtualScroll = await waitForRenderer(
+      'notebook first/later widths after virtual scroll',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+
+    renderer.close();
+    renderer = undefined;
+    await discardActiveVisualNotebook();
+    notebook = undefined;
+    ({ notebook, renderer } = await openColumnSizingNotebook(
+      cdpPort,
+      recreatedFixture
+    ));
+    const recreatedSnapshot = await waitForRenderer(
+      'notebook renamed-schema positional widths',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => snapshotHasHeaders(value, recreatedFixture.headers) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    assert.notDeepStrictEqual(
+      recreatedSnapshot.headers,
+      afterDrag.headers,
+      'notebook recreation must use renamed, different-schema columns'
+    );
+    return {
+      draggedPositions: [0, 2],
+      afterDrag,
+      afterVirtualScroll,
+      recreated: recreatedSnapshot,
+    };
+  } finally {
+    renderer?.close();
+    if (notebook && !notebook.isClosed) {
+      await vscode.window.showNotebookDocument(notebook, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      }).catch(() => undefined);
+      await discardActiveVisualNotebook().catch(() => undefined);
+    }
+  }
+}
+
+async function runPostReloadColumnSizing({
+  artifactDirectory,
+  cdpPort,
+  profilePath,
+  qPort,
+  restartMarker,
+  restartMarkerPath,
+  resultConfiguration,
+  testApi,
+  workbenchConfiguration,
+}) {
+  let markerValidated = false;
+  let phaseOne;
+  let connection;
+  let activeConnectionBeforeOpen;
+  let persistedBeforeOpen;
+  let restartEvidence;
+  try {
+    validateRestartMarker(restartMarker, profilePath, qPort);
+    markerValidated = true;
+    assert.notStrictEqual(
+      process.pid,
+      restartMarker.extensionHostPid,
+      'phase 2 must run in a different Extension Host process'
+    );
+    phaseOne = readRequiredJson(
+      path.join(artifactDirectory, 'visual-phase-1.json'),
+      'visual phase-1 evidence'
+    );
+    assert.strictEqual(phaseOne.complete, true);
+    assert.strictEqual(phaseOne.extensionHostPid, restartMarker.extensionHostPid);
+    assert.deepStrictEqual(
+      normalizedWidthMap(phaseOne.widthsByPosition),
+      RESTART_WIDTHS_BY_POSITION
+    );
+
+    connection = testApi.connection(VISUAL_CONNECTION_ID);
+    assert(connection, 'visual q connection must survive in the persisted profile');
+    assert.strictEqual(connection.host, '127.0.0.1');
+    assert.strictEqual(connection.port, qPort);
+    activeConnectionBeforeOpen = testApi.activeConnectionId();
+    persistedBeforeOpen = normalizedWidthMap(
+      resultConfiguration.get('viewer.columnWidths')
+    );
+    assert.deepStrictEqual(
+      persistedBeforeOpen,
+      RESTART_WIDTHS_BY_POSITION,
+      'global positional widths must survive before either phase-2 surface opens'
+    );
+    await testApi.setActiveConnection(VISUAL_CONNECTION_ID);
+
+    const ordinary = await inspectOrdinaryWidthsAfterReload(
+      cdpPort,
+      RESTART_COLUMN_SIZING_FIXTURES.reloaded
+    );
+    const notebook = await inspectNotebookWidthsAfterReload(
+      cdpPort,
+      RESTART_COLUMN_SIZING_FIXTURES.reloaded
+    );
+    const controls = await exercisePostReloadSizingControls(
+      cdpPort,
+      resultConfiguration,
+      RESTART_COLUMN_SIZING_FIXTURES.reloaded
+    );
+    restartEvidence = {
+      ordinary,
+      notebook,
+      controls,
+    };
+  } finally {
+    try {
+      if (markerValidated) {
+        await cleanupVisualProfile({
+          resultConfiguration,
+          resultSettingsSnapshot: restartMarker.resultSettingsSnapshot,
+          testApi,
+          workbenchConfiguration,
+          workbenchSettingsSnapshot: restartMarker.workbenchSettingsSnapshot,
+          previousActiveConnectionId: restartMarker.previousActiveConnectionId,
+        });
+      }
+    } finally {
+      removeFileIfPresent(restartMarkerPath);
+    }
+  }
+
+  const phaseTwo = {
+    version: 1,
+    complete: true,
+    profilePath,
+    extensionHostPid: process.pid,
+    persistedBeforeOpen,
+    persistedConnectionBeforeOpen: {
+      id: connection.id,
+      name: connection.name,
+      host: connection.host,
+      port: connection.port,
+      activeConnectionId: activeConnectionBeforeOpen,
+    },
+    surfaces: {
+      ordinary: restartEvidence.ordinary,
+      notebook: restartEvidence.notebook,
+    },
+    controls: restartEvidence.controls,
+    settingsRestored: true,
+    profileFixturesRestored: true,
+  };
+  writeJsonAtomic(
+    path.join(artifactDirectory, 'visual-phase-2.json'),
+    phaseTwo
+  );
+  const galleryReport = phaseOne.galleryReport;
+  assert(galleryReport && Array.isArray(galleryReport.interactions),
+    'phase-1 gallery report is missing');
+  const finalReport = {
+    ...galleryReport,
+    interactions: [
+      ...galleryReport.interactions,
+      {
+        name: 'ordinary-positional-widths-after-restart',
+        ...phaseTwo.surfaces.ordinary,
+      },
+      {
+        name: 'notebook-positional-widths-after-restart',
+        ...phaseTwo.surfaces.notebook,
+      },
+      {
+        name: 'post-restart-column-sizing-controls',
+        ...phaseTwo.controls,
+      },
+    ],
+    restartAcceptance: {
+      version: 1,
+      phaseOne,
+      phaseTwo,
+    },
+  };
+  writeJsonAtomic(
+    path.join(artifactDirectory, 'visual-report.json'),
+    finalReport
+  );
+  console.log(
+    `KX notebook visual phase 2 restored widths ` +
+    `${JSON.stringify(persistedBeforeOpen)} in both real surfaces`
+  );
+}
+
+async function inspectOrdinaryWidthsAfterReload(cdpPort, fixture) {
+  let handle;
+  try {
+    handle = await openOrdinaryColumnSizingFixture(cdpPort, fixture);
+    const reopened = await waitForRenderer(
+      'ordinary positional widths after real restart',
+      handle.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotHasHeaders(value, fixture.headers) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    await handle.renderer.evaluate(
+      scrollOrdinaryGridToRow,
+      COLUMN_SIZING_WIDEST_ROW
+    );
+    const afterVirtualScroll = await waitForRenderer(
+      'ordinary positional widths after restart virtual scroll',
+      handle.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    return { reopened, afterVirtualScroll };
+  } finally {
+    await closeOrdinaryColumnSizingFixture(handle).catch(() => undefined);
+  }
+}
+
+async function inspectNotebookWidthsAfterReload(cdpPort, fixture) {
+  let notebook;
+  let renderer;
+  try {
+    ({ notebook, renderer } = await openColumnSizingNotebook(cdpPort, fixture));
+    const reopened = await waitForRenderer(
+      'notebook positional widths after real restart',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => snapshotHasHeaders(value, fixture.headers) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    await renderer.evaluate(
+      scrollNotebookGridToRow,
+      COLUMN_SIZING_WIDEST_ROW
+    );
+    const afterVirtualScroll = await waitForRenderer(
+      'notebook positional widths after restart virtual scroll',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    return { reopened, afterVirtualScroll };
+  } finally {
+    renderer?.close();
+    if (notebook && !notebook.isClosed) {
+      await vscode.window.showNotebookDocument(notebook, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      }).catch(() => undefined);
+      await discardActiveVisualNotebook().catch(() => undefined);
+    }
+  }
+}
+
+async function exercisePostReloadSizingControls(
+  cdpPort,
+  resultConfiguration,
+  fixture
+) {
+  let handle;
+  try {
+    handle = await openOrdinaryColumnSizingFixture(cdpPort, fixture);
+    const resetBefore = await waitForRenderer(
+      'post-restart Reset columns baseline',
+      handle.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    await handle.renderer.evaluate(resetOrdinaryColumnWidths);
+    const resetAfter = await waitForRenderer(
+      'post-restart Reset columns all-column fallback',
+      handle.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotAllColumnsHaveWidth(value, 160)
+    );
+    await waitFor(
+      'post-restart Reset columns clears every override',
+      () => widthMapsEqual(currentResultSetting('viewer.columnWidths'), {}),
+      8_000
+    );
+
+    await dragOrdinaryColumnToWidth(handle.renderer, 0, RESTART_WIDTHS_BY_POSITION[0]);
+    await dragOrdinaryColumnToWidth(handle.renderer, 2, RESTART_WIDTHS_BY_POSITION[2]);
+    const densityBefore = await waitForRenderer(
+      'post-restart density preset manual baseline',
+      handle.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => snapshotHasManualWidths(value, RESTART_WIDTHS_BY_POSITION)
+    );
+    await handle.renderer.evaluate(setOrdinaryDensity, 'comfortable');
+    const comfortableWidth = resultConfiguration.get('comfortable.cellWidth');
+    assert.strictEqual(comfortableWidth, 180);
+    const densityAfter = await waitForRenderer(
+      'post-restart density preset all-column width',
+      handle.renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.density === 'comfortable' &&
+        snapshotAllColumnsHaveWidth(value, comfortableWidth)
+    );
+    await waitFor(
+      'post-restart density preset clears every override',
+      () => widthMapsEqual(currentResultSetting('viewer.columnWidths'), {}),
+      8_000
+    );
+    return {
+      reset: {
+        before: resetBefore,
+        after: resetAfter,
+        persistedAfter: {},
+      },
+      densityPreset: {
+        before: densityBefore,
+        after: densityAfter,
+        persistedAfter: {},
+      },
+    };
+  } finally {
+    await closeOrdinaryColumnSizingFixture(handle).catch(() => undefined);
+  }
+}
+
+async function configureColumnSizingAcceptance(configuration, options = {}) {
+  const settings = [
+    [
+      'viewer.autoFitColumns',
+      options.autoFitColumns === undefined ? true : options.autoFitColumns,
+    ],
+    [
+      'viewer.autoFitMode',
+      options.autoFitMode === 'visibleRows' ? 'visibleRows' : 'wholeResult',
+    ],
+    ['viewer.columnWidths', cloneConfigurationValue(options.columnWidths || {})],
+    ['density', 'standard'],
+    [
+      'standard.cellWidth',
+      Number.isSafeInteger(options.cellWidth) ? options.cellWidth : 160,
+    ],
+    ['comfortable.cellWidth', 180],
+  ];
+  for (const [key, value] of settings) {
+    await configuration.update(key, value, vscode.ConfigurationTarget.Global);
+  }
+  const current = vscode.workspace.getConfiguration('vscode-kdb.results');
+  assert.strictEqual(
+    current.get('viewer.autoFitColumns'),
+    settings[0][1],
+    'column-sizing acceptance auto-fit setting did not persist'
+  );
+  assert.strictEqual(
+    current.get('viewer.autoFitMode'),
+    settings[1][1],
+    'column-sizing acceptance auto-fit scope did not persist'
+  );
+  assert.deepStrictEqual(
+    current.get('viewer.columnWidths'),
+    settings[2][1],
+    'column-sizing acceptance width map did not persist'
+  );
+}
+
+async function exerciseOrdinaryResultColumnSizing(cdpPort, resultConfiguration) {
+  let document;
+  let renderer;
+  let recreatedRenderer;
+  try {
+    document = await vscode.workspace.openTextDocument({
+      language: 'q',
+      content: COLUMN_SIZING_FIXTURE.source,
+    });
+    await vscode.window.showTextDocument(document, {
+      preserveFocus: false,
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
+    await vscode.commands.executeCommand('vscode-kdb.runSelectionOrCurrentLine');
+    renderer = await connectNotebookRenderer(cdpPort, 'acceptance_widest_list');
+
+    const wholeResult = await waitForRenderer(
+      'ordinary whole-result column sizing',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.headers.join('|') ===
+          'acceptance_row|acceptance_label|acceptance_widest_list' &&
+        value.autoFit &&
+        value.autoFitMode === 'wholeResult' &&
+        value.widths.length === 3 &&
+        value.widths[2] >= 400 &&
+        value.firstRowWidths.every((width, index) =>
+          Math.abs(width - value.widths[index]) <= 1)
+    );
+
+    await renderer.evaluate(scrollOrdinaryGridToRow, COLUMN_SIZING_WIDEST_ROW);
+    const wholeResultAfterScroll = await waitForRenderer(
+      'ordinary whole-result virtual scroll stability',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        Math.abs(value.widths[2] - wholeResult.widths[2]) <= 1
+    );
+
+    await resultConfiguration.update(
+      'viewer.autoFitMode',
+      'visibleRows',
       vscode.ConfigurationTarget.Global
-    ).catch(() => undefined);
-    await testApi.removeConnection(VISUAL_CONNECTION_ID).catch(() => undefined);
-    await testApi.setActiveConnection(undefined).catch(() => undefined);
+    );
+    await renderer.evaluate(scrollOrdinaryGridToRow, 0);
+    const visibleRowsNarrow = await waitForRenderer(
+      'ordinary visible-row narrow sizing',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.autoFitMode === 'visibleRows' &&
+        value.renderedRows.includes(0) &&
+        value.widths[2] + 80 < wholeResult.widths[2]
+    );
+    await renderer.evaluate(scrollOrdinaryGridToRow, COLUMN_SIZING_WIDEST_ROW);
+    const visibleRowsWide = await waitForRenderer(
+      'ordinary visible-row adaptive sizing',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        value.widths[2] > visibleRowsNarrow.widths[2] + 80
+    );
+
+    await resultConfiguration.update(
+      'viewer.autoFitColumns',
+      false,
+      vscode.ConfigurationTarget.Global
+    );
+    const autoFitDisabled = await waitForRenderer(
+      'ordinary unchecked auto-fit sizing',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => !value.autoFit &&
+        value.widths.length === 3 &&
+        value.widths.every(width => Math.abs(width - 160) <= 1)
+    );
+
+    const drag = await renderer.evaluate(ordinaryResizeHandlePoint, 0);
+    assert(drag?.point, 'ordinary first-column resize handle must render');
+    const expectedManualWidth = drag.startWidth + 96;
+    await renderer.drag(
+      drag.point.x,
+      drag.point.y,
+      drag.point.x + 96,
+      drag.point.y
+    );
+    const ordinaryResizeFinish = await renderer.evaluate(
+      finishPendingColumnResize
+    );
+    const manualFirstColumn = await waitForRenderer(
+      'ordinary first-column drag persistence',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => Math.abs(value.widths[0] - expectedManualWidth) <= 2 &&
+        value.renderedFirstColumnWidths.length > 0 &&
+        value.renderedFirstColumnWidths.every(width =>
+          Math.abs(width - value.widths[0]) <= 1)
+    );
+    let ordinaryPersistedWidths;
+    try {
+      await waitFor(
+        'ordinary persisted first-column width map',
+        () => {
+          ordinaryPersistedWidths =
+            currentResultSetting('viewer.columnWidths');
+          return isSparseWidthMap(ordinaryPersistedWidths) &&
+            Math.abs(
+              ordinaryPersistedWidths['0'] - expectedManualWidth
+            ) <= 2;
+        },
+        8_000
+      );
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; ` +
+        `actual=${JSON.stringify(ordinaryPersistedWidths)}, ` +
+        `expected=${expectedManualWidth}, finish=${JSON.stringify(
+          ordinaryResizeFinish
+        )}`
+      );
+    }
+
+    await renderer.evaluate(scrollOrdinaryGridToRow, 0);
+    const manualAfterVirtualScroll = await waitForRenderer(
+      'ordinary manual width virtual scroll stability',
+      renderer,
+      ordinaryColumnSizingSnapshot,
+      value => value.renderedRows.includes(0) &&
+        Math.abs(value.widths[0] - expectedManualWidth) <= 2 &&
+        Math.abs(value.firstRowWidths[0] - expectedManualWidth) <= 2
+    );
+
+    renderer.close();
+    renderer = undefined;
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+    await vscode.window.showTextDocument(document, {
+      preserveFocus: false,
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
+    await vscode.commands.executeCommand('vscode-kdb.runSelectionOrCurrentLine');
+    recreatedRenderer = await connectNotebookRenderer(
+      cdpPort,
+      'acceptance_widest_list'
+    );
+    const recreated = await waitForRenderer(
+      'ordinary panel recreation width persistence',
+      recreatedRenderer,
+      ordinaryColumnSizingSnapshot,
+      value => !value.autoFit &&
+        Math.abs(value.widths[0] - expectedManualWidth) <= 2
+    );
+
+    await recreatedRenderer.evaluate(setOrdinaryCellWidth, 190);
+    const allColumnPreset = await waitForRenderer(
+      'ordinary all-column Cell width preset',
+      recreatedRenderer,
+      ordinaryColumnSizingSnapshot,
+      value => !value.autoFit &&
+        value.widths.length === 3 &&
+        snapshotAllColumnsHaveWidth(value, 190)
+    );
+    await waitFor(
+      'ordinary Cell width preset clears sparse overrides',
+      () => {
+        const widths = currentResultSetting('viewer.columnWidths');
+        return isSparseWidthMap(widths) &&
+          Object.keys(widths).length === 0 &&
+          currentResultSetting('standard.cellWidth') === 190;
+      },
+      8_000
+    );
+
+    return {
+      name: 'ordinary-real-runtime-column-sizing',
+      wholeResult: {
+        beforeScroll: wholeResult,
+        afterScroll: wholeResultAfterScroll,
+      },
+      visibleRows: {
+        narrow: visibleRowsNarrow,
+        widestRow: visibleRowsWide,
+      },
+      autoFitDisabled,
+      manualFirstColumn,
+      manualAfterVirtualScroll,
+      recreated,
+      allColumnPreset,
+      persistedShape: 'sparse-map',
+    };
+  } finally {
+    recreatedRenderer?.close();
+    renderer?.close();
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor')
+      .catch(() => undefined);
+    if (document && !document.isClosed) {
+      await vscode.window.showTextDocument(document, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      }).catch(() => undefined);
+      await vscode.commands.executeCommand(
+        'workbench.action.revertAndCloseActiveEditor'
+      ).catch(() => undefined);
+    }
+    await configureColumnSizingAcceptance(resultConfiguration)
+      .catch(() => undefined);
+  }
+}
+
+async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
+  let handle;
+  try {
+    handle = await openOrdinaryColumnSizingFixture(
+      cdpPort,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE
+    );
+    const renderer = handle.renderer;
+    await renderer.evaluate(installOrdinaryChartLifecycleProbe);
+    await renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const open = root.querySelector('#openChart');
+      if (!(open instanceof view.HTMLButtonElement) || open.disabled) {
+        throw new Error('ordinary Chart button is missing or disabled');
+      }
+      open.click();
+      return true;
+    });
+    await waitForRenderer(
+      'ordinary chart options',
+      renderer,
+      root => ({
+        panelVisible: root.querySelector('#chartPanel')?.hidden === false,
+        xColumns: [...root.querySelectorAll('#chartXColumn option')]
+          .map(option => option.value),
+        yColumns: [...root.querySelectorAll('#chartYColumns input')]
+          .map(input => input.value),
+      }),
+      value => value.panelVisible &&
+        value.xColumns.includes('ordinary_zoom_x') &&
+        value.yColumns.includes('ordinary_zoom_y')
+    );
+    await renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const chartType = root.querySelector('#chartType');
+      const xColumn = root.querySelector('#chartXColumn');
+      const render = root.querySelector('#renderChart');
+      if (!(chartType instanceof view.HTMLSelectElement) ||
+        !(xColumn instanceof view.HTMLSelectElement) ||
+        !(render instanceof view.HTMLButtonElement)) {
+        throw new Error('ordinary chart controls are unavailable');
+      }
+      chartType.value = 'line';
+      chartType.dispatchEvent(new view.Event('change', { bubbles: true }));
+      xColumn.value = 'ordinary_zoom_x';
+      xColumn.dispatchEvent(new view.Event('change', { bubbles: true }));
+      let selectedY = false;
+      root.querySelectorAll('#chartYColumns input').forEach(input => {
+        const checked = input.value === 'ordinary_zoom_y';
+        if (input.checked !== checked) {
+          input.checked = checked;
+          input.dispatchEvent(new view.Event('change', { bubbles: true }));
+        }
+        selectedY ||= checked;
+      });
+      if (!selectedY || render.disabled) {
+        throw new Error('ordinary chart line selection is not renderable');
+      }
+      render.click();
+      return {
+        chartType: chartType.value,
+        xColumn: xColumn.value,
+        yColumns: [...root.querySelectorAll('#chartYColumns input:checked')]
+          .map(input => input.value),
+      };
+    });
+
+    const baseline = await waitForRenderer(
+      'ordinary full chart host response and uPlot reconstruction',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === 1 &&
+        value.hostChartErrorCount === 0 &&
+        value.uPlotBuildCount >= 1 &&
+        value.plot.currentMatchesLatestResponse &&
+        value.plot.currentMatchesFullResponse &&
+        value.fullResponseStoredUnchanged &&
+        sameNumericRange(value.plot.range, ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange),
+      15_000
+    );
+    assert.strictEqual(
+      baseline.responses[0].sourceRowCount,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount
+    );
+    assert.strictEqual(
+      baseline.responses[0].eligibleRowCount,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount
+    );
+    assert.deepStrictEqual(
+      baseline.responses[0].xDomain,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
+    );
+    // Let the completed draw/ResizeObserver work settle before beginning a
+    // trusted gesture; this keeps the acceptance on the user-input lifecycle.
+    await delay(750);
+
+    const firstDrag = await dragOrdinaryChartRange(
+      renderer,
+      0.05,
+      0.95,
+      baseline
+    );
+    const firstExpectedDomain = integerDomainForRange(
+      firstDrag.requestedRange,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
+    );
+    const first = await waitForRenderer(
+      'ordinary first drag debounce, host response, and reconstruction',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === 2 &&
+        value.hostChartErrorCount === 0 &&
+        value.uPlotBuildCount > baseline.uPlotBuildCount &&
+        value.plot.currentMatchesLatestResponse &&
+        value.fullResponseStoredUnchanged &&
+        sameNumericRange(value.plot.range, firstDrag.requestedRange),
+      15_000
+    );
+    assertOrdinaryRangedChartResponse(
+      first.responses[1],
+      firstExpectedDomain,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
+      'ordinary first drag'
+    );
+    assert.notStrictEqual(
+      first.responses[1].sampledPointCount,
+      baseline.responses[0].sampledPointCount,
+      'ordinary first drag must change the reconstructed sample count'
+    );
+
+    const secondDrag = await dragOrdinaryChartRange(
+      renderer,
+      0.35,
+      0.65,
+      first
+    );
+    const secondExpectedDomain = integerDomainForRange(
+      secondDrag.requestedRange,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
+    );
+    const second = await waitForRenderer(
+      'ordinary nested drag debounce, host response, and reconstruction',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === 3 &&
+        value.hostChartErrorCount === 0 &&
+        value.uPlotBuildCount > first.uPlotBuildCount &&
+        value.plot.currentMatchesLatestResponse &&
+        value.fullResponseStoredUnchanged &&
+        sameNumericRange(value.plot.range, secondDrag.requestedRange),
+      15_000
+    );
+    assertOrdinaryRangedChartResponse(
+      second.responses[2],
+      secondExpectedDomain,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
+      'ordinary nested drag'
+    );
+    assert(
+      second.responses[2].eligibleRowCount < first.responses[1].eligibleRowCount,
+      'ordinary nested drag must reduce the eligible source-row count'
+    );
+    assert(
+      second.responses[2].sampledPointCount < first.responses[1].sampledPointCount,
+      'ordinary nested drag must change the reconstructed sample count'
+    );
+    assert.strictEqual(
+      second.nestedResponseIntroducedPoint,
+      true,
+      'ordinary nested reconstruction must contain full-source points absent from the first sample'
+    );
+    assert.notDeepStrictEqual(
+      secondDrag.requestedRange,
+      firstDrag.requestedRange,
+      'ordinary nested drag must issue a distinct absolute range'
+    );
+    assert(
+      secondDrag.requestedRange.min > firstDrag.requestedRange.min &&
+        secondDrag.requestedRange.max < firstDrag.requestedRange.max,
+      'ordinary second drag must be nested inside the first absolute range'
+    );
+
+    const responseCountBeforeReset = second.hostChartDataResponseCount;
+    const plotBuildCountBeforeReset = second.uPlotBuildCount;
+    await renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const reset = root.querySelector('#resetChartZoom');
+      if (!(reset instanceof view.HTMLButtonElement) || reset.disabled) {
+        throw new Error('ordinary Reset zoom button is missing or disabled');
+      }
+      reset.click();
+      return true;
+    });
+    const reset = await waitForRenderer(
+      'ordinary Reset local full-sample reconstruction',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === responseCountBeforeReset &&
+        value.hostChartErrorCount === 0 &&
+        value.uPlotBuildCount > plotBuildCountBeforeReset &&
+        value.plot.currentMatchesFullResponse &&
+        value.fullResponseStoredUnchanged &&
+        sameNumericRange(value.plot.range, ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange) &&
+        value.chartStatus === 'Zoom reset to the original full data range.',
+      8_000
+    );
+    assert.strictEqual(
+      reset.plot.data.digest,
+      baseline.plot.data.digest,
+      'ordinary Reset must reconstruct the exact original full sample'
+    );
+    assert.strictEqual(
+      reset.plot.data.pointCount,
+      baseline.plot.data.pointCount,
+      'ordinary Reset must restore the original full sample count'
+    );
+
+    return {
+      name: 'ordinary-real-two-drag-chart-lifecycle',
+      fixture: {
+        rowCount: ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
+        fullRange: ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange,
+      },
+      browserPath:
+        'trusted CDP drag -> uPlot setScale hook -> 450ms debounce -> host chartData -> new uPlot reconstruction',
+      baseline: ordinaryChartStageEvidence(baseline, 0),
+      first: {
+        drag: firstDrag,
+        expectedEligibleDomain: firstExpectedDomain,
+        ...ordinaryChartStageEvidence(first, 1),
+      },
+      second: {
+        drag: secondDrag,
+        expectedEligibleDomain: secondExpectedDomain,
+        nestedResponseIntroducedPoint: second.nestedResponseIntroducedPoint,
+        ...ordinaryChartStageEvidence(second, 2),
+      },
+      immutableFull: {
+        sourceRowCount: baseline.responses[0].sourceRowCount,
+        range: baseline.responses[0].xDomain,
+        responseDigest: baseline.responses[0].digest,
+        unchangedAfterFirst: first.fullResponseStoredUnchanged,
+        unchangedAfterSecond: second.fullResponseStoredUnchanged,
+        unchangedAfterReset: reset.fullResponseStoredUnchanged,
+      },
+      reset: {
+        hostChartDataResponseCountBefore: responseCountBeforeReset,
+        hostChartDataResponseCountAfter: reset.hostChartDataResponseCount,
+        uPlotBuildCountBefore: plotBuildCountBeforeReset,
+        uPlotBuildCountAfter: reset.uPlotBuildCount,
+        range: reset.plot.range,
+        data: reset.plot.data,
+        matchesOriginalFullResponse: reset.plot.currentMatchesFullResponse,
+        fullResponseStoredUnchanged: reset.fullResponseStoredUnchanged,
+        chartStatus: reset.chartStatus,
+      },
+    };
+  } finally {
+    await closeOrdinaryColumnSizingFixture(handle).catch(() => undefined);
+  }
+}
+
+function installOrdinaryChartLifecycleProbe(root) {
+  const view = root.ownerDocument.defaultView;
+  const key = '__kxOrdinaryChartLifecycleProbe';
+  if (view[key]) {
+    return true;
+  }
+  const OriginalUPlot = view.uPlot;
+  if (typeof OriginalUPlot !== 'function') {
+    throw new Error('ordinary chart uPlot constructor is unavailable');
+  }
+  const digestArrays = arrays => {
+    let hash = 1469598103934665603n;
+    const prime = 1099511628211n;
+    const write = value => {
+      const text = `${String(value)}\u0000`;
+      for (let index = 0; index < text.length; index += 1) {
+        hash ^= BigInt(text.charCodeAt(index));
+        hash = BigInt.asUintN(64, hash * prime);
+      }
+    };
+    arrays.forEach((values, arrayIndex) => {
+      write(`array:${arrayIndex}:${values.length}`);
+      values.forEach(write);
+    });
+    return hash.toString(16).padStart(16, '0');
+  };
+  const digestChartData = value => digestArrays([
+    Array.isArray(value?.x) ? value.x : [],
+    ...(Array.isArray(value?.series)
+      ? value.series.map(series =>
+        Array.isArray(series?.values) ? series.values : [])
+      : []),
+  ]);
+  const digestAlignedData = value => digestArrays(
+    Array.isArray(value)
+      ? value.map(series => Array.isArray(series) ? series : [])
+      : []
+  );
+  const cloneRange = value => value &&
+    Number.isFinite(value.min) &&
+    Number.isFinite(value.max)
+    ? { min: value.min, max: value.max }
+    : null;
+  const probe = {
+    OriginalUPlot,
+    currentPlot: null,
+    currentPlotId: 0,
+    nextPlotId: 0,
+    plotBuilds: [],
+    scaleHooks: [],
+    dataHooks: [],
+    hookConfigurations: [],
+    responses: [],
+    errors: [],
+    digestChartData,
+    digestAlignedData,
+    cloneRange,
+  };
+  const listener = event => {
+    const message = event.data;
+    if (message?.type === 'chartData' && message.data) {
+      const data = message.data;
+      const response = {
+        requestId: Number(data.requestId),
+        chartType: String(data.chartType || ''),
+        sourceRowCount: Number(data.sourceRowCount),
+        eligibleRowCount: Number(data.eligibleRowCount),
+        sampledPointCount: Number(data.sampledPointCount),
+        algorithm: String(data.algorithm || ''),
+        xDomain: cloneRange(data.xDomain),
+        x: Array.isArray(data.x) ? data.x.slice() : [],
+        series: Array.isArray(data.series)
+          ? data.series.map(series => ({
+              columnName: String(series?.columnName || ''),
+              values: Array.isArray(series?.values)
+                ? series.values.slice()
+                : [],
+            }))
+          : [],
+        receivedAt: view.performance.now(),
+      };
+      response.receivedDigest = digestChartData(response);
+      probe.responses.push(response);
+    } else if (message?.type === 'chartError') {
+      probe.errors.push({
+        requestId: Number(message.requestId),
+        message: String(message.message || ''),
+        receivedAt: view.performance.now(),
+      });
+    }
+  };
+  view.addEventListener('message', listener, true);
+  probe.listener = listener;
+
+  function InstrumentedUPlot(options, data, target) {
+    const plotId = ++probe.nextPlotId;
+    const originalHooks = options?.hooks || {};
+    probe.hookConfigurations.push({
+      plotId,
+      setScaleCount: Array.isArray(originalHooks.setScale)
+        ? originalHooks.setScale.length
+        : -1,
+      setScaleNames: Array.isArray(originalHooks.setScale)
+        ? originalHooks.setScale.map(hook => String(hook.name || ''))
+        : [],
+    });
+    const hooks = { ...originalHooks };
+    hooks.init = [
+      ...(Array.isArray(originalHooks.init) ? originalHooks.init : []),
+      self => {
+        probe.currentPlot = self;
+        probe.currentPlotId = plotId;
+      },
+    ];
+    hooks.setScale = [
+      ...(Array.isArray(originalHooks.setScale) ? originalHooks.setScale : []),
+      (self, scaleKey) => {
+        if (scaleKey !== 'x') {
+          return;
+        }
+        probe.currentPlot = self;
+        probe.currentPlotId = plotId;
+        probe.scaleHooks.push({
+          plotId,
+          range: cloneRange(self.scales?.x),
+          resetDisabled:
+            root.querySelector('#resetChartZoom')?.disabled === true,
+          refineDisabled:
+            root.querySelector('#refineChartZoom')?.disabled === true,
+          at: view.performance.now(),
+        });
+      },
+    ];
+    hooks.setData = [
+      ...(Array.isArray(originalHooks.setData) ? originalHooks.setData : []),
+      self => {
+        probe.currentPlot = self;
+        probe.currentPlotId = plotId;
+        probe.dataHooks.push({
+          plotId,
+          pointCount: Array.isArray(self.data?.[0])
+            ? self.data[0].length
+            : 0,
+          digest: digestAlignedData(self.data),
+          at: view.performance.now(),
+        });
+      },
+    ];
+    hooks.ready = [
+      ...(Array.isArray(originalHooks.ready) ? originalHooks.ready : []),
+      self => {
+        probe.currentPlot = self;
+        probe.currentPlotId = plotId;
+        probe.plotBuilds.push({
+          plotId,
+          pointCount: Array.isArray(self.data?.[0])
+            ? self.data[0].length
+            : 0,
+          digest: digestAlignedData(self.data),
+          range: cloneRange(self.scales?.x),
+          at: view.performance.now(),
+        });
+      },
+    ];
+    return new OriginalUPlot({ ...options, hooks }, data, target);
+  }
+  Object.setPrototypeOf(InstrumentedUPlot, OriginalUPlot);
+  InstrumentedUPlot.prototype = OriginalUPlot.prototype;
+  view.uPlot = InstrumentedUPlot;
+  view[key] = probe;
+  return true;
+}
+
+function ordinaryChartLifecycleSnapshot(root) {
+  const view = root.ownerDocument.defaultView;
+  const probe = view.__kxOrdinaryChartLifecycleProbe;
+  if (!probe) {
+    throw new Error('ordinary chart lifecycle probe is missing');
+  }
+  const rangesEqual = (left, right) => !!left && !!right &&
+    left.min === right.min &&
+    left.max === right.max;
+  const arraysEqual = (left, right) =>
+    Array.isArray(left) &&
+    Array.isArray(right) &&
+    left.length === right.length &&
+    left.every((value, index) => Object.is(value, right[index]));
+  const responseArrays = response => [
+    response?.x || [],
+    ...(response?.series || []).map(series => series.values || []),
+  ];
+  const alignedArrays = Array.isArray(probe.currentPlot?.data)
+    ? probe.currentPlot.data.map(series => Array.isArray(series) ? series : [])
+    : [];
+  const responseSummary = response => ({
+    requestId: response.requestId,
+    chartType: response.chartType,
+    sourceRowCount: response.sourceRowCount,
+    eligibleRowCount: response.eligibleRowCount,
+    sampledPointCount: response.sampledPointCount,
+    algorithm: response.algorithm,
+    xDomain: response.xDomain,
+    firstX: response.x[0],
+    lastX: response.x.at(-1),
+    digest: probe.digestChartData(response),
+    receivedDigest: response.receivedDigest,
+    storedUnchanged:
+      probe.digestChartData(response) === response.receivedDigest,
+    receivedAt: response.receivedAt,
+  });
+  const fullResponse = probe.responses[0];
+  const latestResponse = probe.responses.at(-1);
+  const plotMatchesResponse = response => {
+    const arrays = responseArrays(response);
+    return arrays.length === alignedArrays.length &&
+      arrays.every((values, index) => arraysEqual(values, alignedArrays[index]));
+  };
+  const firstRefinement = probe.responses[1];
+  const nestedRefinement = probe.responses[2];
+  const firstRefinementX = new Set(firstRefinement?.x || []);
+  return {
+    hostChartDataResponseCount: probe.responses.length,
+    hostChartErrorCount: probe.errors.length,
+    hostChartErrors: probe.errors.slice(),
+    uPlotBuildCount: probe.plotBuilds.length,
+    uPlotScaleHookCount: probe.scaleHooks.length,
+    uPlotDataHookCount: probe.dataHooks.length,
+    uPlotHookConfigurations: probe.hookConfigurations.slice(),
+    latestScaleHook: probe.scaleHooks.at(-1) || null,
+    plot: {
+      id: probe.currentPlotId,
+      range: probe.cloneRange(probe.currentPlot?.scales?.x),
+      data: {
+        pointCount: alignedArrays[0]?.length || 0,
+        firstX: alignedArrays[0]?.[0],
+        lastX: alignedArrays[0]?.at(-1),
+        digest: probe.digestAlignedData(alignedArrays),
+      },
+      currentMatchesLatestResponse: plotMatchesResponse(latestResponse),
+      currentMatchesFullResponse: plotMatchesResponse(fullResponse),
+    },
+    responses: probe.responses.map(responseSummary),
+    fullResponseStoredUnchanged:
+      !!fullResponse &&
+      probe.digestChartData(fullResponse) === fullResponse.receivedDigest &&
+      rangesEqual(
+        responseSummary(fullResponse).xDomain,
+        fullResponse.xDomain
+      ),
+    nestedResponseIntroducedPoint:
+      !!nestedRefinement &&
+      nestedRefinement.x.some(value => !firstRefinementX.has(value)),
+    resetDisabled: root.querySelector('#resetChartZoom')?.disabled === true,
+    chartStatus: root.querySelector('#chartStatus')?.textContent || '',
+  };
+}
+
+async function dragOrdinaryChartRange(
+  renderer,
+  startFraction,
+  endFraction,
+  before
+) {
+  const drag = await renderer.evaluate(
+    ordinaryChartDragPoints,
+    startFraction,
+    endFraction
+  );
+  assert(drag?.start && drag?.end, 'ordinary chart drag points must render');
+  assert.strictEqual(
+    drag.hostChartDataResponseCount,
+    before.hostChartDataResponseCount,
+    'ordinary drag must start from the expected settled host response'
+  );
+  await renderer.drag(
+    drag.start.x,
+    drag.start.y,
+    drag.end.x,
+    drag.end.y
+  );
+  const pending = await renderer.evaluate(ordinaryChartLifecycleSnapshot);
+  assert.strictEqual(
+    pending.hostChartDataResponseCount,
+    before.hostChartDataResponseCount,
+    'ordinary chart debounce must not have settled during the trusted drag'
+  );
+  assert(
+    pending.uPlotScaleHookCount > drag.uPlotScaleHookCount,
+    'ordinary trusted drag must pass through the real uPlot setScale hook'
+  );
+  assert(
+    pending.plot.range.min > drag.beforeRange.min &&
+      pending.plot.range.max < drag.beforeRange.max,
+    'ordinary trusted drag must narrow the current absolute range'
+  );
+  return {
+    input: 'trusted CDP Input.dispatchMouseEvent drag',
+    startFraction,
+    endFraction,
+    beforeRange: drag.beforeRange,
+    requestedRange: pending.plot.range,
+    hostChartDataResponseCountBefore: drag.hostChartDataResponseCount,
+    hostChartDataResponseCountAfterDragBeforeDebounce:
+      pending.hostChartDataResponseCount,
+    uPlotScaleHookCountBefore: drag.uPlotScaleHookCount,
+    uPlotScaleHookCountAfter: pending.uPlotScaleHookCount,
+    scaleHook: pending.latestScaleHook,
+  };
+}
+
+function ordinaryChartDragPoints(root, startFraction, endFraction) {
+  const view = root.ownerDocument.defaultView;
+  const probe = view.__kxOrdinaryChartLifecycleProbe;
+  const overlay = root.querySelector('#chartCanvasWrap .u-over');
+  if (!probe?.currentPlot || !(overlay instanceof view.HTMLElement)) {
+    throw new Error('ordinary chart drag overlay or instrumented plot is missing');
+  }
+  if (!(startFraction >= 0 && endFraction <= 1 &&
+    endFraction > startFraction)) {
+    throw new Error('ordinary chart drag fractions are invalid');
+  }
+  overlay.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const bounds = overlay.getBoundingClientRect();
+  if (bounds.width <= 20 || bounds.height <= 20) {
+    throw new Error('ordinary chart drag overlay has no usable bounds');
+  }
+  let startX = bounds.left + bounds.width * startFraction;
+  let endX = bounds.left + bounds.width * endFraction;
+  let y = bounds.top + bounds.height * 0.5;
+  let frameView = overlay.ownerDocument.defaultView;
+  const visitedViews = new Set();
+  for (let depth = 0;
+    frameView && depth < 8 && !visitedViews.has(frameView);
+    depth += 1) {
+    visitedViews.add(frameView);
+    const frame = frameView.frameElement;
+    if (!frame) {
+      break;
+    }
+    const frameRect = frame.getBoundingClientRect();
+    startX += frameRect.left + frame.clientLeft;
+    endX += frameRect.left + frame.clientLeft;
+    y += frameRect.top + frame.clientTop;
+    const parentView = frame.ownerDocument.defaultView;
+    if (!parentView || parentView === frameView) {
+      break;
+    }
+    frameView = parentView;
+  }
+  return {
+    start: { x: startX, y },
+    end: { x: endX, y },
+    beforeRange: probe.cloneRange(probe.currentPlot.scales?.x),
+    hostChartDataResponseCount: probe.responses.length,
+    uPlotScaleHookCount: probe.scaleHooks.length,
+  };
+}
+
+function integerDomainForRange(range, fullRange) {
+  return {
+    min: Math.ceil(Math.max(fullRange.min, range.min)),
+    max: Math.floor(Math.min(fullRange.max, range.max)),
+  };
+}
+
+function assertOrdinaryRangedChartResponse(
+  response,
+  expectedDomain,
+  sourceRowCount,
+  label
+) {
+  assert(response, `${label} chart response is missing`);
+  assert.deepStrictEqual(
+    response.xDomain,
+    expectedDomain,
+    `${label} must use the exact integer source domain inside its absolute request`
+  );
+  assert.strictEqual(
+    response.sourceRowCount,
+    sourceRowCount,
+    `${label} must resample from the immutable full source`
+  );
+  assert.strictEqual(
+    response.eligibleRowCount,
+    expectedDomain.max - expectedDomain.min + 1,
+    `${label} must report the exact eligible source-row count`
+  );
+  assert.strictEqual(
+    response.sampledPointCount,
+    Math.min(response.eligibleRowCount, 7_000),
+    `${label} must reconstruct the ranged 7,000-point density`
+  );
+  assert.strictEqual(response.firstX, expectedDomain.min);
+  assert.strictEqual(response.lastX, expectedDomain.max);
+  assert.strictEqual(response.storedUnchanged, true);
+}
+
+function ordinaryChartStageEvidence(snapshot, responseIndex) {
+  return {
+    hostChartDataResponseCount: snapshot.hostChartDataResponseCount,
+    hostChartErrorCount: snapshot.hostChartErrorCount,
+    uPlotBuildCount: snapshot.uPlotBuildCount,
+    uPlotScaleHookCount: snapshot.uPlotScaleHookCount,
+    uPlotDataHookCount: snapshot.uPlotDataHookCount,
+    response: snapshot.responses[responseIndex],
+    reconstructedRange: snapshot.plot.range,
+    reconstructedData: snapshot.plot.data,
+    currentMatchesHostResponse: snapshot.plot.currentMatchesLatestResponse,
+    fullResponseStoredUnchanged: snapshot.fullResponseStoredUnchanged,
+    chartStatus: snapshot.chartStatus,
+  };
+}
+
+function sameNumericRange(left, right) {
+  return !!left && !!right &&
+    left.min === right.min &&
+    left.max === right.max;
+}
+
+async function exerciseNotebookResultColumnSizing(cdpPort, resultConfiguration) {
+  let notebook;
+  let renderer;
+  try {
+    ({ notebook, renderer } = await openColumnSizingNotebook(cdpPort));
+    const wholeResult = await waitForRenderer(
+      'notebook whole-result column sizing',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.headers.join('|') ===
+          'acceptance_row|acceptance_label|acceptance_widest_list' &&
+        value.autoFit &&
+        value.autoFitMode === 'wholeResult' &&
+        value.widths.length === 3 &&
+        value.widths[2] >= 400 &&
+        value.firstRowWidths.every((width, index) =>
+          Math.abs(width - value.widths[index]) <= 1)
+    );
+
+    await renderer.evaluate(scrollNotebookGridToRow, COLUMN_SIZING_WIDEST_ROW);
+    const wholeResultAfterScroll = await waitForRenderer(
+      'notebook whole-result virtual scroll stability',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        Math.abs(value.widths[2] - wholeResult.widths[2]) <= 1
+    );
+
+    await resultConfiguration.update(
+      'viewer.autoFitMode',
+      'visibleRows',
+      vscode.ConfigurationTarget.Global
+    );
+    await renderer.evaluate(scrollNotebookGridToRow, 0);
+    const visibleRowsNarrow = await waitForRenderer(
+      'notebook visible-row narrow sizing',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.autoFitMode === 'visibleRows' &&
+        value.renderedRows.includes(0) &&
+        value.widths[2] + 80 < wholeResult.widths[2]
+    );
+    await renderer.evaluate(scrollNotebookGridToRow, COLUMN_SIZING_WIDEST_ROW);
+    const visibleRowsWide = await waitForRenderer(
+      'notebook visible-row adaptive sizing',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.renderedRows.includes(COLUMN_SIZING_WIDEST_ROW) &&
+        value.widths[2] > visibleRowsNarrow.widths[2] + 80
+    );
+
+    await resultConfiguration.update(
+      'viewer.autoFitColumns',
+      false,
+      vscode.ConfigurationTarget.Global
+    );
+    const autoFitDisabled = await waitForRenderer(
+      'notebook unchecked auto-fit sizing',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => !value.autoFit &&
+        value.widths.length === 3 &&
+        value.widths.every(width => Math.abs(width - 160) <= 1)
+    );
+
+    const drag = await renderer.evaluate(notebookResizeHandlePoint, 0);
+    assert(drag?.point, 'notebook first-column resize handle must render');
+    const expectedManualWidth = drag.startWidth + 96;
+    await renderer.drag(
+      drag.point.x,
+      drag.point.y,
+      drag.point.x + 96,
+      drag.point.y
+    );
+    const notebookResizeFinish = await renderer.evaluate(
+      finishPendingColumnResize
+    );
+    const manualFirstColumn = await waitForRenderer(
+      'notebook first-column drag persistence',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => Math.abs(value.widths[0] - expectedManualWidth) <= 2 &&
+        value.renderedFirstColumnWidths.length > 0 &&
+        value.renderedFirstColumnWidths.every(width =>
+          Math.abs(width - value.widths[0]) <= 1)
+    );
+    let notebookPersistedWidths;
+    try {
+      await waitFor(
+        'notebook persisted first-column width map',
+        () => {
+          notebookPersistedWidths =
+            currentResultSetting('viewer.columnWidths');
+          return isSparseWidthMap(notebookPersistedWidths) &&
+            Math.abs(
+              notebookPersistedWidths['0'] - expectedManualWidth
+            ) <= 2;
+        },
+        8_000
+      );
+    } catch (error) {
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; ` +
+        `actual=${JSON.stringify(notebookPersistedWidths)}, ` +
+        `expected=${expectedManualWidth}, finish=${JSON.stringify(
+          notebookResizeFinish
+        )}`
+      );
+    }
+    await renderer.evaluate(scrollNotebookGridToRow, 0);
+    const manualAfterVirtualScroll = await waitForRenderer(
+      'notebook manual width virtual scroll stability',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => value.renderedRows.includes(0) &&
+        Math.abs(value.widths[0] - expectedManualWidth) <= 2 &&
+        Math.abs(value.firstRowWidths[0] - expectedManualWidth) <= 2
+    );
+
+    renderer.close();
+    renderer = undefined;
+    await discardActiveVisualNotebook();
+    ({ notebook, renderer } = await openColumnSizingNotebook(cdpPort));
+    const recreated = await waitForRenderer(
+      'notebook output recreation width persistence',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => !value.autoFit &&
+        Math.abs(value.widths[0] - expectedManualWidth) <= 2
+    );
+
+    await renderer.evaluate(setNotebookCellWidth, 190);
+    const allColumnPreset = await waitForRenderer(
+      'notebook all-column Cell width preset',
+      renderer,
+      notebookColumnSizingSnapshot,
+      value => !value.autoFit &&
+        value.widths.length === 3 &&
+        snapshotAllColumnsHaveWidth(value, 190)
+    );
+    await waitFor(
+      'notebook Cell width preset clears sparse overrides',
+      () => {
+        const widths = currentResultSetting('viewer.columnWidths');
+        return isSparseWidthMap(widths) &&
+          Object.keys(widths).length === 0 &&
+          currentResultSetting('standard.cellWidth') === 190;
+      },
+      8_000
+    );
+
+    return {
+      name: 'notebook-real-runtime-column-sizing',
+      wholeResult: {
+        beforeScroll: wholeResult,
+        afterScroll: wholeResultAfterScroll,
+      },
+      visibleRows: {
+        narrow: visibleRowsNarrow,
+        widestRow: visibleRowsWide,
+      },
+      autoFitDisabled,
+      manualFirstColumn,
+      manualAfterVirtualScroll,
+      recreated,
+      allColumnPreset,
+      persistedShape: 'sparse-map',
+    };
+  } finally {
+    renderer?.close();
+    if (notebook && !notebook.isClosed) {
+      await vscode.window.showNotebookDocument(notebook, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      }).catch(() => undefined);
+      await discardActiveVisualNotebook().catch(() => undefined);
+    }
+    await configureColumnSizingAcceptance(resultConfiguration)
+      .catch(() => undefined);
+  }
+}
+
+async function openColumnSizingNotebook(
+  cdpPort,
+  fixture = COLUMN_SIZING_FIXTURE
+) {
+  const notebook = await openLiveGalleryNotebook(fixture);
+  const editor = await vscode.window.showNotebookDocument(notebook, {
+    preserveFocus: false,
+    preview: false,
+    viewColumn: vscode.ViewColumn.One,
+  });
+  assertLiveCase(
+    fixture,
+    await executeOneLiveGalleryCase(
+      notebook,
+      editor,
+      fixture
+    )
+  );
+  await showNotebookCase(notebook, 0);
+  return {
+    notebook,
+    renderer: await connectNotebookRenderer(
+      cdpPort,
+      fixture.marker || 'acceptance_widest_list'
+    ),
+  };
+}
+
+async function openOrdinaryColumnSizingFixture(cdpPort, fixture) {
+  const document = await vscode.workspace.openTextDocument({
+    language: 'q',
+    content: fixture.source,
+  });
+  await vscode.window.showTextDocument(document, {
+    preserveFocus: false,
+    preview: false,
+    viewColumn: vscode.ViewColumn.One,
+  });
+  await vscode.commands.executeCommand('vscode-kdb.runSelectionOrCurrentLine');
+  return {
+    document,
+    renderer: await connectNotebookRenderer(cdpPort, fixture.marker),
+  };
+}
+
+async function closeOrdinaryColumnSizingFixture(handle) {
+  if (!handle) {
+    return;
+  }
+  if (handle.renderer) {
+    handle.renderer.close();
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  }
+  if (handle.document && !handle.document.isClosed) {
+    await vscode.window.showTextDocument(handle.document, {
+      preserveFocus: false,
+      preview: false,
+      viewColumn: vscode.ViewColumn.One,
+    });
+    await vscode.commands.executeCommand(
+      'workbench.action.revertAndCloseActiveEditor'
+    );
+  }
+}
+
+async function dragOrdinaryColumnToWidth(renderer, position, targetWidth) {
+  const drag = await renderer.evaluate(ordinaryResizeHandlePoint, position);
+  assert(drag?.point, `ordinary resize handle ${position} must render`);
+  const delta = targetWidth - drag.startWidth;
+  assert.notStrictEqual(delta, 0, `ordinary column ${position} must be dragged`);
+  await renderer.drag(
+    drag.point.x,
+    drag.point.y,
+    drag.point.x + delta,
+    drag.point.y
+  );
+  await renderer.evaluate(finishPendingColumnResize);
+  return waitForRenderer(
+    `ordinary column ${position} drag to ${targetWidth}px`,
+    renderer,
+    ordinaryColumnSizingSnapshot,
+    value => snapshotRenderedPositionHasWidth(value, position, targetWidth)
+  );
+}
+
+async function dragNotebookColumnToWidth(renderer, position, targetWidth) {
+  const drag = await renderer.evaluate(notebookResizeHandlePoint, position);
+  assert(drag?.point, `notebook resize handle ${position} must render`);
+  const delta = targetWidth - drag.startWidth;
+  assert.notStrictEqual(delta, 0, `notebook column ${position} must be dragged`);
+  await renderer.drag(
+    drag.point.x,
+    drag.point.y,
+    drag.point.x + delta,
+    drag.point.y
+  );
+  await renderer.evaluate(finishPendingColumnResize);
+  return waitForRenderer(
+    `notebook column ${position} drag to ${targetWidth}px`,
+    renderer,
+    notebookColumnSizingSnapshot,
+    value => snapshotRenderedPositionHasWidth(value, position, targetWidth)
+  );
+}
+
+function snapshotHasHeaders(snapshot, expectedHeaders) {
+  return Array.isArray(snapshot?.headers) &&
+    JSON.stringify(snapshot.headers) === JSON.stringify(expectedHeaders);
+}
+
+function snapshotRenderedPositionHasWidth(
+  snapshot,
+  position,
+  expectedWidth,
+  tolerance = 2
+) {
+  const bodyWidths = snapshot?.renderedColumnWidths?.[String(position)];
+  return Number.isFinite(snapshot?.widths?.[position]) &&
+    Math.abs(snapshot.widths[position] - expectedWidth) <= tolerance &&
+    Array.isArray(bodyWidths) &&
+    bodyWidths.length > 0 &&
+    bodyWidths.every(width =>
+      Number.isFinite(width) &&
+      Math.abs(width - expectedWidth) <= tolerance
+    );
+}
+
+function snapshotHasManualWidths(snapshot, widthsByPosition) {
+  return Object.entries(widthsByPosition).every(([position, width]) =>
+    snapshotRenderedPositionHasWidth(snapshot, Number(position), width)
+  );
+}
+
+function snapshotAllColumnsHaveWidth(snapshot, expectedWidth) {
+  return Array.isArray(snapshot?.widths) &&
+    snapshot.widths.length > 0 &&
+    snapshot.widths.every(width =>
+      Number.isFinite(width) && Math.abs(width - expectedWidth) <= 1
+    ) &&
+    snapshot.widths.every((_width, position) => {
+      const bodyWidths = snapshot.renderedColumnWidths?.[String(position)];
+      return Array.isArray(bodyWidths) &&
+        bodyWidths.length > 0 &&
+        bodyWidths.every(width =>
+          Number.isFinite(width) &&
+          Math.abs(width - expectedWidth) <= 1
+        );
+    });
+}
+
+function ordinaryColumnSizingSnapshot(root) {
+  const renderedCells = [
+    ...root.querySelectorAll('#rows [role="cell"][data-row][data-column]'),
+  ];
+  const widths = elementsByNumericData(
+    root.querySelectorAll('#header [role="columnheader"][data-column]'),
+    'column'
+  ).map(element => Math.round(element.getBoundingClientRect().width));
+  const firstRowWidths = elementsByNumericData(
+    root.querySelectorAll('#rows [role="cell"][data-row="0"][data-column]'),
+    'column'
+  ).map(element => Math.round(element.getBoundingClientRect().width));
+  return {
+    headers: elementsByNumericData(
+      root.querySelectorAll('#header [role="columnheader"][data-column]'),
+      'column'
+    ).map(element => element.childNodes[0]?.textContent?.trim() || ''),
+    widths,
+    firstRowWidths,
+    renderedFirstColumnWidths: [
+      ...root.querySelectorAll(
+        '#rows [role="cell"][data-row][data-column="0"]'
+      ),
+    ].map(element => Math.round(element.getBoundingClientRect().width)),
+    renderedColumnWidths: renderedCells.reduce((result, element) => {
+      const position = String(Number(element.dataset.column));
+      (result[position] ||= []).push(
+        Math.round(element.getBoundingClientRect().width)
+      );
+      return result;
+    }, {}),
+    renderedRows: [...new Set(
+      renderedCells
+        .map(element => Number(element.dataset.row))
+        .filter(Number.isSafeInteger)
+    )].sort((left, right) => left - right),
+    autoFit: root.querySelector('#autoFit')?.checked === true,
+    autoFitMode: root.querySelector('#autoFitMode')?.value || '',
+    density: root.querySelector('#settingsDensity')?.value || '',
+    scrollTop: Math.round(root.querySelector('#viewport')?.scrollTop || 0),
+  };
+
+  function elementsByNumericData(elements, key) {
+    return [...elements].sort(
+      (left, right) => Number(left.dataset[key]) - Number(right.dataset[key])
+    );
+  }
+}
+
+function notebookColumnSizingSnapshot(root) {
+  const headers = [...root.querySelectorAll(
+    '.kx-live-header[role="columnheader"]'
+  )].sort((left, right) =>
+    Number(left.getAttribute('aria-colindex')) -
+    Number(right.getAttribute('aria-colindex')));
+  const firstRow = [...root.querySelectorAll(
+    '.kx-live-cell[role="gridcell"][data-row="0"]'
+  )].sort((left, right) =>
+    Number(left.dataset.column) - Number(right.dataset.column));
+  const setting = label => [...root.querySelectorAll('details.kx-settings label')]
+    .find(candidate => candidate.textContent?.trim().startsWith(label))
+    ?.querySelector('input,select');
+  const renderedCells = [
+    ...root.querySelectorAll(
+      '.kx-live-cell[role="gridcell"][data-row][data-column]'
+    ),
+  ];
+  return {
+    headers: headers.map(header =>
+      header.childNodes[0]?.textContent?.trim() || ''),
+    widths: headers.map(header =>
+      Math.round(header.getBoundingClientRect().width)),
+    firstRowWidths: firstRow.map(cell =>
+      Math.round(cell.getBoundingClientRect().width)),
+    renderedFirstColumnWidths: [
+      ...root.querySelectorAll(
+        '.kx-live-cell[role="gridcell"][data-row][data-column="0"]'
+      ),
+    ].map(cell => Math.round(cell.getBoundingClientRect().width)),
+    renderedColumnWidths: renderedCells.reduce((result, cell) => {
+      const position = String(Number(cell.dataset.column));
+      (result[position] ||= []).push(
+        Math.round(cell.getBoundingClientRect().width)
+      );
+      return result;
+    }, {}),
+    renderedRows: [...new Set(
+      renderedCells
+        .map(element => Number(element.dataset.row))
+        .filter(Number.isSafeInteger)
+    )].sort((left, right) => left - right),
+    autoFit: setting('Auto-fit columns')?.checked === true,
+    autoFitMode: setting('Auto-fit scope')?.value || '',
+    density: setting('Density')?.value || '',
+    scrollTop: Math.round(
+      root.querySelector('.kx-live-viewport')?.scrollTop || 0
+    ),
+  };
+}
+
+function scrollOrdinaryGridToRow(root, row) {
+  const viewport = root.querySelector('#viewport');
+  const firstCell = root.querySelector('#rows [role="cell"][data-row]');
+  if (!viewport) {
+    throw new Error('ordinary result viewport missing');
+  }
+  const rowHeight = Number.parseFloat(firstCell?.style.height || '') || 28;
+  viewport.scrollTop = Math.max(0, row * rowHeight);
+  viewport.dispatchEvent(new root.ownerDocument.defaultView.Event(
+    'scroll',
+    { bubbles: true }
+  ));
+  return viewport.scrollTop;
+}
+
+function scrollNotebookGridToRow(root, row) {
+  const viewport = root.querySelector('.kx-live-viewport');
+  const firstCell = root.querySelector(
+    '.kx-live-cell[role="gridcell"][data-row]'
+  );
+  if (!viewport) {
+    throw new Error('notebook result viewport missing');
+  }
+  const rowHeight = Number.parseFloat(firstCell?.style.height || '') || 28;
+  viewport.scrollTop = Math.max(0, row * rowHeight);
+  viewport.dispatchEvent(new root.ownerDocument.defaultView.Event(
+    'scroll',
+    { bubbles: true }
+  ));
+  return viewport.scrollTop;
+}
+
+function ordinaryResizeHandlePoint(root, column) {
+  const handle = root.querySelector(
+    `#header .resize-handle[data-column="${column}"]`
+  );
+  if (!handle) {
+    throw new Error(`ordinary resize handle ${column} missing`);
+  }
+  return {
+    point: absoluteElementCenter(handle),
+    startWidth: Math.round(
+      handle.closest('[role="columnheader"]').getBoundingClientRect().width
+    ),
+  };
+
+  function absoluteElementCenter(element) {
+    const rect = element.getBoundingClientRect();
+    let x = rect.left + rect.width / 2;
+    let y = rect.top + rect.height / 2;
+    let frameView = element.ownerDocument.defaultView;
+    const visitedViews = new Set();
+    for (let depth = 0;
+      frameView && depth < 8 && !visitedViews.has(frameView);
+      depth += 1) {
+      visitedViews.add(frameView);
+      const frame = frameView.frameElement;
+      if (!frame) {
+        break;
+      }
+      const frameRect = frame.getBoundingClientRect();
+      x += frameRect.left + frame.clientLeft;
+      y += frameRect.top + frame.clientTop;
+      const parentView = frame.ownerDocument.defaultView;
+      if (!parentView || parentView === frameView) {
+        break;
+      }
+      frameView = parentView;
+    }
+    return { x, y };
+  }
+}
+
+function notebookResizeHandlePoint(root, position) {
+  const handle = root.querySelector(
+    `.kx-live-header .kx-column-resize-handle[data-position="${position}"]`
+  );
+  if (!handle) {
+    throw new Error(`notebook resize handle ${position} missing`);
+  }
+  return {
+    point: absoluteElementCenter(handle),
+    startWidth: Math.round(
+      handle.closest('[role="columnheader"]').getBoundingClientRect().width
+    ),
+  };
+
+  function absoluteElementCenter(element) {
+    const rect = element.getBoundingClientRect();
+    let x = rect.left + rect.width / 2;
+    let y = rect.top + rect.height / 2;
+    let frameView = element.ownerDocument.defaultView;
+    const visitedViews = new Set();
+    for (let depth = 0;
+      frameView && depth < 8 && !visitedViews.has(frameView);
+      depth += 1) {
+      visitedViews.add(frameView);
+      const frame = frameView.frameElement;
+      if (!frame) {
+        break;
+      }
+      const frameRect = frame.getBoundingClientRect();
+      x += frameRect.left + frame.clientLeft;
+      y += frameRect.top + frame.clientTop;
+      const parentView = frame.ownerDocument.defaultView;
+      if (!parentView || parentView === frameView) {
+        break;
+      }
+      frameView = parentView;
+    }
+    return { x, y };
+  }
+}
+
+function setOrdinaryCellWidth(root, width) {
+  const input = root.querySelector('#settingsCellWidth');
+  const view = root.ownerDocument.defaultView;
+  if (!(input instanceof view.HTMLInputElement)) {
+    throw new Error('ordinary Cell width input missing');
+  }
+  input.value = String(width);
+  input.dispatchEvent(new view.Event('change', { bubbles: true }));
+  return input.value;
+}
+
+function resetOrdinaryColumnWidths(root) {
+  const button = root.querySelector('#resetColumnWidths');
+  const view = root.ownerDocument.defaultView;
+  if (!(button instanceof view.HTMLButtonElement) || button.disabled) {
+    throw new Error('ordinary Reset column widths button is missing or disabled');
+  }
+  button.click();
+  return true;
+}
+
+function setOrdinaryDensity(root, density) {
+  const select = root.querySelector('#settingsDensity');
+  const view = root.ownerDocument.defaultView;
+  if (!(select instanceof view.HTMLSelectElement)) {
+    throw new Error('ordinary Density select missing');
+  }
+  select.value = density;
+  select.dispatchEvent(new view.Event('change', { bubbles: true }));
+  return select.value;
+}
+
+function setNotebookCellWidth(root, width) {
+  const view = root.ownerDocument.defaultView;
+  const input = [...root.querySelectorAll('details.kx-settings label')]
+    .find(label => label.textContent?.trim().startsWith('Cell width'))
+    ?.querySelector('input[type="number"]');
+  if (!(input instanceof view.HTMLInputElement)) {
+    throw new Error('notebook Cell width input missing');
+  }
+  input.value = String(width);
+  input.dispatchEvent(new view.Event('change', { bubbles: true }));
+  return input.value;
+}
+
+function finishPendingColumnResize(root) {
+  const view = root.ownerDocument.defaultView;
+  const cursorBefore = root.ownerDocument.body.style.cursor || '';
+  const guidesBefore = root.ownerDocument.querySelectorAll(
+    '.kx-column-resize-guide'
+  ).length;
+  view.dispatchEvent(new view.MouseEvent('mouseup', {
+    bubbles: true,
+    cancelable: true,
+  }));
+  return {
+    cursorBefore,
+    cursorAfter: root.ownerDocument.body.style.cursor || '',
+    guidesBefore,
+    guidesAfter: root.ownerDocument.querySelectorAll(
+      '.kx-column-resize-guide'
+    ).length,
+  };
+}
+
+function isSparseWidthMap(value) {
+  return !!value && typeof value === 'object' && !Array.isArray(value) &&
+    Object.keys(value).every(key => /^(0|[1-9]\d*)$/.test(key));
+}
+
+function currentResultSetting(key) {
+  return vscode.workspace
+    .getConfiguration('vscode-kdb.results')
+    .get(key);
+}
+
+function normalizedWidthMap(value) {
+  const result = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return result;
+  }
+  Object.keys(value)
+    .sort((left, right) => Number(left) - Number(right))
+    .forEach(key => {
+      if (!/^(0|[1-9]\d*)$/.test(key)) {
+        return;
+      }
+      const width = Number(value[key]);
+      if (Number.isFinite(width)) {
+        result[String(Number(key))] = width;
+      }
+    });
+  return result;
+}
+
+function widthMapsEqual(actual, expected) {
+  try {
+    assert.deepStrictEqual(
+      normalizedWidthMap(actual),
+      normalizedWidthMap(expected)
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function validateRestartMarker(marker, profilePath, qPort) {
+  assert(marker && typeof marker === 'object', 'restart marker must be an object');
+  assert.strictEqual(marker.version, 1);
+  assert.strictEqual(marker.phaseOneComplete, true);
+  assert.strictEqual(marker.reloadCommand, 'workbench.action.reloadWindow');
+  assert.strictEqual(marker.reloadCommandIssued, true);
+  assert.strictEqual(marker.profilePath, profilePath);
+  assert(Number.isSafeInteger(marker.extensionHostPid) &&
+    marker.extensionHostPid > 0);
+  assert.deepStrictEqual(
+    normalizedWidthMap(marker.widthsByPosition),
+    RESTART_WIDTHS_BY_POSITION
+  );
+  assert(Array.isArray(marker.resultSettingsSnapshot));
+  assert(Array.isArray(marker.workbenchSettingsSnapshot));
+  assert.strictEqual(marker.connectionId, VISUAL_CONNECTION_ID);
+  assert.strictEqual(marker.qPort, qPort);
+  if (marker.reloadPromiseCancellation) {
+    assert.deepStrictEqual(marker.reloadPromiseCancellation, {
+      name: 'Canceled',
+      message: 'Canceled',
+    });
+  }
+}
+
+function isReloadCancellation(error) {
+  return !!error && error.name === 'Canceled' && error.message === 'Canceled';
+}
+
+function readJsonIfPresent(filePath) {
+  try {
+    return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function readRequiredJson(filePath, label) {
+  const value = readJsonIfPresent(filePath);
+  assert(value, `${label} was not found at ${filePath}`);
+  return value;
+}
+
+function writeJsonAtomic(filePath, value) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.tmp`;
+  fs.writeFileSync(
+    temporaryPath,
+    `${JSON.stringify(value, null, 2)}\n`,
+    'utf8'
+  );
+  fs.renameSync(temporaryPath, filePath);
+}
+
+function removeFileIfPresent(filePath) {
+  try {
+    fs.unlinkSync(filePath);
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      throw error;
+    }
+  }
+}
+
+function assertGlobalConfigurationRestored(configuration, snapshot) {
+  assert(Array.isArray(snapshot), 'global configuration snapshot must be an array');
+  for (const entry of snapshot) {
+    const actual = configuration.inspect(entry.key)?.globalValue;
+    if (entry.hadGlobalValue) {
+      assert.deepStrictEqual(
+        actual,
+        entry.globalValue,
+        `global setting ${entry.key} was not restored`
+      );
+    } else {
+      assert.strictEqual(
+        actual,
+        undefined,
+        `global setting ${entry.key} was not cleared`
+      );
+    }
   }
 }
 
@@ -619,7 +3093,7 @@ async function replaceLiveGalleryCell(notebook, fixture, collapseOutput) {
     'q'
   );
   replacement.metadata = {
-    outputCollapsed: collapseOutput || fixture.id !== 'live-full-result',
+    outputCollapsed: collapseOutput || !EXPANDED_LIVE_FIXTURE_IDS.has(fixture.id),
   };
   const edit = new vscode.WorkspaceEdit();
   edit.set(notebook.uri, [
