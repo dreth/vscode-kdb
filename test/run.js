@@ -295,6 +295,7 @@ const {
   safeHistoryLimit,
   sortHistoryNewestFirst,
 } = requireOut('query-history-model');
+const { QueryConnectionSelectionSession } = requireOut('query-connection-selection');
 
 const tests = [
   ['q IPC codec and receive buffering', testQIpc],
@@ -310,6 +311,7 @@ const tests = [
   ['query history privacy and persistence model', testQueryHistoryModel],
   ['webview-free server and history tree providers', testTreeProviders],
   ['multiple KX connection tree profiles and active selection', testConnectionsTreeProvider],
+  ['query connection prompt, reuse, invalidation, and switching policy', testQueryConnectionSelectionPolicy],
   ['feature controls enable and disable lifecycle', testFeatureControlsLifecycle],
   ['connection form payload and password semantics', testConnectionFormModel],
   ['connection webview lifecycle', testConnectionFormPanelLifecycle],
@@ -4782,7 +4784,10 @@ async function testConnectionsTreeProvider() {
   const store = {
     connections: () => connections.map(connection => ({ ...connection })),
     connection: id => connections.find(connection => connection.id === id),
-    activeConnectionId: () => activeId,
+    activeConnectionId: () => connections.some(connection => connection.id === activeId)
+      ? activeId
+      : undefined,
+    activeConnection: () => connections.find(connection => connection.id === activeId),
     async setActiveConnection(id) {
       assert.ok(connections.some(connection => connection.id === id));
       activeId = id;
@@ -4818,8 +4823,14 @@ async function testConnectionsTreeProvider() {
   const context = { subscriptions: [] };
   const commands = new ConnectionCommands(store, manager, provider);
   commands.register(context);
+  const quickPicksBeforeTreeSelection = harness.quickPicks.length;
   await harness.registeredCommands.get('vscode-kdb.setActiveConnection')(items[1]);
   assert.strictEqual(activeId, connections[1].id);
+  assert.strictEqual(
+    harness.quickPicks.length,
+    quickPicksBeforeTreeSelection,
+    'the legacy tree command must still activate its argument without opening a picker'
+  );
   assert.match(harness.information.at(-1), /Active KX connection: Connection two/);
   assert.ok(refreshes > 0);
   items = provider.getChildren();
@@ -4830,12 +4841,218 @@ async function testConnectionsTreeProvider() {
   assert.strictEqual(
     activeId,
     connections[0].id,
-    'Command Palette selection must activate the exact chosen profile'
+    'the legacy no-argument command must remain compatible'
+  );
+
+  const quickPicksBeforeQuerySelection = harness.quickPicks.length;
+  harness.setQuickPickSelectionId(connections[1].id);
+  await harness.registeredCommands.get('vscode-kdb.selectQueryConnection')(connections[0]);
+  assert.strictEqual(
+    harness.quickPicks.length,
+    quickPicksBeforeQuerySelection + 1,
+    'Select Query Connection must always open the picker, even with an active profile or argument'
+  );
+  assert.strictEqual(
+    harness.quickPicks.at(-1).options.title,
+    'KX: Select Query Connection'
+  );
+  assert.strictEqual(activeId, connections[1].id);
+  const reusedAfterPaletteSwitch = await new QueryConnectionSelectionSession().resolve(
+    store.activeConnection(),
+    store.connections(),
+    true,
+    {
+      chooseConnection: async () => assert.fail('a valid switched target must not prompt again'),
+      activateConnection: async () => assert.fail('a valid switched target must not be reactivated'),
+    }
+  );
+  assert.strictEqual(
+    reusedAfterPaletteSwitch.id,
+    connections[1].id,
+    'subsequent execution must reuse the query target selected from the Palette'
   );
 
   refreshSubscription.dispose();
   context.subscriptions.forEach(disposable => disposable.dispose());
   provider.dispose();
+}
+
+async function testQueryConnectionSelectionPolicy() {
+  const profiles = [
+    validateConnection({
+      id: 'query-profile-one',
+      name: 'Query profile one',
+      host: 'one.example.test',
+      port: 5001,
+      database: '.one',
+      username: '',
+    }),
+    validateConnection({
+      id: 'query-profile-two',
+      name: 'Query profile two',
+      host: 'two.example.test',
+      port: 5002,
+      database: '.two',
+      username: '',
+    }),
+  ];
+
+  const firstUseSession = new QueryConnectionSelectionSession();
+  let firstUsePromptCount = 0;
+  let firstUseActivationCount = 0;
+  const firstUse = await firstUseSession.resolve(
+    undefined,
+    [profiles[0]],
+    false,
+    {
+      async chooseConnection() {
+        firstUsePromptCount++;
+        return profiles[0];
+      },
+      async activateConnection(connection) {
+        firstUseActivationCount++;
+        assert.strictEqual(connection, profiles[0]);
+      },
+    }
+  );
+  assert.strictEqual(firstUse, profiles[0]);
+  assert.strictEqual(
+    firstUsePromptCount,
+    0,
+    'a first-ever sole profile must auto-select without opening the picker'
+  );
+  assert.strictEqual(firstUseActivationCount, 1);
+
+  const invalidatedSession = new QueryConnectionSelectionSession();
+  let invalidatedPromptCount = 0;
+  let invalidatedActivationCount = 0;
+  const selectedA = await invalidatedSession.resolve(
+    profiles[0],
+    profiles,
+    true,
+    {
+      async chooseConnection() {
+        assert.fail('the valid selected A target must be reused');
+      },
+      async activateConnection() {
+        assert.fail('the valid selected A target must not be reactivated');
+      },
+    }
+  );
+  assert.strictEqual(selectedA, profiles[0]);
+  const afterARemoved = await invalidatedSession.resolve(
+    undefined,
+    [profiles[1]],
+    true,
+    {
+      async chooseConnection() {
+        invalidatedPromptCount++;
+        return profiles[1];
+      },
+      async activateConnection() {
+        invalidatedActivationCount++;
+      },
+    }
+  );
+  assert.strictEqual(afterARemoved, profiles[1]);
+  assert.strictEqual(
+    invalidatedPromptCount,
+    1,
+    'selected A removed with sole B remaining must prompt exactly once'
+  );
+  assert.strictEqual(
+    invalidatedActivationCount,
+    0,
+    'an invalidated remembered target must not use first-ever sole-profile autoactivation'
+  );
+
+  const concurrentSession = new QueryConnectionSelectionSession();
+  const concurrentPicker = deferred();
+  let concurrentPromptCount = 0;
+  const concurrentActions = {
+    async chooseConnection() {
+      concurrentPromptCount++;
+      return concurrentPicker.promise;
+    },
+    async activateConnection() {
+      assert.fail('multiple profiles must use the picker');
+    },
+  };
+  const concurrentFirst = concurrentSession.resolve(
+    undefined,
+    profiles,
+    false,
+    concurrentActions
+  );
+  const concurrentSecond = concurrentSession.resolve(
+    undefined,
+    profiles,
+    false,
+    concurrentActions
+  );
+  assert.strictEqual(
+    concurrentPromptCount,
+    1,
+    'two concurrent normal runs must share one picker'
+  );
+  concurrentPicker.resolve(profiles[1]);
+  const concurrentResults = await Promise.all([concurrentFirst, concurrentSecond]);
+  assert.strictEqual(concurrentResults[0], profiles[1]);
+  assert.strictEqual(
+    concurrentResults[1],
+    concurrentResults[0],
+    'concurrent normal runs must receive the same selected connection'
+  );
+
+  const cancellationSession = new QueryConnectionSelectionSession();
+  let cancellationPromptCount = 0;
+  let pendingPicker = deferred();
+  const cancellationActions = {
+    async chooseConnection() {
+      cancellationPromptCount++;
+      return pendingPicker.promise;
+    },
+    async activateConnection() {
+      assert.fail('multiple profiles must use the picker');
+    },
+  };
+  const canceledFirst = cancellationSession.resolve(
+    undefined,
+    profiles,
+    false,
+    cancellationActions
+  );
+  const canceledSecond = cancellationSession.resolve(
+    undefined,
+    profiles,
+    false,
+    cancellationActions
+  );
+  assert.strictEqual(
+    cancellationPromptCount,
+    1,
+    'concurrent cancellation must still use one picker'
+  );
+  pendingPicker.resolve(undefined);
+  assert.deepStrictEqual(
+    await Promise.all([canceledFirst, canceledSecond]),
+    [undefined, undefined],
+    'picker cancellation must cancel both concurrent normal-run resolutions'
+  );
+  pendingPicker = deferred();
+  const retry = cancellationSession.resolve(
+    undefined,
+    profiles,
+    false,
+    cancellationActions
+  );
+  assert.strictEqual(
+    cancellationPromptCount,
+    2,
+    'the shared in-flight picker must clear after cancellation so a later run can prompt'
+  );
+  pendingPicker.resolve(profiles[0]);
+  assert.strictEqual(await retry, profiles[0]);
 }
 
 async function testFeatureControlsLifecycle() {
@@ -6884,6 +7101,11 @@ async function testConnectionStoreTransactions() {
     'a delayed event for an acknowledged extension write must not invalidate the mutation'
   );
 
+  assert.strictEqual(
+    store.hasRememberedActiveConnection(),
+    false,
+    'a fresh store must distinguish first use from an invalidated remembered target'
+  );
   harness.failSecretStore = 1;
   await assert.rejects(() => store.add(connection, firstAuthValue), /injected SecretStorage store failure/);
   assert.deepStrictEqual(harness.connections, []);
@@ -6905,6 +7127,11 @@ async function testConnectionStoreTransactions() {
   assert.deepStrictEqual(harness.connections, []);
   assert.strictEqual(harness.activeId, undefined);
   assert.strictEqual(
+    store.hasRememberedActiveConnection(),
+    false,
+    'rolled-back first-profile activation must not create remembered-target state'
+  );
+  assert.strictEqual(
     harness.secretFor(connection.id),
     undefined,
     'add settings failure must roll back both activation and the newly written secret'
@@ -6919,6 +7146,7 @@ async function testConnectionStoreTransactions() {
   assert.strictEqual(harness.connections[0].connectTimeoutMs, 0);
   assert.strictEqual(harness.connections[0].queryTimeoutMs, 2500);
   assert.strictEqual(harness.activeId, connection.id);
+  assert.strictEqual(store.hasRememberedActiveConnection(), true);
   assert.strictEqual(harness.secretFor(connection.id), firstAuthValue);
   assert.strictEqual(await store.hasPassword(connection.id), true);
   assert.ok(!JSON.stringify(harness.connections).includes(firstAuthValue));
@@ -6996,6 +7224,11 @@ async function testConnectionStoreTransactions() {
   await store.remove(connection.id);
   assert.deepStrictEqual(harness.connections, []);
   assert.strictEqual(harness.activeId, undefined);
+  assert.strictEqual(
+    store.hasRememberedActiveConnection(),
+    true,
+    'removing the active profile must retain session memory that a target was chosen'
+  );
   assert.strictEqual(harness.secretFor(connection.id), undefined);
 
   const concurrentA = { ...connection, id: 'kx-concurrent-a', name: 'Concurrent A' };
@@ -7011,13 +7244,17 @@ async function testConnectionStoreTransactions() {
   );
   assert.strictEqual(harness.secretFor(concurrentA.id), firstAuthValue);
   assert.strictEqual(harness.secretFor(concurrentB.id), nextAuthValue);
-  assert.strictEqual(harness.activeId, concurrentA.id);
+  assert.strictEqual(
+    harness.activeId,
+    undefined,
+    'new profiles must not silently replace a remembered target that became invalid'
+  );
   await store.remove(concurrentA.id);
   assert.deepStrictEqual(harness.connections.map(item => item.id), [concurrentB.id]);
   assert.strictEqual(
     harness.activeId,
     undefined,
-    'removing the active profile must not silently promote the first remaining profile'
+    'removing an inactive profile must not silently promote the remaining profile'
   );
   await store.remove(concurrentB.id);
   assert.deepStrictEqual(harness.connections, []);
@@ -15903,10 +16140,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.12');
+  assert.strictEqual(manifest.version, '0.2.13');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.12');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.12');
+  assert.strictEqual(packageLock.version, '0.2.13');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.13');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -15932,6 +16169,7 @@ function testManifestAndSources() {
     'KX: Edit Connection',
     'KX: Remove Connection',
     'KX: Set Active Connection',
+    'KX: Select Query Connection',
     'KX: Connect',
     'KX: Disconnect',
     'KX: Test Connection',
@@ -15988,6 +16226,18 @@ function testManifestAndSources() {
   );
 
   const commandByTitle = Object.fromEntries(commands.map(command => [command.title, command.command]));
+  const commandPalette = (((manifest.contributes || {}).menus || {}).commandPalette) || [];
+  assert.deepStrictEqual(
+    commandPalette.find(item => item.command === 'vscode-kdb.setActiveConnection'),
+    { command: 'vscode-kdb.setActiveConnection', when: 'false' },
+    'the generic compatibility command must stay out of the Command Palette'
+  );
+  assert.strictEqual(
+    commandPalette.some(item =>
+      item.command === 'vscode-kdb.selectQueryConnection' && item.when === 'false'),
+    false,
+    'Select Query Connection must remain visible in the Command Palette'
+  );
   const keybindings = ((manifest.contributes || {}).keybindings) || [];
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection / Current Line'], 'ctrl+enter', 'cmd+enter');
   assertKeybinding(keybindings, commandByTitle['KX: Run q Script'], 'ctrl+alt+enter', 'cmd+alt+enter');
@@ -16828,7 +17078,7 @@ function testManifestAndSources() {
     'async function executeQText(',
     'function toPanelResult('
   );
-  const targetSelectionIndex = executeQTextSource.indexOf('await activeConnectionForRun(store, manager)');
+  const targetSelectionIndex = executeQTextSource.indexOf('await activeConnectionForRun(store)');
   const noTargetIndex = executeQTextSource.indexOf('if (!connection)');
   const rerunConfirmationIndex = executeQTextSource.indexOf('historyRerunRequiresConfirmation(');
   const latestTargetIndex = executeQTextSource.indexOf('const latestTarget = store.activeConnection()');
@@ -16867,12 +17117,12 @@ function testManifestAndSources() {
     'async function activeConnectionForRun(',
     'function updatePerfTraceSetting('
   );
-  assert.match(activeRunSource, /const active = store\.activeConnection\(\);[\s\S]*?if \(active\) \{[\s\S]*?return active;/);
-  assert.match(activeRunSource, /if \(!connections\.length\)[\s\S]*?return undefined;/);
+  assert.match(activeRunSource, /let active = store\.activeConnection\(\);/);
+  assert.match(activeRunSource, /if \(!active && !connections\.length\)[\s\S]*?return undefined;/);
   assert.match(
     activeRunSource,
-    /let connection = connections\[0\];[\s\S]*?if \(connections\.length > 1\)[\s\S]*?setActiveConnection\(connection\.id\)/,
-    'a sole configured but unrelated profile is selected as the target and still reaches the post-selection mismatch confirmation'
+    /queryConnectionSelectionSession\.resolve\([\s\S]*?active,[\s\S]*?connections,[\s\S]*?store\.hasRememberedActiveConnection\(\),[\s\S]*?chooseConnection:[\s\S]*?'vscode-kdb\.selectQueryConnection'[\s\S]*?setActiveConnection\(connection\.id\)/,
+    'normal execution must reuse the shared query selector and persist only the active profile'
   );
   const historyRerunSource = sourceSection(historySource, 'private async rerun(', 'private async copy(');
   assert.match(historyRerunSource, /await runQuery\(entry\)/);
@@ -18089,6 +18339,7 @@ function createVscodeTreeHarness() {
   const createdTreeViews = [];
   const registeredCommands = new Map();
   const progressControllers = [];
+  const quickPicks = [];
   let quickPickSelectionId;
   class EventEmitter {
     constructor() {
@@ -18162,6 +18413,7 @@ function createVscodeTreeHarness() {
     createdTreeViews,
     registeredCommands,
     progressControllers,
+    quickPicks,
     setQuickPickSelectionId(value) {
       quickPickSelectionId = value;
     },
@@ -18206,7 +18458,8 @@ function createVscodeTreeHarness() {
           information.push(message);
           return undefined;
         },
-        showQuickPick(items) {
+        showQuickPick(items, options) {
+          quickPicks.push({ items, options });
           return items.find(item => item.connection?.id === quickPickSelectionId);
         },
       },

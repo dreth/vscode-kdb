@@ -33,13 +33,15 @@ Connections belong to this extension and appear in the **KX Connections** sideba
 - **KX: Add Connection**
 - **KX: Edit Connection**
 - **KX: Remove Connection**
-- **KX: Set Active Connection**
+- **KX: Select Query Connection**
 - **KX: Connect**
 - **KX: Disconnect**
 - **KX: Test Connection**
 - **KX: Import SQLTools KDB Connections**
 
-The sidebar title keeps the routine actions to **Add** and **Refresh**; SQLTools import remains Command Palette only. Every valid saved profile appears immediately. The active row has a star and uppercase `ACTIVE`; click a connection row, use its **Set Active Connection** action, or run the same command from the Command Palette to select it. No list-first profile is silently substituted when the active profile is removed.
+The sidebar title keeps the routine actions to **Add** and **Refresh**; SQLTools import remains Command Palette only. Every valid saved profile appears immediately. The active row has a star and uppercase `ACTIVE`; click a connection row or use its existing **Set Active Connection** action to change the shared active profile.
+
+Normal `.q` editor runs use that active profile as their query connection. On first use, a sole available profile activates without a picker. Otherwise, a run with no valid active profile opens the connection picker and persists its chosen stable profile ID in extension global state for later runs. If a previously selected profile stops resolving, the next run asks again even when only one profile remains. Concurrent normal runs waiting for a target share that picker and its result or cancellation. **KX: Select Query Connection** always opens its own picker and changes the target of subsequent normal runs. Only the profile ID is stored as active state—passwords remain in VS Code SecretStorage and are never persisted by the selector.
 
 Connection errors identify the failed `connect`, `handshake`, or `query` phase and direct host/port so endpoint, network, authentication, and q-listener problems can be distinguished. They do not include credentials or query contents.
 
@@ -136,7 +138,7 @@ Whole-document runs, multiline selections, and direct notebook cells normalize l
 
 For a script or complete cell, KX saves the process's current namespace, enters the configured namespace, evaluates the groups in the existing session, restores the saved namespace after success or q error, and rethrows genuine q errors. A system command inside the source still has normal q semantics and can affect later groups in that same run; the outer wrapper restores the pre-run namespace afterward. The generated request has no `.Q.ld` dependency and does not reject a process by q release date. Deterministic compatibility coverage simulates a process without `.Q.ld`, but the available live-q release check uses the installed modern q runtime. Version 0.2.8 therefore states no exact minimum q version and does not claim a live run against an historical q binary.
 
-Queries use the active connection. A normal run replaces the active result panel; **Run Selection in New Result** keeps the existing panel and opens another.
+Queries reuse the active query connection. Use **KX: Select Query Connection** to change the target of subsequent normal editor runs. A normal run replaces the active result panel; **Run Selection in New Result** keeps the existing panel and opens another.
 
 Canceling a result wait is local and best-effort: the panel stops waiting immediately, but q computation or side effects already sent to the server can continue. It does not cancel other queued result panels on the same connection. Use **Disconnect** when you intentionally need to close that connection and fail its outstanding work.
 

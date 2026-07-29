@@ -2,6 +2,10 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## 0.2.13 - 2026-07-29
+
+- Added **KX: Select Query Connection** to the Command Palette. Normal editor q runs reuse the stable active profile ID persisted in extension global state, auto-activate a sole profile only on first use, and prompt again if a remembered target stops resolving even when one profile remains. Concurrent runs share one in-flight picker result or cancellation, while the explicit Palette command always opens its own selector. The new command changes the same active profile used by subsequent normal runs; the existing sidebar **Set Active Connection** behavior remains compatible, the selector persists only the profile ID, and passwords remain in SecretStorage.
+
 ## 0.2.12 - 2026-07-29
 
 - Persisted authoritative manual grid widths in an uncapped sparse zero-based original/source-position map shared by panels and notebook output across unrelated queries, panel recreation, VS Code reloads, and machine restarts. Legacy array-shaped state is normalized on read. Drag resizing updates that source slot through hide/reorder operations, double-click resets one position, and **Reset column widths** clears every positional override.
