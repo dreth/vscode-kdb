@@ -3,6 +3,7 @@ import {
   ChartTypeCapabilities,
   chartTypeCapabilities,
 } from './charting';
+import { variableVisibleColumnRange } from './column-sizing';
 
 export interface NotebookCellSelection {
   anchorRow: number;
@@ -27,6 +28,7 @@ export interface NotebookGridWindowInput {
   viewportHeight: number;
   rowHeight: number;
   cellWidth: number;
+  columnWidths?: readonly number[];
   rowIndexWidth: number;
   headerHeight: number;
   rowOverscan: number;
@@ -49,6 +51,39 @@ export const NOTEBOOK_GRID_MIN_HEIGHT = 72;
 export const NOTEBOOK_GRID_DEFAULT_MAX_HEIGHT = 420;
 export const NOTEBOOK_GRID_RESIZE_MAX_HEIGHT = 900;
 export const NOTEBOOK_CHART_MAX_Y_COLUMNS = 16;
+
+export function reconcileNotebookHiddenColumnIndexes(
+  previousColumns: readonly string[],
+  previousHiddenColumnIndexes: readonly number[],
+  columns: readonly string[]
+): number[] {
+  const previousHidden = new Set(
+    previousHiddenColumnIndexes.filter(index =>
+      Number.isInteger(index) && index >= 0 && index < previousColumns.length
+    )
+  );
+  const hiddenOccurrences = new Map<string, Set<number>>();
+  const previousOccurrences = new Map<string, number>();
+  previousColumns.forEach((column, index) => {
+    const occurrence = (previousOccurrences.get(column) || 0) + 1;
+    previousOccurrences.set(column, occurrence);
+    if (!previousHidden.has(index)) {
+      return;
+    }
+    const occurrences = hiddenOccurrences.get(column) || new Set<number>();
+    occurrences.add(occurrence);
+    hiddenOccurrences.set(column, occurrences);
+  });
+
+  const occurrences = new Map<string, number>();
+  return columns
+    .map((column, index) => {
+      const occurrence = (occurrences.get(column) || 0) + 1;
+      occurrences.set(column, occurrence);
+      return hiddenOccurrences.get(column)?.has(occurrence) ? index : -1;
+    })
+    .filter(index => index >= 0);
+}
 
 export function notebookGridDefaultHeight(
   rowCount: number,
@@ -85,7 +120,22 @@ export function notebookGridWindow(input: NotebookGridWindowInput): NotebookGrid
   const rawStartRow = Math.floor(
     Math.max(0, finiteNumber(input.scrollTop) - nonNegativeInteger(input.headerHeight)) / rowHeight
   );
-  const rawStartColumn = Math.floor(
+  const variableWidths = Array.isArray(input.columnWidths) &&
+    input.columnWidths.length === columnCount
+    ? input.columnWidths
+    : undefined;
+  const variableColumns = variableWidths
+    ? variableVisibleColumnRange(
+      variableWidths,
+      Math.max(0, finiteNumber(input.scrollLeft) - nonNegativeInteger(input.rowIndexWidth)),
+      Math.max(
+        1,
+        positiveInteger(input.viewportWidth, 1) - nonNegativeInteger(input.rowIndexWidth)
+      ),
+      columnOverscan
+    )
+    : undefined;
+  const rawStartColumn = variableColumns?.start ?? Math.floor(
     Math.max(0, finiteNumber(input.scrollLeft) - nonNegativeInteger(input.rowIndexWidth)) / cellWidth
   );
   const visibleRows = Math.max(1, Math.ceil(positiveInteger(input.viewportHeight, 1) / rowHeight));
@@ -97,7 +147,8 @@ export function notebookGridWindow(input: NotebookGridWindowInput): NotebookGrid
     )
   );
   const startRow = Math.max(0, rawStartRow - rowOverscan);
-  const startColumn = Math.max(0, rawStartColumn - columnOverscan);
+  const startColumn = variableColumns?.start ??
+    Math.max(0, rawStartColumn - columnOverscan);
   const maxRows = Math.max(1, positiveInteger(input.maxRows, visibleRows));
   const maxColumns = Math.max(1, positiveInteger(input.maxColumns, visibleColumns));
   let endRow = rowCount === 0
@@ -106,10 +157,12 @@ export function notebookGridWindow(input: NotebookGridWindowInput): NotebookGrid
       rowCount - 1,
       startRow + Math.min(maxRows, visibleRows + rowOverscan * 2) - 1
     );
-  let endColumn = Math.min(
-    columnCount - 1,
-    startColumn + Math.min(maxColumns, visibleColumns + columnOverscan * 2) - 1
-  );
+  let endColumn = variableColumns
+    ? Math.min(columnCount - 1, variableColumns.end, startColumn + maxColumns - 1)
+    : Math.min(
+      columnCount - 1,
+      startColumn + Math.min(maxColumns, visibleColumns + columnOverscan * 2) - 1
+    );
   const renderedRows = Math.max(1, endRow - startRow + 1);
   const maxCells = Math.max(1, positiveInteger(input.maxCells, renderedRows));
   endColumn = Math.min(

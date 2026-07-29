@@ -3,6 +3,13 @@ import {
   PortableKxResult,
   validatePortableKxResult,
 } from './notebook-contract';
+import {
+  KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+  KX_COLUMN_MAX_WIDTH,
+  KX_COLUMN_MIN_WIDTH,
+  PositionalColumnWidths,
+  normalizePositionalColumnWidths,
+} from './column-sizing';
 import { NotebookSettings } from './notebook-settings';
 import {
   SharedKxResultSettingKey,
@@ -56,6 +63,12 @@ export type NotebookRendererMessage =
     requestId: number;
   }
   | { type: 'requestLiveResult'; outputId: string; liveId: string; requestId: number }
+  | {
+    type: 'requestLiveColumnTextLengths';
+    outputId: string;
+    liveId: string;
+    requestId: number;
+  }
   | {
     type: 'requestLiveSlice';
     outputId: string;
@@ -175,7 +188,9 @@ export type NotebookRendererMessage =
   }
   | { type: 'rerunPreview'; outputId?: string; payload: PortableKxResult; requestId: number }
   | { type: 'openLiveResult'; outputId: string; liveId: string; requestId: number }
-  | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean };
+  | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean }
+  | { type: 'setResultColumnWidth'; position: number; width: number }
+  | { type: 'resetResultColumnWidths' };
 
 export interface NotebookRendererSettingsMessage extends NotebookSettings {
   type: 'settings';
@@ -204,9 +219,17 @@ export interface NotebookLiveResultMessage {
   chartXColumns?: string[];
   chartYColumns?: string[];
   chartGroupColumns?: string[];
+  wholeResultColumnTextLengths?: number[];
   text?: string;
   metadata?: NotebookLiveResultMetadata;
   message?: string;
+}
+
+export interface NotebookLiveColumnTextLengthsMessage {
+  type: 'liveColumnTextLengths';
+  liveId: string;
+  requestId: number;
+  lengths: number[];
 }
 
 export interface NotebookLiveSliceMessage {
@@ -316,6 +339,7 @@ export interface NotebookActionResultMessage {
 export type NotebookRendererHostMessage =
   | NotebookRendererSettingsMessage
   | NotebookLiveResultMessage
+  | NotebookLiveColumnTextLengthsMessage
   | NotebookLiveSliceMessage
   | NotebookLiveSearchMessage
   | NotebookLiveChartMessage
@@ -345,6 +369,18 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
       : undefined;
   }
   if (raw.type === 'requestLiveResult') {
+    return hasOnlyKeys(raw, ['type', 'outputId', 'liveId', 'requestId']) &&
+      validOutputId(raw.outputId) && validLiveId(raw.liveId) &&
+      validRequestId(raw.requestId)
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        liveId: raw.liveId,
+        requestId: raw.requestId,
+      }
+      : undefined;
+  }
+  if (raw.type === 'requestLiveColumnTextLengths') {
     return hasOnlyKeys(raw, ['type', 'outputId', 'liveId', 'requestId']) &&
       validOutputId(raw.outputId) && validLiveId(raw.liveId) &&
       validRequestId(raw.requestId)
@@ -407,6 +443,26 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
   if (raw.type === 'updateResultSetting') {
     return parseResultSettingUpdate(raw);
   }
+  if (raw.type === 'setResultColumnWidth') {
+    return hasOnlyKeys(raw, ['type', 'position', 'width']) &&
+      nonNegativeSafeInteger(raw.position) &&
+      (raw.width === 0 || integerInRange(
+        raw.width,
+        KX_COLUMN_MIN_WIDTH,
+        KX_COLUMN_MAX_WIDTH
+      ))
+      ? {
+        type: raw.type,
+        position: raw.position,
+        width: raw.width,
+      }
+      : undefined;
+  }
+  if (raw.type === 'resetResultColumnWidths') {
+    return hasOnlyKeys(raw, ['type'])
+      ? { type: raw.type }
+      : undefined;
+  }
   return undefined;
 }
 
@@ -419,6 +475,9 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   }
   if (raw.type === 'liveResult') {
     return parseLiveResultMessage(raw);
+  }
+  if (raw.type === 'liveColumnTextLengths') {
+    return parseLiveColumnTextLengthsMessage(raw);
   }
   if (raw.type === 'liveSlice') {
     return parseLiveSliceMessage(raw);
@@ -878,6 +937,7 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     'chartXColumns',
     'chartYColumns',
     'chartGroupColumns',
+    'wholeResultColumnTextLengths',
     'text',
     'metadata',
     'message',
@@ -903,7 +963,11 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
         raw.totalColumnCount < raw.columns.length)) ||
     !validOptionalColumnList(raw.chartXColumns) ||
     !validOptionalColumnList(raw.chartYColumns) ||
-    !validOptionalColumnList(raw.chartGroupColumns)) {
+    !validOptionalColumnList(raw.chartGroupColumns) ||
+    !validOptionalColumnTextLengths(
+      raw.wholeResultColumnTextLengths,
+      raw.columns.length
+    )) {
     return undefined;
   }
   const metadata = parseLiveResultMetadata(raw.metadata);
@@ -931,9 +995,35 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     ...(Array.isArray(raw.chartGroupColumns)
       ? { chartGroupColumns: raw.chartGroupColumns.slice() as string[] }
       : {}),
+    ...(Array.isArray(raw.wholeResultColumnTextLengths)
+      ? { wholeResultColumnTextLengths: raw.wholeResultColumnTextLengths.slice() as number[] }
+      : {}),
     ...(raw.mode === 'text' ? { text: raw.text as string } : {}),
     metadata,
     ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
+  };
+}
+
+function parseLiveColumnTextLengthsMessage(
+  raw: Record<string, unknown>
+): NotebookLiveColumnTextLengthsMessage | undefined {
+  if (!hasOnlyKeys(raw, ['type', 'liveId', 'requestId', 'lengths']) ||
+    !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
+    !Array.isArray(raw.lengths) ||
+    raw.lengths.length > MAX_NOTEBOOK_LIVE_COLUMNS ||
+    !raw.lengths.every(length => integerInRange(
+      length,
+      0,
+      KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
+    ))) {
+    return undefined;
+  }
+  return {
+    type: 'liveColumnTextLengths',
+    liveId: raw.liveId,
+    requestId: raw.requestId,
+    lengths: raw.lengths.slice() as number[],
   };
 }
 
@@ -1341,8 +1431,15 @@ function parseLiveResultMetadata(raw: unknown): NotebookLiveResultMetadata | und
 }
 
 function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings | undefined {
-  if (!isRecord(raw) || !hasOnlyKeys(raw, [
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const columnWidths = parsePositionalColumnWidths(raw.columnWidths);
+  if (!columnWidths || !hasOnlyKeys(raw, [
     'cellWidth',
+    'columnWidths',
+    'autoFitColumns',
+    'autoFitMode',
     'rowHeight',
     'fontSize',
     'density',
@@ -1363,6 +1460,8 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     'listDisplayStrategy',
     'objectDisplayStrategy',
   ]) || !integerInRange(raw.cellWidth, 80, 600) ||
+    typeof raw.autoFitColumns !== 'boolean' ||
+    (raw.autoFitMode !== 'wholeResult' && raw.autoFitMode !== 'visibleRows') ||
     !integerInRange(raw.rowHeight, 20, 80) || !integerInRange(raw.fontSize, 0, 32) ||
     (raw.density !== 'compact' && raw.density !== 'standard' && raw.density !== 'comfortable') ||
     typeof raw.showRowIndex !== 'boolean' ||
@@ -1387,6 +1486,9 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
   }
   return {
     cellWidth: raw.cellWidth,
+    columnWidths,
+    autoFitColumns: raw.autoFitColumns,
+    autoFitMode: raw.autoFitMode,
     rowHeight: raw.rowHeight,
     fontSize: raw.fontSize,
     density: raw.density,
@@ -1416,6 +1518,10 @@ function normalizedResultSettingValue(
   switch (key as NotebookResultSettingKey) {
     case 'cellWidth':
       return integerInRange(value, 80, 600) ? value : undefined;
+    case 'autoFitColumns':
+      return typeof value === 'boolean' ? value : undefined;
+    case 'autoFitMode':
+      return value === 'wholeResult' || value === 'visibleRows' ? value : undefined;
     case 'rowHeight':
       return integerInRange(value, 20, 80) ? value : undefined;
     case 'fontSize':
@@ -1552,6 +1658,17 @@ function validOptionalColumnList(value: unknown): boolean {
       value.every(validColumnName) && new Set(value).size === value.length);
 }
 
+function validOptionalColumnTextLengths(value: unknown, columnCount: number): boolean {
+  return value === undefined ||
+    (Array.isArray(value) &&
+      value.length === columnCount &&
+      value.every(length => integerInRange(
+        length,
+        0,
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
+      )));
+}
+
 function validBoundedText(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length <= max;
 }
@@ -1571,6 +1688,32 @@ function isLiveChartType(value: unknown): value is NotebookLiveChartType {
 
 function isDisplayStrategy(value: unknown): value is 'grid' | 'qText' {
   return value === 'grid' || value === 'qText';
+}
+
+function parsePositionalColumnWidths(
+  value: unknown
+): PositionalColumnWidths | undefined {
+  if (Array.isArray(value)) {
+    if (!value.every(width =>
+      width === 0 || integerInRange(
+        width,
+        KX_COLUMN_MIN_WIDTH,
+        KX_COLUMN_MAX_WIDTH
+      ))) {
+      return undefined;
+    }
+    return normalizePositionalColumnWidths(value);
+  }
+  if (!isRecord(value) || !Object.keys(value).every(key =>
+    /^(0|[1-9]\d*)$/.test(key) &&
+    integerInRange(
+      value[key],
+      KX_COLUMN_MIN_WIDTH,
+      KX_COLUMN_MAX_WIDTH
+    ))) {
+    return undefined;
+  }
+  return normalizePositionalColumnWidths(value);
 }
 
 function isPresentation(value: unknown): value is NotebookSettings['presentation'] {

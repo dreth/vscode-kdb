@@ -25,6 +25,7 @@ import {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
 } from './notebook-message';
+import { widestDisplayedColumnTextLengthsAsync } from './column-sizing';
 import {
   QPanelResult,
   QResultDisplayOptions,
@@ -146,6 +147,14 @@ interface LiveNotebookRecord extends LiveNotebookResultRegistration {
   staged?: boolean;
   viewKey?: string;
   converted?: QPanelResult;
+  columnTextLengthCache?: {
+    key: string;
+    lengths: number[];
+  };
+  columnTextLengthScan?: {
+    key: string;
+    promise?: Promise<number[] | undefined>;
+  };
   sortOrders: Map<string, number[]>;
 }
 
@@ -157,6 +166,12 @@ export class LiveNotebookResultStore {
     private readonly maxEntries = MAX_LIVE_NOTEBOOK_RESULTS,
     private readonly idFactory: () => string = () => crypto.randomBytes(24).toString('hex')
   ) {}
+
+  public cancelColumnTextLengthScans(): void {
+    this.records.forEach(record => {
+      record.columnTextLengthScan = undefined;
+    });
+  }
 
   public register(registration: LiveNotebookResultRegistration): string {
     this.removeCell(registration.notebookUri, registration.cellUri);
@@ -301,6 +316,70 @@ export class LiveNotebookResultStore {
       chartGroupColumns: chartOptions.groupColumns.map(option => option.columnName),
       table: converted.result,
     };
+  }
+
+  public async columnTextLengths(
+    id: string,
+    notebookUri: string,
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string,
+    maximumColumns = Number.MAX_SAFE_INTEGER
+  ): Promise<number[] | undefined> {
+    const record = this.record(id, notebookUri, cellUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    if (converted.mode !== 'grid') {
+      return undefined;
+    }
+    const columnLimit = Math.min(
+      converted.result.columns.length,
+      Math.max(0, Math.floor(Number(maximumColumns) || 0))
+    );
+    const key =
+      `${record.viewKey || ''}\0${options.arrayDisplayFormat || ''}\0${columnLimit}`;
+    if (record.columnTextLengthCache?.key === key) {
+      return record.columnTextLengthCache.lengths.slice();
+    }
+    const pending = record.columnTextLengthScan;
+    if (pending?.key === key && pending.promise) {
+      const lengths = await pending.promise;
+      return lengths?.slice();
+    }
+    const scan: NonNullable<LiveNotebookRecord['columnTextLengthScan']> = { key };
+    record.columnTextLengthScan = scan;
+    const scanTable = columnLimit === converted.result.columns.length
+      ? converted.result
+      : createColumnarPanelResult(
+        converted.result.columns.slice(0, columnLimit),
+        converted.result.rowCount,
+        (row, column) => converted.result.cellValue(row, column),
+        converted.result.columnTypes?.slice(0, columnLimit)
+      );
+    scan.promise = widestDisplayedColumnTextLengthsAsync(
+      scanTable,
+      { arrayDisplayFormat: options.arrayDisplayFormat },
+      {
+        continueScanning: () =>
+          this.records.get(id) === record &&
+          record.columnTextLengthScan === scan,
+      }
+    );
+    try {
+      const lengths = await scan.promise;
+      if (!lengths ||
+        this.records.get(id) !== record ||
+        record.columnTextLengthScan !== scan) {
+        return undefined;
+      }
+      record.columnTextLengthCache = { key, lengths };
+      return lengths.slice();
+    } finally {
+      if (record.columnTextLengthScan === scan) {
+        record.columnTextLengthScan = undefined;
+      }
+    }
   }
 
   public fullText(
@@ -648,6 +727,8 @@ export class LiveNotebookResultStore {
     if (!record.converted || record.viewKey !== key) {
       record.converted = qValueToColumnarPanel(record.value, options);
       record.viewKey = key;
+      record.columnTextLengthCache = undefined;
+      record.columnTextLengthScan = undefined;
       record.sortOrders.clear();
     }
     return record.converted;
@@ -683,6 +764,8 @@ export class LiveNotebookResultStore {
       staged: false,
       viewKey: previous?.viewKey,
       converted: previous?.converted,
+      columnTextLengthCache: undefined,
+      columnTextLengthScan: undefined,
       sortOrders: previous?.sortOrders ?? new Map<string, number[]>(),
     });
     this.cellResults.set(targetKey, id);

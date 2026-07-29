@@ -398,31 +398,40 @@ export function emptyColumnarPanelResult(): ColumnarPanelResult {
   return createColumnarPanelResult([], 0, () => undefined);
 }
 
-export function filterColumnarPanelResult(result: ColumnarPanelResult, visibleColumns: string[]): ColumnarPanelResult {
-  const sourceColumnIndexesByName: { [column: string]: number } = Object.create(null);
-  result.columns.forEach((column, columnIndex) => {
-    if (!Object.prototype.hasOwnProperty.call(sourceColumnIndexesByName, column)) {
-      sourceColumnIndexesByName[column] = columnIndex;
-    }
-  });
-
-  const sourceColumnIndexes: number[] = [];
-  const filteredColumns: string[] = [];
-  visibleColumns.map(column => String(column)).forEach(column => {
-    if (Object.prototype.hasOwnProperty.call(sourceColumnIndexesByName, column)) {
-      sourceColumnIndexes.push(sourceColumnIndexesByName[column]);
-      filteredColumns.push(column);
-    }
-  });
-
+export function projectColumnarPanelResult(
+  result: ColumnarPanelResult,
+  sourceColumnPositions: readonly number[]
+): ColumnarPanelResult {
+  const positions = sourceColumnPositions
+    .map(position => Number(position))
+    .filter(position =>
+      Number.isSafeInteger(position) &&
+      position >= 0 &&
+      position < result.columns.length
+    );
   return createColumnarPanelResult(
-    filteredColumns,
+    positions.map(position => result.columns[position]),
     result.rowCount,
-    (rowIndex, columnIndex) => result.cellValue(rowIndex, sourceColumnIndexes[columnIndex]),
+    (rowIndex, columnIndex) => result.cellValue(rowIndex, positions[columnIndex]),
     result.columnTypes
-      ? sourceColumnIndexes.map(columnIndex => result.columnTypes![columnIndex])
+      ? positions.map(position => result.columnTypes![position])
       : undefined
   );
+}
+
+export function filterColumnarPanelResult(result: ColumnarPanelResult, visibleColumns: string[]): ColumnarPanelResult {
+  const used = new Set<number>();
+  const sourceColumnPositions: number[] = [];
+  visibleColumns.map(column => String(column)).forEach(column => {
+    const sourcePosition = result.columns.findIndex(
+      (candidate, position) => candidate === column && !used.has(position)
+    );
+    if (sourcePosition >= 0) {
+      used.add(sourcePosition);
+      sourceColumnPositions.push(sourcePosition);
+    }
+  });
+  return projectColumnarPanelResult(result, sourceColumnPositions);
 }
 
 export function applyColumnarRowOrder(result: ColumnarPanelResult, rowOrder: number[] | undefined): ColumnarPanelResult {

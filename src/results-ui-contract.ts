@@ -1,5 +1,9 @@
 import type { ArrayDisplayFormat, ExportFormat } from './kx-results';
 import type { ChartType } from './charting';
+import type {
+  KxColumnAutoFitMode,
+  PositionalColumnWidths,
+} from './column-sizing';
 
 export type KxResultDensity = 'compact' | 'standard' | 'comfortable';
 export type KxResultElapsedTimeDisplay = 'auto' | 'milliseconds';
@@ -7,6 +11,9 @@ export type KxQResultDisplayStrategy = 'grid' | 'qText';
 
 export interface SharedKxResultSettings {
   cellWidth: number;
+  columnWidths: PositionalColumnWidths;
+  autoFitColumns: boolean;
+  autoFitMode: KxColumnAutoFitMode;
   rowHeight: number;
   fontSize: number;
   density: KxResultDensity;
@@ -117,6 +124,16 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
     ],
   },
   { key: 'cellWidth', label: 'Cell width', control: 'number', minimum: 80, maximum: 600 },
+  { key: 'autoFitColumns', label: 'Auto-fit columns', control: 'checkbox' },
+  {
+    key: 'autoFitMode',
+    label: 'Auto-fit scope',
+    control: 'select',
+    values: [
+      { value: 'wholeResult', label: 'Whole result' },
+      { value: 'visibleRows', label: 'Visible rows' },
+    ],
+  },
   { key: 'rowHeight', label: 'Row height', control: 'number', minimum: 20, maximum: 80 },
   {
     key: 'fontSize',
