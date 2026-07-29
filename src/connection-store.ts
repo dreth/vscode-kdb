@@ -69,6 +69,7 @@ export class ConnectionStore {
   private mutationQueue: Promise<void> = Promise.resolve();
   private optimisticConnections: OptimisticConnections | undefined;
   private activeConnectionIdSnapshot: string | undefined;
+  private hasRememberedActiveConnectionSnapshot: boolean;
   private configurationRevision = 0;
   private lastEffectiveConfigurationFingerprint: string;
   private configurationMutationBlockedUntilFingerprint: string | undefined;
@@ -76,6 +77,8 @@ export class ConnectionStore {
 
   public constructor(private readonly context: vscode.ExtensionContext) {
     this.activeConnectionIdSnapshot = context.globalState.get<string>(ACTIVE_CONNECTION_KEY);
+    this.hasRememberedActiveConnectionSnapshot =
+      this.activeConnectionIdSnapshot !== undefined;
     this.lastEffectiveConfigurationFingerprint =
       mergedConnectionFingerprint(this.configuredState());
     context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(event => {
@@ -203,6 +206,10 @@ export class ConnectionStore {
     return id ? this.connection(id) : undefined;
   }
 
+  public hasRememberedActiveConnection(): boolean {
+    return this.hasRememberedActiveConnectionSnapshot;
+  }
+
   public async setActiveConnection(id: string | undefined): Promise<void> {
     return this.mutate(async () => {
       if (id && !this.connection(id)) {
@@ -215,6 +222,9 @@ export class ConnectionStore {
         await this.rethrowAfterRollback(error, [
           () => this.writeActiveConnectionId(previousActiveId),
         ]);
+      }
+      if (id !== undefined) {
+        this.hasRememberedActiveConnectionSnapshot = true;
       }
     });
   }
@@ -246,7 +256,8 @@ export class ConnectionStore {
       const passwordChanges = password !== undefined;
       const previousPassword = passwordChanges ? await this.password(validated.id) : undefined;
       const previousActiveId = this.activeConnectionIdSnapshot;
-      const shouldActivate = !this.activeConnectionId();
+      const shouldActivate = !this.activeConnectionId() &&
+        !this.hasRememberedActiveConnection();
       let secretAttempted = false;
       let activeAttempted = false;
       let connectionsAttempted = false;
@@ -291,6 +302,9 @@ export class ConnectionStore {
             connectionsRestored ? previousPassword : undefined
           ) : undefined,
         ]);
+      }
+      if (shouldActivate) {
+        this.hasRememberedActiveConnectionSnapshot = true;
       }
     });
   }

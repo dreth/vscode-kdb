@@ -10,6 +10,7 @@ const CONNECTIONS_SETTING = 'connections';
 const SET_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
 const RESTORE_LANGUAGE_COMMAND = 'vscode-kdb.restoreNotebookCellLanguage';
 const SET_ACTIVE_CONNECTION_COMMAND = 'vscode-kdb.setActiveConnection';
+const SELECT_QUERY_CONNECTION_COMMAND = 'vscode-kdb.selectQueryConnection';
 const DIRECT_CONTROLLER_SETTING = 'enableDirectController';
 
 function kxExtension() {
@@ -485,6 +486,7 @@ async function run() {
     SET_Q_COMMAND,
     RESTORE_LANGUAGE_COMMAND,
     SET_ACTIVE_CONNECTION_COMMAND,
+    SELECT_QUERY_CONNECTION_COMMAND,
   ]) {
     assert(commands.has(command), `activated extension must register ${command}`);
   }

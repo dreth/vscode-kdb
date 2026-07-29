@@ -33,8 +33,10 @@ import {
   QueryHistoryStatus,
 } from './query-history-model';
 import { qSelectionExecutionKind, selectedTextOrCurrentLine } from './q-text';
+import { QueryConnectionSelectionSession } from './query-connection-selection';
 
 let activeConnectionManager: ConnectionManager | undefined;
+const queryConnectionSelectionSession = new QueryConnectionSelectionSession();
 
 export interface KxExtensionHostTestApi {
   connections(): readonly KxConnection[];
@@ -348,7 +350,7 @@ async function executeQText(
   }
   let connection = request.expectedConnectionId
     ? activeConnectionForExpectedRun(store, manager, request.expectedConnectionId)
-    : await activeConnectionForRun(store, manager);
+    : await activeConnectionForRun(store);
   if (!connection) {
     return;
   }
@@ -568,15 +570,11 @@ function activeConnectionForExpectedRun(
 }
 
 async function activeConnectionForRun(
-  store: ConnectionStore,
-  manager: ConnectionManager
+  store: ConnectionStore
 ): Promise<KxConnection | undefined> {
-  const active = store.activeConnection();
-  if (active) {
-    return active;
-  }
+  let active = store.activeConnection();
   let connections = store.connections();
-  if (!connections.length) {
+  if (!active && !connections.length) {
     const action = await vscode.window.showWarningMessage(
       'No KX connections are configured.',
       'Add Connection'
@@ -589,27 +587,22 @@ async function activeConnectionForRun(
     if (!connections.length) {
       return undefined;
     }
+    active = store.activeConnection();
   }
-  let connection = connections[0];
-  if (connections.length > 1) {
-    const picked = await vscode.window.showQuickPick(connections.map(item => ({
-      label: item.name,
-      description: `${connectionEndpoint(item)} • ${item.database}`,
-      detail: manager.isConnected(item.id) ? 'Connected' : 'Disconnected',
-      connection: item,
-    })), {
-      title: 'KX: Select Active Connection',
-      placeHolder: 'Choose the direct q IPC connection for this run',
-      ignoreFocusOut: true,
-    });
-    if (!picked) {
-      return undefined;
+  return queryConnectionSelectionSession.resolve(
+    active,
+    connections,
+    store.hasRememberedActiveConnection(),
+    {
+      chooseConnection: async () => vscode.commands.executeCommand<KxConnection | undefined>(
+        'vscode-kdb.selectQueryConnection'
+      ),
+      activateConnection: async connection => {
+        await store.setActiveConnection(connection.id);
+        await vscode.commands.executeCommand('vscode-kdb.refreshConnections');
+      },
     }
-    connection = picked.connection;
-  }
-  await store.setActiveConnection(connection.id);
-  await vscode.commands.executeCommand('vscode-kdb.refreshConnections');
-  return connection;
+  );
 }
 
 function updatePerfTraceSetting(): void {

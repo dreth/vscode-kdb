@@ -47,6 +47,7 @@ export class ConnectionCommands {
       vscode.commands.registerCommand('vscode-kdb.editConnection', argument => this.edit(argument)),
       vscode.commands.registerCommand('vscode-kdb.removeConnection', argument => this.remove(argument)),
       vscode.commands.registerCommand('vscode-kdb.setActiveConnection', argument => this.setActive(argument)),
+      vscode.commands.registerCommand('vscode-kdb.selectQueryConnection', () => this.setActive()),
       vscode.commands.registerCommand('vscode-kdb.connect', argument => this.connect(argument)),
       vscode.commands.registerCommand('vscode-kdb.disconnect', argument => this.disconnect(argument)),
       vscode.commands.registerCommand('vscode-kdb.testConnection', argument => this.test(argument)),
@@ -82,7 +83,7 @@ export class ConnectionCommands {
   }
 
   public async setActive(argument?: unknown): Promise<KxConnection | undefined> {
-    const connection = await this.pickConnection('Set which KX connection active?', argument);
+    const connection = await this.pickConnection('KX: Select Query Connection', argument);
     if (!connection) {
       return undefined;
     }

@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.12",
+  "version": "0.2.13",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -47,6 +47,7 @@
     "onCommand:vscode-kdb.editConnection",
     "onCommand:vscode-kdb.removeConnection",
     "onCommand:vscode-kdb.setActiveConnection",
+    "onCommand:vscode-kdb.selectQueryConnection",
     "onCommand:vscode-kdb.connect",
     "onCommand:vscode-kdb.disconnect",
     "onCommand:vscode-kdb.testConnection",
@@ -93,8 +94,8 @@
     "test:parity": "node scripts/run-cross-parity.js",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.12.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.12.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.13.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.13.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -161,6 +162,11 @@
         "command": "vscode-kdb.setActiveConnection",
         "title": "KX: Set Active Connection",
         "icon": "$(star-full)"
+      },
+      {
+        "command": "vscode-kdb.selectQueryConnection",
+        "title": "KX: Select Query Connection",
+        "icon": "$(server-process)"
       },
       {
         "command": "vscode-kdb.connect",
@@ -472,6 +478,10 @@
         }
       ],
       "commandPalette": [
+        {
+          "command": "vscode-kdb.setActiveConnection",
+          "when": "false"
+        },
         {
           "command": "vscode-kdb.runSelectionOrCurrentLine",
           "when": "notebookType != 'jupyter-notebook'"
