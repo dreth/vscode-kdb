@@ -1,6 +1,6 @@
 # Settings
 
-Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The manifest is the source of truth for accepted values.
+Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The extension manifest defines accepted values.
 
 Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
 
@@ -29,7 +29,7 @@ Mixed **Run q Cell (KX)** and the optional direct controller reject a leading `%
 
 The optional Python `%%q` helper is a distinct Python-kernel-owned evaluator route: keep its marker, restore the notebook default/Python language, and use normal Run. It does not share the direct KX q session by implication.
 
-`inline` is the default Python-helper experience. For helper output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable `vscode-kdb.results.*` configuration as the panel; Settings messages update and broadcast that common source of truth.
+`inline` is the default Python-helper experience. For helper output, `panel` uses the saved-output KX Results panel and `both` retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable `vscode-kdb.results.*` configuration as the panel; Settings messages broadcast updates to open results.
 
 ## Feature Controls
 

@@ -32,8 +32,6 @@ Run the standalone extension checks independently of the documentation build:
 npm ci
 npm run compile
 npm test
-npm run test:parity:self
-npm run test:parity
 npm run test:notebook-python
 npm run test:notebook-cross
 npm run test:extension-host
@@ -45,14 +43,7 @@ For a release candidate, require the live IPC check instead of allowing it to sk
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-The full parity gate compiles its reference checkout. If that checkout must remain
-byte-for-byte untouched, point `KDB_SQLTOOLS_PARITY_ROOT` and
-`KDB_SQLTOOLS_PARITY_REVISION` at a disposable clone with a satisfied dependency
-tree rather than the protected checkout.
-
 Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default location.
-
-The checked [`PARITY_RUN.md`](https://github.com/dreth/vscode-kdb/blob/main/PARITY_RUN.md) remains pre-0.2.0 `VALID_WITH_KNOWN_GAPS` evidence; it is not migration, current notebook, complete functional, or visual parity evidence. Pure/provider/source tests cover detailed routing and UI contracts. `npm run test:extension-host` uses isolated VS Code user data and the actual store for two application/global profiles, exact active selection, same-ID port `5005`→`5000` edit/current target resolution, default controller non-registration, cleanup, and real notebook language conversion/restoration. It does not visually automate the connection webview, top-right kernel selector, toolbar/status layout, QuickPick interaction, or q execution.
 
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 

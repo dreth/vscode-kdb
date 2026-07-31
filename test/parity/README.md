@@ -1,12 +1,12 @@
-# Cross-extension parity gate
+# Cross-extension verification
 
-Run the executable evidence gate from the `vscode-kdb` repository root:
+Run from the `vscode-kdb` repository root:
 
 ```sh
 npm run test:parity
 ```
 
-The runner compiles both checkouts, runs its own self-tests, runs the reference focused and required live-q suites, and then applies common deterministic and anonymous live-q fixtures to the public/core boundaries that both products expose. It never installs dependencies or edits tracked reference source/docs, packages, stages, resets, commits, or publishes the reference repository. The approved reference compile can refresh ignored `out/**`; ignored build output is excluded from source evidence while tracked/index state is guarded before and after every reference command.
+The runner compiles both checkouts, runs focused and required live-q suites, and applies common deterministic and anonymous live-q fixtures to public/core boundaries exposed by both products. It does not install dependencies, package, stage, reset, commit, or publish. Reference tracked/index state is checked before and after every reference command; a compile may refresh ignored `out/**`.
 
 If the original reference checkout must remain byte-for-byte untouched, clone it
 to a disposable directory, give that clone a satisfied dependency tree, and use
@@ -16,7 +16,7 @@ the protected checkout.
 Defaults:
 
 - reference checkout: `/opt/data/home/projects/kdb-sqltools`
-- required reference commit: `af2c7c920932274f156e31832859fa262068effe`
+- required reference commit: `ba36f328610ec99b77569027ce642829a20bb2ef`
 - required q executable: `/opt/data/home/.kx/bin/q`
 
 Overrides are explicit:
@@ -28,16 +28,16 @@ VSCODE_KDB_Q_BIN=/absolute/path/to/q \
 npm run test:parity
 ```
 
-Set `VSCODE_KDB_PARITY_REVISION` to require an exact standalone commit. The runner always prints the actual commits and tracked-state disclaimers. It fails before compilation when the path, package identity, revision, dependency tree, q executable, or approved reference dirty state is wrong. Only the pre-existing unstaged tracked `docs/**` reference drift is accepted, and its byte-exact porcelain snapshot must remain unchanged after every reference command.
+Set `VSCODE_KDB_PARITY_REVISION` to require an exact standalone commit. The runner fails before compilation when a path, package identity, revision, dependency tree, q executable, or reference state is wrong. Only pre-existing unstaged tracked `docs/**` drift is accepted, and its exact status snapshot must remain unchanged.
 
 Every stable case ends as:
 
 - `PASS`: common fixture behavior was executed and proved equivalent;
 - `DIFFERENT_BY_DESIGN`: asserted product boundaries intentionally differ and the rationale is recorded;
-- `GAP`: a ranked compatibility or evidence gap remains, with an action and sign-off condition; or
-- `NOT_TESTABLE_HERE`: an external boundary cannot be represented honestly in this environment, with required future evidence recorded.
+- `GAP`: a known mismatch or missing fixture remains, with a follow-up action; or
+- `NOT_TESTABLE_HERE`: the current environment cannot exercise the boundary.
 
-The default command exits zero for a valid evidence run with registered gaps. It exits nonzero for infrastructure failure, reference-state drift, an unexpected mismatch, a new gap, or classification drift. Strict sign-off mode requires a clean standalone worktree and exits `2` while any registered `GAP` remains:
+The default command exits zero when results match their registered classifications. Infrastructure failures, reference-state drift, unexpected mismatches, new gaps, or classification drift exit nonzero. Strict mode requires a clean standalone worktree and exits `2` while any registered `GAP` remains:
 
 ```sh
 npm run test:parity:strict
@@ -45,12 +45,12 @@ npm run test:parity:strict
 PARITY_STRICT_GAPS=1 npm run test:parity
 ```
 
-Update the checked evidence snapshot only as an explicit action:
+The runner writes no files. Progress and diagnostics go to stderr. A completed run writes one concise machine-readable line to stdout:
 
-```sh
-npm run test:parity -- --write-report
+```text
+PARITY_RESULT_JSON={"schemaVersion":1,...}
 ```
 
-That writes `PARITY_RUN.json` and `PARITY_RUN.md`. The JSON is the complete machine-readable record; Markdown is generated from it. Raw ZIP bytes, random local-server tokens, allocated loopback ports, or generated IDs are not treated as semantic differences. Canonicalization validates those fields before replacing them and preserves result order, chart series/warnings, export text, and error classes.
+Raw ZIP metadata, random local-server tokens, allocated loopback ports, and generated IDs are canonicalized after validation. Result order, chart series and warnings, export text, and error classes remain significant.
 
-The shared q fixture is anonymous and loopback-only. The gate does not invent an authenticated endpoint, VS Code Extension Host, browser/visual test, spreadsheet application, SSH/TLS service, Marketplace install, or publication evidence.
+The shared q fixture is anonymous and loopback-only. It does not exercise authenticated endpoints, a VS Code Extension Host, visual rendering, spreadsheet applications, SSH/TLS services, installation, or publication.

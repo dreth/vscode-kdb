@@ -67,7 +67,7 @@ Timing records include operation names, durations, sizes/counts, and memory snap
 
 For development compatibility, the same performance records retain their `[vscode-kdb:perf]` entry in the Extension Host console. **Output > KX** is the supported user-facing place to collect them.
 
-Performance trace can itself add small measurement and output overhead. Disable it after collecting the evidence needed for a report.
+Performance trace can add small measurement and output overhead. Disable it after troubleshooting.
 
 ## External analysis
 

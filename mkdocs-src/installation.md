@@ -69,7 +69,7 @@ The KX action executes the complete q source through that explicit target withou
 
 When the q cell editor itself has text focus, the contributed default `Ctrl+Enter` / `Cmd+Enter` runs the KX action. The shortcut is limited to q code-cell editor focus and is disabled when the KX direct controller is selected. Python, Markdown, cell-container, and output focus keep their normal notebook shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if the shortcut was customized.
 
-Mixed mode cannot claim native KX kernel execution while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.
+Mixed mode is an explicit KX action, not native KX kernel execution, while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.
 
 KX is absent from the kernel candidates by default. VS Code's top-right Jupyter selector remains; KX does not remove it.
 
@@ -124,16 +124,10 @@ The maintained non-visual checks are:
 npm ci
 npm run compile
 npm test
-npm run test:parity:self
-npm run test:parity
 npm run test:notebook-python
 npm run test:notebook-cross
 npm run test:extension-host
 ```
-
-The full parity gate compiles its reference checkout. For a protected reference,
-use a disposable clone and set `KDB_SQLTOOLS_PARITY_ROOT` plus
-`KDB_SQLTOOLS_PARITY_REVISION` explicitly.
 
 When a local q executable is available:
 
@@ -141,4 +135,4 @@ When a local q executable is available:
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Pure helpers and faithful VS Code providers/fakes cover migration configuration, native active-profile routing, mixed explicit-target routing, live results, status, menus, and keybinding scopes. The scoped Extension Host smoke covers activation, contributed commands, isolated two-profile configuration/active selection, and real notebook language conversion/restoration. It does not exercise the connection webview, kernel selector, toolbar/status layout, target QuickPick, or q execution and makes no visual UI E2E claim.
+Unit tests cover migration configuration, active-profile routing, mixed explicit-target routing, live results, status, menus, and keybinding scopes. The Extension Host smoke covers activation, contributed commands, isolated two-profile configuration and active selection, and notebook language conversion and restoration.

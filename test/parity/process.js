@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_REFERENCE_ROOT = '/opt/data/home/projects/kdb-sqltools';
-const EXPECTED_REFERENCE_COMMIT = 'af2c7c920932274f156e31832859fa262068effe';
+const EXPECTED_REFERENCE_COMMIT = 'ba36f328610ec99b77569027ce642829a20bb2ef';
 const DEFAULT_Q_BINARY = '/opt/data/home/.kx/bin/q';
 const REFERENCE_ROOT_ENV = 'KDB_SQLTOOLS_PARITY_ROOT';
 const Q_BINARY_ENVS = Object.freeze(['VSCODE_KDB_Q_BIN', 'KDB_Q_BIN']);
@@ -227,7 +227,7 @@ function assertReferenceDirtyState(snapshot, options = {}) {
     dirtyPaths: Object.freeze(snapshot.entries.map(entry => entry.path)),
     disclaimer: snapshot.entries.length === 0
       ? 'Reference worktree is clean.'
-      : `Reference worktree has ${snapshot.entries.length} pre-existing modified generated ${allowedPrefix} paths; they are excluded from parity evidence.`,
+      : `Reference worktree has ${snapshot.entries.length} pre-existing modified generated ${allowedPrefix} paths; they are ignored by the comparison.`,
   });
 }
 

@@ -673,14 +673,14 @@
 
 
     <li class="md-nav__item">
-      <a href="parity-roadmap/" class="md-nav__link">
+      <a href="architecture/" class="md-nav__link">
 
 
 
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -835,7 +835,7 @@
 <li>an opt-in tokenized loopback data server; and</li>
 <li>a dedicated <code>KX</code> Output channel with opt-in performance tracing.</li>
 </ul>
-<p>This is not a full KDB-X or q Professional compatibility claim. Standalone owns its TextMate q grammar, explicit mixed-notebook q action, optional direct q controller, opt-in qText result presentation, focused Server Explorer, local Query History, and NotebookRenderer, but it does not claim a q LSP, lint engine, source-document formatter, remote Jupyter kernel, or complete editor/notebook parity. Public VS Code APIs select one notebook controller; built-in Python Run is never rerouted to KX. The extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, <code>.session.sql</code> behavior, persisted full-result recovery, or server-side notebook interruption. Live direct results exist only in the current extension-host session; reopened output is the bounded saved snapshot. A scoped non-visual Extension Host smoke covers actual two-profile store persistence/current target resolution, default controller non-registration, cleanup, and notebook cell-language conversion/restoration. It does not visually automate the connection form, selector, toolbar/status, QuickPick, or q execution. See <a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a>.</p>
+<p>The extension provides TextMate q syntax highlighting, not a q language server, lint engine, or source formatter. Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote administration, SQLTools UI/session behavior, persisted full-result recovery, and server-side notebook interruption are not included. Live direct results exist only in the current extension-host session; reopened output contains the bounded saved snapshot. See <a href="architecture/">Architecture</a> for component and state boundaries.</p>
 <h2 id="requirements">Requirements</h2>
 <ul>
 <li>VS Code <code>1.96.0</code> or newer.</li>
@@ -869,7 +869,7 @@
 <li><a href="performance/">Performance &amp; Large Results</a>: memory model, limits, and safe tracing.</li>
 <li><a href="local-data-server/">Local Data Server</a>: tokenized local endpoints.</li>
 <li><a href="troubleshooting/">Troubleshooting</a>: connection, q, diagnostics, and result problems.</li>
-<li><a href="parity-roadmap/">Parity Roadmap &amp; Architecture</a>: current boundary and planned parity/backport flow.</li>
+<li><a href="architecture/">Architecture</a>: components, state lifetime, and product boundaries.</li>
 <li><a href="feedback/">Feedback</a>: useful details for reports and requests.</li>
 </ul>
 

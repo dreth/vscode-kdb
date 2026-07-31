@@ -43,13 +43,13 @@ Multiline selections, documents, and complete direct cells normalize CRLF/CR to 
 
 Whitespace, q indentation, source validity, and system-command behavior still belong to q. A system command in the source can therefore affect later groups in the same run. Select the intended text when a partial document should run.
 
-Generated script/cell requests do not depend on `.Q.ld` and are not rejected by q release date. Deterministic compatibility coverage runs the full direct-cell request against a simulated missing-`.Q.ld` capability; the release live test uses only the installed modern q runtime. There was no historical q binary available for a live run, so version 0.2.8 claims no exact minimum q version or live old-q result.
+Generated script and cell requests do not depend on `.Q.ld` and are not rejected by q release date. The extension does not enforce a minimum q version; source syntax and server capabilities still determine whether q accepts a request.
 
 ## Syntax scope
 
-The extension owns its first-party TextMate q grammar. Version 0.2.2 recognizes a top-line `%%q` as a notebook directive while retaining the ordinary q rules and highlighting below it. The extension continues to associate q with `.q` files only. It does not claim `.k`: adding that association without a demonstrated, testable requirement could conflict with other VS Code language support.
+The extension owns its TextMate q grammar. A top-line `%%q` is recognized as a notebook directive while ordinary q rules and highlighting continue below it. The extension associates q with `.q` files only; `.k` is left to other VS Code language support.
 
-This is basic syntax grammar and editor-command support, not a q language server, lint engine, source-document formatter, or full editor-parity claim. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. In notebooks, the cell language selects highlighting; normal Run belongs to the selected Jupyter controller, while the explicit KX action owns Direct IPC q execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents.
+This is syntax grammar and editor-command support, not a q language server, lint engine, or source-document formatter. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. In notebooks, the cell language selects highlighting; normal Run belongs to the selected Jupyter controller, while the explicit KX action owns Direct IPC q execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents.
 
 ## Active connection and namespace
 

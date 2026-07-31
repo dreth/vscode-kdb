@@ -8,7 +8,7 @@ const path = require('path');
 const JSZip = require('jszip');
 
 const fixtures = require('./fixtures');
-const { buildSummary, renderMarkdown, validateEvidence } = require('./report');
+const { buildMachineSummary, buildSummary } = require('./summary');
 const {
   assertStrictStandaloneState,
   referenceStatusSnapshot,
@@ -42,7 +42,7 @@ const tests = [
   ['revision and reference dirty-state checks fail closed', testReferenceGuards],
   ['runner preflight failures are transparent', testRunnerPreflightFailures],
   ['failed commands retain reference-state and timeout failures', testGuardedCommandFailures],
-  ['evidence schema and Markdown counts fail closed', testEvidenceReport],
+  ['machine summaries fail closed', testMachineSummary],
 ];
 
 async function run() {
@@ -329,7 +329,7 @@ function testReferenceGuards() {
   const accepted = assertReferenceStatus(dirtyDocs, { requireDirty: true });
   assert.strictEqual(accepted.dirty, true);
   assert.strictEqual(accepted.entryCount, 2);
-  assert.match(accepted.disclaimer, /excluded from source evidence/);
+  assert.match(accepted.disclaimer, /ignored by the comparison/);
   assert.doesNotThrow(() => assertReferenceStatus(dirtyDocs, {
     expectedEntries: [' M docs/index.html', ' M docs/assets/main.css'],
   }));
@@ -441,7 +441,7 @@ function runFixtureCommand(command, args, cwd) {
   );
 }
 
-function testEvidenceReport() {
+function testMachineSummary() {
   const outcomes = [
     { id: 'pass', area: 'codec', mode: 'deterministic', status: 'PASS', expectedStatus: 'PASS' },
     {
@@ -460,7 +460,6 @@ function testEvidenceReport() {
       expectedStatus: 'GAP',
       rank: 1,
       action: 'Add the missing host fixture.',
-      signoff: 'The fixture passes from a clean commit.',
     },
     {
       id: 'manual',
@@ -469,39 +468,36 @@ function testEvidenceReport() {
       status: 'NOT_TESTABLE_HERE',
       expectedStatus: 'NOT_TESTABLE_HERE',
       rationale: 'No Extension Host is available.',
-      signoff: 'Record a supported manual run.',
     },
   ];
   const summary = buildSummary(outcomes, 4);
-  const evidence = {
-    schemaVersion: 1,
-    generatedAt: '2026-07-22T00:00:00.000Z',
-    standalone: { commit: 'standalone', name: 'vscode-kdb', version: '0.2.0', dirtyDisclaimer: 'clean' },
-    reference: {
-      commit: 'reference',
-      name: 'kdb-sqltools',
-      version: '0.3.17',
-      dirtyDisclaimer: 'docs only',
-      statusHashBefore: 'same',
-      statusHashAfter: 'same',
-    },
-    q: { path: '/q', versionEvidence: 'q test' },
-    checks: [{ name: 'fixture', command: 'node fixture', exitCode: 0, outcome: 'passed' }],
+  const machine = buildMachineSummary({
+    standaloneCommit: 'standalone',
+    referenceCommit: 'reference',
     summary,
-    outcomes,
-  };
-  assert.strictEqual(validateEvidence(evidence), evidence);
-  const markdown = renderMarkdown(evidence);
-  assert.match(markdown, /VALID_WITH_KNOWN_GAPS/);
-  assert.match(markdown, /"PASS": 1/);
-  assert.match(markdown, /does \*\*not\*\* conclude/);
+  });
+  assert.deepStrictEqual(machine, {
+    schemaVersion: 1,
+    standaloneCommit: 'standalone',
+    referenceCommit: 'reference',
+    caseCount: 4,
+    assertionCount: 4,
+    unexpectedCount: 0,
+    byStatus: {
+      PASS: 1,
+      DIFFERENT_BY_DESIGN: 1,
+      GAP: 1,
+      NOT_TESTABLE_HERE: 1,
+    },
+    result: 'VALID_WITH_KNOWN_GAPS',
+  });
   assert.throws(
-    () => validateEvidence({ ...evidence, outcomes: [...outcomes, { ...outcomes[0] }] }),
+    () => buildSummary([...outcomes, { ...outcomes[0] }], 4),
     /unique/
   );
   assert.throws(
-    () => validateEvidence({ ...evidence, summary: { ...summary, caseCount: 99 } }),
-    /caseCount is inconsistent/
+    () => buildSummary(outcomes, -1),
+    /non-negative integer/
   );
 }
 

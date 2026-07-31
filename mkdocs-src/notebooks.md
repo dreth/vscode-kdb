@@ -61,11 +61,11 @@ Mixed cells use the notebook's explicit q target. The optional q-only controller
 
 Every direct q cell uses the same complete-source path as **Run q Script**. The extension groups physical q lines on the client, including indentation continuations, comments, top-level system commands, and q's bare-`\` trailing-script-comment convention, then evaluates the groups in order through ordinary q `value`. It saves the process's current namespace, enters the profile's configured namespace, and restores the saved namespace after success or q error. A source system command retains normal q semantics and can affect later groups within that run; the outer wrapper still restores the pre-run namespace afterward.
 
-This path has no `.Q.ld` or q release-date gate. Deterministic tests simulate missing `.Q.ld` through the full direct-cell request, while the available live test uses the installed modern q runtime. Version 0.2.8 does not state an exact minimum q version or claim a live historical-q run.
+This path has no `.Q.ld` or q release-date gate. The extension does not enforce an exact minimum q version.
 
 A saved but disconnected target may connect on demand after an explicit KX execution gesture. Its profile/global connect and query timeouts apply. A missing mixed target stays actionable rather than falling through. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.
 
-Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; mixed mode writes a cancellation result only if the q cell is still unchanged, while the optional selected controller completes its native execution. q work or side effects already sent may continue on the server. Version 0.2.8 does not claim server-side interruption.
+Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; mixed mode writes a cancellation result only if the q cell is still unchanged, while the optional selected controller completes its native execution. q work or side effects already sent may continue on the server.
 
 ## Live KX result and saved snapshot
 
@@ -208,9 +208,3 @@ VS Code's built-in Jupyter serializer can persist a non-default q cell as:
 ```
 
 That serializer-owned field is separate from the helper's nested `metadata.vscode-kdb` marker/limit object. Tagging merges its metadata without deleting unrelated fields and preserves an existing leading `%%q` marker.
-
-## Evidence boundary
-
-Focused pure/provider tests cover default non-registration and opt-in controller registration/disposal, mixed action/toolbar/context/keybinding guards, q language assignment without a controller switch, current stable-ID target routing after same-profile endpoint edits and active changes, missing-target prompts, namespace/session continuity, complete-cell dispatch, Python-cell isolation, race/error/cancellation handling, live result lifetime, bounded snapshots, shared settings messages, helper-route separation, and bans on private Jupyter/SQLTools runtime coupling.
-
-The scoped real Extension Host smoke uses isolated VS Code user data and the actual `ConnectionStore` to add two application/global profiles, set active selection, edit the same targeted ID from port `5005` to `5000`, confirm both profiles remain, resolve the notebook target to current port `5000`, verify the optional controller is not registered by default, and clean up its settings, secrets, and global state. It also covers actual notebook language conversion/restoration. It does not visually automate the connection webview, top-right kernel selector, toolbar/status layout, target QuickPick, or q execution, so there is no visual UI E2E claim.

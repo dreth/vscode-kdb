@@ -4,6 +4,8 @@ All notable changes to KX for VS Code are documented here.
 
 ## Unreleased
 
+- Removed checked-in parity run reports and ignored agent worklogs. Cross-extension verification remains available but no longer writes repository files; it prints one concise machine summary to stdout.
+
 ## 0.2.8 - 2026-07-27
 
 - Repaired KX connection persistence under real VS Code configuration timing. A resolved application/global `WorkspaceConfiguration.update` or active-profile `Memento.update` is now treated as success without requiring an immediate matching read snapshot. Reads use effective application configuration, and bounded optimistic state keeps add, edit, remove, and active selection coherent while delayed propagation catches up. Causally newer or otherwise identifiable external values win immediately; pre-target and same-as-pending ambiguities yield reads after five seconds while retaining an ordered ledger, conservatively pausing profile mutations until the last saved value appears or the Extension Host reloads.

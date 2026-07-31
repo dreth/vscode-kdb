@@ -9470,6 +9470,15 @@ async function testMixedQNotebookCommandIntegration() {
 }
 
 function testManifestAndSources() {
+  const forbiddenRootArtifacts = fs.readdirSync(ROOT).filter(name =>
+    /^(?:CODEX|PROMPT)/.test(name) || name === 'PARITY.md' || /^PARITY_RUN(?:\.|$)/.test(name)
+  );
+  assert.deepStrictEqual(
+    forbiddenRootArtifacts,
+    [],
+    `repository root must not contain agent worklogs or parity reports: ${forbiddenRootArtifacts.join(', ')}`
+  );
+
   const manifestPath = path.join(ROOT, 'package.json');
   assert.ok(fs.existsSync(manifestPath), 'package.json is missing; run this test after the extension scaffold is present');
   const manifestSource = fs.readFileSync(manifestPath, 'utf8');
@@ -10459,9 +10468,6 @@ function testManifestAndSources() {
     'docs/**',
     'mkdocs-src/**',
     'mkdocs.yml',
-    'PARITY.md',
-    'PARITY_RUN.md',
-    'PARITY_RUN.json',
     '**/*.map',
     'CODEX*',
     'PROMPT*',

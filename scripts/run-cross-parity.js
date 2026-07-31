@@ -9,11 +9,11 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_REFERENCE_ROOT = '/opt/data/home/projects/kdb-sqltools';
-const DEFAULT_REFERENCE_REVISION = 'af2c7c920932274f156e31832859fa262068effe';
+const DEFAULT_REFERENCE_REVISION = 'ba36f328610ec99b77569027ce642829a20bb2ef';
 const DEFAULT_Q_PATH = '/opt/data/home/.kx/bin/q';
 const VALID_STATUSES = new Set(['PASS', 'DIFFERENT_BY_DESIGN', 'GAP', 'NOT_TESTABLE_HERE']);
 
-const { buildSummary, validateEvidence, writeEvidenceFiles } = require('../test/parity/report');
+const { buildMachineSummary, buildSummary } = require('../test/parity/summary');
 const {
   assertGitStatusUnchanged,
   assertReferenceDirtyState,
@@ -56,46 +56,45 @@ async function main() {
   const referenceStatusBefore = referenceStatusSnapshot(referenceRoot);
   assertAllowedReferenceStatus(referenceStatusBefore.raw);
   const standaloneStatus = gitCapture(ROOT, ['status', '--porcelain=v1', '--untracked-files=all']);
-  const qVersionEvidence = qVersion(qPath);
+  const qVersionText = qVersion(qPath);
 
-  printBaseline({ standalone, reference, referenceStatusBefore, standaloneStatus, qPath, qVersionEvidence });
+  printBaseline({ standalone, reference, referenceStatusBefore, standaloneStatus, qPath, qVersionText });
   assertStrictStandaloneState(standaloneStatus, options.failOnKnownGap);
 
-  const checks = [];
-  checks.push(runDependencyCheck(ROOT, 'standalone dependencies'));
-  checks.push(runDependencyCheck(referenceRoot, 'reference dependencies'));
+  runDependencyCheck(ROOT, 'standalone dependencies');
+  runDependencyCheck(referenceRoot, 'reference dependencies');
   assertReferenceSnapshotUnchanged(referenceStatusBefore, referenceStatusSnapshot(referenceRoot));
 
-  checks.push(await runCheckedCommand({
+  await runCheckedCommand({
     name: 'standalone compile',
     command: npmCommand(),
     args: ['run', 'compile'],
     cwd: ROOT,
     display: 'npm run compile',
-  }));
-  checks.push(await runReferenceCommand({
+  });
+  await runReferenceCommand({
     name: 'reference compile',
     command: npmCommand(),
     args: ['run', 'compile'],
     cwd: referenceRoot,
     display: 'npm run compile',
-  }, referenceStatusBefore));
+  }, referenceStatusBefore);
 
-  checks.push(await runCheckedCommand({
+  await runCheckedCommand({
     name: 'parity runner self-tests',
     command: process.execPath,
     args: ['test/parity/self-test.js'],
     cwd: ROOT,
     display: 'node test/parity/self-test.js',
-  }));
-  checks.push(await runCheckedCommand({
+  });
+  await runCheckedCommand({
     name: 'standalone focused suite',
     command: process.execPath,
     args: ['test/run.js'],
     cwd: ROOT,
     display: 'node test/run.js',
-  }));
-  checks.push(await runCheckedCommand({
+  });
+  await runCheckedCommand({
     name: 'standalone required live-q suite',
     command: process.execPath,
     args: ['test/live/run.js'],
@@ -106,15 +105,15 @@ async function main() {
       VSCODE_KDB_Q_BIN: qPath,
     },
     display: `VSCODE_KDB_LIVE_REQUIRED=1 VSCODE_KDB_Q_BIN=${shellDisplay(qPath)} node test/live/run.js`,
-  }));
-  checks.push(await runReferenceCommand({
+  });
+  await runReferenceCommand({
     name: 'reference focused suite',
     command: process.execPath,
     args: ['test/run.js'],
     cwd: referenceRoot,
     display: 'node test/run.js',
-  }, referenceStatusBefore));
-  checks.push(await runReferenceCommand({
+  }, referenceStatusBefore);
+  await runReferenceCommand({
     name: 'reference required live-q suite',
     command: process.execPath,
     args: ['test/live/run.js'],
@@ -125,7 +124,7 @@ async function main() {
       KDB_SQLTOOLS_LIVE_REQUIRED: '1',
     },
     display: `KDB_Q_BIN=${shellDisplay(qPath)} KDB_SQLTOOLS_LIVE_REQUIRED=1 node test/live/run.js`,
-  }, referenceStatusBefore));
+  }, referenceStatusBefore);
 
   const { loadParityAdapters } = require('../test/parity/loaders');
   const fixtures = require('../test/parity/fixtures');
@@ -148,71 +147,17 @@ async function main() {
   const referenceStatusAfter = referenceStatusSnapshot(referenceRoot);
   assertReferenceSnapshotUnchanged(referenceStatusBefore, referenceStatusAfter);
   const summary = buildSummary(execution.outcomes, execution.assertionCount());
-  checks.push({
-    name: 'cross-extension same-fixture suite',
-    command: 'npm run test:parity',
-    exitCode: summary.unexpectedCount === 0 ? 0 : 1,
-    outcome: `${summary.caseCount} classified cases; ${summary.assertionCount} assertions; ${summary.gateResult}`,
-  });
-
-  const evidence = validateEvidence({
-    schemaVersion: 1,
-    generatedAt: new Date().toISOString(),
-    standalone: {
-      name: standalone.packageJson.name,
-      version: standalone.packageJson.version,
-      commit: standalone.commit,
-      dirty: standaloneStatus.length > 0,
-      dirtyDisclaimer: dirtyDisclaimer(standaloneStatus, 'standalone'),
-    },
-    reference: {
-      name: reference.packageJson.name,
-      version: reference.packageJson.version,
-      commit: reference.commit,
-      expectedCommit: expectedReferenceRevision,
-      dirty: referenceStatusBefore.entries.length > 0,
-      dirtyEntryCount: referenceStatusBefore.entries.length,
-      dirtyDisclaimer: `${referenceStatusBefore.entries.length} pre-existing unstaged tracked docs/** entries only; excluded from source evidence`,
-      statusHashBefore: referenceStatusBefore.hash,
-      statusHashAfter: referenceStatusAfter.hash,
-    },
-    q: {
-      path: qPath,
-      versionEvidence: qVersionEvidence,
-      fixture: 'test/parity/fixture.q',
-      authentication: 'anonymous loopback only',
-    },
-    canonicalization: [
-      'validated 48-hex local-server tokens',
-      'asserted ephemeral loopback ports',
-      'path separators in path-bearing values',
-      'ZIP timestamps/compression metadata by comparing unzipped entries',
-      'fixture-owned generated IDs fixed at source',
-    ],
-    checks,
+  const machineSummary = buildMachineSummary({
+    standaloneCommit: standalone.commit,
+    referenceCommit: reference.commit,
     summary,
-    outcomes: execution.outcomes,
   });
-
-  printSummary(evidence);
-  if (options.writeReport && summary.unexpectedCount === 0) {
-    writeEvidenceFiles(ROOT, evidence);
-    process.stdout.write(`Evidence written: ${path.join(ROOT, 'PARITY_RUN.json')} and ${path.join(ROOT, 'PARITY_RUN.md')}\n`);
-  }
-
-  const machineSummary = {
-    schemaVersion: evidence.schemaVersion,
-    standaloneCommit: evidence.standalone.commit,
-    referenceCommit: evidence.reference.commit,
-    summary: evidence.summary,
-    statuses: evidence.outcomes.map(({ id, status }) => ({ id, status })),
-  };
   process.stdout.write(`PARITY_RESULT_JSON=${JSON.stringify(machineSummary)}\n`);
 
   if (summary.unexpectedCount > 0) {
     process.exitCode = 1;
   } else if (options.failOnKnownGap && summary.byStatus.GAP > 0) {
-    process.stderr.write(`Strict parity gate blocked by ${summary.byStatus.GAP} known GAP case(s).\n`);
+    process.stderr.write(`Strict parity mode found ${summary.byStatus.GAP} known GAP case(s).\n`);
     process.exitCode = 2;
   }
 }
@@ -262,11 +207,10 @@ function createCaseExecution() {
       detail: failure || definition.detail,
       rank: definition.rank,
       action: definition.action,
-      signoff: definition.signoff,
       unexpected,
     };
     outcomes.push(withoutUndefined(outcome));
-    process.stdout.write(`${unexpected ? 'not ok' : 'ok'} - [${status}] ${definition.id}${failure ? `: ${firstLine(failure)}` : ''}\n`);
+    process.stderr.write(`${unexpected ? 'not ok' : 'ok'} - [${status}] ${definition.id}${failure ? `: ${firstLine(failure)}` : ''}\n`);
     if (failure) {
       process.stderr.write(`${failure}\n`);
     }
@@ -294,11 +238,11 @@ function validateCaseDefinition(definition, ids) {
   if (definition.expectedStatus === 'DIFFERENT_BY_DESIGN' && !definition.rationale) {
     throw new Error(`Parity case ${definition.id} needs a design rationale.`);
   }
-  if (definition.expectedStatus === 'GAP' && (!definition.rank || !definition.action || !definition.signoff)) {
-    throw new Error(`Parity case ${definition.id} needs gap rank/action/signoff metadata.`);
+  if (definition.expectedStatus === 'GAP' && (!definition.rank || !definition.action)) {
+    throw new Error(`Parity case ${definition.id} needs gap rank/action metadata.`);
   }
-  if (definition.expectedStatus === 'NOT_TESTABLE_HERE' && (!definition.rationale || !definition.signoff)) {
-    throw new Error(`Parity case ${definition.id} needs untestable rationale/future evidence.`);
+  if (definition.expectedStatus === 'NOT_TESTABLE_HERE' && !definition.rationale) {
+    throw new Error(`Parity case ${definition.id} needs an untestable rationale.`);
   }
 }
 
@@ -372,7 +316,7 @@ function assertReferenceSnapshotUnchanged(before, after) {
 
 function runDependencyCheck(cwd, name) {
   const display = 'npm ls --depth=0';
-  process.stdout.write(`\n==> ${name}: ${display}\n`);
+  process.stderr.write(`\n==> ${name}: ${display}\n`);
   const result = cp.spawnSync(npmCommand(), ['ls', '--depth=0'], {
     cwd,
     encoding: 'utf8',
@@ -380,7 +324,7 @@ function runDependencyCheck(cwd, name) {
     maxBuffer: 10 * 1024 * 1024,
   });
   if (result.stdout) {
-    process.stdout.write(result.stdout);
+    process.stderr.write(result.stdout);
   }
   if (result.stderr) {
     process.stderr.write(result.stderr);
@@ -434,7 +378,7 @@ async function runReferenceCommand(spec, baseline) {
 function runCheckedCommand(spec) {
   return new Promise((resolve, reject) => {
     if (!spec.silent) {
-      process.stdout.write(`\n==> ${spec.name}: ${spec.display}\n`);
+      process.stderr.write(`\n==> ${spec.name}: ${spec.display}\n`);
     }
     const child = cp.spawn(spec.command, spec.args, {
       cwd: spec.cwd,
@@ -454,7 +398,7 @@ function runCheckedCommand(spec) {
     child.stdout.on('data', chunk => {
       stdout = `${stdout}${chunk}`.slice(-100000);
       if (!spec.silent) {
-        process.stdout.write(chunk);
+        process.stderr.write(chunk);
       }
     });
     child.stderr.on('data', chunk => {
@@ -503,14 +447,11 @@ function qVersion(qPath) {
 }
 
 function parseArgs(args) {
-  const options = { failOnKnownGap: process.env.PARITY_STRICT_GAPS === '1', writeReport: false, help: false };
+  const options = { failOnKnownGap: process.env.PARITY_STRICT_GAPS === '1', help: false };
   for (const arg of args) {
     switch (arg) {
       case '--fail-on-known-gap':
         options.failOnKnownGap = true;
-        break;
-      case '--write-report':
-        options.writeReport = true;
         break;
       case '--help':
       case '-h':
@@ -532,28 +473,17 @@ function printHelp() {
     `  VSCODE_KDB_Q_BIN              q executable (default ${DEFAULT_Q_PATH})\n` +
     `  PARITY_STRICT_GAPS=1          fail with exit 2 for registered GAP cases\n\n` +
     `Options:\n` +
-    `  --write-report       update PARITY_RUN.json and PARITY_RUN.md\n` +
-    `  --fail-on-known-gap  strict sign-off mode\n`);
+    `  --fail-on-known-gap  exit 2 when registered GAP cases remain\n\n` +
+    `A run writes no files. Progress goes to stderr; stdout contains one PARITY_RESULT_JSON line.\n`);
 }
 
 function printBaseline(values) {
-  process.stdout.write(`Cross-extension parity preflight\n` +
+  process.stderr.write(`Cross-extension parity preflight\n` +
     `  standalone: ${values.standalone.commit} (${values.standalone.packageJson.name}@${values.standalone.packageJson.version})\n` +
     `  reference:  ${values.reference.commit} (${values.reference.packageJson.name}@${values.reference.packageJson.version})\n` +
-    `  q runtime:  ${values.qPath} (${values.qVersionEvidence})\n` +
+    `  q runtime:  ${values.qPath} (${values.qVersionText})\n` +
     `  standalone tracked state: ${dirtyDisclaimer(values.standaloneStatus, 'standalone')}\n` +
-    `  reference tracked state: ${values.referenceStatusBefore.entries.length} pre-existing unstaged docs/** modifications; SHA-256 ${values.referenceStatusBefore.hash}\n` +
-    `DISCLAIMER: ignored build/dependency/artifact files are not source evidence. Reference generated docs drift is excluded.\n`);
-}
-
-function printSummary(evidence) {
-  const byStatus = evidence.summary.byStatus;
-  process.stdout.write(`\nParity evidence summary\n` +
-    `  cases: ${evidence.summary.caseCount}; assertions: ${evidence.summary.assertionCount}\n` +
-    `  PASS=${byStatus.PASS} DIFFERENT_BY_DESIGN=${byStatus.DIFFERENT_BY_DESIGN} GAP=${byStatus.GAP} NOT_TESTABLE_HERE=${byStatus.NOT_TESTABLE_HERE}\n` +
-    `  deterministic=${evidence.summary.byEvidenceMode.deterministic} live-q=${evidence.summary.byEvidenceMode['live-q']} boundary=${evidence.summary.byEvidenceMode.boundary}\n` +
-    `  result: ${evidence.summary.gateResult}; signoffReady=${evidence.summary.signoffReady}\n` +
-    `  reference status unchanged: ${evidence.reference.statusHashBefore === evidence.reference.statusHashAfter}\n`);
+    `  reference tracked state: ${values.referenceStatusBefore.entries.length} pre-existing unstaged docs/** modifications; SHA-256 ${values.referenceStatusBefore.hash}\n`);
 }
 
 function gitCapture(cwd, args) {
@@ -603,8 +533,8 @@ function dirtyDisclaimer(status, label) {
 function assertStrictStandaloneState(status, strict) {
   if (strict && String(status || '').trim()) {
     throw new Error(
-      'Strict parity sign-off requires a clean standalone tracked/untracked worktree. ' +
-      'Use the default gate for classified work-in-progress evidence.'
+      'Strict parity mode requires a clean standalone tracked/untracked worktree. ' +
+      'Use the default mode while changing the repository.'
     );
   }
 }

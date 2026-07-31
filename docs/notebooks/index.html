@@ -555,17 +555,6 @@
 
 </li>
 
-        <li class="md-nav__item">
-  <a href="#evidence-boundary" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Evidence boundary
-
-    </span>
-  </a>
-
-</li>
-
     </ul>
 
 </nav>
@@ -770,14 +759,14 @@
 
 
     <li class="md-nav__item">
-      <a href="../parity-roadmap/" class="md-nav__link">
+      <a href="../architecture/" class="md-nav__link">
 
 
 
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -971,17 +960,6 @@
 
 </li>
 
-        <li class="md-nav__item">
-  <a href="#evidence-boundary" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Evidence boundary
-
-    </span>
-  </a>
-
-</li>
-
     </ul>
 
 </nav>
@@ -1064,9 +1042,9 @@
 <h2 id="active-connection-and-shared-q-session">Active connection and shared q session</h2>
 <p>Mixed cells use the notebook's explicit q target. The optional q-only controller uses the active profile only while it is enabled and selected. Both Direct IPC routes reuse the profile-keyed <code>ConnectionManager</code> client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target.</p>
 <p>Every direct q cell uses the same complete-source path as <strong>Run q Script</strong>. The extension groups physical q lines on the client, including indentation continuations, comments, top-level system commands, and q's bare-<code>\</code> trailing-script-comment convention, then evaluates the groups in order through ordinary q <code>value</code>. It saves the process's current namespace, enters the profile's configured namespace, and restores the saved namespace after success or q error. A source system command retains normal q semantics and can affect later groups within that run; the outer wrapper still restores the pre-run namespace afterward.</p>
-<p>This path has no <code>.Q.ld</code> or q release-date gate. Deterministic tests simulate missing <code>.Q.ld</code> through the full direct-cell request, while the available live test uses the installed modern q runtime. Version 0.2.8 does not state an exact minimum q version or claim a live historical-q run.</p>
+<p>This path has no <code>.Q.ld</code> or q release-date gate. The extension does not enforce an exact minimum q version.</p>
 <p>A saved but disconnected target may connect on demand after an explicit KX execution gesture. Its profile/global connect and query timeouts apply. A missing mixed target stays actionable rather than falling through. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.</p>
-<p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; mixed mode writes a cancellation result only if the q cell is still unchanged, while the optional selected controller completes its native execution. q work or side effects already sent may continue on the server. Version 0.2.8 does not claim server-side interruption.</p>
+<p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; mixed mode writes a cancellation result only if the q cell is still unchanged, while the optional selected controller completes its native execution. q work or side effects already sent may continue on the server.</p>
 <h2 id="live-kx-result-and-saved-snapshot">Live KX result and saved snapshot</h2>
 <p>A successful Direct IPC result from the default mixed runner or optional controller has two representations:</p>
 <ol>
@@ -1218,9 +1196,6 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <span class="p">}</span>
 </code></pre></div>
 <p>That serializer-owned field is separate from the helper's nested <code>metadata.vscode-kdb</code> marker/limit object. Tagging merges its metadata without deleting unrelated fields and preserves an existing leading <code>%%q</code> marker.</p>
-<h2 id="evidence-boundary">Evidence boundary</h2>
-<p>Focused pure/provider tests cover default non-registration and opt-in controller registration/disposal, mixed action/toolbar/context/keybinding guards, q language assignment without a controller switch, current stable-ID target routing after same-profile endpoint edits and active changes, missing-target prompts, namespace/session continuity, complete-cell dispatch, Python-cell isolation, race/error/cancellation handling, live result lifetime, bounded snapshots, shared settings messages, helper-route separation, and bans on private Jupyter/SQLTools runtime coupling.</p>
-<p>The scoped real Extension Host smoke uses isolated VS Code user data and the actual <code>ConnectionStore</code> to add two application/global profiles, set active selection, edit the same targeted ID from port <code>5005</code> to <code>5000</code>, confirm both profiles remain, resolve the notebook target to current port <code>5000</code>, verify the optional controller is not registered by default, and clean up its settings, secrets, and global state. It also covers actual notebook language conversion/restoration. It does not visually automate the connection webview, top-right kernel selector, toolbar/status layout, target QuickPick, or q execution, so there is no visual UI E2E claim.</p>
 
 
 
