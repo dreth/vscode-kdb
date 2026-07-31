@@ -736,14 +736,14 @@
 
 
     <li class="md-nav__item">
-      <a href="../parity-roadmap/" class="md-nav__link">
+      <a href="../architecture/" class="md-nav__link">
 
 
 
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -935,7 +935,7 @@
 
 
 <h1 id="settings">Settings</h1>
-<p>Open VS Code Settings and search for <code>vscode-kdb</code>, or edit settings JSON. The manifest is the source of truth for accepted values.</p>
+<p>Open VS Code Settings and search for <code>vscode-kdb</code>, or edit settings JSON. The extension manifest defines accepted values.</p>
 <p>Connection records are application-scoped user metadata. Other settings can be set at normal VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.</p>
 <h2 id="notebook-language-and-results">Notebook language and results</h2>
 <p>Notebook cell language is not a <code>vscode-kdb</code> setting. The default workflow keeps the Python controller selected: set only the intended code cells to q with <strong>Make q Cell (KX)</strong>, choose one saved target, and use <strong>Run q Cell (KX)</strong>. Python cells retain normal Jupyter Run. KX is absent from the kernel candidates by default; VS Code's top-right Jupyter selector itself remains.</p>
@@ -982,7 +982,7 @@
 <p>These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, tokens, connection objects, recoverable IPC handles, and unbounded data. A direct result's full value is transient extension-host state only: bound to the notebook/current-cell URI (and rebound after a mixed output edit), removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.</p>
 <p>Mixed <strong>Run q Cell (KX)</strong> and the optional direct controller reject a leading <code>%%q</code>; they run ordinary complete-cell q. Mixed cells use the notebook's explicit current target, while the q-only controller uses the active session only if explicitly enabled and selected. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, its guarded <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> shortcut runs the KX action; Python, Markdown, cell-container, and output focus keep normal notebook behavior.</p>
 <p>The optional Python <code>%%q</code> helper is a distinct Python-kernel-owned evaluator route: keep its marker, restore the notebook default/Python language, and use normal Run. It does not share the direct KX q session by implication.</p>
-<p><code>inline</code> is the default Python-helper experience. For helper output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable <code>vscode-kdb.results.*</code> configuration as the panel; Settings messages update and broadcast that common source of truth.</p>
+<p><code>inline</code> is the default Python-helper experience. For helper output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable <code>vscode-kdb.results.*</code> configuration as the panel; Settings messages broadcast updates to open results.</p>
 <h2 id="feature-controls">Feature Controls</h2>
 <p>Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.</p>
 <table>

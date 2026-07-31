@@ -686,14 +686,14 @@
 
 
     <li class="md-nav__item">
-      <a href="../parity-roadmap/" class="md-nav__link">
+      <a href="../architecture/" class="md-nav__link">
 
 
 
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -920,7 +920,7 @@
 </code></pre></div>
 <p>Timing records include operation names, durations, sizes/counts, and memory snapshots where implemented. Query text and result values are not logged. Passwords, authentication credentials, SecretStorage values, and local-data-server tokens are omitted or redacted. The extension does not mutate this setting automatically.</p>
 <p>For development compatibility, the same performance records retain their <code>[vscode-kdb:perf]</code> entry in the Extension Host console. <strong>Output &gt; KX</strong> is the supported user-facing place to collect them.</p>
-<p>Performance trace can itself add small measurement and output overhead. Disable it after collecting the evidence needed for a report.</p>
+<p>Performance trace can add small measurement and output overhead. Disable it after troubleshooting.</p>
 <h2 id="external-analysis">External analysis</h2>
 <p>For a result already loaded in the panel, use bounded <a href="../local-data-server/">Local Data Server</a> slices to avoid creating an additional q query. For data that should never be fully loaded into VS Code, query and aggregate it directly in q or use a separately managed client suited to that volume.</p>
 

@@ -568,7 +568,7 @@ function assertReferenceStatus(statusText, options = {}) {
     entryCount: entries.length,
     entries: entries.map(entry => ({ xy: entry.xy, path: entry.path })),
     disclaimer: dirty
-      ? `Reference worktree is not clean: ${entries.length} allowed generated docs change${entries.length === 1 ? '' : 's'} were excluded from source evidence.`
+      ? `Reference worktree is not clean: ${entries.length} allowed generated docs change${entries.length === 1 ? '' : 's'} will be ignored by the comparison.`
       : 'Reference tracked worktree is clean.',
   };
 }

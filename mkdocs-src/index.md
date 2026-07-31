@@ -30,7 +30,7 @@ Implemented foundations include:
 - an opt-in tokenized loopback data server; and
 - a dedicated `KX` Output channel with opt-in performance tracing.
 
-This is not a full KDB-X or q Professional compatibility claim. Standalone owns its TextMate q grammar, explicit mixed-notebook q action, optional direct q controller, opt-in qText result presentation, focused Server Explorer, local Query History, and NotebookRenderer, but it does not claim a q LSP, lint engine, source-document formatter, remote Jupyter kernel, or complete editor/notebook parity. Public VS Code APIs select one notebook controller; built-in Python Run is never rerouted to KX. The extension has no built-in SSH/TLS setup, gateway or Insights orchestration, remote administration, SQLTools result target/UI, `.session.sql` behavior, persisted full-result recovery, or server-side notebook interruption. Live direct results exist only in the current extension-host session; reopened output is the bounded saved snapshot. A scoped non-visual Extension Host smoke covers actual two-profile store persistence/current target resolution, default controller non-registration, cleanup, and notebook cell-language conversion/restoration. It does not visually automate the connection form, selector, toolbar/status, QuickPick, or q execution. See [Parity Roadmap & Architecture](parity-roadmap.md).
+The extension provides TextMate q syntax highlighting, not a q language server, lint engine, or source formatter. Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote administration, SQLTools UI/session behavior, persisted full-result recovery, and server-side notebook interruption are not included. Live direct results exist only in the current extension-host session; reopened output contains the bounded saved snapshot. See [Architecture](architecture.md) for component and state boundaries.
 
 ## Requirements
 
@@ -67,5 +67,5 @@ SQLTools is not required.
 - [Performance & Large Results](performance.md): memory model, limits, and safe tracing.
 - [Local Data Server](local-data-server.md): tokenized local endpoints.
 - [Troubleshooting](troubleshooting.md): connection, q, diagnostics, and result problems.
-- [Parity Roadmap & Architecture](parity-roadmap.md): current boundary and planned parity/backport flow.
+- [Architecture](architecture.md): components, state lifetime, and product boundaries.
 - [Feedback](feedback.md): useful details for reports and requests.

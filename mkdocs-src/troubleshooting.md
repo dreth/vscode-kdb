@@ -92,7 +92,7 @@ Version 0.2.8 does not require `.Q.ld` and does not reject a process by q releas
 
 Check the failing source in the configured namespace and inspect the genuine q error shown in KX Results. Direct notebook cells always use complete-cell script semantics; **Run Selection / Current Line** remains raw for a single physical line. KX does not replace q source semantics with a SQL parser.
 
-The compatibility fixture proves the generated full direct-cell request has no `.Q.ld` dependency when that capability is absent. The available live test uses the installed modern q runtime, not an historical binary. Report the q version/build and exact source shape when filing an older-process issue; this release states no exact minimum q version and does not claim a live old-q run.
+Generated full direct-cell requests do not depend on `.Q.ld`. Report the q version, build, and exact source shape when filing an older-process issue; the extension does not enforce an exact minimum q version.
 
 ## Namespace behavior looks wrong
 
@@ -126,7 +126,7 @@ Virtualization limits webview cells, but the complete IPC payload is decoded and
 
 Confirm `vscode-kdb.features.serverExplorer` is enabled and an active direct q IPC profile exists. The view and its commands are intentionally absent when the feature is off or there is no active profile. A disconnected active profile remains visible with reconnect guidance, but the explorer does not connect automatically merely to display metadata.
 
-The focused explorer is not a namespace browser or remote-administration surface. Built-in SSH/TLS, gateway, Insights, SQLTools, and `.session.sql` controls are intentionally absent. Review [Connections & SecretStorage](connections.md#focused-server-explorer) and [Parity Roadmap & Architecture](parity-roadmap.md) before filing a compatibility report.
+The focused explorer is not a namespace browser or remote-administration surface. It has no built-in SSH/TLS, gateway, Insights, SQLTools, or `.session.sql` controls. See [Connections & SecretStorage](connections.md#focused-server-explorer) and [Architecture](architecture.md).
 
 ## Server Explorer refresh or table expansion failed
 
@@ -195,7 +195,7 @@ If a q-language cell has no marker, use its **Prepare for Python kernel** status
 
 The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.8 or the matching `kx_notebook` 0.2.8 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
-Direct IPC output from the mixed runner or optional controller includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. A static fallback is not evidence that arbitrary notebook interaction will survive export.
+Direct IPC output from the mixed runner or optional controller includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. Static fallbacks do not preserve interactive notebook behavior.
 
 ## Notebook preview is truncated
 

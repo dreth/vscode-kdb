@@ -120,7 +120,7 @@ All supported settings and ranges are listed in the [settings reference](mkdocs-
 
 Direct q IPC is plaintext in transit, including authentication and query traffic. The extension does not provide TLS, SSH tunnelling, a gateway, or a broker. Use loopback, a trusted private network, or a separately managed secure tunnel.
 
-Complete-source execution does not depend on `.Q.ld`. The live test records the available q runtime version but does not enforce a minimum; historical q releases are not part of the automated matrix.
+Complete-source execution does not depend on `.Q.ld`. No minimum q version is enforced; historical q releases are not maintained as a compatibility matrix.
 
 Language support covers `.q` files with a TextMate grammar; `.k` is not associated with q. The extension does not provide language-server features such as linting or source formatting.
 
@@ -134,7 +134,7 @@ Open `View > Output` and select `KX` for connection, handshake, query, cancellat
 
 ## Documentation and support
 
-The maintained documentation starts at the [user guide](mkdocs-src/index.md). [PARITY.md](PARITY.md) tracks implemented and missing scope, with reproduction instructions in the [parity test guide](test/parity/README.md).
+Start with the [user guide](mkdocs-src/index.md), [settings reference](mkdocs-src/settings.md), or [troubleshooting guide](mkdocs-src/troubleshooting.md).
 
 Report bugs and documentation problems in the [GitHub issue tracker](https://github.com/dreth/vscode-kdb/issues).
 
@@ -150,7 +150,6 @@ npm test
 Additional maintained checks include:
 
 ```sh
-npm run test:parity:self
 npm run test:notebook-python
 npm run test:notebook-cross
 npm run test:extension-host
@@ -162,7 +161,7 @@ The live-q test detects `~/.kx/bin/q`, or accepts `VSCODE_KDB_Q_BIN=/absolute/pa
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-The live test is optional unless `VSCODE_KDB_LIVE_REQUIRED=1` is set. Documentation build and parity-gate instructions are in [mkdocs-src/README.md](mkdocs-src/README.md).
+The live test is optional unless `VSCODE_KDB_LIVE_REQUIRED=1` is set.
 
 ## License
 

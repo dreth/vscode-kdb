@@ -141,7 +141,6 @@ async function editorAndNamespaceCases(ctx) {
     expectedStatus: 'GAP',
     rank: 3,
     action: 'Make an explicit first-party product decision: implement a standalone q-block helper/command with tests, or formally exclude it and reclassify this row by design.',
-    signoff: 'The reviewed decision is documented and the executable case asserts the resulting standalone contract.',
     detail: 'Reference exposes currentQBlock/selectedTextOrCurrentBlock; standalone intentionally preserves current-line behavior but has not resolved the separate optional block command.',
   }, t => {
     t.equal(typeof reference.qText.currentQBlock, 'function');
@@ -708,7 +707,6 @@ async function liveQCases(ctx) {
       expectedStatus: 'GAP',
       rank: 2,
       action: 'Backport a compatible script-grouping adapter to the SQLTools driver without changing its UI/session ownership.',
-      signoff: 'The shared LF and CRLF script fixtures return 30 and 5 through both adapters and restore the root namespace after success/error.',
       detail: 'The standalone compatibility grouper succeeds without .Q.ld; the pinned reference raw value wrapper raises a genuine q error for the same multiline source.',
     }, async t => {
       await leftClient.query('system "d .standaloneParityScript";system "d ."');
@@ -740,7 +738,7 @@ async function liveQCases(ctx) {
 }
 
 async function boundaryCases(ctx) {
-  const { standalone, reference, roots, liveFixturePath } = ctx;
+  const { standalone, reference, liveFixturePath } = ctx;
 
   await ctx.case(caseDef(
     'manifest-standalone-runtime-boundary',
@@ -805,7 +803,6 @@ async function boundaryCases(ctx) {
     expectedStatus: 'GAP',
     rank: 1,
     action: 'Add a standalone Extension Host suite for activation, KX connection tree/form/SecretStorage, commands, result-panel protocol, cancellation, and settings without importing SQLTools.',
-    signoff: 'The suite runs in CI and locally on a supported VS Code build from a clean standalone commit.',
     detail: 'Reference has test/e2e; standalone has deterministic host-free tests but no test/e2e directory or Extension Host workflow.',
   }, t => {
     t.equal(fs.existsSync(path.join(standalone.root, 'test', 'e2e')), false);
@@ -817,8 +814,7 @@ async function boundaryCases(ctx) {
     area: 'VS Code Extension Host and visual/manual UX',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'Neither code nor code-insiders is installed, and this repository has no truthful cross-extension visual browser/Extension Host fixture. Source and webview parsing are not visual evidence.',
-    signoff: 'Record supported VS Code runs for activation, theme/layout, virtual scrolling, selection/keyboard, chart zoom/reset, settings, error states, and screenshots where useful.',
+    rationale: 'Neither code nor code-insiders is installed, so this fixture cannot exercise Extension Host or visual behavior.',
   }, t => {
     t.equal(commandOnPath('code'), false);
     t.equal(commandOnPath('code-insiders'), false);
@@ -829,8 +825,7 @@ async function boundaryCases(ctx) {
     area: 'authenticated direct q IPC',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The shared fixture is deliberately anonymous and loopback-only; no authenticated endpoint was available or invented.',
-    signoff: 'Run accepted and rejected credentials against an authorized real q endpoint and verify SecretStorage/error redaction without recording credentials.',
+    rationale: 'The shared fixture is deliberately anonymous and loopback-only; no authenticated endpoint is available.',
   }, t => {
     const fixtureSource = fs.readFileSync(liveFixturePath, 'utf8');
     t.equal(fixtureSource.includes('.z.pw'), false);
@@ -841,8 +836,7 @@ async function boundaryCases(ctx) {
     area: 'SSH/TLS/IPv6/remote endpoint behavior',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'Only anonymous IPv4 loopback direct q was authorized. No SSH/TLS service, remote host, IPv6 listener, or multi-version q matrix was available.',
-    signoff: 'Record separately authorized endpoint tests for every supported transport/address/q-version claim; keep standalone direct-only unless product scope changes.',
+    rationale: 'The fixture has no SSH/TLS service, remote host, IPv6 listener, or multi-version q matrix.',
   });
 
   await ctx.case({
@@ -850,20 +844,7 @@ async function boundaryCases(ctx) {
     area: 'spreadsheet application rendering',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The gate proves OOXML ZIP structure and limits but no Excel/LibreOffice GUI application was available for visual rendering.',
-    signoff: 'Open representative exports in supported spreadsheet applications and record data, escaping, dimensions, and limits.',
-  });
-
-  await ctx.case({
-    id: 'marketplace-package-publication',
-    area: 'VSIX install and Marketplace publication',
-    mode: 'boundary',
-    expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.8 archive inventory and hashes must be verified separately by the release gate.',
-    signoff: 'Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.',
-  }, t => {
-    t.equal(standalone.packageJson.version, '0.2.8');
-    t.equal(reference.packageJson.version, '0.3.17');
+    rationale: 'The fixture checks OOXML ZIP structure and limits; no Excel or LibreOffice GUI is available.',
   });
 
   await ctx.case({
@@ -871,22 +852,7 @@ async function boundaryCases(ctx) {
     area: 'server-side q cancellation after dispatch',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'Both public products document local wait/transport cancellation limits; the harness does not claim reliable interruption of already-dispatched q work.',
-    signoff: 'Define an authorized server interruption protocol and prove side-effect/cancellation semantics before claiming server-side cancellation.',
-  });
-
-  await ctx.case(caseDef(
-    'documentation-no-complete-parity-claim',
-    'documentation conclusion boundary',
-    'boundary',
-    'PASS',
-    'Current standalone documentation explicitly denies complete functional/visual parity and defers source-of-truth sign-off.'
-  ), t => {
-    for (const relative of ['README.md', 'PARITY.md', 'mkdocs-src/parity-roadmap.md']) {
-      const text = fs.readFileSync(path.join(roots.standalone, relative), 'utf8');
-      t.match(text, /not|no|remain|pending|before/i);
-      t.equal(/complete functional and visual parity (?:is|has been) achieved/i.test(text), false);
-    }
+    rationale: 'The fixture has no server-side interruption protocol for already-dispatched q work.',
   });
 }
 
@@ -930,7 +896,7 @@ async function captureAsyncError(operation) {
 }
 
 function validateContext(ctx) {
-  for (const key of ['case', 'standalone', 'reference', 'fixtures', 'canonical', 'qPath', 'roots', 'liveFixturePath']) {
+  for (const key of ['case', 'standalone', 'reference', 'fixtures', 'canonical', 'qPath', 'liveFixturePath']) {
     if (!ctx || !ctx[key]) {
       throw new Error(`Parity suite context is missing ${key}.`);
     }

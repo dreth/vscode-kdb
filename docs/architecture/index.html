@@ -25,7 +25,7 @@
 
 
 
-        <title>Parity Roadmap & Architecture - KX for VS Code</title>
+        <title>Architecture - KX for VS Code</title>
 
 
 
@@ -76,7 +76,7 @@
     <div data-md-component="skip">
 
 
-        <a href="#parity-roadmap-architecture" class="md-skip">
+        <a href="#architecture" class="md-skip">
           Skip to content
         </a>
 
@@ -112,7 +112,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
 
-              Parity Roadmap & Architecture
+              Architecture
 
           </span>
         </div>
@@ -368,6 +368,33 @@
 
 
     <li class="md-nav__item">
+      <a href="../notebooks/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    Jupyter Notebooks
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
 
 
@@ -573,7 +600,7 @@
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -591,7 +618,7 @@
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -617,10 +644,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
-  <a href="#current-standalone-architecture" class="md-nav__link">
+  <a href="#main-components" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Current standalone architecture
+        Main components
 
     </span>
   </a>
@@ -628,10 +655,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#phase-1-boundary" class="md-nav__link">
+  <a href="#state-and-persistence" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Phase 1 boundary
+        State and persistence
 
     </span>
   </a>
@@ -639,21 +666,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#planned-milestones" class="md-nav__link">
+  <a href="#product-boundaries" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Planned milestones
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#future-shared-core-boundary" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Future shared-core boundary
+        Product boundaries
 
     </span>
   </a>
@@ -722,10 +738,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
 
         <li class="md-nav__item">
-  <a href="#current-standalone-architecture" class="md-nav__link">
+  <a href="#main-components" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Current standalone architecture
+        Main components
 
     </span>
   </a>
@@ -733,10 +749,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#phase-1-boundary" class="md-nav__link">
+  <a href="#state-and-persistence" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Phase 1 boundary
+        State and persistence
 
     </span>
   </a>
@@ -744,21 +760,10 @@
 </li>
 
         <li class="md-nav__item">
-  <a href="#planned-milestones" class="md-nav__link">
+  <a href="#product-boundaries" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Planned milestones
-
-    </span>
-  </a>
-
-</li>
-
-        <li class="md-nav__item">
-  <a href="#future-shared-core-boundary" class="md-nav__link">
-    <span class="md-ellipsis">
-
-        Future shared-core boundary
+        Product boundaries
 
     </span>
   </a>
@@ -785,50 +790,23 @@
 
 
 
-<h1 id="parity-roadmap-architecture">Parity Roadmap &amp; Architecture</h1>
-<p>KX for VS Code is being developed as the future first-party KX product. During the parity phase, useful capabilities are ported from <code>kdb-sqltools</code> into this standalone architecture. Functional parity must be verified by evidence and user testing before the standalone repository becomes the source of truth.</p>
-<p>The detailed, source-backed status is maintained in the repository's <a href="https://github.com/dreth/vscode-kdb/blob/main/PARITY.md"><code>PARITY.md</code></a>. Its Present/Partial/Missing rows and exact source/test references are authoritative; this page is a user-facing architecture summary, not a second parity claim.</p>
-<p>The repository manifest is at <code>0.1.3</code> for direct user testing. This package is not a parity sign-off or Marketplace-readiness claim; Marketplace publication remains deferred pending separate upload evidence.</p>
-<h2 id="current-standalone-architecture">Current standalone architecture</h2>
-<p>The extension has five deliberate layers:</p>
-<ol>
-<li><strong>VS Code surface:</strong> q language contribution, editor commands, KX activity-bar connection tree, the KX-owned single-screen connection form, notifications, and <code>KX</code> Output channel.</li>
-<li><strong>Connection ownership:</strong> application-scoped safe metadata and optional timeout overrides, global active-connection state, and per-connection VS Code SecretStorage keys.</li>
-<li><strong>Direct q IPC:</strong> handshake, serialization/deserialization, ordered queries, separate connect/query deadlines, q errors, transport lifecycle, and namespace/script wrappers.</li>
-<li><strong>Result capabilities:</strong> columnar storage, virtual grid/q-text presentation, search/sort/selection, copy/export, and safe chart transformations.</li>
-<li><strong>Optional local access:</strong> per-panel tokenized HTTP endpoints bound to loopback.</li>
-</ol>
-<p>There are no SQLTools runtime imports, APIs, result targets, connection/session UI hooks, object-explorer nodes, or session-file hooks in this graph. The <strong>KX Connection</strong> form and its storage lifecycle are owned entirely by this extension.</p>
-<h2 id="phase-1-boundary">Phase 1 boundary</h2>
-<p>Present foundations include a responsive single-screen direct-connection form, extension-host validation, optional per-profile connect/query timeouts, deterministic connected-edit lifecycle, authentication and SecretStorage implementation, exact editor execution, result viewing, charting including candlesticks, copy/export, local data endpoints, diagnostics, tests, and reproducible documentation. Authenticated live-path verification remains partial as recorded in <code>PARITY.md</code>.</p>
-<p>Known gaps and partial areas remain. In particular, Phase 1 does not provide an object explorer, built-in SSH/TLS or gateway orchestration, every historical editor convenience, complete visual/manual Extension Host coverage, or proof of end-user functional parity. Deterministic source/webview guards are not visual E2E, and release 0.1.3 has no screenshot evidence. Packaging, release identity, and Marketplace readiness remain evidence gates rather than documentation claims.</p>
-<p>Some SQLTools behaviors are deliberately omitted rather than missing:</p>
+<h1 id="architecture">Architecture</h1>
+<p>KX for VS Code connects directly to q over IPC. The extension owns connection profiles, query execution, result decoding, editor and notebook integration, and the KX user interface.</p>
+<h2 id="main-components">Main components</h2>
 <ul>
-<li>SQLTools as a runtime dependency;</li>
-<li>SQLTools connection/session UI;</li>
-<li>SQLTools result-grid routing;</li>
-<li><code>.session.sql</code> creation or interpretation; and</li>
-<li>compatibility commands whose only purpose is to reproduce SQLTools ownership.</li>
+<li><strong>Connection layer:</strong> saved profile metadata lives in VS Code settings; passwords use SecretStorage. Each profile has an independent q IPC client and request queue.</li>
+<li><strong>Execution layer:</strong> editor commands and direct notebook actions send q text through the selected profile. Namespace wrappers restore the previous q namespace after success or error.</li>
+<li><strong>Result layer:</strong> IPC values are decoded once into shared result models used by the KX Results panel and notebook renderer. Large operations apply explicit limits or confirmation prompts.</li>
+<li><strong>Notebook layer:</strong> the default mixed-notebook path leaves the Python controller selected and runs marked q cells through an explicit KX action. The optional q-only controller uses the same direct IPC path.</li>
+<li><strong>Optional tools:</strong> Server Explorer, Query History, performance tracing, and the loopback data server are off by default.</li>
 </ul>
-<h2 id="planned-milestones">Planned milestones</h2>
-<ol>
-<li><strong>Foundation:</strong> maintain the standalone docs, diagnostics/redaction, connection-state reliability, execution semantics, and source-backed parity matrix.</li>
-<li><strong>Useful capability parity:</strong> port remaining product-value gaps in bounded changes, with standalone UI and direct tests rather than SQLTools adapters.</li>
-<li><strong>User verification:</strong> exercise connection, editor, viewer, chart, export, local-server, failure, cancellation, and large-result workflows in a real VS Code/q environment. Record exceptions instead of relabeling partial features as complete.</li>
-<li><strong>Source-of-truth transition:</strong> after verified functional parity, develop new KX behavior in <code>vscode-kdb</code> first.</li>
-<li><strong>Deliberate backports:</strong> make compatible, reviewed backports to <code>kdb-sqltools</code> only where its SQLTools architecture can support them without making it the design authority again.</li>
-</ol>
-<h2 id="future-shared-core-boundary">Future shared-core boundary</h2>
-<p>No monorepo or cross-repository code move is part of the foundation pass. A later extraction should start only after interfaces are stable and both repositories have contract tests.</p>
-<p>Good candidates are pure or host-neutral code:</p>
-<ul>
-<li>q IPC codec/value/error contracts;</li>
-<li>namespace and script-wrapping helpers;</li>
-<li>columnar result and q-text transformations;</li>
-<li>copy/export and chart data algorithms; and</li>
-<li>structured diagnostics schemas and redaction helpers.</li>
-</ul>
-<p>VS Code commands, panels, tree providers, SecretStorage, standalone connection state, and SQLTools adapters should remain in their owning products. Shared code should flow from standalone product requirements, then be consumed by deliberate compatible backports; it should not reintroduce a SQLTools runtime dependency.</p>
+<h2 id="state-and-persistence">State and persistence</h2>
+<p>Connection metadata and supported display preferences are durable. Query sockets, full direct-notebook results, panel state, local data-server tokens, and performance traces are process-local. Saved notebook output contains a bounded portable snapshot; omitted rows require rerunning the cell.</p>
+<p>The Python <code>kx_notebook</code> helper is separate from the extension-managed direct IPC session. It runs inside the selected Python kernel and requires an evaluator supplied by the user.</p>
+<h2 id="product-boundaries">Product boundaries</h2>
+<p>The extension has no SQLTools runtime dependency. Legacy SQLTools connection import is a one-time settings migration and creates no synchronization or shared session.</p>
+<p>Direct q IPC is plaintext. TLS, SSH tunnels, gateways, remote administration, SQL translation, q language-server features, and server-side cancellation are outside the extension. Separately managed network controls can be used around direct IPC.</p>
+<p>Host-neutral helpers such as IPC codecs, q source grouping, result transformations, export algorithms, and chart data preparation remain isolated from VS Code UI code where practical. Commands, webviews, SecretStorage, and extension lifecycle code remain extension-owned.</p>
 
 
 

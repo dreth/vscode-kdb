@@ -741,14 +741,14 @@
 
 
     <li class="md-nav__item">
-      <a href="../parity-roadmap/" class="md-nav__link">
+      <a href="../architecture/" class="md-nav__link">
 
 
 
   <span class="md-ellipsis">
 
 
-    Parity Roadmap & Architecture
+    Architecture
 
 
 
@@ -990,7 +990,7 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 </ol>
 <p>The KX action executes the complete q source through that explicit target without switching the Python controller. A target persists only safe stable profile ID/name metadata in the <code>.ipynb</code>. Every run resolves current store data: editing the same profile to a new host/port uses the new endpoint and recycles a stale client as needed; changing the active profile does not override it. A missing or removed target asks for a replacement instead of using list order. q assignments continue through the selected profile's KX q process across q cells that share the target. Python variables and KX q variables remain separate.</p>
 <p>When the q cell editor itself has text focus, the contributed default <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs the KX action. The shortcut is limited to q code-cell editor focus and is disabled when the KX direct controller is selected. Python, Markdown, cell-container, and output focus keep their normal notebook shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if the shortcut was customized.</p>
-<p>Mixed mode cannot claim native KX kernel execution while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.</p>
+<p>Mixed mode is an explicit KX action, not native KX kernel execution, while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.</p>
 <p>KX is absent from the kernel candidates by default. VS Code's top-right Jupyter selector remains; KX does not remove it.</p>
 <h2 id="optional-native-direct-q-notebook-controller">Optional native direct q notebook controller</h2>
 <p>Set the application-scoped <code>vscode-kdb.notebook.enableDirectController</code> setting to <code>true</code>, then choose <strong>KX q (Direct IPC)</strong> from the normal notebook kernel selector. This opt-in controller executes complete q cells through the active profile's existing direct q client and namespace using normal <strong>Run Cell</strong>, <strong>Run All</strong>, and notebook shortcuts.</p>
@@ -1054,19 +1054,14 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <div class="highlight"><pre><span></span><code>npm<span class="w"> </span>ci
 npm<span class="w"> </span>run<span class="w"> </span>compile
 npm<span class="w"> </span><span class="nb">test</span>
-npm<span class="w"> </span>run<span class="w"> </span>test:parity:self
-npm<span class="w"> </span>run<span class="w"> </span>test:parity
 npm<span class="w"> </span>run<span class="w"> </span>test:notebook-python
 npm<span class="w"> </span>run<span class="w"> </span>test:notebook-cross
 npm<span class="w"> </span>run<span class="w"> </span>test:extension-host
 </code></pre></div>
-<p>The full parity gate compiles its reference checkout. For a protected reference,
-use a disposable clone and set <code>KDB_SQLTOOLS_PARITY_ROOT</code> plus
-<code>KDB_SQLTOOLS_PARITY_REVISION</code> explicitly.</p>
 <p>When a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>Pure helpers and faithful VS Code providers/fakes cover migration configuration, native active-profile routing, mixed explicit-target routing, live results, status, menus, and keybinding scopes. The scoped Extension Host smoke covers activation, contributed commands, isolated two-profile configuration/active selection, and real notebook language conversion/restoration. It does not exercise the connection webview, kernel selector, toolbar/status layout, target QuickPick, or q execution and makes no visual UI E2E claim.</p>
+<p>Unit tests cover migration configuration, active-profile routing, mixed explicit-target routing, live results, status, menus, and keybinding scopes. The Extension Host smoke covers activation, contributed commands, isolated two-profile configuration and active selection, and notebook language conversion and restoration.</p>
 
 
 
