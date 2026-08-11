@@ -2,104 +2,104 @@
 <!doctype html>
 <html lang="en" class="no-js">
   <head>
-
+    
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
-
+      
         <meta name="description" content="Standalone q IPC, execution, results, charting, and diagnostics documentation for KX for VS Code.">
-
-
-
-
+      
+      
+      
+      
         <link rel="prev" href="../local-data-server/">
-
-
+      
+      
         <link rel="next" href="../architecture/">
-
-
-
-
-
+      
+      
+        
+      
+      
       <link rel="icon" href="../assets/images/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
-
-
-
+    
+    
+      
         <title>Troubleshooting - KX for VS Code</title>
-
-
-
+      
+    
+    
       <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
-
-
+      
+        
         <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
 
 
-
-
-
-
-
-
-
-
-
-
+    
+    
+      
+    
+    
+      
+        
+        
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
         <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
-
-
-
+      
+    
+    
     <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
 
-
-
-
-
+    
+    
   </head>
-
-
-
-
-
-
-
-
-
+  
+  
+    
+    
+      
+    
+    
+    
+    
     <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="lime">
-
-
+  
+    
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
     <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
     <label class="md-overlay" for="__drawer"></label>
     <div data-md-component="skip">
-
-
+      
+        
         <a href="#troubleshooting" class="md-skip">
           Skip to content
         </a>
-
+      
     </div>
     <div data-md-component="announce">
-
+      
     </div>
+    
+    
+      
 
-
-
-
-
+  
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="KX for VS Code" class="md-header__button md-logo" aria-label="KX for VS Code" data-md-component="logo">
-
-
+      
+  
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
-
+      
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
     </label>
     <div class="md-header__title" data-md-component="header-title">
@@ -111,49 +111,49 @@
         </div>
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
-
+            
               Troubleshooting
-
+            
           </span>
         </div>
       </div>
     </div>
-
-
+    
+      
         <form class="md-header__option" data-md-component="palette">
-
-
-
-
+  
+    
+    
+    
     <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="lime"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
-
+    
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
       </label>
-
-
-
-
-
+    
+  
+    
+    
+    
     <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="lime"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
-
+    
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
       </label>
-
-
+    
+  
 </form>
-
-
-
+      
+    
+    
       <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
-
-
-
-
-
+    
+    
+    
+      
+      
         <label class="md-header__button md-icon" for="__search">
-
+          
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
         </label>
         <div class="md-search" data-md-component="search" role="dialog">
@@ -162,21 +162,21 @@
     <form class="md-search__form" name="search">
       <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
       <label class="md-search__icon md-icon" for="__search">
-
+        
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
-
+        
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
       </label>
       <nav class="md-search__options" aria-label="Search">
-
+        
         <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
-
+          
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
         </button>
       </nav>
-
+      
         <div class="md-search__suggest" data-md-component="search-suggest"></div>
-
+      
     </form>
     <div class="md-search__output">
       <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
@@ -190,13 +190,13 @@
     </div>
   </div>
 </div>
-
-
-
+      
+    
+    
       <div class="md-header__source">
         <a href="https://github.com/dreth/vscode-kdb" title="Go to repository" class="md-source" data-md-component="source">
   <div class="md-source__icon md-icon">
-
+    
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
   </div>
   <div class="md-source__repository">
@@ -204,45 +204,45 @@
   </div>
 </a>
       </div>
-
+    
   </nav>
-
+  
 </header>
-
+    
     <div class="md-container" data-md-component="container">
-
-
-
-
-
-
+      
+      
+        
+          
+        
+      
       <main class="md-main" data-md-component="main">
         <div class="md-main__inner md-grid">
-
-
-
+          
+            
+              
               <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
-
+                    
 
 
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
     <a href=".." title="KX for VS Code" class="md-nav__button md-logo" aria-label="KX for VS Code" data-md-component="logo">
-
-
+      
+  
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
 
     </a>
     KX for VS Code
   </label>
-
+  
     <div class="md-nav__source">
       <a href="https://github.com/dreth/vscode-kdb" title="Go to repository" class="md-source" data-md-component="source">
   <div class="md-source__icon md-icon">
-
+    
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
   </div>
   <div class="md-source__repository">
@@ -250,1226 +250,1226 @@
   </div>
 </a>
     </div>
-
+  
   <ul class="md-nav__list" data-md-scrollfix>
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href=".." class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Overview
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../installation/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Installation
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../connections/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Connections & SecretStorage
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../running-q/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Running q
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../notebooks/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Jupyter Notebooks
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Results Viewer
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../charting/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Charting
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../copy-export/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Copy & Export
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../settings/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Settings
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../performance/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Performance & Large Results
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../local-data-server/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Local Data Server
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+    
+  
+  
+  
     <li class="md-nav__item md-nav__item--active">
-
+      
       <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-
-
-
-
-
+      
+      
+        
+      
+      
         <label class="md-nav__link md-nav__link--active" for="__toc">
-
-
-
+          
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Troubleshooting
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
           <span class="md-nav__icon md-icon"></span>
         </label>
-
+      
       <a href="./" class="md-nav__link md-nav__link--active">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Troubleshooting
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
-
-
+      
+        
 
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-
-
-
-
-
-
+  
+  
+  
+    
+  
+  
     <label class="md-nav__title" for="__toc">
       <span class="md-nav__icon md-icon"></span>
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-
+      
         <li class="md-nav__item">
   <a href="#start-with-kx-output" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Start with KX Output
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#cannot-connect" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Cannot connect
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#no-sqltools-kdb-import-candidates-were-found" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         No SQLTools KDB import candidates were found
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#a-sqltools-kdb-profile-is-not-importable" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         A SQLTools KDB profile is not importable
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#an-imported-connection-was-skipped-or-renamed" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         An imported connection was skipped or renamed
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#an-imported-connection-has-no-password-or-a-different-query-timeout" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         An imported connection has no password or a different query timeout
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#sidebar-says-disconnected-after-failure" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Sidebar says disconnected after failure
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#query-timed-out" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Query timed out
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#edited-connection-is-disconnected" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Edited connection is disconnected
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#a-saved-connection-does-not-appear" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         A saved connection does not appear
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#q-error-appears-in-the-result-panel" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         q error appears in the result panel
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#complete-script-fails-on-a-q-process" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Complete script fails on a q process
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#namespace-behavior-looks-wrong" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Namespace behavior looks wrong
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#form-test-connection-failed" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Form Test Connection failed
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#cancel-did-not-stop-server-work" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Cancel did not stop server work
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#huge-result-is-slow" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Huge result is slow
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#local-data-url-fails" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Local data URL fails
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#server-explorer-is-missing" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Server Explorer is missing
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#server-explorer-refresh-or-table-expansion-failed" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Server Explorer refresh or table expansion failed
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#preview-may-be-large" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Preview may be large
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#q-is-not-registered" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         %%q is not registered
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#kx-q-is-missing-from-the-notebook-kernelcontroller-selector" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         KX q is missing from the notebook kernel/controller selector
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#run-q-cell-kx-is-missing" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Run q Cell (KX) is missing
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#normal-run-did-not-execute-q-through-kx" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Normal Run did not execute q through KX
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#an-existing-cell-is-not-q" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         An existing cell is not q
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#tagging-a-q-cell-did-not-execute-it" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Tagging a q cell did not execute it
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-kx-output-is-invalid-or-shows-the-static-fallback" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook KX output is invalid or shows the static fallback
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-preview-is-truncated" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook preview is truncated
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#open-in-kx-results-has-only-the-preview" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Open in KX Results has only the preview
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-chart-changes-did-not-persist" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook chart changes did not persist
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-q-used-a-different-session-than-the-q-editor" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook q used a different session than the .q editor
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#query-history-is-missing-or-incomplete" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Query History is missing or incomplete
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#live-q-check" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Live q check
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#generated-docs-drift" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Generated docs drift
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
     </ul>
-
+  
 </nav>
-
+      
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../architecture/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Architecture
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../feedback/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Feedback
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
+    
   </ul>
 </nav>
                   </div>
                 </div>
               </div>
-
-
-
+            
+            
+              
               <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
-
+                    
 
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-
-
-
-
-
-
+  
+  
+  
+    
+  
+  
     <label class="md-nav__title" for="__toc">
       <span class="md-nav__icon md-icon"></span>
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-
+      
         <li class="md-nav__item">
   <a href="#start-with-kx-output" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Start with KX Output
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#cannot-connect" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Cannot connect
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#no-sqltools-kdb-import-candidates-were-found" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         No SQLTools KDB import candidates were found
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#a-sqltools-kdb-profile-is-not-importable" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         A SQLTools KDB profile is not importable
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#an-imported-connection-was-skipped-or-renamed" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         An imported connection was skipped or renamed
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#an-imported-connection-has-no-password-or-a-different-query-timeout" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         An imported connection has no password or a different query timeout
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#sidebar-says-disconnected-after-failure" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Sidebar says disconnected after failure
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#query-timed-out" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Query timed out
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#edited-connection-is-disconnected" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Edited connection is disconnected
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#a-saved-connection-does-not-appear" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         A saved connection does not appear
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#q-error-appears-in-the-result-panel" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         q error appears in the result panel
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#complete-script-fails-on-a-q-process" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Complete script fails on a q process
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#namespace-behavior-looks-wrong" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Namespace behavior looks wrong
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#form-test-connection-failed" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Form Test Connection failed
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#cancel-did-not-stop-server-work" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Cancel did not stop server work
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#huge-result-is-slow" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Huge result is slow
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#local-data-url-fails" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Local data URL fails
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#server-explorer-is-missing" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Server Explorer is missing
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#server-explorer-refresh-or-table-expansion-failed" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Server Explorer refresh or table expansion failed
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#preview-may-be-large" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Preview may be large
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#q-is-not-registered" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         %%q is not registered
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#kx-q-is-missing-from-the-notebook-kernelcontroller-selector" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         KX q is missing from the notebook kernel/controller selector
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#run-q-cell-kx-is-missing" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Run q Cell (KX) is missing
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#normal-run-did-not-execute-q-through-kx" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Normal Run did not execute q through KX
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#an-existing-cell-is-not-q" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         An existing cell is not q
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#tagging-a-q-cell-did-not-execute-it" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Tagging a q cell did not execute it
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-kx-output-is-invalid-or-shows-the-static-fallback" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook KX output is invalid or shows the static fallback
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-preview-is-truncated" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook preview is truncated
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#open-in-kx-results-has-only-the-preview" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Open in KX Results has only the preview
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-chart-changes-did-not-persist" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook chart changes did not persist
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#notebook-q-used-a-different-session-than-the-q-editor" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Notebook q used a different session than the .q editor
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#query-history-is-missing-or-incomplete" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Query History is missing or incomplete
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#live-q-check" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Live q check
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#generated-docs-drift" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Generated docs drift
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
     </ul>
-
+  
 </nav>
                   </div>
                 </div>
               </div>
-
-
-
+            
+          
+          
             <div class="md-content" data-md-component="content">
-
+              
               <article class="md-content__inner md-typeset">
+                
+                  
 
 
-
-
-
-
+  
+  
 
 
 <h1 id="troubleshooting">Troubleshooting</h1>
@@ -1509,7 +1509,8 @@
 <p>If a connected profile's host, port, username, password, or timeout changes, this is intentional lifecycle behavior. Save commits the safe profile and requested SecretStorage change first, then disconnects and reconnects using the saved values. If reconnect fails, the profile remains saved and KX warns that it is disconnected; it never keeps using the stale client.</p>
 <p>Name and namespace-only changes do not recycle a healthy client. Validation errors, Cancel, or closing the form without saving do not change storage or the current session.</p>
 <h2 id="a-saved-connection-does-not-appear">A saved connection does not appear</h2>
-<p>Version 0.2.8 treats a resolved application/global VS Code settings or Memento update as success; it does not reject a real save merely because an immediate read snapshot is stale. The tree uses coherent immediate state while delayed propagation catches up, then reconciles with effective configuration. Causally newer or otherwise identifiable external values win immediately; pre-target or same-as-pending values use the bounded ambiguity policy below. A rejected settings or secret write keeps the form open, refreshes the tree, and shows both inline and VS Code errors while transactional rollback protects the previous state. Distinct valid profiles all appear. The active row is marked <code>ACTIVE</code>; removing it leaves no active profile instead of silently choosing the first remaining row.</p>
+<p>KX reads explicit User, Workspace, and Workspace Folder <code>vscode-kdb.connections</code> arrays. For the same stable ID, Folder overrides Workspace, which overrides User; inspect the profile's scope label before editing. Same-name/different-ID profiles remain distinct. If two sibling folders define the same ID differently, KX shows a conflict and chooses neither endpoint until the settings are corrected.</p>
+<p>A resolved scoped VS Code settings or Memento update is success; KX does not reject a real save merely because an immediate read snapshot is stale. The tree uses coherent immediate state while delayed propagation catches up, then reconciles the merged scoped configuration. Causally newer or otherwise identifiable external values win immediately; pre-target or same-as-pending values use the bounded ambiguity policy below. A rejected settings or secret write keeps the form open, refreshes the tree, and shows both inline and VS Code errors while transactional rollback protects the previous state. The active row is marked <code>ACTIVE</code>; removing it leaves no active profile instead of silently choosing the first remaining row.</p>
 <p>If KX says connection settings are still reconciling, VS Code exposed an old value that is indistinguishable from an outstanding saved occurrence. Wait for the last saved profile list to appear. If it does not, run <strong>Developer: Reload Window</strong> before adding, editing, or removing profiles. This conservative pause prevents an old snapshot from overwriting a resolved save; reload discards the in-memory ledger and reads persisted VS Code configuration.</p>
 <p>The Connections title toolbar intentionally contains Add and Refresh, not SQLTools import. Use <strong>KX: Import SQLTools KDB Connections</strong> from the Command Palette for one-time migration.</p>
 <h2 id="q-error-appears-in-the-result-panel">q error appears in the result panel</h2>
@@ -1553,13 +1554,14 @@
 <h2 id="preview-may-be-large">Preview may be large</h2>
 <p>Every Preview asks for confirmation. <code>vscode-kdb.serverExplorer.previewCellLimit</code> defaults to approximately <code>10000</code> table cells or <code>10000</code> outer list/dictionary items and accepts <code>1</code> through <code>1000000</code>. Nested values and scalars may still be large. Functions/projections are not previewed. Canceling the local wait does not interrupt work already sent to q.</p>
 <h2 id="q-is-not-registered"><code>%%q</code> is not registered</h2>
-<p>Install <code>python/kx_notebook</code> into the exact Python environment selected as the notebook kernel, then configure an evaluator and load the IPython extension:</p>
-<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">kx_notebook</span><span class="w"> </span><span class="kn">import</span> <span class="n">configure_evaluator</span>
-
-<span class="n">configure_evaluator</span><span class="p">(</span><span class="k">lambda</span> <span class="n">source</span><span class="p">:</span> <span class="n">my_existing_q_session</span><span class="p">(</span><span class="n">source</span><span class="p">))</span>
-<span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
+<p>Install the exact released distribution into the Python 3.9-3.13 environment selected as the notebook kernel:</p>
+<div class="highlight"><pre><span></span><code>python<span class="w"> </span>-m<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span><span class="s1">&#39;kx-notebook==0.1.0&#39;</span>
 </code></pre></div>
-<p>The helper deliberately has no implicit q connection. If no callback is configured, it raises an actionable error instead of borrowing the extension's active connection. If using the optional PyKX adapter, install/configure/license PyKX separately and explicitly call <code>kx_notebook.pykx.configure_pykx()</code>.</p>
+<p>The distribution name is <code>kx-notebook</code>; the import/IPython extension name is <code>kx_notebook</code>. Load it and use its built-in direct q IPC:</p>
+<div class="highlight"><pre><span></span><code><span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
+<span class="o">%</span><span class="n">kx</span> <span class="n">connect</span> <span class="n">localhost</span><span class="p">:</span><span class="mi">5000</span>
+</code></pre></div>
+<p>If <code>ModuleNotFoundError</code> persists, inspect <code>sys.executable</code> in the notebook and install into that interpreter. The companion connection is separate from extension-managed Direct IPC. Named profiles, a synchronous callback, separately installed/licensed PyKX, and a runtime-configured loopback broker are explicit alternatives; none discovers or borrows the extension connection.</p>
 <h2 id="kx-q-is-missing-from-the-notebook-kernelcontroller-selector">KX q is missing from the notebook kernel/controller selector</h2>
 <p>That is the expected 0.2.8 default. Keep Python selected and use <strong>Make q Cell (KX)</strong>, choose an explicit notebook q target, then use <strong>Run q Cell (KX)</strong>. KX is intentionally absent from kernel candidates, but VS Code's top-right Jupyter selector itself remains.</p>
 <p>For an explicit legacy q-only workflow, set the application-scoped <code>vscode-kdb.notebook.enableDirectController</code> setting to <code>true</code>. KX then registers <strong>KX q (Direct IPC)</strong> dynamically through the public NotebookController API. Turning the setting off disposes it; a previously saved KX selection cannot be restored while the controller is unregistered.</p>
@@ -1567,8 +1569,8 @@
 <p>The mixed-notebook action appears only for an actual q-language code cell while the optional <strong>KX q (Direct IPC)</strong> controller is not selected. Keep Python selected and click the leading <strong>Make q Cell (KX)</strong> action; <strong>Run q Cell (KX)</strong> should replace it immediately. Do not switch the top-right kernel merely to mark the cell q.</p>
 <p>The q status must show <code>KX: &lt;profile&gt; · Ctrl+Enter</code> (<code>Cmd+Enter</code> on macOS). If it shows <strong>Select connection</strong>, click the notebook <code>q default</code> target and choose a saved profile. A removed target is never replaced from list order or the active profile. Each run resolves the saved stable ID against current store data, so editing that profile from port <code>5005</code> to <code>5000</code> routes the next run to <code>5000</code> and reconnects a stale client as needed. With the optional <strong>KX q (Direct IPC)</strong> controller selected, the mixed actions/status deliberately disappear and normal Run owns q execution.</p>
 <p>After a successful mixed run the notebook becomes dirty because KX commits the finished output as one supported, undoable notebook edit while Python remains selected. This replaces that q cell's internal handle but preserves its source, q language, metadata, and sibling cells. If the q cell or its output changes while the query is running, KX leaves the newer state alone and reports that it did not overwrite it.</p>
-<p>If <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs a customized action instead, use the visible <strong>Run q Cell (KX)</strong> toolbar/context command. User and keymap-extension bindings can override extension defaults. <strong>Developer: Toggle Keyboard Shortcuts Troubleshooting</strong> shows which rule VS Code selected.</p>
-<p>The KX <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> binding applies only while the q cell editor itself has text focus. With focus on the cell container or output, use the visible play/context action. Python and Markdown cells deliberately retain normal Jupyter shortcuts.</p>
+<p>If <code>Ctrl+Enter</code> / <code>Cmd+Enter</code>, <code>Shift+Enter</code>, or <code>Alt+Enter</code> / <code>Option+Enter</code> runs a customized action instead, use the visible <strong>Run q Cell (KX)</strong> toolbar/context command. User and keymap-extension bindings can override extension defaults. <strong>Developer: Toggle Keyboard Shortcuts Troubleshooting</strong> shows which rule VS Code selected.</p>
+<p>The three KX Enter bindings apply only while the q cell editor itself has text focus. <code>Ctrl</code>/<code>Cmd</code> runs and stays, <code>Shift</code> runs and moves next, and <code>Alt</code>/<code>Option</code> runs and inserts below; canceled or failed q runs do not move or insert. With focus on the cell container or output, use the visible play/context action. Python and Markdown cells deliberately retain normal Jupyter shortcuts.</p>
 <h2 id="normal-run-did-not-execute-q-through-kx">Normal Run did not execute q through KX</h2>
 <p>That is expected while a Python controller is selected. Public notebook APIs select one controller for normal Run, so KX does not reroute Jupyter's action. Use <strong>Run q Cell (KX)</strong> for a q-language cell. If a q-only notebook must give normal Run to KX, explicitly enable <code>vscode-kdb.notebook.enableDirectController</code> and select <strong>KX q (Direct IPC)</strong>.</p>
 <h2 id="an-existing-cell-is-not-q">An existing cell is not q</h2>
@@ -1576,10 +1578,9 @@
 <p>The KX action uses VS Code's supported document-language API. Successful code cells have actual <code>TextDocument.languageId === "q"</code>; when saved as a non-default language, the built-in serializer records raw <code>metadata.vscode.languageId: "q"</code>. Markdown is skipped. A controller can still normalize that field when its kernel is selected.</p>
 <h2 id="tagging-a-q-cell-did-not-execute-it">Tagging a q cell did not execute it</h2>
 <p>That is expected. <strong>KX: Tag Notebook Cell as q</strong> sets actual q language mode, inserts or preserves the durable <code>%%q --max-rows ... --max-bytes ...</code> marker, and merges <code>vscode-kdb</code> namespaced cell metadata. It does not execute.</p>
-<p>The normal Python Jupyter controller does not advertise q and will not Run a q-language cell. Keep the marker, use <strong>KX: Restore Notebook Cell Language</strong> to return selected code cells to the notebook default/Python language, then use the notebook's normal Run action. IPython invokes the registered <code>%%q</code> helper. Kernel selection may perform the language normalization automatically.</p>
-<p>If a q-language cell has no marker, use its <strong>Prepare for Python kernel</strong> status action first. This action is for a selected Python controller and is hidden under <strong>KX q (Direct IPC)</strong>. The direct controller rejects a leading <code>%%q</code>; remove it and run the complete ordinary q cell, or select the Python controller.</p>
+<p>Choose one route per cell. For extension-managed Direct IPC, keep the durable cell q-language, remove <code>%%q</code>, select its saved KX target, and use <strong>Run q Cell (KX)</strong>. For the released <code>kx-notebook==0.1.0</code> companion, create or keep a Python-language cell, type <code>%%q</code> as its first line, and use normal Jupyter Run. Do not repeatedly switch one Direct IPC cell between q and Python. The Tag/Prepare actions are editing aids and are not required by the released companion.</p>
 <h2 id="notebook-kx-output-is-invalid-or-shows-the-static-fallback">Notebook KX output is invalid or shows the static fallback</h2>
-<p>The renderer accepts only <code>application/vnd.kx.result+json</code> version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.8 or the matching <code>kx_notebook</code> 0.2.8 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.</p>
+<p>The renderer accepts only <code>application/vnd.kx.result+json</code> version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.8 or released <code>kx-notebook==0.1.0</code> (<code>import kx_notebook</code>). Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.</p>
 <p>Direct IPC output from the mixed runner or optional controller includes <code>text/plain</code>, not <code>text/html</code>. The Python helper includes escaped <code>text/html</code> and <code>text/plain</code> fallbacks for viewers without the KX renderer. Static fallbacks do not preserve interactive notebook behavior.</p>
 <h2 id="notebook-preview-is-truncated">Notebook preview is truncated</h2>
 <p><code>vscode-kdb.notebook.maxOutputRows</code> defaults to <code>20</code> and accepts <code>1</code> through <code>10000</code>. Tables with 20 rows or fewer persist fully; larger tables keep headers/schema, a 20-row preview, total row count, and an explicit truncation notice. <code>vscode-kdb.notebook.maxOutputBytes</code> defaults to <code>1000000</code> and accepts <code>16384</code> through <code>10000000</code>. The portable contract additionally caps schema at 256 columns and cell text at 32,768 characters. The tag command writes the configurable values into the cell marker; either route may retain fewer rows/columns/cell characters and reports the truncation reason.</p>
@@ -1593,7 +1594,7 @@
 <p>Check the selected notebook controller.</p>
 <ul>
 <li><strong>KX q (Direct IPC)</strong> uses the active profile's existing extension client and namespace. Mixed-mode <strong>Run q Cell (KX)</strong> uses the notebook's explicit q target. Neither creates a connection per cell, and q assignments persist across cells that resolve to the same profile.</li>
-<li>A Python controller plus <code>%%q</code> uses only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not borrow the extension client, and helper output never receives a Direct IPC live-result identity. A user callback may independently target the same server, but that is not extension-managed state sharing.</li>
+<li>A Python controller plus <code>%%q</code> uses the companion's Python-process-owned direct IPC connection or an explicitly selected profile, callback, PyKX evaluator, or loopback broker. It does not borrow the extension client, and companion output never receives an extension live-result identity or output binding. An independent evaluator may target the same server, but that is not extension-managed state sharing.</li>
 </ul>
 <p>Choose the intended route explicitly. KX never intercepts Python-controller Run; the q-cell action is a separate visible gesture.</p>
 <h2 id="query-history-is-missing-or-incomplete">Query History is missing or incomplete</h2>
@@ -1604,7 +1605,7 @@
 <p>Maintainers can run the direct live smoke path when a local q executable is available:</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VSCODE_KDB_LIVE_REQUIRED</span><span class="o">=</span><span class="m">1</span><span class="w"> </span>npm<span class="w"> </span>run<span class="w"> </span>test:live-q
 </code></pre></div>
-<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic notebook cell selection/language/default/marker/metadata and renderer-message contracts, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, grammar, source, and manifest guards. <code>npm run test:extension-host</code> adds scoped non-visual activation, isolated multi-profile configuration/active selection, and real notebook language conversion/restoration. It does not automate the connection webview, notebook toolbar/status/kernel selector, target QuickPick, or q execution. The Python helper has a separate isolated <code>uv</code>/<code>unittest</code> suite; no standalone visual UI E2E is claimed.</p>
+<p>Use <code>VSCODE_KDB_Q_BIN=/absolute/path/to/q</code> to select a non-default executable. The normal test harness includes deterministic notebook cell selection/language/default/marker/metadata and renderer-message contracts, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, grammar, source, and manifest guards. <code>npm run test:notebook-cross</code> installs exactly <code>kx-notebook==0.1.0</code>, imports <code>kx_notebook</code>, and validates its emitted version-1 contract. <code>npm run test:extension-host</code> adds scoped non-visual activation, isolated multi-profile configuration/active selection, and real q-language/KX metadata persistence through save, close, and reopen. It does not automate the connection webview, notebook toolbar/status/kernel selector, or target QuickPick. <code>npm run test:notebook-results-visual</code> separately starts real q in an isolated VS Code + Xvfb session and keeps 12 validated screenshots covering light/dark table/chart, visible/hidden legends, readable dark axes, selector/Settings containment, opt-in qText, tracked-file reopen, live-full state, and all chart families. This visual acceptance is local Linux Extension Host/Xvfb plus loopback q only. Remote and devcontainer acceptance were not run; the Docker daemon is unavailable, so Docker-backed acceptance is blocked. The repository-local Python compatibility fixtures retain a separate isolated <code>uv</code>/<code>unittest</code> suite.</p>
 <h2 id="generated-docs-drift">Generated docs drift</h2>
 <p>Edit files under <code>mkdocs-src/</code>, then run the exact gate in <code>mkdocs-src/README.md</code>. Generated <code>docs/</code> is committed. The workflow builds and uploads an artifact but intentionally does not deploy or alter Pages settings.</p>
 
@@ -1619,54 +1620,54 @@
 
 
 
-
+                
               </article>
             </div>
-
-
+          
+          
 <script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
         </div>
-
+        
           <button type="button" class="md-top md-icon" data-md-component="top" hidden>
-
+  
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
   Back to top
 </button>
-
+        
       </main>
-
+      
         <footer class="md-footer">
-
+  
   <div class="md-footer-meta md-typeset">
     <div class="md-footer-meta__inner md-grid">
       <div class="md-copyright">
-
-
+  
+  
     Made with
     <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
       Material for MkDocs
     </a>
-
+  
 </div>
-
+      
     </div>
   </div>
 </footer>
-
+      
     </div>
     <div class="md-dialog" data-md-component="dialog">
       <div class="md-dialog__inner md-typeset"></div>
     </div>
-
-
-
-
-
+    
+    
+    
+      
+      
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "search.highlight", "search.suggest", "toc.follow", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
-
-
+    
+    
       <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
-
-
+      
+    
   </body>
 </html>

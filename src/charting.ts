@@ -1,4 +1,8 @@
 import { ColumnarPanelResult } from './kx-results';
+import {
+  isKnownQType,
+  qTypeChartColumnKind,
+} from './q-type';
 
 export type ChartColumnKind = 'numeric' | 'temporal';
 export type ChartGroupColumnKind = 'categorical';
@@ -14,6 +18,7 @@ export interface ChartColumnOption {
   columnName: string;
   columnIndex: number;
   kind: ChartColumnKind;
+  qType?: string;
 }
 
 export interface ChartGroupColumnOption {
@@ -222,12 +227,13 @@ export function chartColumnOptions(table: ColumnarPanelResult, sampleSize = CHAR
   const warnings: string[] = [];
 
   table.columns.forEach((columnName, columnIndex) => {
+    const qType = table.columnTypes?.[columnIndex];
     const inference = inferColumn(table, columnIndex, sampleSize);
     if (inference.numeric) {
-      xColumns.push({ columnName, columnIndex, kind: 'numeric' });
-      yColumns.push({ columnName, columnIndex, kind: 'numeric' });
+      xColumns.push({ columnName, columnIndex, kind: 'numeric', ...(qType ? { qType } : {}) });
+      yColumns.push({ columnName, columnIndex, kind: 'numeric', ...(qType ? { qType } : {}) });
     } else if (inference.temporal) {
-      xColumns.push({ columnName, columnIndex, kind: 'temporal' });
+      xColumns.push({ columnName, columnIndex, kind: 'temporal', ...(qType ? { qType } : {}) });
     }
     if (inference.categorical) {
       groupColumns.push({ columnName, columnIndex, kind: 'categorical' });
@@ -323,7 +329,8 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
       preparedPoints,
       grouped.series.length,
       maxSampledPoints,
-      chartType === 'line' || chartType === 'step'
+      chartType === 'line' || chartType === 'step',
+      !!xRange
     );
   const xDomain = preparedPoints.length > 0
     ? { min: preparedPoints[0].x, max: preparedPoints[preparedPoints.length - 1].x }
@@ -379,8 +386,10 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
   }
 
   const sorted = sortCandlestickPoints(collected.points, warnings);
-  const targetPointCount = candlestickTargetPointCount(request.width, request.maxSampledPoints);
-  const aggregation = aggregateCandlestickPoints(collected.points, targetPointCount);
+  const targetPointCount = xRange
+    ? chartRequestTargetPointCount(request, xRange)
+    : candlestickTargetPointCount(request.width, request.maxSampledPoints);
+  const aggregation = aggregateCandlestickPoints(collected.points, targetPointCount, !!xRange);
   if (aggregation.exactPointCount < collected.points.length) {
     warnings.push(`Candlestick data aggregated ${collected.points.length} eligible rows into ${aggregation.exactPointCount} distinct x candles.`);
   }
@@ -433,12 +442,15 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
   }
 
   const sorted = sortChartPoints(points, warnings);
-  const maxGroups = boxChartTargetGroupCount(
-    points.length,
-    source.yColumnNames.length,
-    request.width,
-    chartRequestTargetPointCount(request, xRange)
-  );
+  const requestTargetPointCount = chartRequestTargetPointCount(request, xRange);
+  const maxGroups = xRange
+    ? Math.max(1, Math.min(points.length, requestTargetPointCount))
+    : boxChartTargetGroupCount(
+      points.length,
+      source.yColumnNames.length,
+      request.width,
+      requestTargetPointCount
+    );
   const bins = buildBoxChartBins(points, source.yColumnNames.length, maxGroups);
   const xDomain = { min: points[0].x, max: points[points.length - 1].x };
   const boxSeries = source.yColumnNames.map((columnName, seriesIndex) => {
@@ -998,7 +1010,8 @@ export function boxChartTargetGroupCount(
 
 export function aggregateCandlestickPoints(
   points: CandlestickInputPoint[],
-  maxPoints: number
+  maxPoints: number,
+  balanceBucketsByCount = false
 ): CandlestickAggregationResult {
   if (points.length === 0) {
     return { candlesticks: [], exactPointCount: 0, algorithm: 'ohlc-exact/0' };
@@ -1045,6 +1058,21 @@ export function aggregateCandlestickPoints(
   }
 
   const bucketCount = Math.max(1, Math.min(limit, exact.length));
+  if (balanceBucketsByCount) {
+    const candlesticks: CandlestickDataPoint[] = [];
+    for (let bucketIndex = 0; bucketIndex < bucketCount; bucketIndex++) {
+      const start = Math.floor(bucketIndex * exact.length / bucketCount);
+      const end = Math.max(start + 1, Math.floor((bucketIndex + 1) * exact.length / bucketCount));
+      candlesticks.push(aggregateCandlestickBucket(exact.slice(start, end)));
+    }
+    return {
+      candlesticks,
+      exactPointCount: exact.length,
+      algorithm: `ohlc-bucket/${candlesticks.length}`,
+      xDomain,
+    };
+  }
+
   const buckets: CandlestickDataPoint[][] = Array.from({ length: bucketCount }, () => []);
   const domainScale = Math.max(1, Math.abs(xDomain.min), Math.abs(xDomain.max));
   const scaledMin = xDomain.min / domainScale;
@@ -1168,6 +1196,28 @@ export function inferColumn(
   columnIndex: number,
   sampleSize = CHART_INFERENCE_SAMPLE_SIZE
 ): ColumnInference {
+  const qType = table.columnTypes?.[columnIndex];
+  const declaredKind = qTypeChartColumnKind(qType);
+  if (declaredKind) {
+    return {
+      numeric: declaredKind === 'numeric',
+      temporal: declaredKind === 'temporal',
+      categorical: false,
+      sampled: sampledScalarCount(table, columnIndex, sampleSize),
+      missing: 0,
+      invalid: 0,
+    };
+  }
+  if (isKnownQType(qType)) {
+    return {
+      numeric: false,
+      temporal: false,
+      categorical: declaredCategoricalQType(qType),
+      sampled: sampledScalarCount(table, columnIndex, sampleSize),
+      missing: 0,
+      invalid: 0,
+    };
+  }
   let sampled = 0;
   let missing = 0;
   let numeric = 0;
@@ -1210,6 +1260,32 @@ export function inferColumn(
     missing,
     invalid,
   };
+}
+
+function sampledScalarCount(
+  table: ColumnarPanelResult,
+  columnIndex: number,
+  sampleSize: number
+): number {
+  if (columnIndex < 0 || columnIndex >= table.columns.length || table.rowCount <= 0) {
+    return 0;
+  }
+  const targetSamples = Math.max(1, Math.floor(sampleSize));
+  const step = Math.max(1, Math.floor(table.rowCount / targetSamples));
+  let sampled = 0;
+  for (let rowIndex = 0; rowIndex < table.rowCount && sampled < targetSamples; rowIndex += step) {
+    const value = table.cellValue(rowIndex, columnIndex);
+    if (!isMissing(value) && !isNonFiniteScalar(value)) {
+      sampled += 1;
+    }
+  }
+  return sampled;
+}
+
+function declaredCategoricalQType(qType: unknown): boolean {
+  const normalized = String(qType || '').trim().toLocaleLowerCase();
+  return normalized === 'symbol' || normalized === 'char' ||
+    normalized === 'string' || normalized === 'boolean' || normalized === 'bool';
 }
 
 function buildBoxChartBins(points: ChartPoint[], seriesCount: number, maxGroups: number): BoxChartBin[] {
@@ -1395,20 +1471,35 @@ function normalizeTemporalValue(value: unknown): NormalizedValue | null {
 
   match = /^(\d{4})-(\d{2})-(\d{2})(?:T.*)?$/.exec(text);
   if (match) {
-    const time = Date.parse(text);
+    const time = parseIsoTemporalMilliseconds(text);
     return Number.isFinite(time) ? { value: time, text } : null;
   }
 
-  match = /^([01]?\d|2[0-3]):([0-5]\d)(?::([0-5]\d)(?:\.(\d{1,9}))?)?$/.exec(text);
+  match = /^([+-])?(?:(\d+)D )?(\d{1,2}):([0-5]\d)(?::([0-5]\d)(?:\.(\d{1,9}))?)?$/.exec(text);
   if (match) {
-    const hours = Number(match[1]);
-    const minutes = Number(match[2]);
-    const seconds = match[3] ? Number(match[3]) : 0;
-    const fraction = match[4] ? Number(`0.${match[4]}`) : 0;
-    return { value: ((hours * 60 + minutes) * 60 + seconds + fraction) * 1000, text };
+    const sign = match[1] === '-' ? -1 : 1;
+    const days = match[2] ? Number(match[2]) : 0;
+    const hours = Number(match[3]);
+    const minutes = Number(match[4]);
+    const seconds = match[5] ? Number(match[5]) : 0;
+    const fraction = match[6] ? Number(`0.${match[6]}`) : 0;
+    if (hours <= 23 || days === 0) {
+      return {
+        value: sign * ((((days * 24 + hours) * 60 + minutes) * 60 + seconds + fraction) * 1000),
+        text,
+      };
+    }
   }
 
   return null;
+}
+
+function parseIsoTemporalMilliseconds(text: string): number {
+  const normalized = text.replace(
+    /(\.\d{3})\d+(?=(?:Z|[+-]\d{2}:?\d{2})?$)/,
+    '$1'
+  );
+  return Date.parse(normalized);
 }
 
 function normalizeCategoricalValue(value: unknown): string | null {
@@ -1445,7 +1536,7 @@ function normalizedChartXRange(request: LineChartRequest): ChartXRange | undefin
 
 function chartRequestTargetPointCount(request: LineChartRequest, xRange?: ChartXRange): number {
   if (xRange) {
-    return positiveInteger(request.maxSampledPoints, CHART_ZOOM_MAX_SAMPLED_POINTS);
+    return CHART_ZOOM_MAX_SAMPLED_POINTS;
   }
   return chartTargetPointCount(request.width, request.maxSampledPoints, request.minSampledPoints);
 }
@@ -1491,7 +1582,8 @@ function downsampleMinMax(
   points: ChartPoint[],
   seriesCount: number,
   maxPoints: number,
-  preserveSourceGaps: boolean
+  preserveSourceGaps: boolean,
+  fillToTarget: boolean
 ): { points: ChartPoint[]; algorithm: string } {
   if (points.length <= maxPoints) {
     return { points, algorithm: 'none' };
@@ -1578,11 +1670,47 @@ function downsampleMinMax(
     }
   }
 
+  if (fillToTarget) {
+    fillSelectedPointIndexes(selected, points.length, maxPoints);
+  }
   const sampled = points.filter((_point, index) => selected[index]);
   return {
     points: sampled.length <= maxPoints ? sampled : evenlyThin(sampled, maxPoints),
     algorithm: `minmax-bucket/${maxPoints}`,
   };
+}
+
+function fillSelectedPointIndexes(selected: boolean[], pointCount: number, targetCount: number): void {
+  const boundedTarget = Math.max(0, Math.min(pointCount, Math.floor(targetCount)));
+  let selectedCount = 0;
+  for (let index = 0; index < pointCount; index++) {
+    if (selected[index]) {
+      selectedCount += 1;
+    }
+  }
+
+  const needed = boundedTarget - selectedCount;
+  const available = pointCount - selectedCount;
+  if (needed <= 0 || available <= 0) {
+    return;
+  }
+
+  let availableRank = 0;
+  let targetRankIndex = 0;
+  let nextTargetRank = needed === 1 ? Math.floor((available - 1) / 2) : 0;
+  for (let index = 0; index < pointCount && targetRankIndex < needed; index++) {
+    if (selected[index]) {
+      continue;
+    }
+    if (availableRank === nextTargetRank) {
+      selected[index] = true;
+      targetRankIndex += 1;
+      nextTargetRank = targetRankIndex < needed
+        ? Math.round(targetRankIndex * (available - 1) / (needed - 1))
+        : -1;
+    }
+    availableRank += 1;
+  }
 }
 
 function evenlyThin(points: ChartPoint[], maxPoints: number): ChartPoint[] {

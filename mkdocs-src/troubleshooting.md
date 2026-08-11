@@ -72,7 +72,9 @@ Name and namespace-only changes do not recycle a healthy client. Validation erro
 
 ## A saved connection does not appear
 
-Version 0.2.8 treats a resolved application/global VS Code settings or Memento update as success; it does not reject a real save merely because an immediate read snapshot is stale. The tree uses coherent immediate state while delayed propagation catches up, then reconciles with effective configuration. Causally newer or otherwise identifiable external values win immediately; pre-target or same-as-pending values use the bounded ambiguity policy below. A rejected settings or secret write keeps the form open, refreshes the tree, and shows both inline and VS Code errors while transactional rollback protects the previous state. Distinct valid profiles all appear. The active row is marked `ACTIVE`; removing it leaves no active profile instead of silently choosing the first remaining row.
+KX reads explicit User, Workspace, and Workspace Folder `vscode-kdb.connections` arrays. For the same stable ID, Folder overrides Workspace, which overrides User; inspect the profile's scope label before editing. Same-name/different-ID profiles remain distinct. If two sibling folders define the same ID differently, KX shows a conflict and chooses neither endpoint until the settings are corrected.
+
+A resolved scoped VS Code settings or Memento update is success; KX does not reject a real save merely because an immediate read snapshot is stale. The tree uses coherent immediate state while delayed propagation catches up, then reconciles the merged scoped configuration. Causally newer or otherwise identifiable external values win immediately; pre-target or same-as-pending values use the bounded ambiguity policy below. A rejected settings or secret write keeps the form open, refreshes the tree, and shows both inline and VS Code errors while transactional rollback protects the previous state. The active row is marked `ACTIVE`; removing it leaves no active profile instead of silently choosing the first remaining row.
 
 If KX says connection settings are still reconciling, VS Code exposed an old value that is indistinguishable from an outstanding saved occurrence. Wait for the last saved profile list to appear. If it does not, run **Developer: Reload Window** before adding, editing, or removing profiles. This conservative pause prevents an old snapshot from overwriting a resolved save; reload discards the in-memory ledger and reads persisted VS Code configuration.
 
@@ -144,16 +146,20 @@ Every Preview asks for confirmation. `vscode-kdb.serverExplorer.previewCellLimit
 
 ## `%%q` is not registered
 
-Install `python/kx_notebook` into the exact Python environment selected as the notebook kernel, then configure an evaluator and load the IPython extension:
+Install the exact released distribution into the Python 3.9-3.13 environment selected as the notebook kernel:
 
-```python
-from kx_notebook import configure_evaluator
-
-configure_evaluator(lambda source: my_existing_q_session(source))
-%load_ext kx_notebook
+```sh
+python -m pip install 'kx-notebook==0.1.0'
 ```
 
-The helper deliberately has no implicit q connection. If no callback is configured, it raises an actionable error instead of borrowing the extension's active connection. If using the optional PyKX adapter, install/configure/license PyKX separately and explicitly call `kx_notebook.pykx.configure_pykx()`.
+The distribution name is `kx-notebook`; the import/IPython extension name is `kx_notebook`. Load it and use its built-in direct q IPC:
+
+```python
+%load_ext kx_notebook
+%kx connect localhost:5000
+```
+
+If `ModuleNotFoundError` persists, inspect `sys.executable` in the notebook and install into that interpreter. The companion connection is separate from extension-managed Direct IPC. Named profiles, a synchronous callback, separately installed/licensed PyKX, and a runtime-configured loopback broker are explicit alternatives; none discovers or borrows the extension connection.
 
 ## KX q is missing from the notebook kernel/controller selector
 
@@ -169,9 +175,9 @@ The q status must show `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS). If 
 
 After a successful mixed run the notebook becomes dirty because KX commits the finished output as one supported, undoable notebook edit while Python remains selected. This replaces that q cell's internal handle but preserves its source, q language, metadata, and sibling cells. If the q cell or its output changes while the query is running, KX leaves the newer state alone and reports that it did not overwrite it.
 
-If `Ctrl+Enter` / `Cmd+Enter` runs a customized action instead, use the visible **Run q Cell (KX)** toolbar/context command. User and keymap-extension bindings can override extension defaults. **Developer: Toggle Keyboard Shortcuts Troubleshooting** shows which rule VS Code selected.
+If `Ctrl+Enter` / `Cmd+Enter`, `Shift+Enter`, or `Alt+Enter` / `Option+Enter` runs a customized action instead, use the visible **Run q Cell (KX)** toolbar/context command. User and keymap-extension bindings can override extension defaults. **Developer: Toggle Keyboard Shortcuts Troubleshooting** shows which rule VS Code selected.
 
-The KX `Ctrl+Enter` / `Cmd+Enter` binding applies only while the q cell editor itself has text focus. With focus on the cell container or output, use the visible play/context action. Python and Markdown cells deliberately retain normal Jupyter shortcuts.
+The three KX Enter bindings apply only while the q cell editor itself has text focus. `Ctrl`/`Cmd` runs and stays, `Shift` runs and moves next, and `Alt`/`Option` runs and inserts below; canceled or failed q runs do not move or insert. With focus on the cell container or output, use the visible play/context action. Python and Markdown cells deliberately retain normal Jupyter shortcuts.
 
 ## Normal Run did not execute q through KX
 
@@ -187,13 +193,11 @@ The KX action uses VS Code's supported document-language API. Successful code ce
 
 That is expected. **KX: Tag Notebook Cell as q** sets actual q language mode, inserts or preserves the durable `%%q --max-rows ... --max-bytes ...` marker, and merges `vscode-kdb` namespaced cell metadata. It does not execute.
 
-The normal Python Jupyter controller does not advertise q and will not Run a q-language cell. Keep the marker, use **KX: Restore Notebook Cell Language** to return selected code cells to the notebook default/Python language, then use the notebook's normal Run action. IPython invokes the registered `%%q` helper. Kernel selection may perform the language normalization automatically.
-
-If a q-language cell has no marker, use its **Prepare for Python kernel** status action first. This action is for a selected Python controller and is hidden under **KX q (Direct IPC)**. The direct controller rejects a leading `%%q`; remove it and run the complete ordinary q cell, or select the Python controller.
+Choose one route per cell. For extension-managed Direct IPC, keep the durable cell q-language, remove `%%q`, select its saved KX target, and use **Run q Cell (KX)**. For the released `kx-notebook==0.1.0` companion, create or keep a Python-language cell, type `%%q` as its first line, and use normal Jupyter Run. Do not repeatedly switch one Direct IPC cell between q and Python. The Tag/Prepare actions are editing aids and are not required by the released companion.
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.8 or the matching `kx_notebook` 0.2.8 helper. Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
+The renderer accepts only `application/vnd.kx.result+json` version 1 within its strict schema and safety limits. Rerun with KX for VS Code 0.2.8 or released `kx-notebook==0.1.0` (`import kx_notebook`). Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and oversized payloads are rejected rather than partially trusted.
 
 Direct IPC output from the mixed runner or optional controller includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. Static fallbacks do not preserve interactive notebook behavior.
 
@@ -218,7 +222,7 @@ Chart configuration and zoom made only in the VS Code renderer are session state
 Check the selected notebook controller.
 
 - **KX q (Direct IPC)** uses the active profile's existing extension client and namespace. Mixed-mode **Run q Cell (KX)** uses the notebook's explicit q target. Neither creates a connection per cell, and q assignments persist across cells that resolve to the same profile.
-- A Python controller plus `%%q` uses only its configured Python-kernel evaluator or explicitly enabled PyKX object. It does not borrow the extension client, and helper output never receives a Direct IPC live-result identity. A user callback may independently target the same server, but that is not extension-managed state sharing.
+- A Python controller plus `%%q` uses the companion's Python-process-owned direct IPC connection or an explicitly selected profile, callback, PyKX evaluator, or loopback broker. It does not borrow the extension client, and companion output never receives an extension live-result identity or output binding. An independent evaluator may target the same server, but that is not extension-managed state sharing.
 
 Choose the intended route explicitly. KX never intercepts Python-controller Run; the q-cell action is a separate visible gesture.
 
@@ -238,7 +242,7 @@ Maintainers can run the direct live smoke path when a local q executable is avai
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook cell selection/language/default/marker/metadata and renderer-message contracts, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, grammar, source, and manifest guards. `npm run test:extension-host` adds scoped non-visual activation, isolated multi-profile configuration/active selection, and real notebook language conversion/restoration. It does not automate the connection webview, notebook toolbar/status/kernel selector, target QuickPick, or q execution. The Python helper has a separate isolated `uv`/`unittest` suite; no standalone visual UI E2E is claimed.
+Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. The normal test harness includes deterministic notebook cell selection/language/default/marker/metadata and renderer-message contracts, connection-test, migration parser/fake configuration-provider/SecretStorage, qText, chart-reset, tree/history, grammar, source, and manifest guards. `npm run test:notebook-cross` installs exactly `kx-notebook==0.1.0`, imports `kx_notebook`, and validates its emitted version-1 contract. `npm run test:extension-host` adds scoped non-visual activation, isolated multi-profile configuration/active selection, and real q-language/KX metadata persistence through save, close, and reopen. It does not automate the connection webview, notebook toolbar/status/kernel selector, or target QuickPick. `npm run test:notebook-results-visual` separately starts real q in an isolated VS Code + Xvfb session and keeps 12 validated screenshots covering light/dark table/chart, visible/hidden legends, readable dark axes, selector/Settings containment, opt-in qText, tracked-file reopen, live-full state, and all chart families. This visual acceptance is local Linux Extension Host/Xvfb plus loopback q only. Remote and devcontainer acceptance were not run; the Docker daemon is unavailable, so Docker-backed acceptance is blocked. The repository-local Python compatibility fixtures retain a separate isolated `uv`/`unittest` suite.
 
 ## Generated docs drift
 

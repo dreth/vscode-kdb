@@ -844,7 +844,20 @@ async function boundaryCases(ctx) {
     area: 'spreadsheet application rendering',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The fixture checks OOXML ZIP structure and limits; no Excel or LibreOffice GUI is available.',
+    rationale: 'The gate proves OOXML ZIP structure and limits but no Excel/LibreOffice GUI application was available for visual rendering.',
+    signoff: 'Open representative exports in supported spreadsheet applications and record data, escaping, dimensions, and limits.',
+  });
+
+  await ctx.case({
+    id: 'marketplace-package-publication',
+    area: 'VSIX install and Marketplace publication',
+    mode: 'boundary',
+    expectedStatus: 'NOT_TESTABLE_HERE',
+    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.13 archive inventory and hashes must be verified separately by the release gate.',
+    signoff: 'Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.',
+  }, t => {
+    t.equal(standalone.packageJson.version, '0.2.13');
+    t.equal(reference.packageJson.version, '0.3.20');
   });
 
   await ctx.case({

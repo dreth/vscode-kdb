@@ -4,6 +4,22 @@ KX for VS Code owns its direct q IPC connections. They appear in the **KX Connec
 
 Every valid distinct profile is shown immediately after a resolved save, even if VS Code's effective configuration snapshot propagates later. The active profile has a star and uppercase `ACTIVE` label. Click a connection item, use its inline/context **Set Active Connection** action, or run **KX: Set Active Connection** from the Command Palette. Removing the active profile leaves no active selection; KX never silently promotes the first remaining row. Rejected settings or secret writes stay in the form, also produce a visible VS Code error, and refresh the tree without reporting success. Passwordless profiles do not depend on SecretStorage; profiles with passwords retain transactional SecretStorage safety.
 
+## Settings scopes and precedence
+
+`vscode-kdb.connections` accepts explicit arrays in User, Workspace, and Workspace Folder settings, including `.vscode/settings.json` supplied by a project or devcontainer. KX merges them by stable connection ID with deterministic `Workspace Folder > Workspace > User` precedence. A stale User definition therefore cannot override an explicit project definition of the same ID.
+
+Same-name profiles with different IDs remain distinct; tree rows and pickers include endpoint and owning scope so the user does not silently select the wrong endpoint. If sibling workspace folders define the same stable ID with different endpoints, KX fails closed: it omits that ambiguous ID and shows a conflict item instead of choosing one folder arbitrarily.
+
+The form's **Save profile in** selector controls ownership:
+
+- User is shared across projects in the current VS Code environment and is Settings Sync eligible where VS Code allows ordinary user settings.
+- Workspace is stored with the workspace/project and is the default for a new profile when a workspace is open.
+- Workspace Folder is available for each folder in a multi-root workspace.
+
+Editing writes back to the current owner unless the selector is changed, which explicitly moves the profile. Workspace/project profiles survive Remote or Dev Container recreation because the metadata lives with the project; a remote/container User setting is environment-specific and is not a durable project substitute.
+
+Only safe metadata participates in settings and possible Settings Sync. Passwords remain in VS Code SecretStorage, never enter User/Workspace/Folder settings or source control, and never sync. SecretStorage is environment-specific, so a password may need to be entered again in each local, remote, or container environment.
+
 ## Connection fields
 
 | Field | Use |
@@ -92,7 +108,7 @@ Choose the visible **Test Connection** button to validate and test the current u
 
 Test status is announced and identifies the `validation`, `connect`, `handshake`, `namespace`, `query`, or `cancel` phase with the safe direct host/port only. Starting another test cancels the older one. Save remains available during a test and cancels that test before normal persistence; Cancel, Escape, and closing the panel also cancel and close the temporary transport. Late responses from superseded or closed tests are ignored.
 
-When editing, **Delete Connection** is also available. It asks for explicit confirmation through a modal VS Code notification in the extension host, not browser `confirm`. Removing a connection also removes its secret.
+When editing, **Delete Connection** is also available. It asks for explicit confirmation through a modal VS Code notification in the extension host, not browser `confirm`. Removing the last definition of a stable ID removes its secret; removing a more-specific override retains the secret when a lower-scope profile with that ID becomes effective.
 
 ### Password edits
 
@@ -104,7 +120,7 @@ A stored password is never read back into or reflected by the webview. On Edit, 
 
 The same rules apply to testing: a blank edit can use the saved secret only when the extension host retrieves it from SecretStorage, and status discloses only that a saved secret was used. A new password remains in memory for the test; Clear means do not use the saved secret. No password is reflected into the webview, logs, settings, history, or test status.
 
-Connection changes are serialized and use rollback handling so a rejected settings or secret write does not intentionally leave half-written state. A resolved application/global `WorkspaceConfiguration.update` or active-profile `Memento.update` is success; KX does not reject or roll back solely because a same-turn configuration read is still stale. Immediate optimistic state supports following add/edit/remove operations while propagation catches up, then reconciles with the effective application setting. An external value causally observed after KX's target, or outside the outstanding acknowledgement ledger, supersedes optimistic state immediately.
+Connection changes are serialized and use rollback handling so a rejected settings or secret write does not intentionally leave half-written state. A resolved scoped `WorkspaceConfiguration.update` or active-profile `Memento.update` is success; KX does not reject or roll back solely because a same-turn configuration read is still stale. Immediate optimistic state supports following add/edit/remove/move operations while propagation catches up, then reconciles the merged scoped configuration. An external value causally observed after KX's target, or outside the outstanding acknowledgement ledger, supersedes optimistic state immediately.
 
 A value exposed before KX's target is observed—or identical to an outstanding write—is causally ambiguous. After five seconds reads yield to effective VS Code configuration, but KX retains the ordered acknowledgement ledger so a later mutation cannot erase a newer resolved write. If the effective list differs from the last saved list, add/edit/remove pauses until that last value appears. If it never appears, run **Developer: Reload Window**; the new Extension Host starts only from persisted VS Code configuration. A validation error, Cancel, or webview disposal does not modify the saved profile or active client; reopen Edit to try again. Each panel accepts only its own session token and ignores stale messages after disposal.
 
@@ -132,13 +148,13 @@ The Python-first mixed notebook runner uses this same connection manager without
 
 Mixed-notebook **Run q Cell (KX)** persists only safe profile ID/name and resolves that stable ID against current store data on every run. Editing the same profile's host or port therefore routes the next run to the new endpoint; the manager disconnects/reconnects a stale runtime client as needed. Active/global profile changes do not override the notebook target. An unselected, missing, or removed target prompts explicitly and never falls through to the first or active profile.
 
-The optional **KX q (Direct IPC)** controller uses the active profile only when `vscode-kdb.notebook.enableDirectController` is enabled and the controller is selected. It is disabled and unregistered by default, so KX is absent from the kernel candidates while mixed Make/Target/Run remains available. The Python `kx_notebook` / `%%q` helper is separate: it calls only the evaluator configured inside that Python kernel, and optional PyKX uses that kernel's existing object. A first-party direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
+The optional **KX q (Direct IPC)** controller uses the active profile only when `vscode-kdb.notebook.enableDirectController` is enabled and the controller is selected. It is disabled and unregistered by default, so KX is absent from the kernel candidates while mixed Make/Target/Run remains available. The separately installed `kx-notebook==0.1.0` / `%%q` companion is also separate: its built-in direct IPC connection, profiles, callback, optional PyKX, or loopback broker belong to that Python process and never borrow this extension's profiles, client, live record, or output binding. A first-party direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
 
 Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection, including a notebook run that resolves the same stable target ID.
 
 ## Storage and secrets
 
-Safe metadata is stored in the application-scoped global user setting `vscode-kdb.connections`. KX reads VS Code's effective application configuration and writes with `ConfigurationTarget.Global`:
+Safe metadata is stored in `vscode-kdb.connections` at the profile's User, Workspace, or Workspace Folder owner. KX inspects explicit values at all three levels, merges them by stable-ID precedence, and writes only the selected owner:
 
 - generated connection ID;
 - display name;
@@ -147,7 +163,7 @@ Safe metadata is stored in the application-scoped global user setting `vscode-kd
 - username; and
 - optional `connectTimeoutMs` and `queryTimeoutMs` overrides.
 
-Passwords and authentication secrets are not written into that setting. Each connection's secret is stored under an extension-specific key in VS Code `SecretStorage`, which delegates at-rest protection to VS Code and the operating system.
+Passwords and authentication secrets are not written into that setting. Each connection's secret is stored under an extension-specific key in VS Code `SecretStorage`, which delegates at-rest protection to VS Code and the operating system. These secrets do not participate in Settings Sync and may require re-entry in another environment. Removing an override keeps the secret if a lower-scope profile with the same stable ID becomes visible; removing the last definition removes it.
 
 Do not add a password field to `settings.json`. Do not paste credentials into logs, issue reports, or example queries.
 

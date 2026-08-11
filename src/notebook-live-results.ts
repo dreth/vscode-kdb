@@ -9,21 +9,29 @@ import {
 } from './charting';
 import {
   ArrayDisplayFormat,
+  CellRange,
   CellTextOptions,
   ColumnarPanelResult,
+  TextExportFormat,
   applyColumnarRowOrder,
+  cellValueToBoundedText,
   createColumnarPanelResult,
+  kxResultJsonCharacterLength,
+  kxResultJsonStringCharacterLength,
+  rowIndexColumnName,
   sortedColumnarRowOrder,
 } from './kx-results';
 import {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
 } from './notebook-message';
+import { widestDisplayedColumnTextLengthsAsync } from './column-sizing';
 import {
   QPanelResult,
   QResultDisplayOptions,
   QValue,
   qValueToColumnarPanel,
+  qValueToQText,
 } from './q-ipc';
 
 export const MAX_LIVE_NOTEBOOK_RESULTS = 512;
@@ -74,6 +82,7 @@ export interface LiveNotebookSliceRequest {
   endRow: number;
   startColumn: number;
   endColumn: number;
+  columnIndexes?: number[];
   sortColumn?: string;
   sortDirection?: 'asc' | 'desc';
 }
@@ -105,26 +114,47 @@ export interface LiveNotebookChartRequest {
   lowColumn?: string;
   closeColumn?: string;
   maxPoints: number;
+  minPoints?: number;
   maxSourceRows?: number;
+  xMin?: number;
+  xMax?: number;
 }
 
-export interface LiveNotebookCopyRequest {
+export interface LiveNotebookRangeRequest {
   startRow: number;
   endRow: number;
   startColumn: number;
   endColumn: number;
-  format: 'tsv' | 'csv';
-  includeHeaders: boolean;
-  includeRowIndex: boolean;
+  columnIndexes?: number[];
   sortColumn?: string;
   sortDirection?: 'asc' | 'desc';
+}
+
+export interface LiveNotebookCopyRequest extends LiveNotebookRangeRequest {
+  format: TextExportFormat;
+  includeHeaders: boolean;
+  includeRowIndex: boolean;
+}
+
+export interface LiveNotebookResultRange {
+  table: ColumnarPanelResult;
+  range: CellRange;
 }
 
 interface LiveNotebookRecord extends LiveNotebookResultRegistration {
   id: string;
   createdAt: number;
+  staged?: boolean;
   viewKey?: string;
   converted?: QPanelResult;
+  columnTextLengthCache?: {
+    key: string;
+    lengths: number[];
+  };
+  columnTextLengthScan?: {
+    key: string;
+    promise?: Promise<number[] | undefined>;
+  };
   sortOrders: Map<string, number[]>;
 }
 
@@ -136,6 +166,12 @@ export class LiveNotebookResultStore {
     private readonly maxEntries = MAX_LIVE_NOTEBOOK_RESULTS,
     private readonly idFactory: () => string = () => crypto.randomBytes(24).toString('hex')
   ) {}
+
+  public cancelColumnTextLengthScans(): void {
+    this.records.forEach(record => {
+      record.columnTextLengthScan = undefined;
+    });
+  }
 
   public register(registration: LiveNotebookResultRegistration): string {
     this.removeCell(registration.notebookUri, registration.cellUri);
@@ -150,6 +186,7 @@ export class LiveNotebookResultStore {
       ...registration,
       id,
       createdAt: Date.now(),
+      staged: true,
       sortOrders: new Map<string, number[]>(),
     });
     return id;
@@ -160,6 +197,26 @@ export class LiveNotebookResultStore {
       throw new Error('Live KX notebook result identifier is invalid.');
     }
     this.bind(id, registration);
+  }
+
+  public bindStagedOutput(
+    id: string,
+    notebookUri: string,
+    cellUri: string
+  ): boolean {
+    const record = this.records.get(id);
+    if (!record?.staged || record.notebookUri !== notebookUri) {
+      return false;
+    }
+    this.bind(id, {
+      notebookUri,
+      cellUri,
+      query: record.query,
+      connectionName: record.connectionName,
+      elapsedMs: record.elapsedMs,
+      value: record.value,
+    });
+    return true;
   }
 
   public remove(id: string, notebookUri: string): void {
@@ -198,16 +255,17 @@ export class LiveNotebookResultStore {
     this.cellResults.clear();
   }
 
-  public has(id: string, notebookUri: string): boolean {
-    return this.record(id, notebookUri) !== undefined;
+  public has(id: string, notebookUri: string, cellUri?: string): boolean {
+    return !!this.record(id, notebookUri, cellUri);
   }
 
   public tableColumns(
     id: string,
     notebookUri: string,
-    options: LiveNotebookDisplayOptions = {}
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
   ): string[] | undefined {
-    const record = this.record(id, notebookUri);
+    const record = this.record(id, notebookUri, cellUri);
     if (!record) {
       return undefined;
     }
@@ -218,9 +276,10 @@ export class LiveNotebookResultStore {
   public view(
     id: string,
     notebookUri: string,
-    options: LiveNotebookDisplayOptions = {}
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
   ): LiveNotebookResultView | undefined {
-    const record = this.record(id, notebookUri);
+    const record = this.record(id, notebookUri, cellUri);
     if (!record) {
       return undefined;
     }
@@ -259,13 +318,14 @@ export class LiveNotebookResultStore {
     };
   }
 
-  public slice(
+  public async columnTextLengths(
     id: string,
     notebookUri: string,
-    request: LiveNotebookSliceRequest,
-    options: LiveNotebookDisplayOptions = {}
-  ): LiveNotebookSlice | undefined {
-    const record = this.record(id, notebookUri);
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string,
+    maximumColumns = Number.MAX_SAFE_INTEGER
+  ): Promise<number[] | undefined> {
+    const record = this.record(id, notebookUri, cellUri);
     if (!record) {
       return undefined;
     }
@@ -273,7 +333,86 @@ export class LiveNotebookResultStore {
     if (converted.mode !== 'grid') {
       return undefined;
     }
-    const table = sortedTable(record, converted.result, request, options);
+    const columnLimit = Math.min(
+      converted.result.columns.length,
+      Math.max(0, Math.floor(Number(maximumColumns) || 0))
+    );
+    const key =
+      `${record.viewKey || ''}\0${options.arrayDisplayFormat || ''}\0${columnLimit}`;
+    if (record.columnTextLengthCache?.key === key) {
+      return record.columnTextLengthCache.lengths.slice();
+    }
+    const pending = record.columnTextLengthScan;
+    if (pending?.key === key && pending.promise) {
+      const lengths = await pending.promise;
+      return lengths?.slice();
+    }
+    const scan: NonNullable<LiveNotebookRecord['columnTextLengthScan']> = { key };
+    record.columnTextLengthScan = scan;
+    const scanTable = columnLimit === converted.result.columns.length
+      ? converted.result
+      : createColumnarPanelResult(
+        converted.result.columns.slice(0, columnLimit),
+        converted.result.rowCount,
+        (row, column) => converted.result.cellValue(row, column),
+        converted.result.columnTypes?.slice(0, columnLimit)
+      );
+    scan.promise = widestDisplayedColumnTextLengthsAsync(
+      scanTable,
+      { arrayDisplayFormat: options.arrayDisplayFormat },
+      {
+        continueScanning: () =>
+          this.records.get(id) === record &&
+          record.columnTextLengthScan === scan,
+      }
+    );
+    try {
+      const lengths = await scan.promise;
+      if (!lengths ||
+        this.records.get(id) !== record ||
+        record.columnTextLengthScan !== scan) {
+        return undefined;
+      }
+      record.columnTextLengthCache = { key, lengths };
+      return lengths.slice();
+    } finally {
+      if (record.columnTextLengthScan === scan) {
+        record.columnTextLengthScan = undefined;
+      }
+    }
+  }
+
+  public fullText(
+    id: string,
+    notebookUri: string,
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
+  ): string | undefined {
+    const record = this.record(id, notebookUri, cellUri);
+    if (!record || this.converted(record, options).mode !== 'text') {
+      return undefined;
+    }
+    return qValueToQText(record.value, { maxChars: Number.MAX_SAFE_INTEGER });
+  }
+
+  public slice(
+    id: string,
+    notebookUri: string,
+    request: LiveNotebookSliceRequest,
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
+  ): LiveNotebookSlice | undefined {
+    const record = this.record(id, notebookUri, cellUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    if (converted.mode !== 'grid') {
+      return undefined;
+    }
+    const sorted = sortedTable(record, converted.result, request, options);
+    const requestedColumnIndexes = liveNotebookColumnIndexes(sorted, request);
+    const table = columnSelectionTable(sorted, requestedColumnIndexes);
     if (table.rowCount === 0 || table.columns.length === 0) {
       return {
         startRow: 0,
@@ -286,8 +425,12 @@ export class LiveNotebookResultStore {
 
     const startRow = boundedIndex(request.startRow, table.rowCount - 1);
     const requestedEndRow = boundedIndex(request.endRow, table.rowCount - 1);
-    const startColumn = boundedIndex(request.startColumn, table.columns.length - 1);
-    const requestedEndColumn = boundedIndex(request.endColumn, table.columns.length - 1);
+    const startColumn = request.columnIndexes
+      ? 0
+      : boundedIndex(request.startColumn, table.columns.length - 1);
+    const requestedEndColumn = request.columnIndexes
+      ? table.columns.length - 1
+      : boundedIndex(request.endColumn, table.columns.length - 1);
     const rowCount = Math.min(
       MAX_LIVE_NOTEBOOK_SLICE_ROWS,
       Math.max(1, requestedEndRow - startRow + 1)
@@ -334,7 +477,14 @@ export class LiveNotebookResultStore {
         fairCellLimit
       )!;
     }
-    return { startRow, endRow, startColumn, endColumn, cells };
+    const responseStartColumn = request.columnIndexes ? request.startColumn : startColumn;
+    return {
+      startRow,
+      endRow,
+      startColumn: responseStartColumn,
+      endColumn: responseStartColumn + columnCount - 1,
+      cells,
+    };
   }
 
   public search(
@@ -342,9 +492,13 @@ export class LiveNotebookResultStore {
     notebookUri: string,
     query: string,
     options: LiveNotebookDisplayOptions = {},
-    sort?: Pick<LiveNotebookSliceRequest, 'sortColumn' | 'sortDirection'>
+    request?: Pick<
+      LiveNotebookSliceRequest,
+      'sortColumn' | 'sortDirection' | 'columnIndexes'
+    >,
+    cellUri?: string
   ): LiveNotebookSearchResult | undefined {
-    const record = this.record(id, notebookUri);
+    const record = this.record(id, notebookUri, cellUri);
     if (!record) {
       return undefined;
     }
@@ -352,9 +506,10 @@ export class LiveNotebookResultStore {
     if (converted.mode !== 'grid') {
       return undefined;
     }
-    const table = sortedTable(record, converted.result, {
-      ...sort,
-    }, options);
+    const sorted = sortedTable(record, converted.result, { ...request }, options);
+    const table = request?.columnIndexes
+      ? columnSelectionTable(sorted, validColumnIndexes(request.columnIndexes, sorted.columns.length))
+      : sorted;
     const needle = boundedSearchText(query).toLocaleLowerCase();
     if (!needle) {
       return { matches: [], totalScanned: 0, scannedCells: 0, capped: false, partial: false };
@@ -365,12 +520,19 @@ export class LiveNotebookResultStore {
     let totalScanned = 0;
     let scannedCells = 0;
     let partial = false;
+    let truncatedCells = false;
     const textOptions = cellTextOptions(options);
     outer: for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex++) {
       totalScanned += 1;
       for (let columnIndex = 0; columnIndex < table.columns.length; columnIndex++) {
         scannedCells += 1;
-        if (table.cellText(rowIndex, columnIndex, textOptions).toLocaleLowerCase().includes(needle)) {
+        const rendered = cellValueToBoundedText(
+          table.cellValue(rowIndex, columnIndex),
+          MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS,
+          textOptions
+        );
+        truncatedCells = truncatedCells || rendered.truncated;
+        if (rendered.text.toLocaleLowerCase().includes(needle)) {
           matches.push(rowIndex);
           if (matches.length >= MAX_LIVE_NOTEBOOK_SEARCH_MATCHES) {
             partial = rowIndex + 1 < table.rowCount;
@@ -390,7 +552,7 @@ export class LiveNotebookResultStore {
       totalScanned,
       scannedCells,
       capped: matches.length >= MAX_LIVE_NOTEBOOK_SEARCH_MATCHES,
-      partial,
+      partial: partial || truncatedCells,
     };
   }
 
@@ -398,9 +560,10 @@ export class LiveNotebookResultStore {
     id: string,
     notebookUri: string,
     request: LiveNotebookChartRequest,
-    options: LiveNotebookDisplayOptions = {}
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
   ): LineChartData | undefined {
-    const view = this.view(id, notebookUri, options);
+    const view = this.view(id, notebookUri, options, cellUri);
     if (!view?.table) {
       return undefined;
     }
@@ -416,9 +579,14 @@ export class LiveNotebookResultStore {
       highColumn: request.highColumn,
       lowColumn: request.lowColumn,
       closeColumn: request.closeColumn,
+      xMin: request.xMin,
+      xMax: request.xMax,
       width: 720,
       maxSourceRows: safePositiveInteger(request.maxSourceRows, CHART_MAX_SOURCE_ROWS),
       maxSampledPoints: safePositiveInteger(request.maxPoints, 2_500),
+      minSampledPoints: request.xMin !== undefined && request.xMax !== undefined
+        ? safePositiveInteger(request.minPoints, 1)
+        : undefined,
     });
   }
 
@@ -426,26 +594,20 @@ export class LiveNotebookResultStore {
     id: string,
     notebookUri: string,
     request: LiveNotebookCopyRequest,
-    options: LiveNotebookDisplayOptions = {}
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
   ): string | undefined {
-    const record = this.record(id, notebookUri);
-    if (!record) {
+    const selected = this.resultRange(id, notebookUri, request, options, cellUri);
+    if (!selected) {
       return undefined;
     }
-    const converted = this.converted(record, options);
-    if (converted.mode !== 'grid') {
-      return undefined;
-    }
-    const table = sortedTable(record, converted.result, request, options);
-    const startRow = boundedIndex(request.startRow, Math.max(0, table.rowCount - 1));
-    const endRow = boundedIndex(request.endRow, Math.max(0, table.rowCount - 1));
-    const startColumn = boundedIndex(request.startColumn, Math.max(0, table.columns.length - 1));
-    const endColumn = boundedIndex(request.endColumn, Math.max(0, table.columns.length - 1));
-    if (table.rowCount === 0 || table.columns.length === 0 ||
-      endRow < startRow || endColumn < startColumn) {
+    const { table, range } = selected;
+    if (table.rowCount === 0 || table.columns.length === 0) {
       return '';
     }
-    const cellCount = (endRow - startRow + 1) * (endColumn - startColumn + 1);
+    const cellCount =
+      (range.endRow - range.startRow + 1) *
+      (range.endColumn - range.startColumn + 1);
     if (cellCount > MAX_LIVE_NOTEBOOK_COPY_CELLS) {
       throw new Error(
         `Inline copy is limited to ${MAX_LIVE_NOTEBOOK_COPY_CELLS.toLocaleString()} cells.`
@@ -459,34 +621,97 @@ export class LiveNotebookResultStore {
       )
     );
     const textOptions = cellTextOptions(options);
-    const bounded = createColumnarPanelResult(
-      table.columns.map(column => boundedLiveCellText(column, fairCellLimit)),
-      table.rowCount,
-      (rowIndex, columnIndex) => boundedLiveCellText(
-        table.cellText(rowIndex, columnIndex, textOptions),
+    const structured = request.format === 'json' || request.format === 'ndjson';
+    if (structured) {
+      assertStructuredLiveCopyBounded(
+        table,
+        range,
+        request.format,
+        request.includeRowIndex,
         fairCellLimit
-      )
-    );
-    const text = bounded.toText(request.format, {
-      startRow,
-      endRow,
-      startColumn,
-      endColumn,
-    }, {
+      );
+    }
+    const copyTable = structured
+      ? table
+      : createColumnarPanelResult(
+        table.columns.map(column => boundedLiveCellText(column, fairCellLimit)),
+        table.rowCount,
+        (rowIndex, columnIndex) => {
+          const rendered = cellValueToBoundedText(
+            table.cellValue(rowIndex, columnIndex),
+            fairCellLimit,
+            textOptions
+          );
+          return boundedLiveCellText(
+            rendered.text,
+            fairCellLimit,
+            rendered.truncated
+          );
+        }
+      );
+    const text = copyTable.toText(request.format, range, {
       includeHeaders: request.includeHeaders,
       includeRowIndex: request.includeRowIndex,
+      arrayDisplayFormat: textOptions.arrayDisplayFormat,
     });
     if (text.length > MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS) {
-      throw new Error(
-        `Inline copy exceeds the ${MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS.toLocaleString()} character limit.`
-      );
+      throw liveCopyAggregateLimitError();
     }
     return text;
   }
 
-  private record(id: string, notebookUri: string): LiveNotebookRecord | undefined {
+  public resultRange(
+    id: string,
+    notebookUri: string,
+    request: LiveNotebookRangeRequest,
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
+  ): LiveNotebookResultRange | undefined {
+    const record = this.record(id, notebookUri, cellUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    if (converted.mode !== 'grid') {
+      return undefined;
+    }
+    const sorted = sortedTable(record, converted.result, request, options);
+    const indexes = request.columnIndexes || columnRangeIndexes(
+      request.startColumn,
+      request.endColumn,
+      sorted.columns.length
+    );
+    const table = columnSelectionTable(sorted, indexes);
+    const startRow = boundedIndex(request.startRow, Math.max(0, table.rowCount - 1));
+    const endRow = boundedIndex(request.endRow, Math.max(0, table.rowCount - 1));
+    if (table.rowCount === 0 || table.columns.length === 0 ||
+      endRow < startRow) {
+      return {
+        table,
+        range: { startRow: 0, endRow: -1, startColumn: 0, endColumn: -1 },
+      };
+    }
+    return {
+      table,
+      range: {
+        startRow,
+        endRow,
+        startColumn: 0,
+        endColumn: table.columns.length - 1,
+      },
+    };
+  }
+
+  private record(
+    id: string,
+    notebookUri: string,
+    cellUri?: string
+  ): LiveNotebookRecord | undefined {
     const record = this.records.get(id);
-    return record?.notebookUri === notebookUri ? record : undefined;
+    return record?.notebookUri === notebookUri &&
+      (cellUri === undefined || record.cellUri === cellUri)
+      ? record
+      : undefined;
   }
 
   private converted(
@@ -502,6 +727,8 @@ export class LiveNotebookResultStore {
     if (!record.converted || record.viewKey !== key) {
       record.converted = qValueToColumnarPanel(record.value, options);
       record.viewKey = key;
+      record.columnTextLengthCache = undefined;
+      record.columnTextLengthScan = undefined;
       record.sortOrders.clear();
     }
     return record.converted;
@@ -520,7 +747,10 @@ export class LiveNotebookResultStore {
   private bind(id: string, registration: LiveNotebookResultRegistration): void {
     const previous = this.records.get(id);
     if (previous) {
-      this.cellResults.delete(cellKey(previous.notebookUri, previous.cellUri));
+      const previousKey = cellKey(previous.notebookUri, previous.cellUri);
+      if (this.cellResults.get(previousKey) === id) {
+        this.cellResults.delete(previousKey);
+      }
     }
     const targetKey = cellKey(registration.notebookUri, registration.cellUri);
     const replacedId = this.cellResults.get(targetKey);
@@ -531,8 +761,11 @@ export class LiveNotebookResultStore {
       ...registration,
       id,
       createdAt: previous?.createdAt ?? Date.now(),
+      staged: false,
       viewKey: previous?.viewKey,
       converted: previous?.converted,
+      columnTextLengthCache: undefined,
+      columnTextLengthScan: undefined,
       sortOrders: previous?.sortOrders ?? new Map<string, number[]>(),
     });
     this.cellResults.set(targetKey, id);
@@ -597,6 +830,55 @@ function sortedTable(
   return applyColumnarRowOrder(table, order);
 }
 
+function liveNotebookColumnIndexes(
+  table: ColumnarPanelResult,
+  request: Pick<LiveNotebookSliceRequest, 'columnIndexes'>
+): number[] {
+  return request.columnIndexes
+    ? validColumnIndexes(request.columnIndexes, table.columns.length)
+    : table.columns.map((_column, index) => index);
+}
+
+function columnRangeIndexes(start: number, end: number, columnCount: number): number[] {
+  if (columnCount <= 0) {
+    return [];
+  }
+  const first = boundedIndex(start, columnCount - 1);
+  const last = boundedIndex(end, columnCount - 1);
+  const result: number[] = [];
+  for (let index = first; index <= last; index += 1) {
+    result.push(index);
+  }
+  return result;
+}
+
+function validColumnIndexes(indexes: readonly number[], columnCount: number): number[] {
+  const seen = new Set<number>();
+  return indexes.filter(index => {
+    const valid = Number.isSafeInteger(index) && index >= 0 &&
+      index < columnCount && !seen.has(index);
+    if (valid) {
+      seen.add(index);
+    }
+    return valid;
+  });
+}
+
+function columnSelectionTable(
+  table: ColumnarPanelResult,
+  rawIndexes: readonly number[]
+): ColumnarPanelResult {
+  const indexes = validColumnIndexes(rawIndexes, table.columns.length);
+  return createColumnarPanelResult(
+    indexes.map(index => table.columns[index]),
+    table.rowCount,
+    (rowIndex, columnIndex) => table.cellValue(rowIndex, indexes[columnIndex]),
+    table.columnTypes
+      ? indexes.map(index => table.columnTypes![index])
+      : undefined
+  );
+}
+
 function inlineChartSource(table: ColumnarPanelResult): ColumnarPanelResult {
   if (table.columns.length <= MAX_NOTEBOOK_LIVE_COLUMNS) {
     return table;
@@ -605,7 +887,8 @@ function inlineChartSource(table: ColumnarPanelResult): ColumnarPanelResult {
   return createColumnarPanelResult(
     columns,
     table.rowCount,
-    (rowIndex, columnIndex) => table.cellValue(rowIndex, columnIndex)
+    (rowIndex, columnIndex) => table.cellValue(rowIndex, columnIndex),
+    table.columnTypes?.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS)
   );
 }
 
@@ -647,9 +930,15 @@ function liveSliceCells(
   for (let rowIndex = startRow; rowIndex <= endRow; rowIndex++) {
     const row: string[] = [];
     for (let columnIndex = startColumn; columnIndex <= endColumn; columnIndex++) {
+      const rendered = cellValueToBoundedText(
+        table.cellValue(rowIndex, columnIndex),
+        cellLimit,
+        textOptions
+      );
       const value = boundedLiveCellText(
-        table.cellText(rowIndex, columnIndex, textOptions),
-        cellLimit
+        rendered.text,
+        cellLimit,
+        rendered.truncated
       );
       textChars += value.length;
       if (aggregateLimit !== undefined && textChars > aggregateLimit) {
@@ -662,9 +951,13 @@ function liveSliceCells(
   return cells;
 }
 
-function boundedLiveCellText(value: string, maxChars: number): string {
+function boundedLiveCellText(
+  value: string,
+  maxChars: number,
+  truncated = false
+): string {
   const limit = Math.max(1, Math.min(MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS, Math.floor(maxChars)));
-  if (value.length <= limit) {
+  if (!truncated && value.length <= limit) {
     return value;
   }
   const suffix = '\u2026 [cell truncated; open KX Results]';
@@ -672,6 +965,148 @@ function boundedLiveCellText(value: string, maxChars: number): string {
     return suffix.slice(0, limit);
   }
   return `${value.slice(0, limit - suffix.length)}${suffix}`;
+}
+
+interface StructuredLiveCopyColumn {
+  columnIndex: number;
+  jsonKeyChars: number;
+}
+
+function assertStructuredLiveCopyBounded(
+  table: ColumnarPanelResult,
+  range: CellRange,
+  format: TextExportFormat,
+  includeRowIndex: boolean,
+  maxCellChars: number
+): void {
+  const rowCount = range.endRow - range.startRow + 1;
+  const columns = structuredLiveCopyColumns(table, range);
+  const indexKeyChars = includeRowIndex
+    ? structuredLiveCopyKeyChars(rowIndexColumnName(table.columns, range))
+    : 0;
+  const propertyCount = columns.length + (includeRowIndex ? 1 : 0);
+  let rowSyntaxChars = 2;
+  rowSyntaxChars = addStructuredLiveCopyChars(rowSyntaxChars, indexKeyChars);
+  for (const column of columns) {
+    rowSyntaxChars = addStructuredLiveCopyChars(
+      rowSyntaxChars,
+      column.jsonKeyChars
+    );
+  }
+  rowSyntaxChars = addStructuredLiveCopyChars(rowSyntaxChars, propertyCount);
+  rowSyntaxChars = addStructuredLiveCopyChars(
+    rowSyntaxChars,
+    Math.max(0, propertyCount - 1)
+  );
+
+  let aggregateChars = format === 'json' ? 2 : 0;
+  aggregateChars = addStructuredLiveCopyChars(
+    aggregateChars,
+    Math.max(0, rowCount - 1)
+  );
+  aggregateChars = addStructuredLiveCopyProduct(
+    aggregateChars,
+    rowSyntaxChars,
+    rowCount
+  );
+  if (includeRowIndex) {
+    for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+      aggregateChars = addStructuredLiveCopyChars(
+        aggregateChars,
+        String(rowIndex + 1).length
+      );
+    }
+  }
+
+  for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
+    for (const column of columns) {
+      let serializedChars: number | undefined;
+      try {
+        serializedChars = kxResultJsonCharacterLength(
+          table.cellValue(rowIndex, column.columnIndex),
+          maxCellChars
+        );
+      } catch {
+        throw new Error('Inline structured copy contains a value that cannot be serialized safely.');
+      }
+      if (serializedChars === undefined) {
+        throw new Error(
+          `Inline structured copy cell exceeds the ${maxCellChars.toLocaleString()} character limit. ` +
+          'Open KX Results to export the full value.'
+        );
+      }
+      aggregateChars = addStructuredLiveCopyChars(
+        aggregateChars,
+        serializedChars
+      );
+    }
+  }
+}
+
+function structuredLiveCopyColumns(
+  table: ColumnarPanelResult,
+  range: CellRange
+): StructuredLiveCopyColumn[] {
+  const columns: StructuredLiveCopyColumn[] = [];
+  const positions = new Map<string, number>();
+  for (let columnIndex = range.startColumn;
+    columnIndex <= range.endColumn;
+    columnIndex++) {
+    const name = table.columns[columnIndex];
+    const existing = positions.get(name);
+    if (existing !== undefined) {
+      columns[existing].columnIndex = columnIndex;
+      continue;
+    }
+    positions.set(name, columns.length);
+    columns.push({
+      columnIndex,
+      jsonKeyChars: structuredLiveCopyKeyChars(name),
+    });
+  }
+  return columns;
+}
+
+function structuredLiveCopyKeyChars(value: string): number {
+  const chars = kxResultJsonStringCharacterLength(
+    value,
+    MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS
+  );
+  if (chars === undefined) {
+    throw liveCopyAggregateLimitError();
+  }
+  return chars;
+}
+
+function addStructuredLiveCopyChars(total: number, additional: number): number {
+  if (!Number.isSafeInteger(additional) ||
+    additional < 0 ||
+    additional > MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS - total) {
+    throw liveCopyAggregateLimitError();
+  }
+  return total + additional;
+}
+
+function addStructuredLiveCopyProduct(
+  total: number,
+  value: number,
+  count: number
+): number {
+  if (!Number.isSafeInteger(value) ||
+    !Number.isSafeInteger(count) ||
+    value < 0 ||
+    count < 0 ||
+    (count > 0 &&
+      value > Math.floor((MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS - total) / count))) {
+    throw liveCopyAggregateLimitError();
+  }
+  return total + value * count;
+}
+
+function liveCopyAggregateLimitError(): Error {
+  return new Error(
+    `Inline copy exceeds the ${MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS.toLocaleString()} character limit.`
+  );
 }
 
 function safePositiveInteger(value: unknown, fallback: number): number {

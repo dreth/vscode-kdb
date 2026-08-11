@@ -1,6 +1,8 @@
 'use strict';
 
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const vscode = require('vscode');
 
 const EXTENSION_ID = 'DanielAlonso.vscode-kdb';
@@ -8,6 +10,7 @@ const CONNECTIONS_SETTING = 'connections';
 const SET_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
 const RESTORE_LANGUAGE_COMMAND = 'vscode-kdb.restoreNotebookCellLanguage';
 const SET_ACTIVE_CONNECTION_COMMAND = 'vscode-kdb.setActiveConnection';
+const SELECT_QUERY_CONNECTION_COMMAND = 'vscode-kdb.selectQueryConnection';
 const DIRECT_CONTROLLER_SETTING = 'enableDirectController';
 
 function kxExtension() {
@@ -48,6 +51,19 @@ async function waitFor(label, predicate, timeoutMs = 5000) {
     await new Promise(resolve => setTimeout(resolve, 25));
   }
   assert.fail(`timed out waiting for ${label}`);
+}
+
+async function closeNotebookTab(uri) {
+  const uriText = uri.toString();
+  const tab = vscode.window.tabGroups.all
+    .flatMap(group => group.tabs)
+    .find(candidate => candidate.input?.uri?.toString() === uriText);
+  assert(tab, `open notebook tab ${uriText} was not found`);
+  assert.strictEqual(
+    await vscode.window.tabGroups.close(tab),
+    true,
+    `VS Code refused to close notebook tab ${uriText}`
+  );
 }
 
 async function exerciseConnectionStore(testApi) {
@@ -292,6 +308,166 @@ async function exerciseNotebookCellLanguageCommands() {
     'Restore Cell Language must use the Jupyter notebook default language'
   );
   assert.strictEqual(notebook.cellAt(0).document.getText(), source);
+  await vscode.commands.executeCommand('workbench.action.revertAndCloseActiveEditor');
+  await waitFor(
+    'language-command notebook close',
+    () => !vscode.workspace.notebookDocuments.includes(notebook)
+  );
+}
+
+async function exerciseDurableMixedNotebook() {
+  const fixturePath = path.join(
+    path.resolve(__dirname, '..', '..'),
+    '.vscode-test',
+    'e2e',
+    'durable-mixed.ipynb'
+  );
+  const reopenedPath = path.join(
+    path.dirname(fixturePath),
+    'durable-mixed-reopened.ipynb'
+  );
+  const fixture = {
+    cells: [
+      {
+        cell_type: 'code',
+        execution_count: null,
+        metadata: {},
+        outputs: [],
+        source: ['answer:42\n', 'show answer'],
+      },
+      {
+        cell_type: 'code',
+        execution_count: null,
+        metadata: {},
+        outputs: [],
+        source: ['python_answer = 6 * 7\n', 'print(python_answer)'],
+      },
+    ],
+    metadata: {
+      kernelspec: {
+        display_name: 'Python 3',
+        language: 'python',
+        name: 'python3',
+      },
+      language_info: {
+        name: 'python',
+      },
+    },
+    nbformat: 4,
+    nbformat_minor: 5,
+  };
+  fs.mkdirSync(path.dirname(fixturePath), { recursive: true });
+  fs.writeFileSync(fixturePath, `${JSON.stringify(fixture, null, 2)}\n`, 'utf8');
+  let uri = vscode.Uri.file(fixturePath);
+  let notebook;
+  try {
+    notebook = await vscode.workspace.openNotebookDocument(uri);
+    const editor = await vscode.window.showNotebookDocument(notebook, {
+      preserveFocus: false,
+      preview: false,
+    });
+    editor.selections = [new vscode.NotebookRange(0, 1)];
+    await vscode.commands.executeCommand(SET_Q_COMMAND, notebook.cellAt(0));
+    const targetMetadata = {
+      ...notebook.metadata,
+      metadata: {
+        ...notebook.metadata.metadata,
+        'vscode-kdb': {
+          version: 1,
+          qTarget: {
+            id: 'durable-mixed-target',
+            name: 'Durable mixed target',
+          },
+        },
+      },
+    };
+    const metadataEdit = new vscode.WorkspaceEdit();
+    metadataEdit.set(notebook.uri, [
+      vscode.NotebookEdit.updateNotebookMetadata(targetMetadata),
+    ]);
+    assert.strictEqual(
+      await vscode.workspace.applyEdit(metadataEdit),
+      true,
+      'saving the durable q target metadata failed'
+    );
+
+    assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
+    assert.strictEqual(notebook.cellAt(0).document.getText(), 'answer:42\nshow answer');
+    assert.deepStrictEqual(notebook.metadata.metadata['vscode-kdb'], {
+      version: 1,
+      qTarget: {
+        id: 'durable-mixed-target',
+        name: 'Durable mixed target',
+      },
+    });
+    assert.strictEqual(notebook.cellAt(1).document.languageId, 'python');
+    assert.strictEqual(
+      notebook.cellAt(1).document.getText(),
+      'python_answer = 6 * 7\nprint(python_answer)'
+    );
+    assert.strictEqual(notebook.metadata.metadata.kernelspec.language, 'python');
+    assert.strictEqual(notebook.metadata.metadata.language_info.name, 'python');
+    assert.deepStrictEqual(
+      vscode.languages.getDiagnostics(notebook.cellAt(0).document.uri),
+      [],
+      'a durable q-language cell must not receive Python diagnostics'
+    );
+
+    assert.strictEqual(await notebook.save(), true, 'mixed notebook save failed');
+    const firstNotebook = notebook;
+    await closeNotebookTab(uri);
+    await vscode.commands.executeCommand('workbench.action.closeAllEditors');
+    await waitFor(
+      'mixed notebook editor close before reopen',
+      () => !vscode.window.tabGroups.all
+        .flatMap(group => group.tabs)
+        .some(tab => tab.input?.uri?.toString() === uri.toString())
+    );
+
+    fs.renameSync(fixturePath, reopenedPath);
+    uri = vscode.Uri.file(reopenedPath);
+    notebook = await vscode.workspace.openNotebookDocument(uri);
+    assert.notStrictEqual(
+      notebook,
+      firstNotebook,
+      'reopened path must be deserialized as a new notebook document'
+    );
+    await vscode.window.showNotebookDocument(notebook, {
+      preserveFocus: false,
+      preview: false,
+    });
+    const qCell = notebook.cellAt(0);
+    const pythonCell = notebook.cellAt(1);
+    assert.strictEqual(qCell.document.languageId, 'q');
+    assert.strictEqual(qCell.document.getText(), 'answer:42\nshow answer');
+    assert.deepStrictEqual(qCell.metadata.metadata.vscode, {
+      languageId: 'q',
+    });
+    assert.deepStrictEqual(notebook.metadata.metadata['vscode-kdb'], {
+      version: 1,
+      qTarget: {
+        id: 'durable-mixed-target',
+        name: 'Durable mixed target',
+      },
+    });
+    assert.strictEqual(pythonCell.document.languageId, 'python');
+    assert.strictEqual(
+      pythonCell.document.getText(),
+      'python_answer = 6 * 7\nprint(python_answer)'
+    );
+    assert.strictEqual(notebook.metadata.metadata.kernelspec.name, 'python3');
+    assert.strictEqual(notebook.metadata.metadata.language_info.name, 'python');
+    assert.deepStrictEqual(vscode.languages.getDiagnostics(qCell.document.uri), []);
+  } finally {
+    const openTab = vscode.window.tabGroups.all
+      .flatMap(group => group.tabs)
+      .find(tab => tab.input?.uri?.toString() === uri.toString());
+    if (openTab) {
+      await vscode.window.tabGroups.close(openTab);
+    }
+    fs.rmSync(fixturePath, { force: true });
+    fs.rmSync(reopenedPath, { force: true });
+  }
 }
 
 async function run() {
@@ -310,6 +486,7 @@ async function run() {
     SET_Q_COMMAND,
     RESTORE_LANGUAGE_COMMAND,
     SET_ACTIVE_CONNECTION_COMMAND,
+    SELECT_QUERY_CONNECTION_COMMAND,
   ]) {
     assert(commands.has(command), `activated extension must register ${command}`);
   }
@@ -317,8 +494,9 @@ async function run() {
   await exerciseConnectionStore(testApi);
   await exerciseDirectControllerLifecycle(testApi);
   await exerciseNotebookCellLanguageCommands();
+  await exerciseDurableMixedNotebook();
   console.log(
-    'KX Extension Host assertions passed: activation, real-store add/edit/remove, two-profile persistence, current notebook target resolution, active selection, default-off controller lifecycle, q conversion, and restoration.'
+    'KX Extension Host assertions passed: activation, real-store add/edit/remove, two-profile persistence, current notebook target resolution, active selection, default-off controller lifecycle, q conversion/restoration, and durable mixed-notebook reopen.'
   );
 }
 

@@ -1,5 +1,22 @@
+import * as os from 'os';
+import * as path from 'path';
 import * as vscode from 'vscode';
-import { createColumnarPanelResult } from './kx-results';
+import { KX_COLUMN_AUTO_TEXT_CHAR_LIMIT } from './column-sizing';
+import {
+  CellRange,
+  ColumnarPanelResult,
+  ExportFormat,
+  TextExportFormat,
+  createColumnarPanelResult,
+} from './kx-results';
+import {
+  chartPngBytesFromDataUrl,
+  columnarToXlsx,
+  estimateCopyExport,
+  kxResultExportFileExtension,
+  kxResultExportSaveFilters,
+  largeCopyExportConfirmationMessage,
+} from './kx-results-export';
 import {
   jupyterNotebookDefaultLanguageId,
   NotebookCellLanguageProvider,
@@ -14,21 +31,30 @@ import {
   KX_NOTEBOOK_MIME,
   MAX_NOTEBOOK_BYTE_LIMIT,
   PortableKxResult,
+  PortableKxTableResult,
+  notebookSavedPreviewNotice,
   portableCellValue,
   validatePortableKxResult,
 } from './notebook-contract';
 import {
   KxResultsPanel,
   SharedKxResultSettings,
+  resetPositionalKxResultColumnWidths,
   sharedKxResultSettings,
+  updatePositionalKxResultColumnWidth,
   updateSharedKxResultSetting,
 } from './kx-results-panel';
 import {
   LiveNotebookDisplayOptions,
   LiveNotebookResultStore,
+  MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS,
 } from './notebook-live-results';
 import {
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
+  NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
+  NotebookActionResultMessage,
   NotebookLiveChartMessage,
+  NotebookLiveColumnTextLengthsMessage,
   NotebookLiveCopyMessage,
   NotebookLiveResultMessage,
   NotebookLiveSearchMessage,
@@ -36,11 +62,14 @@ import {
   NotebookRendererMessage,
   MAX_NOTEBOOK_LIVE_COLUMNS,
   notebookRendererSettingsMessage,
+  parseNotebookLiveResultReference,
+  parseNotebookOutputBindingReference,
   parseNotebookRendererMessage,
 } from './notebook-message';
 import {
   NotebookSettings,
   hasNotebookQMarker,
+  notebookQSourceFromMagic,
   safeNotebookByteLimit,
   safeNotebookPresentation,
   safeNotebookRowLimit,
@@ -52,7 +81,10 @@ import {
   safeConnectionName,
   withNotebookQTarget,
 } from './notebook-q-target';
-import type { DirectQCellRunResult } from './notebook-controller';
+import type {
+  DirectQCellRunOptions,
+  DirectQCellRunResult,
+} from './notebook-controller';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
 export const SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
@@ -61,7 +93,13 @@ export const TAG_NOTEBOOK_CELL_AS_Q_COMMAND = 'vscode-kdb.tagNotebookCellAsQ';
 export const PREPARE_NOTEBOOK_CELL_FOR_PYTHON_COMMAND =
   'vscode-kdb.prepareNotebookCellForPythonKernel';
 export const RUN_Q_NOTEBOOK_CELL_COMMAND = 'vscode-kdb.runQNotebookCell';
+export const RUN_Q_NOTEBOOK_CELL_AND_SELECT_BELOW_COMMAND =
+  'vscode-kdb.runQNotebookCellAndSelectBelow';
+export const RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND =
+  'vscode-kdb.runQNotebookCellAndInsertBelow';
 export const SELECT_NOTEBOOK_Q_TARGET_COMMAND = 'vscode-kdb.selectNotebookQTarget';
+export const RUN_NOTEBOOK_PREVIEW_LIVE_COMMAND =
+  'vscode-kdb.runNotebookPreviewLive';
 
 const NOTEBOOK_Q_CELL_RESOURCES_CONTEXT = 'vscode-kdb.qNotebookCellResources';
 const NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT =
@@ -72,12 +110,17 @@ const NOTEBOOK_DIRECT_CONTROLLER_CONTEXT =
   'vscode-kdb.notebookDirectQControllerSelected';
 const MAX_NOTEBOOK_SCAN_CELLS = 10_000;
 const MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL = 2_000;
+const MAX_NOTEBOOK_SCAN_OUTPUTS = 2_000;
 
 export interface DirectQNotebookRunner {
   readonly onDidChangeState: vscode.Event<void>;
   isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean;
   connectionProfiles(): NotebookQTargetProfile[];
-  runCell(cell: vscode.NotebookCell, connectionId: string): Promise<DirectQCellRunResult>;
+  runCell(
+    cell: vscode.NotebookCell,
+    connectionId: string,
+    options?: DirectQCellRunOptions
+  ): Promise<DirectQCellRunResult>;
 }
 
 /** @deprecated Use DirectQNotebookRunner. */
@@ -89,6 +132,13 @@ export interface NotebookIntegrationOptions {
   directController?: DirectQNotebookRunner;
   liveResults?: LiveNotebookResultStore;
 }
+
+type LiveScopedRendererMessage = Extract<
+  NotebookRendererMessage,
+  { liveId: string; outputId: string; requestId: number }
+>;
+
+type NotebookQCellRunOutcome = DirectQCellRunResult | 'canceled' | 'controller-selected';
 
 export class NotebookIntegration implements vscode.Disposable {
   private readonly context: vscode.ExtensionContext;
@@ -135,8 +185,20 @@ export class NotebookIntegration implements vscode.Disposable {
         (cell?: vscode.NotebookCell) => this.runQCellWithKx(cell)
       ),
       vscode.commands.registerCommand(
+        'vscode-kdb.runQNotebookCellAndSelectBelow',
+        (cell?: vscode.NotebookCell) => this.runQCellWithKxAndThen(cell, 'select-below')
+      ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.runQNotebookCellAndInsertBelow',
+        (cell?: vscode.NotebookCell) => this.runQCellWithKxAndThen(cell, 'insert-below')
+      ),
+      vscode.commands.registerCommand(
         'vscode-kdb.selectNotebookQTarget',
         (cell?: vscode.NotebookCell) => this.selectNotebookQTarget(cell)
+      ),
+      vscode.commands.registerCommand(
+        'vscode-kdb.runNotebookPreviewLive',
+        (cell?: vscode.NotebookCell) => this.runNotebookPreviewLive(cell)
       ),
       vscode.commands.registerCommand('vscode-kdb.openNotebookPreviewInResults', () =>
         this.openSelectedNotebookPreview()),
@@ -157,6 +219,15 @@ export class NotebookIntegration implements vscode.Disposable {
       vscode.workspace.onDidChangeConfiguration(event => {
         if (event.affectsConfiguration('vscode-kdb.notebook') ||
           event.affectsConfiguration('vscode-kdb.results')) {
+          if (event.affectsConfiguration('vscode-kdb.results.viewer.autoFitColumns') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.autoFitMode') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.arrayDisplayFormat') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.functionDisplayStrategy') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.dictionaryDisplayStrategy') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.listDisplayStrategy') ||
+            event.affectsConfiguration('vscode-kdb.results.viewer.objectDisplayStrategy')) {
+            this.options.liveResults?.cancelColumnTextLengthScans();
+          }
           void this.messaging.postMessage(this.rendererSettingsMessage());
         }
       }),
@@ -193,15 +264,33 @@ export class NotebookIntegration implements vscode.Disposable {
       return;
     }
     if (message.type === 'openPreview') {
-      const payload = matchingNotebookOutput(event.editor.notebook, message.payload);
-      if (!payload) {
-        throw new Error('The requested preview is not present in the current notebook.');
-      }
-      this.showPreview(payload);
+      const response = await notebookActionResult(message.requestId, 'openPreview', async () => {
+        const payload = matchingNotebookOutput(
+          event.editor.notebook,
+          message.outputId,
+          message.payload
+        );
+        if (!payload) {
+          throw new Error('The requested preview is not present in the current notebook.');
+        }
+        this.showPreview(payload);
+        return 'Opened saved preview in KX Results.';
+      });
+      await this.messaging.postMessage(response, event.editor);
       return;
     }
     if (message.type === 'updateResultSetting') {
       await updateSharedKxResultSetting(message.key, message.value);
+      await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
+      return;
+    }
+    if (message.type === 'setResultColumnWidth') {
+      await updatePositionalKxResultColumnWidth(message.position, message.width);
+      await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
+      return;
+    }
+    if (message.type === 'resetResultColumnWidths') {
+      await resetPositionalKxResultColumnWidths();
       await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
       return;
     }
@@ -210,17 +299,71 @@ export class NotebookIntegration implements vscode.Disposable {
     const notebookUri = event.editor.notebook.uri.toString();
     const resultSettings = sharedKxResultSettings();
     const displayOptions = liveNotebookDisplayOptions(resultSettings);
+    let authorizedCellUri: string | undefined;
+    if (isLiveScopedRendererMessage(message)) {
+      const binding = matchingLiveNotebookOutput(
+        event.editor.notebook,
+        message.outputId,
+        message.liveId
+      );
+      const cellUri = binding?.cell.document.uri.toString();
+      const available = !!binding && !!cellUri && (
+        liveResults?.has(message.liveId, notebookUri, cellUri) ||
+        liveResults?.bindStagedOutput(message.liveId, notebookUri, cellUri)
+      );
+      if (!available || !cellUri) {
+        await this.rejectUnavailableLiveMessage(message, event.editor);
+        return;
+      }
+      authorizedCellUri = cellUri;
+    }
     if (message.type === 'requestLiveResult') {
+      const result = liveResultMessage(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        message.requestId,
+        displayOptions,
+        authorizedCellUri
+      );
       await this.messaging.postMessage(
-        liveResultMessage(
+        result,
+        event.editor
+      );
+      if (result.available &&
+        result.mode === 'table' &&
+        resultSettings.autoFitColumns &&
+        resultSettings.autoFitMode === 'wholeResult') {
+        const sizing = await liveColumnTextLengthsMessage(
           liveResults,
           notebookUri,
           message.liveId,
           message.requestId,
-          displayOptions
-        ),
-        event.editor
+          displayOptions,
+          authorizedCellUri
+        );
+        if (sizing) {
+          await this.messaging.postMessage(sizing, event.editor);
+        }
+      }
+      return;
+    }
+    if (message.type === 'requestLiveColumnTextLengths') {
+      if (!resultSettings.autoFitColumns ||
+        resultSettings.autoFitMode !== 'wholeResult') {
+        return;
+      }
+      const sizing = await liveColumnTextLengthsMessage(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        message.requestId,
+        displayOptions,
+        authorizedCellUri
       );
+      if (sizing) {
+        await this.messaging.postMessage(sizing, event.editor);
+      }
       return;
     }
     if (message.type === 'requestLiveSlice') {
@@ -229,7 +372,8 @@ export class NotebookIntegration implements vscode.Disposable {
           liveResults,
           notebookUri,
           message,
-          displayOptions
+          displayOptions,
+          authorizedCellUri
         ),
         event.editor
       );
@@ -241,7 +385,8 @@ export class NotebookIntegration implements vscode.Disposable {
           liveResults,
           notebookUri,
           message,
-          displayOptions
+          displayOptions,
+          authorizedCellUri
         ),
         event.editor
       );
@@ -254,7 +399,8 @@ export class NotebookIntegration implements vscode.Disposable {
           notebookUri,
           message,
           displayOptions,
-          resultSettings
+          resultSettings,
+          authorizedCellUri
         ),
         event.editor
       );
@@ -268,28 +414,63 @@ export class NotebookIntegration implements vscode.Disposable {
             liveResults,
             notebookUri,
             message.liveId,
-            displayOptions
+            displayOptions,
+            authorizedCellUri
           ).get(message.sortColumn)
           : undefined;
+        const rangeRequest = {
+          startRow: message.startRow,
+          endRow: message.endRow,
+          startColumn: message.startColumn,
+          endColumn: message.endColumn,
+          ...(message.columnIndexes ? { columnIndexes: message.columnIndexes } : {}),
+          ...(sortColumn && message.sortDirection
+            ? {
+              sortColumn,
+              sortDirection: message.sortDirection,
+            }
+            : {}),
+        };
+        const selected = liveResults?.resultRange(
+          message.liveId,
+          notebookUri,
+          rangeRequest,
+          displayOptions,
+          authorizedCellUri
+        );
+        if (!selected) {
+          throw new Error('Result unavailable.');
+        }
+        if (!(await confirmNotebookCopyExport(
+          'copy',
+          selected.table,
+          selected.range,
+          message.format,
+          message.includeHeaders,
+          message.includeRowIndex,
+          resultSettings
+        ))) {
+          response = {
+            type: 'liveCopy',
+            liveId: message.liveId,
+            requestId: message.requestId,
+            ok: false,
+            message: 'Copy canceled.',
+          };
+          await this.messaging.postMessage(response, event.editor);
+          return;
+        }
         const text = liveResults?.copyText(
           message.liveId,
           notebookUri,
           {
-            startRow: message.startRow,
-            endRow: message.endRow,
-            startColumn: message.startColumn,
-            endColumn: message.endColumn,
+            ...rangeRequest,
             format: message.format,
             includeHeaders: message.includeHeaders,
             includeRowIndex: message.includeRowIndex,
-            ...(sortColumn && message.sortDirection
-              ? {
-                sortColumn,
-                sortDirection: message.sortDirection,
-              }
-              : {}),
           },
-          displayOptions
+          displayOptions,
+          authorizedCellUri
         );
         if (text === undefined) {
           throw new Error('Result unavailable.');
@@ -313,28 +494,269 @@ export class NotebookIntegration implements vscode.Disposable {
       await this.messaging.postMessage(response, event.editor);
       return;
     }
+    if (message.type === 'exportLiveRange') {
+      const response = await notebookActionResult(message.requestId, 'export', async () => {
+        const sortColumn = message.sortColumn && message.sortDirection
+          ? liveSourceColumnMap(
+            liveResults,
+            notebookUri,
+            message.liveId,
+            displayOptions,
+            authorizedCellUri
+          ).get(message.sortColumn)
+          : undefined;
+        const selected = liveResults?.resultRange(
+          message.liveId,
+          notebookUri,
+          {
+            startRow: message.startRow,
+            endRow: message.endRow,
+            startColumn: message.startColumn,
+            endColumn: message.endColumn,
+            ...(message.columnIndexes ? { columnIndexes: message.columnIndexes } : {}),
+            ...(sortColumn && message.sortDirection
+              ? { sortColumn, sortDirection: message.sortDirection }
+              : {}),
+          },
+          displayOptions,
+          authorizedCellUri
+        );
+        if (!selected) {
+          throw new Error('Result unavailable.');
+        }
+        return saveNotebookTableExport(
+          selected.table,
+          selected.range,
+          message.format,
+          message.includeHeaders,
+          message.includeRowIndex,
+          resultSettings
+        );
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'exportPreviewRange') {
+      const response = await notebookActionResult(message.requestId, 'export', async () => {
+        const payload = matchingNotebookOutput(
+          event.editor.notebook,
+          message.outputId,
+          message.payload
+        );
+        if (!payload || payload.kind !== 'table') {
+          throw new Error('The requested saved preview is not present in the current notebook.');
+        }
+        const selected = portablePreviewRange(payload, {
+          startRow: message.startRow,
+          endRow: message.endRow,
+          startColumn: message.startColumn,
+          endColumn: message.endColumn,
+          columnIndexes: message.columnIndexes,
+          rowIndexes: message.rowIndexes,
+        });
+        return saveNotebookTableExport(
+          selected.table,
+          selected.range,
+          message.format,
+          message.includeHeaders,
+          message.includeRowIndex,
+          resultSettings
+        );
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'copyPreviewRange') {
+      const response = await notebookActionResult(message.requestId, 'copy', async () => {
+        const payload = matchingNotebookOutput(
+          event.editor.notebook,
+          message.outputId,
+          message.payload
+        );
+        if (!payload || payload.kind !== 'table') {
+          throw new Error('The requested saved preview is not present in the current notebook.');
+        }
+        const selected = portablePreviewRange(payload, {
+          startRow: message.startRow,
+          endRow: message.endRow,
+          startColumn: message.startColumn,
+          endColumn: message.endColumn,
+          columnIndexes: message.columnIndexes,
+          rowIndexes: message.rowIndexes,
+        });
+        return copyNotebookTableRange(
+          selected.table,
+          selected.range,
+          message.format,
+          message.includeHeaders,
+          message.includeRowIndex,
+          resultSettings
+        );
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'copyLiveText') {
+      const response = await notebookActionResult(message.requestId, 'copy', async () => {
+        const text = liveResults?.fullText(
+          message.liveId,
+          notebookUri,
+          displayOptions,
+          authorizedCellUri
+        );
+        if (text === undefined) {
+          throw new Error('Result unavailable.');
+        }
+        await vscode.env.clipboard.writeText(text);
+        return 'Copied.';
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'exportLiveText') {
+      const response = await notebookActionResult(message.requestId, 'exportText', async () => {
+        const text = liveResults?.fullText(
+          message.liveId,
+          notebookUri,
+          displayOptions,
+          authorizedCellUri
+        );
+        if (text === undefined) {
+          throw new Error('Result unavailable.');
+        }
+        return saveNotebookTextExport(text);
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'exportPreviewText') {
+      const response = await notebookActionResult(message.requestId, 'exportText', async () => {
+        const payload = matchingNotebookOutput(
+          event.editor.notebook,
+          message.outputId,
+          message.payload
+        );
+        if (!payload || payload.kind !== 'qText') {
+          throw new Error('The requested saved preview is not present in the current notebook.');
+        }
+        return saveNotebookTextExport(payload.data.text);
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'exportChartPng') {
+      const response = await notebookActionResult(message.requestId, 'exportChartPng', () => {
+        const payload = matchingNotebookOutput(
+          event.editor.notebook,
+          message.outputId,
+          message.payload
+        );
+        if (!payload || payload.kind !== 'table') {
+          throw new Error('The requested chart output is not present in the current notebook.');
+        }
+        return saveNotebookChartPng(message.dataUrl);
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (message.type === 'rerunPreview') {
+      const response = await notebookActionResult(message.requestId, 'rerun', async () => {
+        const match = matchingNotebookCellOutput(
+          event.editor.notebook,
+          message.outputId,
+          message.payload
+        );
+        if (!match) {
+          throw new Error('The requested saved preview is not present in the current notebook.');
+        }
+        if (match.payload.provenance.marker === 'direct-ipc') {
+          if (this.directControllerSelected(event.editor.notebook)) {
+            await vscode.commands.executeCommand(
+              'notebook.cell.execute',
+              { start: match.cell.index, end: match.cell.index + 1 },
+              event.editor.notebook.uri
+            );
+            return 'Rerun requested through the selected KX q controller.';
+          }
+          const outcome = await this.runQCellWithKx(match.cell, event.editor);
+          return notebookRerunOutcome(outcome);
+        }
+        const outcome = await this.runNotebookPreviewLive(
+          match.cell,
+          event.editor
+        );
+        return notebookLiveRerunOutcome(outcome);
+      });
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
     if (message.type === 'openLiveResult') {
-      this.openLiveResult(liveResults, notebookUri, message.liveId, displayOptions);
+      if (!this.openLiveResult(
+        liveResults,
+        notebookUri,
+        message.liveId,
+        displayOptions,
+        authorizedCellUri
+      )) {
+        await this.rejectUnavailableLiveMessage(message, event.editor);
+      }
     }
   }
 
-  private async runQCellWithKx(commandCell?: vscode.NotebookCell): Promise<void> {
-    const editor = activeJupyterNotebookEditor('running a q cell with KX');
+  private async rejectUnavailableLiveMessage(
+    message: LiveScopedRendererMessage,
+    editor: vscode.NotebookEditor
+  ): Promise<void> {
+    const detail = 'Live result unavailable. Only the bounded saved preview remains.';
+    if (message.type === 'copyLiveRange') {
+      await this.messaging.postMessage({
+        type: 'liveCopy',
+        liveId: message.liveId,
+        requestId: message.requestId,
+        ok: false,
+        message: detail,
+      }, editor);
+    } else if (message.type === 'copyLiveText' ||
+      message.type === 'exportLiveRange' || message.type === 'exportLiveText') {
+      await this.messaging.postMessage({
+        type: 'actionResult',
+        requestId: message.requestId,
+        action: message.type === 'copyLiveText'
+          ? 'copy'
+          : message.type === 'exportLiveRange'
+            ? 'export'
+            : 'exportText',
+        ok: false,
+        canceled: false,
+        message: detail,
+      }, editor);
+    }
+    await this.messaging.postMessage(
+      unavailableLiveResultMessage(message.liveId, message.requestId, detail),
+      editor
+    );
+  }
+
+  private async runQCellWithKx(
+    commandCell?: vscode.NotebookCell,
+    commandEditor?: vscode.NotebookEditor
+  ): Promise<NotebookQCellRunOutcome> {
+    const editor = commandEditor ?? activeJupyterNotebookEditor('running a q cell with KX');
     if (!editor) {
-      return;
+      return 'unsupported-notebook';
     }
     const runner = this.directRunner;
     if (!runner) {
       void vscode.window.showErrorMessage(
         'Run q Cell (KX) is unavailable because the KX direct IPC runner did not start.'
       );
-      return;
+      return 'unavailable';
     }
     if (this.directControllerSelected(editor.notebook)) {
       void vscode.window.showInformationMessage(
         'KX q (Direct IPC) is selected. Use the notebook’s normal Run Cell or Ctrl+Enter action.'
       );
-      return;
+      return 'controller-selected';
     }
     const cell = commandCell?.notebook === editor.notebook
       ? commandCell
@@ -343,7 +765,7 @@ export class NotebookIntegration implements vscode.Disposable {
       void vscode.window.showWarningMessage(
         'Run q Cell (KX) applies only to a q-language code cell in the active Jupyter notebook.'
       );
-      return;
+      return 'not-q';
     }
     const resolution = resolveNotebookQTarget(
       editor.notebook.metadata,
@@ -351,9 +773,9 @@ export class NotebookIntegration implements vscode.Disposable {
     );
     const target = resolution.kind === 'resolved'
       ? resolution.profile
-      : await this.selectNotebookQTarget(cell, resolution);
+      : await this.selectNotebookQTarget(cell, resolution, editor);
     if (!target) {
-      return;
+      return 'canceled';
     }
     const result = await runner.runCell(cell, target.id);
     if (result === 'busy') {
@@ -372,18 +794,128 @@ export class NotebookIntegration implements vscode.Disposable {
       void vscode.window.showErrorMessage(
         'Run q Cell (KX) is unavailable because the notebook or KX direct IPC runner closed.'
       );
-    } else if (result !== 'executed') {
+    } else if (result === 'not-q' || result === 'unsupported-notebook') {
       void vscode.window.showWarningMessage(
         'Run q Cell (KX) applies only to a q-language code cell in a Jupyter notebook.'
       );
     }
+    return result;
+  }
+
+  private async runNotebookPreviewLive(
+    commandCell?: vscode.NotebookCell,
+    commandEditor?: vscode.NotebookEditor
+  ): Promise<NotebookQCellRunOutcome> {
+    const editor = commandEditor ??
+      activeJupyterNotebookEditor('running a saved %%q preview live with KX');
+    if (!editor) {
+      return 'unsupported-notebook';
+    }
+    if (this.directControllerSelected(editor.notebook)) {
+      void vscode.window.showInformationMessage(
+        'Select the Python/Jupyter controller before using Run %%q Live with KX. The action does not switch notebook kernels.'
+      );
+      return 'controller-selected';
+    }
+    const cell = commandCell?.notebook === editor.notebook
+      ? commandCell
+      : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    const sourceCellSnapshot = cell
+      ? {
+          source: cell.document.getText(),
+          languageId: cell.document.languageId,
+        }
+      : undefined;
+    const source = sourceCellSnapshot
+      ? notebookQSourceFromMagic(sourceCellSnapshot.source)
+      : undefined;
+    if (!cell || source === undefined) {
+      void vscode.window.showWarningMessage(
+        'Run %%q Live with KX applies only to a code cell whose first line is %%q.'
+      );
+      return 'not-q';
+    }
+    if (!source.trim()) {
+      void vscode.window.showWarningMessage(
+        'Run %%q Live with KX requires q source below the %%q line.'
+      );
+      return 'not-q';
+    }
+    const runner = this.directRunner;
+    if (!runner) {
+      void vscode.window.showErrorMessage(
+        'Run %%q Live with KX is unavailable because the KX direct IPC runner did not start.'
+      );
+      return 'unavailable';
+    }
+    const resolution = resolveNotebookQTarget(
+      editor.notebook.metadata,
+      runner.connectionProfiles()
+    );
+    const target = resolution.kind === 'resolved'
+      ? resolution.profile
+      : await this.selectNotebookQTarget(cell, resolution, editor, true);
+    if (!target) {
+      return 'canceled';
+    }
+    const confirmation = await vscode.window.showWarningMessage(
+      `Run this %%q body again as a new KX Direct IPC execution on "${target.name}"? ` +
+      'This does not reuse the Python kx_notebook evaluator or its session, and the selected notebook kernel will not change.',
+      { modal: true },
+      'Run via Direct IPC'
+    );
+    if (confirmation !== 'Run via Direct IPC') {
+      return 'canceled';
+    }
+    const result = await runner.runCell(cell, target.id, {
+      source,
+      sourceCellSnapshot: sourceCellSnapshot!,
+      runLabel: 'Run %%q Live with KX (new Direct IPC execution)',
+    });
+    if (result === 'executed') {
+      void vscode.window.showInformationMessage(
+        `New KX Direct IPC execution finished on "${target.name}". ` +
+        'A successful result is live while its extension-host record exists; the selected notebook kernel was not changed.'
+      );
+    }
+    return result;
+  }
+
+  private async runQCellWithKxAndThen(
+    commandCell: vscode.NotebookCell | undefined,
+    action: 'select-below' | 'insert-below'
+  ): Promise<NotebookQCellRunOutcome> {
+    const editor = activeJupyterNotebookEditor('running a q cell with KX');
+    if (!editor) {
+      return 'unsupported-notebook';
+    }
+    const cell = commandCell?.notebook === editor.notebook
+      ? commandCell
+      : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    const cellIndex = cell?.index ?? -1;
+    const result = await this.runQCellWithKx(cell, editor);
+    if (result !== 'executed' ||
+      vscode.window.activeNotebookEditor !== editor ||
+      cellIndex < 0 ||
+      editor.selections[0]?.start !== cellIndex) {
+      return result;
+    }
+    await vscode.commands.executeCommand(
+      action === 'select-below'
+        ? 'notebook.focusNextEditor'
+        : 'notebook.cell.insertCodeCellBelow'
+    );
+    return result;
   }
 
   private async selectNotebookQTarget(
     commandCell?: vscode.NotebookCell,
-    knownResolution?: NotebookQTargetResolution
+    knownResolution?: NotebookQTargetResolution,
+    commandEditor?: vscode.NotebookEditor,
+    allowMagicCell = false
   ): Promise<NotebookQTargetProfile | undefined> {
-    const editor = activeJupyterNotebookEditor('choosing a KX target for q cells');
+    const editor = commandEditor ??
+      activeJupyterNotebookEditor('choosing a KX target for q cells');
     if (!editor) {
       return undefined;
     }
@@ -396,7 +928,8 @@ export class NotebookIntegration implements vscode.Disposable {
     const cell = commandCell?.notebook === editor.notebook
       ? commandCell
       : activeTextNotebookCell(editor) ?? selectedCell(editor);
-    if (!cell || !isQCell(cell)) {
+    if (!cell || (!isQCell(cell) &&
+      !(allowMagicCell && notebookQSourceFromMagic(cell.document.getText()) !== undefined))) {
       void vscode.window.showWarningMessage(
         'Choose q Target applies only to a q-language code cell in the active Jupyter notebook.'
       );
@@ -766,7 +1299,7 @@ export class NotebookIntegration implements vscode.Disposable {
         connectionName: payload.provenance.label ?? 'Notebook result',
         elapsedMs: payload.provenance.elapsedMs ?? 0,
         messages: payload.result.truncated
-          ? [`Output truncated at the notebook limit (${payload.result.byteLimit} bytes).`]
+          ? [notebookSavedPreviewNotice(payload)]
           : [],
       });
       return;
@@ -774,14 +1307,16 @@ export class NotebookIntegration implements vscode.Disposable {
     const columns = payload.schema.columns.map(column => column.name);
     const messages: string[] = [];
     if (payload.result.truncated) {
-      messages.push(
-        `Showing ${payload.result.previewRowCount.toLocaleString()} of ` +
-        `${payload.result.rowCount.toLocaleString()} rows saved in this notebook.`
-      );
+      messages.push(notebookSavedPreviewNotice(payload));
     }
     KxResultsPanel.showResult(this.context, {
-      table: createColumnarPanelResult(columns, payload.data.rows.length, (rowIndex, columnIndex) =>
-        portableCellValue(payload.data.rows[rowIndex][columnIndex])),
+      table: createColumnarPanelResult(
+        columns,
+        payload.data.rows.length,
+        (rowIndex, columnIndex) =>
+          portableCellValue(payload.data.rows[rowIndex][columnIndex]),
+        payload.schema.columns.map(column => column.type)
+      ),
       query: payload.provenance.qSource ?? (payload.provenance.marker === 'direct-ipc'
         ? 'Direct IPC'
         : '%%q'),
@@ -795,22 +1330,17 @@ export class NotebookIntegration implements vscode.Disposable {
     liveResults: LiveNotebookResultStore | undefined,
     notebookUri: string,
     liveId: string,
-    displayOptions: LiveNotebookDisplayOptions
-  ): void {
+    displayOptions: LiveNotebookDisplayOptions,
+    cellUri?: string
+  ): boolean {
     let view: ReturnType<LiveNotebookResultStore['view']>;
     try {
-      view = liveResults?.view(liveId, notebookUri, displayOptions);
+      view = liveResults?.view(liveId, notebookUri, displayOptions, cellUri);
     } catch {
-      void vscode.window.showWarningMessage(
-        'Result unavailable. The saved notebook output remains in the cell.'
-      );
-      return;
+      return false;
     }
     if (!view) {
-      void vscode.window.showWarningMessage(
-        'Result unavailable. The saved notebook output remains in the cell.'
-      );
-      return;
+      return false;
     }
     const messages: string[] = [];
     if (view.mode === 'text') {
@@ -822,7 +1352,7 @@ export class NotebookIntegration implements vscode.Disposable {
         elapsedMs: view.elapsedMs,
         messages,
       });
-      return;
+      return true;
     }
     KxResultsPanel.showResult(this.context, {
       table: view.table!,
@@ -831,6 +1361,7 @@ export class NotebookIntegration implements vscode.Disposable {
       elapsedMs: view.elapsedMs,
       messages,
     });
+    return true;
   }
 
   private updateContexts(): void {
@@ -1052,18 +1583,411 @@ function portableOutputs(cell: vscode.NotebookCell): PortableKxResult[] {
 
 function matchingNotebookOutput(
   notebook: vscode.NotebookDocument,
+  outputId: string | undefined,
   requested: PortableKxResult
 ): PortableKxResult | undefined {
+  return matchingNotebookCellOutput(notebook, outputId, requested)?.payload;
+}
+
+function matchingNotebookCellOutput(
+  notebook: vscode.NotebookDocument,
+  outputId: string | undefined,
+  requested: PortableKxResult
+): {
+    cell: vscode.NotebookCell;
+    output: vscode.NotebookCellOutput;
+    payload: PortableKxResult;
+  } | undefined {
   const canonical = JSON.stringify(requested);
-  const cellCount = Math.min(notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
-  for (let index = 0; index < cellCount; index++) {
-    for (const payload of portableOutputs(notebook.cellAt(index))) {
+  if (outputId) {
+    const match = exactNotebookOutput(notebook, outputId);
+    if (!match) {
+      return undefined;
+    }
+    for (const payload of portableOutputPayloads(match.output)) {
       if (JSON.stringify(payload) === canonical) {
-        return payload;
+        return { ...match, payload };
+      }
+    }
+    return undefined;
+  }
+
+  let unique: {
+    cell: vscode.NotebookCell;
+    output: vscode.NotebookCellOutput;
+    payload: PortableKxResult;
+  } | undefined;
+  const scan = boundedNotebookOutputs(notebook);
+  for (const match of scan.outputs) {
+    if (hasNotebookOutputBindingMetadata(match.output)) {
+      continue;
+    }
+    for (const payload of portableOutputPayloads(match.output)) {
+      if (JSON.stringify(payload) !== canonical) {
+        continue;
+      }
+      if (unique) {
+        return undefined;
+      }
+      unique = { ...match, payload };
+    }
+  }
+  return scan.complete ? unique : undefined;
+}
+
+function matchingLiveNotebookOutput(
+  notebook: vscode.NotebookDocument,
+  outputId: string,
+  liveId: string
+): { cell: vscode.NotebookCell; output: vscode.NotebookCellOutput } | undefined {
+  const match = exactNotebookOutput(notebook, outputId);
+  const metadata = match?.output.metadata;
+  const reference = metadata && parseNotebookLiveResultReference(
+    metadata[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
+  );
+  return match && reference?.id === liveId ? match : undefined;
+}
+
+function exactNotebookOutput(
+  notebook: vscode.NotebookDocument,
+  outputId: string
+): { cell: vscode.NotebookCell; output: vscode.NotebookCellOutput } | undefined {
+  let match: { cell: vscode.NotebookCell; output: vscode.NotebookCellOutput } | undefined;
+  const scan = boundedNotebookOutputs(notebook);
+  for (const candidate of scan.outputs) {
+    const reference = parseNotebookOutputBindingReference(
+      candidate.output.metadata?.[NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]
+    );
+    if (reference?.id === outputId) {
+      if (match) {
+        return undefined;
+      }
+      match = candidate;
+    }
+  }
+  return scan.complete ? match : undefined;
+}
+
+function boundedNotebookOutputs(
+  notebook: vscode.NotebookDocument
+): {
+  outputs: Array<{ cell: vscode.NotebookCell; output: vscode.NotebookCellOutput }>;
+  complete: boolean;
+} {
+  const outputs: Array<{ cell: vscode.NotebookCell; output: vscode.NotebookCellOutput }> = [];
+  const cellCount = Math.min(notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
+  let remainingOutputs = MAX_NOTEBOOK_SCAN_OUTPUTS;
+  for (let index = 0; index < cellCount && remainingOutputs > 0; index++) {
+    const cell = notebook.cellAt(index);
+    for (const output of cell.outputs) {
+      outputs.push({ cell, output });
+      remainingOutputs -= 1;
+      if (remainingOutputs <= 0) {
+        return { outputs, complete: false };
       }
     }
   }
-  return undefined;
+  return {
+    outputs,
+    complete: notebook.cellCount <= MAX_NOTEBOOK_SCAN_CELLS,
+  };
+}
+
+function hasNotebookOutputBindingMetadata(output: vscode.NotebookCellOutput): boolean {
+  return !!output.metadata && Object.prototype.hasOwnProperty.call(
+    output.metadata,
+    NOTEBOOK_OUTPUT_BINDING_METADATA_KEY
+  );
+}
+
+function portableOutputPayloads(output: vscode.NotebookCellOutput): PortableKxResult[] {
+  const payloads: PortableKxResult[] = [];
+  for (const item of output.items.slice(0, MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL)) {
+    if (item.mime !== KX_NOTEBOOK_MIME || item.data.byteLength > MAX_NOTEBOOK_BYTE_LIMIT) {
+      continue;
+    }
+    try {
+      const validation = validatePortableKxResult(JSON.parse(new TextDecoder().decode(item.data)));
+      if (validation.ok) {
+        payloads.push(validation.value);
+      }
+    } catch {
+      // Untrusted or incomplete notebook output is ignored.
+    }
+  }
+  return payloads;
+}
+
+function isLiveScopedRendererMessage(
+  message: NotebookRendererMessage
+): message is LiveScopedRendererMessage {
+  return 'liveId' in message && 'outputId' in message && 'requestId' in message;
+}
+
+interface NotebookActionOutcome {
+  message: string;
+  canceled?: boolean;
+}
+
+function notebookRerunOutcome(
+  outcome: NotebookQCellRunOutcome
+): string | NotebookActionOutcome {
+  switch (outcome) {
+    case 'executed':
+      return 'Cell rerun completed.';
+    case 'canceled':
+      return { canceled: true, message: 'Rerun canceled.' };
+    case 'busy':
+      throw new Error('The cell is already running.');
+    case 'stale':
+      throw new Error('The cell or its output changed before the rerun could be applied.');
+    case 'write-failed':
+      throw new Error('The rerun finished, but VS Code could not apply its output.');
+    case 'unavailable':
+    case 'controller-selected':
+      throw new Error('The KX notebook runner is unavailable for this cell.');
+    case 'not-q':
+    case 'unsupported-notebook':
+      throw new Error('Rerun applies only to a q-language code cell in a Jupyter notebook.');
+  }
+}
+
+function notebookLiveRerunOutcome(
+  outcome: NotebookQCellRunOutcome
+): string | NotebookActionOutcome {
+  switch (outcome) {
+    case 'executed':
+      return 'The new KX Direct IPC execution finished; see its replacement output for success or error details.';
+    case 'canceled':
+      return { canceled: true, message: 'Live Direct IPC execution canceled.' };
+    case 'busy':
+      throw new Error('The cell is already running through KX.');
+    case 'stale':
+      throw new Error('The cell changed before the live Direct IPC output could be applied.');
+    case 'write-failed':
+      throw new Error('Direct IPC completed, but the live output could not be applied.');
+    case 'unavailable':
+      throw new Error('The KX Direct IPC runner is unavailable for this cell.');
+    case 'controller-selected':
+      throw new Error('Select the Python/Jupyter controller before running this %%q body through KX Direct IPC.');
+    case 'not-q':
+    case 'unsupported-notebook':
+      throw new Error('Run %%q Live with KX requires a %%q code cell in a Jupyter notebook.');
+  }
+}
+
+async function notebookActionResult(
+  requestId: number,
+  action: NotebookActionResultMessage['action'],
+  operation: () => Promise<string | NotebookActionOutcome>
+): Promise<NotebookActionResultMessage> {
+  try {
+    const raw = await operation();
+    const outcome = typeof raw === 'string' ? { message: raw } : raw;
+    return {
+      type: 'actionResult',
+      requestId,
+      action,
+      ok: outcome.canceled !== true,
+      canceled: outcome.canceled === true,
+      message: outcome.message,
+    };
+  } catch (error) {
+    return {
+      type: 'actionResult',
+      requestId,
+      action,
+      ok: false,
+      canceled: false,
+      message: safeHostError(error),
+    };
+  }
+}
+
+async function copyNotebookTableRange(
+  table: ColumnarPanelResult,
+  range: CellRange,
+  format: TextExportFormat,
+  includeHeaders: boolean,
+  includeRowIndex: boolean,
+  settings: SharedKxResultSettings
+): Promise<NotebookActionOutcome> {
+  if (range.endRow < range.startRow || range.endColumn < range.startColumn) {
+    throw new Error('There are no result cells to copy.');
+  }
+  if (!(await confirmNotebookCopyExport(
+    'copy',
+    table,
+    range,
+    format,
+    includeHeaders,
+    includeRowIndex,
+    settings
+  ))) {
+    return { canceled: true, message: 'Copy canceled.' };
+  }
+  const text = table.toText(format, range, {
+    includeHeaders,
+    includeRowIndex,
+    arrayDisplayFormat: settings.arrayDisplayFormat,
+  });
+  if (text.length > MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS) {
+    throw new Error(
+      `Inline copy exceeds the ` +
+      `${MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS.toLocaleString()} character limit.`
+    );
+  }
+  await vscode.env.clipboard.writeText(text);
+  return { message: 'Copied.' };
+}
+
+async function saveNotebookTableExport(
+  table: ColumnarPanelResult,
+  range: CellRange,
+  format: ExportFormat,
+  includeHeaders: boolean,
+  includeRowIndex: boolean,
+  settings: SharedKxResultSettings
+): Promise<NotebookActionOutcome> {
+  if (range.endRow < range.startRow || range.endColumn < range.startColumn) {
+    throw new Error('There are no result cells to export.');
+  }
+  if (!(await confirmNotebookCopyExport(
+    'export',
+    table,
+    range,
+    format,
+    includeHeaders,
+    includeRowIndex,
+    settings
+  ))) {
+    return { canceled: true, message: 'Export canceled.' };
+  }
+  const uri = await vscode.window.showSaveDialog({
+    defaultUri: defaultNotebookExportUri(`kx-results.${kxResultExportFileExtension(format)}`),
+    filters: kxResultExportSaveFilters(format),
+    saveLabel: 'Export',
+  });
+  if (!uri) {
+    return { canceled: true, message: 'Export canceled.' };
+  }
+  const content = format === 'xlsx'
+    ? await columnarToXlsx(
+      table,
+      range,
+      includeHeaders,
+      includeRowIndex,
+      { arrayDisplayFormat: settings.arrayDisplayFormat }
+    )
+    : new TextEncoder().encode(table.toText(format, range, {
+      includeHeaders,
+      includeRowIndex,
+      arrayDisplayFormat: settings.arrayDisplayFormat,
+    }));
+  await vscode.workspace.fs.writeFile(uri, content);
+  return { message: `${format.toUpperCase()} exported / saved.` };
+}
+
+async function confirmNotebookCopyExport(
+  action: 'copy' | 'export',
+  table: ColumnarPanelResult,
+  range: CellRange,
+  format: ExportFormat,
+  includeHeaders: boolean,
+  includeRowIndex: boolean,
+  settings: SharedKxResultSettings
+): Promise<boolean> {
+  const estimate = estimateCopyExport(
+    table,
+    range,
+    format,
+    includeHeaders,
+    includeRowIndex,
+    { arrayDisplayFormat: settings.arrayDisplayFormat }
+  );
+  const message = largeCopyExportConfirmationMessage(
+    action,
+    format,
+    estimate,
+    settings.copyExportConfirmCellThreshold
+  );
+  if (!message) {
+    return true;
+  }
+  const decision = await vscode.window.showWarningMessage(message, 'Continue', 'Cancel');
+  return decision === 'Continue';
+}
+
+async function saveNotebookTextExport(text: string): Promise<NotebookActionOutcome> {
+  const uri = await vscode.window.showSaveDialog({
+    defaultUri: defaultNotebookExportUri('kx-results.txt'),
+    filters: { Text: ['txt'] },
+    saveLabel: 'Export',
+  });
+  if (!uri) {
+    return { canceled: true, message: 'Text export canceled.' };
+  }
+  await vscode.workspace.fs.writeFile(uri, new TextEncoder().encode(text));
+  return { message: 'Text exported / saved.' };
+}
+
+async function saveNotebookChartPng(dataUrl: string): Promise<NotebookActionOutcome> {
+  const content = chartPngBytesFromDataUrl(dataUrl);
+  const uri = await vscode.window.showSaveDialog({
+    defaultUri: defaultNotebookExportUri('kx-chart.png'),
+    filters: { PNG: ['png'] },
+    saveLabel: 'Export',
+  });
+  if (!uri) {
+    return { canceled: true, message: 'Chart export canceled.' };
+  }
+  await vscode.workspace.fs.writeFile(uri, content);
+  return { message: 'Chart exported / saved.' };
+}
+
+function defaultNotebookExportUri(fileName: string): vscode.Uri {
+  const folder = vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? os.homedir();
+  return vscode.Uri.file(path.join(folder, fileName));
+}
+
+function portablePreviewRange(
+  payload: PortableKxTableResult,
+  request: {
+    startRow: number;
+    endRow: number;
+    startColumn: number;
+    endColumn: number;
+    columnIndexes?: number[];
+    rowIndexes?: number[];
+  }
+): { table: ColumnarPanelResult; range: CellRange } {
+  const indexes = request.columnIndexes || Array.from(
+    { length: request.endColumn - request.startColumn + 1 },
+    (_value, index) => request.startColumn + index
+  );
+  const rowIndexes = request.rowIndexes || payload.data.rows.map((_row, index) => index);
+  const projectedRows = request.rowIndexes ? request.endRow + 1 : rowIndexes.length;
+  const table = createColumnarPanelResult(
+    indexes.map(index => payload.schema.columns[index].name),
+    projectedRows,
+    (rowIndex, columnIndex) => {
+      const rowOffset = request.rowIndexes ? rowIndex - request.startRow : rowIndex;
+      const sourceRow = rowIndexes[rowOffset];
+      return sourceRow === undefined
+        ? null
+        : portableCellValue(payload.data.rows[sourceRow][indexes[columnIndex]]);
+    },
+    indexes.map(index => payload.schema.columns[index].type)
+  );
+  return {
+    table,
+    range: {
+      startRow: request.startRow,
+      endRow: request.endRow,
+      startColumn: 0,
+      endColumn: indexes.length - 1,
+    },
+  };
 }
 
 export function liveNotebookDisplayOptions(
@@ -1083,28 +2007,17 @@ export function liveResultMessage(
   notebookUri: string,
   liveId: string,
   requestId: number,
-  displayOptions: LiveNotebookDisplayOptions
+  displayOptions: LiveNotebookDisplayOptions,
+  cellUri?: string
 ): NotebookLiveResultMessage {
   let view: ReturnType<LiveNotebookResultStore['view']>;
   try {
-    view = liveResults?.view(liveId, notebookUri, displayOptions);
+    view = liveResults?.view(liveId, notebookUri, displayOptions, cellUri);
   } catch {
-    return {
-      type: 'liveResult',
-      liveId,
-      requestId,
-      available: false,
-      message: 'Result unavailable.',
-    };
+    return unavailableLiveResultMessage(liveId, requestId);
   }
   if (!view) {
-    return {
-      type: 'liveResult',
-      liveId,
-      requestId,
-      available: false,
-      message: 'Result unavailable.',
-    };
+    return unavailableLiveResultMessage(liveId, requestId);
   }
   const rawColumns = view.columns.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS);
   const columns = safeLiveColumnNames(rawColumns);
@@ -1133,6 +2046,7 @@ export function liveResultMessage(
     mode: view.mode,
     kind: boundedHostText(view.kind, 128),
     columns,
+    totalColumnCount: view.columns.length,
     rowCount: view.rowCount,
     chartXColumns,
     chartYColumns,
@@ -1149,11 +2063,68 @@ export function liveResultMessage(
   };
 }
 
+export async function liveColumnTextLengthsMessage(
+  liveResults: LiveNotebookResultStore | undefined,
+  notebookUri: string,
+  liveId: string,
+  requestId: number,
+  displayOptions: LiveNotebookDisplayOptions,
+  cellUri?: string
+): Promise<NotebookLiveColumnTextLengthsMessage | undefined> {
+  let view: ReturnType<LiveNotebookResultStore['view']>;
+  try {
+    view = liveResults?.view(liveId, notebookUri, displayOptions, cellUri);
+  } catch {
+    return undefined;
+  }
+  if (!view || view.mode !== 'table') {
+    return undefined;
+  }
+  const lengths = await liveResults?.columnTextLengths(
+    liveId,
+    notebookUri,
+    displayOptions,
+    cellUri,
+    MAX_NOTEBOOK_LIVE_COLUMNS
+  );
+  if (!lengths) {
+    return undefined;
+  }
+  const rawColumns = view.columns.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS);
+  const columns = safeLiveColumnNames(rawColumns);
+  return {
+    type: 'liveColumnTextLengths',
+    liveId,
+    requestId,
+    lengths: lengths
+      .slice(0, columns.length)
+      .map((length, index) => Math.min(
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+        Math.max(length, columns[index].length)
+      )),
+  };
+}
+
+export function unavailableLiveResultMessage(
+  liveId: string,
+  requestId: number,
+  message = 'Result unavailable.'
+): NotebookLiveResultMessage {
+  return {
+    type: 'liveResult',
+    liveId,
+    requestId,
+    available: false,
+    message,
+  };
+}
+
 export function liveSliceMessage(
   liveResults: LiveNotebookResultStore | undefined,
   notebookUri: string,
   message: Extract<NotebookRendererMessage, { type: 'requestLiveSlice' }>,
-  displayOptions: LiveNotebookDisplayOptions
+  displayOptions: LiveNotebookDisplayOptions,
+  cellUri?: string
 ): NotebookLiveSliceMessage {
   try {
     const sortColumn = message.sortColumn && message.sortDirection
@@ -1161,7 +2132,8 @@ export function liveSliceMessage(
         liveResults,
         notebookUri,
         message.liveId,
-        displayOptions
+        displayOptions,
+        cellUri
       ).get(message.sortColumn)
       : undefined;
     const slice = liveResults?.slice(
@@ -1172,6 +2144,7 @@ export function liveSliceMessage(
         endRow: message.endRow,
         startColumn: message.startColumn,
         endColumn: message.endColumn,
+        ...(message.columnIndexes ? { columnIndexes: message.columnIndexes } : {}),
         ...(sortColumn && message.sortDirection
           ? {
             sortColumn,
@@ -1179,7 +2152,8 @@ export function liveSliceMessage(
           }
           : {}),
       },
-      displayOptions
+      displayOptions,
+      cellUri
     );
     if (!slice) {
       return unavailableLiveSlice(message.liveId, message.requestId);
@@ -1217,7 +2191,8 @@ export function liveSearchMessage(
   liveResults: LiveNotebookResultStore | undefined,
   notebookUri: string,
   message: Extract<NotebookRendererMessage, { type: 'searchLiveResult' }>,
-  displayOptions: LiveNotebookDisplayOptions
+  displayOptions: LiveNotebookDisplayOptions,
+  cellUri?: string
 ): NotebookLiveSearchMessage {
   try {
     const sortColumn = message.sortColumn && message.sortDirection
@@ -1225,7 +2200,8 @@ export function liveSearchMessage(
         liveResults,
         notebookUri,
         message.liveId,
-        displayOptions
+        displayOptions,
+        cellUri
       ).get(message.sortColumn)
       : undefined;
     const result = liveResults?.search(
@@ -1233,12 +2209,16 @@ export function liveSearchMessage(
       notebookUri,
       message.query,
       displayOptions,
-      sortColumn && message.sortDirection
-        ? {
+      {
+        ...(message.columnIndexes ? { columnIndexes: message.columnIndexes } : {}),
+        ...(sortColumn && message.sortDirection
+          ? {
           sortColumn,
           sortDirection: message.sortDirection,
-        }
-        : undefined
+          }
+          : {}),
+      },
+      cellUri
     );
     if (!result) {
       return unavailableLiveSearch(message.liveId, message.requestId);
@@ -1277,14 +2257,16 @@ export function liveChartMessage(
   notebookUri: string,
   message: Extract<NotebookRendererMessage, { type: 'requestLiveChart' }>,
   displayOptions: LiveNotebookDisplayOptions,
-  resultSettings: SharedKxResultSettings
+  resultSettings: SharedKxResultSettings,
+  cellUri?: string
 ): NotebookLiveChartMessage {
   try {
     const columnMap = liveSourceColumnMap(
       liveResults,
       notebookUri,
       message.liveId,
-      displayOptions
+      displayOptions,
+      cellUri
     );
     const sourceXColumn = columnMap.get(message.xColumn);
     const sourceYColumns = message.yColumns.map(column => columnMap.get(column));
@@ -1329,9 +2311,15 @@ export function liveChartMessage(
         lowColumn: sourceLowColumn,
         closeColumn: sourceCloseColumn,
         maxPoints: message.maxPoints,
+        minPoints: message.xMin !== undefined && message.xMax !== undefined
+          ? resultSettings.chartZoomMinSampledPoints
+          : undefined,
         maxSourceRows: resultSettings.chartMaxSourceRows,
+        xMin: message.xMin,
+        xMax: message.xMax,
       },
-      displayOptions
+      displayOptions,
+      cellUri
     );
     if (!chart) {
       return {
@@ -1449,9 +2437,10 @@ function liveSourceColumnMap(
   liveResults: LiveNotebookResultStore | undefined,
   notebookUri: string,
   liveId: string,
-  displayOptions: LiveNotebookDisplayOptions
+  displayOptions: LiveNotebookDisplayOptions,
+  cellUri?: string
 ): Map<string, string> {
-  const rawColumns = liveResults?.tableColumns(liveId, notebookUri, displayOptions)
+  const rawColumns = liveResults?.tableColumns(liveId, notebookUri, displayOptions, cellUri)
     ?.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS) || [];
   const displayColumns = safeLiveColumnNames(rawColumns);
   return new Map(displayColumns.map((display, index) => [display, rawColumns[index]]));

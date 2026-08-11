@@ -1,9 +1,28 @@
-import { PortableKxResult, validatePortableKxResult } from './notebook-contract';
+import {
+  MAX_NOTEBOOK_ROW_LIMIT,
+  PortableKxResult,
+  validatePortableKxResult,
+} from './notebook-contract';
+import {
+  KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+  KX_COLUMN_MAX_WIDTH,
+  KX_COLUMN_MIN_WIDTH,
+  PositionalColumnWidths,
+  normalizePositionalColumnWidths,
+} from './column-sizing';
 import { NotebookSettings } from './notebook-settings';
+import {
+  SharedKxResultSettingKey,
+  SharedKxResultSettings,
+} from './results-ui-contract';
+import type { ExportFormat, TextExportFormat } from './kx-results';
 
 export const NOTEBOOK_LIVE_RESULT_METADATA_KEY = 'vscode-kdb.liveResult';
+export const NOTEBOOK_OUTPUT_BINDING_METADATA_KEY = 'vscode-kdb.outputBinding';
 export const MIN_NOTEBOOK_LIVE_ID_CHARS = 32;
 export const MAX_NOTEBOOK_LIVE_ID_CHARS = 128;
+export const MIN_NOTEBOOK_OUTPUT_ID_CHARS = 32;
+export const MAX_NOTEBOOK_OUTPUT_ID_CHARS = 128;
 export const MAX_NOTEBOOK_LIVE_REQUEST_ID = 0x7fffffff;
 export const MAX_NOTEBOOK_LIVE_SLICE_ROWS = 500;
 export const MAX_NOTEBOOK_LIVE_SLICE_COLUMNS = 128;
@@ -25,55 +44,57 @@ export type NotebookLiveChartType =
   | 'bar'
   | 'box'
   | 'candlestick';
-export type NotebookResultSettingKey =
-  | 'cellWidth'
-  | 'rowHeight'
-  | 'fontSize'
-  | 'density'
-  | 'showRowIndex'
-  | 'includeHeaders'
-  | 'includeRowIndex'
-  | 'elapsedTimeDisplay'
-  | 'chartDecimalPlaces'
-  | 'chartMaxSourceRows'
-  | 'qTextSyntaxHighlighting'
-  | 'qTextDisplayFormatting'
-  | 'arrayDisplayFormat'
-  | 'functionDisplayStrategy'
-  | 'dictionaryDisplayStrategy'
-  | 'listDisplayStrategy'
-  | 'objectDisplayStrategy';
+export type NotebookResultSettingKey = SharedKxResultSettingKey;
+export type NotebookLiveCopyFormat = TextExportFormat;
 
 export interface NotebookLiveResultReference {
   version: 1;
   id: string;
 }
 
+export type NotebookOutputBindingReference = NotebookLiveResultReference;
+
 export type NotebookRendererMessage =
   | { type: 'ready' }
-  | { type: 'openPreview'; payload: PortableKxResult }
-  | { type: 'requestLiveResult'; liveId: string; requestId: number }
+  | {
+    type: 'openPreview';
+    outputId?: string;
+    payload: PortableKxResult;
+    requestId: number;
+  }
+  | { type: 'requestLiveResult'; outputId: string; liveId: string; requestId: number }
+  | {
+    type: 'requestLiveColumnTextLengths';
+    outputId: string;
+    liveId: string;
+    requestId: number;
+  }
   | {
     type: 'requestLiveSlice';
+    outputId: string;
     liveId: string;
     requestId: number;
     startRow: number;
     endRow: number;
     startColumn: number;
     endColumn: number;
+    columnIndexes?: number[];
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
   | {
     type: 'searchLiveResult';
+    outputId: string;
     liveId: string;
     requestId: number;
     query: string;
+    columnIndexes?: number[];
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
   | {
     type: 'requestLiveChart';
+    outputId: string;
     liveId: string;
     requestId: number;
     chartType: NotebookLiveChartType;
@@ -85,49 +106,98 @@ export type NotebookRendererMessage =
     lowColumn?: string;
     closeColumn?: string;
     maxPoints: number;
+    xMin?: number;
+    xMax?: number;
   }
   | {
     type: 'copyLiveRange';
+    outputId: string;
     liveId: string;
     requestId: number;
     startRow: number;
     endRow: number;
     startColumn: number;
     endColumn: number;
-    format: 'tsv' | 'csv';
+    format: NotebookLiveCopyFormat;
     includeHeaders: boolean;
     includeRowIndex: boolean;
+    columnIndexes?: number[];
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
-  | { type: 'openLiveResult'; liveId: string }
-  | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean };
+  | {
+    type: 'exportLiveRange';
+    outputId: string;
+    liveId: string;
+    requestId: number;
+    startRow: number;
+    endRow: number;
+    startColumn: number;
+    endColumn: number;
+    format: ExportFormat;
+    includeHeaders: boolean;
+    includeRowIndex: boolean;
+    columnIndexes?: number[];
+    sortColumn?: string;
+    sortDirection?: NotebookLiveSortDirection;
+  }
+  | {
+    type: 'exportPreviewRange';
+    outputId?: string;
+    requestId: number;
+    payload: PortableKxResult;
+    startRow: number;
+    endRow: number;
+    startColumn: number;
+    endColumn: number;
+    format: ExportFormat;
+    includeHeaders: boolean;
+    includeRowIndex: boolean;
+    columnIndexes?: number[];
+    rowIndexes?: number[];
+  }
+  | {
+    type: 'copyPreviewRange';
+    outputId?: string;
+    requestId: number;
+    payload: PortableKxResult;
+    startRow: number;
+    endRow: number;
+    startColumn: number;
+    endColumn: number;
+    format: NotebookLiveCopyFormat;
+    includeHeaders: boolean;
+    includeRowIndex: boolean;
+    columnIndexes?: number[];
+    rowIndexes?: number[];
+  }
+  | { type: 'copyLiveText'; outputId: string; liveId: string; requestId: number }
+  | { type: 'exportLiveText'; outputId: string; liveId: string; requestId: number }
+  | {
+    type: 'exportPreviewText';
+    outputId?: string;
+    payload: PortableKxResult;
+    requestId: number;
+  }
+  | {
+    type: 'exportChartPng';
+    outputId?: string;
+    payload: PortableKxResult;
+    requestId: number;
+    dataUrl: string;
+  }
+  | { type: 'rerunPreview'; outputId?: string; payload: PortableKxResult; requestId: number }
+  | { type: 'openLiveResult'; outputId: string; liveId: string; requestId: number }
+  | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean }
+  | { type: 'setResultColumnWidth'; position: number; width: number }
+  | { type: 'resetResultColumnWidths' };
 
 export interface NotebookRendererSettingsMessage extends NotebookSettings {
   type: 'settings';
   resultSettings: NotebookSharedKxResultSettings;
 }
 
-export interface NotebookSharedKxResultSettings {
-  cellWidth: number;
-  rowHeight: number;
-  fontSize: number;
-  density: 'compact' | 'standard' | 'comfortable';
-  showRowIndex: boolean;
-  includeHeaders: boolean;
-  includeRowIndex: boolean;
-  elapsedTimeDisplay: 'auto' | 'milliseconds';
-  chartDecimalPlaces: number;
-  chartMaxSourceRows: number;
-  chartZoomMaxSampledPoints: number;
-  qTextSyntaxHighlighting: boolean;
-  qTextDisplayFormatting: boolean;
-  arrayDisplayFormat: 'commaSpace' | 'space' | 'raw';
-  functionDisplayStrategy: 'grid' | 'qText';
-  dictionaryDisplayStrategy: 'grid' | 'qText';
-  listDisplayStrategy: 'grid' | 'qText';
-  objectDisplayStrategy: 'grid' | 'qText';
-}
+export type NotebookSharedKxResultSettings = SharedKxResultSettings;
 
 export interface NotebookLiveResultMetadata {
   query?: string;
@@ -144,13 +214,22 @@ export interface NotebookLiveResultMessage {
   mode?: 'table' | 'text';
   kind?: string;
   columns?: string[];
+  totalColumnCount?: number;
   rowCount?: number;
   chartXColumns?: string[];
   chartYColumns?: string[];
   chartGroupColumns?: string[];
+  wholeResultColumnTextLengths?: number[];
   text?: string;
   metadata?: NotebookLiveResultMetadata;
   message?: string;
+}
+
+export interface NotebookLiveColumnTextLengthsMessage {
+  type: 'liveColumnTextLengths';
+  liveId: string;
+  requestId: number;
+  lengths: number[];
 }
 
 export interface NotebookLiveSliceMessage {
@@ -248,13 +327,24 @@ export interface NotebookLiveCopyMessage {
   message?: string;
 }
 
+export interface NotebookActionResultMessage {
+  type: 'actionResult';
+  requestId: number;
+  action: 'copy' | 'export' | 'exportText' | 'exportChartPng' | 'openPreview' | 'rerun';
+  ok: boolean;
+  canceled: boolean;
+  message: string;
+}
+
 export type NotebookRendererHostMessage =
   | NotebookRendererSettingsMessage
   | NotebookLiveResultMessage
+  | NotebookLiveColumnTextLengthsMessage
   | NotebookLiveSliceMessage
   | NotebookLiveSearchMessage
   | NotebookLiveChartMessage
-  | NotebookLiveCopyMessage;
+  | NotebookLiveCopyMessage
+  | NotebookActionResultMessage;
 
 export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMessage | undefined {
   if (!isRecord(raw) || typeof raw.type !== 'string') {
@@ -264,16 +354,42 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
     return Object.keys(raw).length === 1 ? { type: 'ready' } : undefined;
   }
   if (raw.type === 'openPreview') {
-    if (!hasOnlyKeys(raw, ['type', 'payload'])) {
+    if (!hasOnlyKeys(raw, ['type', 'outputId', 'payload', 'requestId']) ||
+      !validOptionalOutputId(raw.outputId) || !validRequestId(raw.requestId)) {
       return undefined;
     }
     const validation = validatePortableKxResult(raw.payload);
-    return validation.ok ? { type: 'openPreview', payload: validation.value } : undefined;
+    return validation.ok
+      ? {
+        type: 'openPreview',
+        ...(typeof raw.outputId === 'string' ? { outputId: raw.outputId } : {}),
+        payload: validation.value,
+        requestId: raw.requestId,
+      }
+      : undefined;
   }
   if (raw.type === 'requestLiveResult') {
-    return hasOnlyKeys(raw, ['type', 'liveId', 'requestId']) &&
-      validLiveId(raw.liveId) && validRequestId(raw.requestId)
-      ? { type: raw.type, liveId: raw.liveId, requestId: raw.requestId }
+    return hasOnlyKeys(raw, ['type', 'outputId', 'liveId', 'requestId']) &&
+      validOutputId(raw.outputId) && validLiveId(raw.liveId) &&
+      validRequestId(raw.requestId)
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        liveId: raw.liveId,
+        requestId: raw.requestId,
+      }
+      : undefined;
+  }
+  if (raw.type === 'requestLiveColumnTextLengths') {
+    return hasOnlyKeys(raw, ['type', 'outputId', 'liveId', 'requestId']) &&
+      validOutputId(raw.outputId) && validLiveId(raw.liveId) &&
+      validRequestId(raw.requestId)
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        liveId: raw.liveId,
+        requestId: raw.requestId,
+      }
       : undefined;
   }
   if (raw.type === 'requestLiveSlice') {
@@ -288,13 +404,64 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
   if (raw.type === 'copyLiveRange') {
     return parseLiveCopyRequest(raw);
   }
+  if (raw.type === 'exportLiveRange') {
+    return parseLiveExportRequest(raw);
+  }
+  if (raw.type === 'exportPreviewRange' || raw.type === 'copyPreviewRange') {
+    return parsePreviewExportRequest(raw);
+  }
+  if (raw.type === 'copyLiveText' || raw.type === 'exportLiveText') {
+    return hasOnlyKeys(raw, ['type', 'outputId', 'liveId', 'requestId']) &&
+      validOutputId(raw.outputId) && validLiveId(raw.liveId) &&
+      validRequestId(raw.requestId)
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        liveId: raw.liveId,
+        requestId: raw.requestId,
+      }
+      : undefined;
+  }
+  if (raw.type === 'exportPreviewText' || raw.type === 'rerunPreview') {
+    return parsePreviewActionRequest(raw);
+  }
+  if (raw.type === 'exportChartPng') {
+    return parseChartPngExportRequest(raw);
+  }
   if (raw.type === 'openLiveResult') {
-    return hasOnlyKeys(raw, ['type', 'liveId']) && validLiveId(raw.liveId)
-      ? { type: raw.type, liveId: raw.liveId }
+    return hasOnlyKeys(raw, ['type', 'outputId', 'liveId', 'requestId']) &&
+      validOutputId(raw.outputId) && validLiveId(raw.liveId) &&
+      validRequestId(raw.requestId)
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        liveId: raw.liveId,
+        requestId: raw.requestId,
+      }
       : undefined;
   }
   if (raw.type === 'updateResultSetting') {
     return parseResultSettingUpdate(raw);
+  }
+  if (raw.type === 'setResultColumnWidth') {
+    return hasOnlyKeys(raw, ['type', 'position', 'width']) &&
+      nonNegativeSafeInteger(raw.position) &&
+      (raw.width === 0 || integerInRange(
+        raw.width,
+        KX_COLUMN_MIN_WIDTH,
+        KX_COLUMN_MAX_WIDTH
+      ))
+      ? {
+        type: raw.type,
+        position: raw.position,
+        width: raw.width,
+      }
+      : undefined;
+  }
+  if (raw.type === 'resetResultColumnWidths') {
+    return hasOnlyKeys(raw, ['type'])
+      ? { type: raw.type }
+      : undefined;
   }
   return undefined;
 }
@@ -309,6 +476,9 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   if (raw.type === 'liveResult') {
     return parseLiveResultMessage(raw);
   }
+  if (raw.type === 'liveColumnTextLengths') {
+    return parseLiveColumnTextLengthsMessage(raw);
+  }
   if (raw.type === 'liveSlice') {
     return parseLiveSliceMessage(raw);
   }
@@ -320,6 +490,9 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   }
   if (raw.type === 'liveCopy') {
     return parseLiveCopyMessage(raw);
+  }
+  if (raw.type === 'actionResult') {
+    return parseActionResultMessage(raw);
   }
   return undefined;
 }
@@ -338,20 +511,33 @@ export function parseNotebookLiveResultReference(raw: unknown): NotebookLiveResu
     : undefined;
 }
 
+export function parseNotebookOutputBindingReference(
+  raw: unknown
+): NotebookOutputBindingReference | undefined {
+  return isRecord(raw) && hasOnlyKeys(raw, ['version', 'id']) &&
+    raw.version === 1 && validOutputId(raw.id)
+    ? { version: 1, id: raw.id }
+    : undefined;
+}
+
 function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
     'requestId',
     'startRow',
     'endRow',
     'startColumn',
     'endColumn',
+    'columnIndexes',
     'sortColumn',
     'sortDirection',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
     !nonNegativeSafeInteger(raw.startRow) || !nonNegativeSafeInteger(raw.endRow) ||
-    !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn)) {
+    !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn) ||
+    !validOptionalColumnIndexes(raw.columnIndexes)) {
     return undefined;
   }
   const startRow = raw.startRow;
@@ -359,7 +545,8 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
   const startColumn = raw.startColumn;
   const endColumn = raw.endColumn;
   const rowCount = endRow - startRow + 1;
-  const columnCount = endColumn - startColumn + 1;
+  const columnIndexes = optionalColumnIndexes(raw.columnIndexes);
+  const columnCount = columnIndexes?.length ?? (endColumn - startColumn + 1);
   if (rowCount < 1 || rowCount > MAX_NOTEBOOK_LIVE_SLICE_ROWS ||
     columnCount < 1 || columnCount > MAX_NOTEBOOK_LIVE_SLICE_COLUMNS ||
     rowCount * columnCount > MAX_NOTEBOOK_LIVE_SLICE_CELLS ||
@@ -368,12 +555,14 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
   }
   return {
     type: 'requestLiveSlice',
+    outputId: raw.outputId,
     liveId: raw.liveId,
     requestId: raw.requestId,
     startRow,
     endRow,
     startColumn,
     endColumn,
+    ...(columnIndexes ? { columnIndexes } : {}),
     ...sortFields(raw),
   };
 }
@@ -381,21 +570,29 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
 function parseLiveSearchRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
     'requestId',
     'query',
+    'columnIndexes',
     'sortColumn',
     'sortDirection',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
     typeof raw.query !== 'string' || raw.query.length > MAX_NOTEBOOK_LIVE_SEARCH_CHARS ||
+    !validOptionalColumnIndexes(raw.columnIndexes) ||
     !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
     return undefined;
   }
   return {
     type: 'searchLiveResult',
+    outputId: raw.outputId,
     liveId: raw.liveId,
     requestId: raw.requestId,
     query: raw.query,
+    ...(optionalColumnIndexes(raw.columnIndexes)
+      ? { columnIndexes: optionalColumnIndexes(raw.columnIndexes) }
+      : {}),
     ...sortFields(raw),
   };
 }
@@ -403,6 +600,7 @@ function parseLiveSearchRequest(raw: Record<string, unknown>): NotebookRendererM
 function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
     'requestId',
     'chartType',
@@ -414,7 +612,10 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
     'lowColumn',
     'closeColumn',
     'maxPoints',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+    'xMin',
+    'xMax',
+  ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
     !isLiveChartType(raw.chartType) || !validColumnName(raw.xColumn) ||
     !Array.isArray(raw.yColumns) || raw.yColumns.length > 16 ||
     !raw.yColumns.every(validColumnName) || new Set(raw.yColumns).size !== raw.yColumns.length ||
@@ -424,7 +625,8 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
     !validOptionalColumnName(raw.highColumn) ||
     !validOptionalColumnName(raw.lowColumn) ||
     !validOptionalColumnName(raw.closeColumn) ||
-    !positiveSafeInteger(raw.maxPoints) || raw.maxPoints > MAX_NOTEBOOK_LIVE_CHART_POINTS) {
+    !positiveSafeInteger(raw.maxPoints) || raw.maxPoints > MAX_NOTEBOOK_LIVE_CHART_POINTS ||
+    !validOptionalChartRange(raw.xMin, raw.xMax)) {
     return undefined;
   }
   const groupByColumn = optionalColumnName(raw.groupByColumn);
@@ -447,6 +649,7 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
   }
   return {
     type: 'requestLiveChart',
+    outputId: raw.outputId,
     liveId: raw.liveId,
     requestId: raw.requestId,
     chartType: raw.chartType,
@@ -462,12 +665,16 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
       }
       : {}),
     maxPoints: raw.maxPoints,
+    ...(typeof raw.xMin === 'number' && typeof raw.xMax === 'number'
+      ? { xMin: raw.xMin, xMax: raw.xMax }
+      : {}),
   };
 }
 
 function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
     'requestId',
     'startRow',
@@ -477,35 +684,205 @@ function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMes
     'format',
     'includeHeaders',
     'includeRowIndex',
+    'columnIndexes',
     'sortColumn',
     'sortDirection',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
     !nonNegativeSafeInteger(raw.startRow) || !nonNegativeSafeInteger(raw.endRow) ||
     !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn) ||
     raw.endRow < raw.startRow || raw.endColumn < raw.startColumn ||
-    (raw.format !== 'tsv' && raw.format !== 'csv') ||
+    !isTextExportFormat(raw.format) ||
     typeof raw.includeHeaders !== 'boolean' ||
     typeof raw.includeRowIndex !== 'boolean' ||
+    !validOptionalColumnIndexes(raw.columnIndexes) ||
     !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
     return undefined;
   }
-  const cellCount =
-    (raw.endRow - raw.startRow + 1) * (raw.endColumn - raw.startColumn + 1);
+  const columnIndexes = optionalColumnIndexes(raw.columnIndexes);
+  const columnCount = columnIndexes?.length ?? (raw.endColumn - raw.startColumn + 1);
+  const cellCount = (raw.endRow - raw.startRow + 1) * columnCount;
   if (!Number.isSafeInteger(cellCount) || cellCount > MAX_NOTEBOOK_LIVE_COPY_CELLS) {
     return undefined;
   }
   return {
     type: 'copyLiveRange',
+    outputId: raw.outputId,
     liveId: raw.liveId,
     requestId: raw.requestId,
-    startRow: raw.startRow,
-    endRow: raw.endRow,
-    startColumn: raw.startColumn,
-    endColumn: raw.endColumn,
+    startRow: raw.startRow as number,
+    endRow: raw.endRow as number,
+    startColumn: raw.startColumn as number,
+    endColumn: raw.endColumn as number,
     format: raw.format,
     includeHeaders: raw.includeHeaders,
     includeRowIndex: raw.includeRowIndex,
+    ...(columnIndexes ? { columnIndexes } : {}),
     ...sortFields(raw),
+  };
+}
+
+function parseLiveExportRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'outputId',
+    'liveId',
+    'requestId',
+    'startRow',
+    'endRow',
+    'startColumn',
+    'endColumn',
+    'format',
+    'includeHeaders',
+    'includeRowIndex',
+    'columnIndexes',
+    'sortColumn',
+    'sortDirection',
+  ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
+    !validResultRange(raw) || !isExportFormat(raw.format) ||
+    typeof raw.includeHeaders !== 'boolean' ||
+    typeof raw.includeRowIndex !== 'boolean' ||
+    !validOptionalColumnIndexes(raw.columnIndexes) ||
+    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    return undefined;
+  }
+  const columnIndexes = optionalColumnIndexes(raw.columnIndexes);
+  return {
+    type: 'exportLiveRange',
+    outputId: raw.outputId,
+    liveId: raw.liveId,
+    requestId: raw.requestId,
+    startRow: raw.startRow as number,
+    endRow: raw.endRow as number,
+    startColumn: raw.startColumn as number,
+    endColumn: raw.endColumn as number,
+    format: raw.format,
+    includeHeaders: raw.includeHeaders,
+    includeRowIndex: raw.includeRowIndex,
+    ...(columnIndexes ? { columnIndexes } : {}),
+    ...sortFields(raw),
+  };
+}
+
+function parsePreviewExportRequest(
+  raw: Record<string, unknown>
+): NotebookRendererMessage | undefined {
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'outputId',
+    'requestId',
+    'payload',
+    'startRow',
+    'endRow',
+    'startColumn',
+    'endColumn',
+    'format',
+    'includeHeaders',
+    'includeRowIndex',
+    'columnIndexes',
+    'rowIndexes',
+  ]) || !validOptionalOutputId(raw.outputId) || !validRequestId(raw.requestId) ||
+    !validResultRange(raw) ||
+    (raw.type === 'copyPreviewRange'
+      ? !isTextExportFormat(raw.format)
+      : !isExportFormat(raw.format)) ||
+    typeof raw.includeHeaders !== 'boolean' ||
+    typeof raw.includeRowIndex !== 'boolean' ||
+    !validOptionalColumnIndexes(raw.columnIndexes) ||
+    !validOptionalRowIndexes(raw.rowIndexes)) {
+    return undefined;
+  }
+  const validation = validatePortableKxResult(raw.payload);
+  if (!validation.ok || validation.value.kind !== 'table') {
+    return undefined;
+  }
+  const payload = validation.value;
+  if ((raw.endRow as number) >= payload.data.rows.length ||
+    (raw.endColumn as number) >= payload.schema.columns.length) {
+    return undefined;
+  }
+  const columnIndexes = optionalColumnIndexes(raw.columnIndexes);
+  const rowIndexes = optionalRowIndexes(raw.rowIndexes);
+  if (columnIndexes?.some(index => index >= payload.schema.columns.length)) {
+    return undefined;
+  }
+  if (rowIndexes?.some(index => index >= payload.data.rows.length)) {
+    return undefined;
+  }
+  if ((columnIndexes && columnIndexes.length !==
+      (raw.endColumn as number) - (raw.startColumn as number) + 1) ||
+    (rowIndexes && rowIndexes.length !==
+      (raw.endRow as number) - (raw.startRow as number) + 1)) {
+    return undefined;
+  }
+  const common = {
+    ...(typeof raw.outputId === 'string' ? { outputId: raw.outputId } : {}),
+    requestId: raw.requestId,
+    payload,
+    startRow: raw.startRow as number,
+    endRow: raw.endRow as number,
+    startColumn: raw.startColumn as number,
+    endColumn: raw.endColumn as number,
+    includeHeaders: raw.includeHeaders,
+    includeRowIndex: raw.includeRowIndex,
+    ...(columnIndexes ? { columnIndexes } : {}),
+    ...(rowIndexes ? { rowIndexes } : {}),
+  };
+  return raw.type === 'copyPreviewRange'
+    ? {
+      type: 'copyPreviewRange',
+      ...common,
+      format: raw.format as TextExportFormat,
+    }
+    : {
+      type: 'exportPreviewRange',
+      ...common,
+      format: raw.format as ExportFormat,
+    };
+}
+
+function parsePreviewActionRequest(
+  raw: Record<string, unknown>
+): NotebookRendererMessage | undefined {
+  if (!hasOnlyKeys(raw, ['type', 'outputId', 'payload', 'requestId']) ||
+    !validOptionalOutputId(raw.outputId) || !validRequestId(raw.requestId)) {
+    return undefined;
+  }
+  const validation = validatePortableKxResult(raw.payload);
+  if (!validation.ok ||
+    (raw.type === 'exportPreviewText' && validation.value.kind !== 'qText')) {
+    return undefined;
+  }
+  return {
+    type: raw.type as 'exportPreviewText' | 'rerunPreview',
+    ...(typeof raw.outputId === 'string' ? { outputId: raw.outputId } : {}),
+    payload: validation.value,
+    requestId: raw.requestId,
+  };
+}
+
+function parseChartPngExportRequest(
+  raw: Record<string, unknown>
+): NotebookRendererMessage | undefined {
+  const prefix = 'data:image/png;base64,';
+  if (!hasOnlyKeys(raw, ['type', 'outputId', 'payload', 'requestId', 'dataUrl']) ||
+    !validOptionalOutputId(raw.outputId) || !validRequestId(raw.requestId) ||
+    typeof raw.dataUrl !== 'string' ||
+    raw.dataUrl.length <= prefix.length || raw.dataUrl.length > 70_000_000 ||
+    !raw.dataUrl.startsWith(prefix)) {
+    return undefined;
+  }
+  const validation = validatePortableKxResult(raw.payload);
+  if (!validation.ok || validation.value.kind !== 'table') {
+    return undefined;
+  }
+  return {
+    type: 'exportChartPng',
+    ...(typeof raw.outputId === 'string' ? { outputId: raw.outputId } : {}),
+    payload: validation.value,
+    requestId: raw.requestId,
+    dataUrl: raw.dataUrl,
   };
 }
 
@@ -555,10 +932,12 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     'mode',
     'kind',
     'columns',
+    'totalColumnCount',
     'rowCount',
     'chartXColumns',
     'chartYColumns',
     'chartGroupColumns',
+    'wholeResultColumnTextLengths',
     'text',
     'metadata',
     'message',
@@ -579,9 +958,16 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     !validBoundedText(raw.kind, 128) ||
     !Array.isArray(raw.columns) || raw.columns.length > MAX_NOTEBOOK_LIVE_COLUMNS ||
     !raw.columns.every(validColumnName) || !nonNegativeSafeInteger(raw.rowCount) ||
+    (raw.totalColumnCount !== undefined &&
+      (!nonNegativeSafeInteger(raw.totalColumnCount) ||
+        raw.totalColumnCount < raw.columns.length)) ||
     !validOptionalColumnList(raw.chartXColumns) ||
     !validOptionalColumnList(raw.chartYColumns) ||
-    !validOptionalColumnList(raw.chartGroupColumns)) {
+    !validOptionalColumnList(raw.chartGroupColumns) ||
+    !validOptionalColumnTextLengths(
+      raw.wholeResultColumnTextLengths,
+      raw.columns.length
+    )) {
     return undefined;
   }
   const metadata = parseLiveResultMetadata(raw.metadata);
@@ -596,6 +982,9 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     mode: raw.mode,
     kind: raw.kind,
     columns: raw.columns.slice(),
+    ...(typeof raw.totalColumnCount === 'number'
+      ? { totalColumnCount: raw.totalColumnCount }
+      : {}),
     rowCount: raw.rowCount,
     ...(Array.isArray(raw.chartXColumns)
       ? { chartXColumns: raw.chartXColumns.slice() as string[] }
@@ -606,9 +995,35 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     ...(Array.isArray(raw.chartGroupColumns)
       ? { chartGroupColumns: raw.chartGroupColumns.slice() as string[] }
       : {}),
+    ...(Array.isArray(raw.wholeResultColumnTextLengths)
+      ? { wholeResultColumnTextLengths: raw.wholeResultColumnTextLengths.slice() as number[] }
+      : {}),
     ...(raw.mode === 'text' ? { text: raw.text as string } : {}),
     metadata,
     ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
+  };
+}
+
+function parseLiveColumnTextLengthsMessage(
+  raw: Record<string, unknown>
+): NotebookLiveColumnTextLengthsMessage | undefined {
+  if (!hasOnlyKeys(raw, ['type', 'liveId', 'requestId', 'lengths']) ||
+    !validLiveId(raw.liveId) ||
+    !validRequestId(raw.requestId) ||
+    !Array.isArray(raw.lengths) ||
+    raw.lengths.length > MAX_NOTEBOOK_LIVE_COLUMNS ||
+    !raw.lengths.every(length => integerInRange(
+      length,
+      0,
+      KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
+    ))) {
+    return undefined;
+  }
+  return {
+    type: 'liveColumnTextLengths',
+    liveId: raw.liveId,
+    requestId: raw.requestId,
+    lengths: raw.lengths.slice() as number[],
   };
 }
 
@@ -738,6 +1153,34 @@ function parseLiveCopyMessage(raw: Record<string, unknown>): NotebookLiveCopyMes
     requestId: raw.requestId,
     ok: raw.ok,
     ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
+  };
+}
+
+function parseActionResultMessage(
+  raw: Record<string, unknown>
+): NotebookActionResultMessage | undefined {
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'requestId',
+    'action',
+    'ok',
+    'canceled',
+    'message',
+  ]) || !validRequestId(raw.requestId) ||
+    (raw.action !== 'copy' && raw.action !== 'export' && raw.action !== 'exportText' &&
+      raw.action !== 'exportChartPng' && raw.action !== 'openPreview' &&
+      raw.action !== 'rerun') ||
+    typeof raw.ok !== 'boolean' || typeof raw.canceled !== 'boolean' ||
+    !validBoundedText(raw.message, 4_096)) {
+    return undefined;
+  }
+  return {
+    type: 'actionResult',
+    requestId: raw.requestId,
+    action: raw.action,
+    ok: raw.ok,
+    canceled: raw.canceled,
+    message: raw.message,
   };
 }
 
@@ -988,17 +1431,26 @@ function parseLiveResultMetadata(raw: unknown): NotebookLiveResultMetadata | und
 }
 
 function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings | undefined {
-  if (!isRecord(raw) || !hasOnlyKeys(raw, [
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const columnWidths = parsePositionalColumnWidths(raw.columnWidths);
+  if (!columnWidths || !hasOnlyKeys(raw, [
     'cellWidth',
+    'columnWidths',
+    'autoFitColumns',
+    'autoFitMode',
     'rowHeight',
     'fontSize',
     'density',
     'showRowIndex',
     'includeHeaders',
     'includeRowIndex',
+    'copyExportConfirmCellThreshold',
     'elapsedTimeDisplay',
     'chartDecimalPlaces',
     'chartMaxSourceRows',
+    'chartZoomMinSampledPoints',
     'chartZoomMaxSampledPoints',
     'qTextSyntaxHighlighting',
     'qTextDisplayFormatting',
@@ -1008,15 +1460,20 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     'listDisplayStrategy',
     'objectDisplayStrategy',
   ]) || !integerInRange(raw.cellWidth, 80, 600) ||
+    typeof raw.autoFitColumns !== 'boolean' ||
+    (raw.autoFitMode !== 'wholeResult' && raw.autoFitMode !== 'visibleRows') ||
     !integerInRange(raw.rowHeight, 20, 80) || !integerInRange(raw.fontSize, 0, 32) ||
     (raw.density !== 'compact' && raw.density !== 'standard' && raw.density !== 'comfortable') ||
     typeof raw.showRowIndex !== 'boolean' ||
     typeof raw.includeHeaders !== 'boolean' ||
     typeof raw.includeRowIndex !== 'boolean' ||
+    !positiveSafeInteger(raw.copyExportConfirmCellThreshold) ||
     (raw.elapsedTimeDisplay !== 'auto' && raw.elapsedTimeDisplay !== 'milliseconds') ||
     !integerInRange(raw.chartDecimalPlaces, 0, 12) ||
     !positiveSafeInteger(raw.chartMaxSourceRows) ||
+    !positiveSafeInteger(raw.chartZoomMinSampledPoints) ||
     !positiveSafeInteger(raw.chartZoomMaxSampledPoints) ||
+    raw.chartZoomMaxSampledPoints < raw.chartZoomMinSampledPoints ||
     typeof raw.qTextSyntaxHighlighting !== 'boolean' ||
     typeof raw.qTextDisplayFormatting !== 'boolean' ||
     (raw.arrayDisplayFormat !== 'commaSpace' && raw.arrayDisplayFormat !== 'space' &&
@@ -1029,15 +1486,20 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
   }
   return {
     cellWidth: raw.cellWidth,
+    columnWidths,
+    autoFitColumns: raw.autoFitColumns,
+    autoFitMode: raw.autoFitMode,
     rowHeight: raw.rowHeight,
     fontSize: raw.fontSize,
     density: raw.density,
     showRowIndex: raw.showRowIndex,
     includeHeaders: raw.includeHeaders,
     includeRowIndex: raw.includeRowIndex,
+    copyExportConfirmCellThreshold: raw.copyExportConfirmCellThreshold,
     elapsedTimeDisplay: raw.elapsedTimeDisplay,
     chartDecimalPlaces: raw.chartDecimalPlaces,
     chartMaxSourceRows: raw.chartMaxSourceRows,
+    chartZoomMinSampledPoints: raw.chartZoomMinSampledPoints,
     chartZoomMaxSampledPoints: raw.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: raw.qTextSyntaxHighlighting,
     qTextDisplayFormatting: raw.qTextDisplayFormatting,
@@ -1056,6 +1518,10 @@ function normalizedResultSettingValue(
   switch (key as NotebookResultSettingKey) {
     case 'cellWidth':
       return integerInRange(value, 80, 600) ? value : undefined;
+    case 'autoFitColumns':
+      return typeof value === 'boolean' ? value : undefined;
+    case 'autoFitMode':
+      return value === 'wholeResult' || value === 'visibleRows' ? value : undefined;
     case 'rowHeight':
       return integerInRange(value, 20, 80) ? value : undefined;
     case 'fontSize':
@@ -1074,7 +1540,10 @@ function normalizedResultSettingValue(
       return value === 'auto' || value === 'milliseconds' ? value : undefined;
     case 'chartDecimalPlaces':
       return integerInRange(value, 0, 12) ? value : undefined;
+    case 'copyExportConfirmCellThreshold':
     case 'chartMaxSourceRows':
+    case 'chartZoomMinSampledPoints':
+    case 'chartZoomMaxSampledPoints':
       return positiveSafeInteger(value) ? value : undefined;
     case 'arrayDisplayFormat':
       return value === 'commaSpace' || value === 'space' || value === 'raw'
@@ -1088,6 +1557,48 @@ function normalizedResultSettingValue(
     default:
       return undefined;
   }
+}
+
+function validResultRange(raw: Record<string, unknown>): boolean {
+  return nonNegativeSafeInteger(raw.startRow) && nonNegativeSafeInteger(raw.endRow) &&
+    nonNegativeSafeInteger(raw.startColumn) && nonNegativeSafeInteger(raw.endColumn) &&
+    raw.endRow >= raw.startRow && raw.endColumn >= raw.startColumn;
+}
+
+function validOptionalColumnIndexes(value: unknown): boolean {
+  return value === undefined ||
+    (Array.isArray(value) && value.length > 0 && value.length <= MAX_NOTEBOOK_LIVE_COLUMNS &&
+      value.every(nonNegativeSafeInteger) && new Set(value).size === value.length);
+}
+
+function optionalColumnIndexes(value: unknown): number[] | undefined {
+  return Array.isArray(value) ? (value as number[]).slice() : undefined;
+}
+
+function validOptionalRowIndexes(value: unknown): boolean {
+  return value === undefined ||
+    (Array.isArray(value) && value.length > 0 && value.length <= MAX_NOTEBOOK_ROW_LIMIT &&
+      value.every(nonNegativeSafeInteger) && new Set(value).size === value.length);
+}
+
+function optionalRowIndexes(value: unknown): number[] | undefined {
+  return Array.isArray(value) ? (value as number[]).slice() : undefined;
+}
+
+function validOptionalChartRange(xMin: unknown, xMax: unknown): boolean {
+  if (xMin === undefined && xMax === undefined) {
+    return true;
+  }
+  return finiteNumber(xMin) && finiteNumber(xMax) && xMax > xMin;
+}
+
+function isTextExportFormat(value: unknown): value is TextExportFormat {
+  return value === 'csv' || value === 'json' || value === 'ndjson' ||
+    value === 'html' || value === 'markdown' || value === 'tsv';
+}
+
+function isExportFormat(value: unknown): value is ExportFormat {
+  return value === 'xlsx' || isTextExportFormat(value);
 }
 
 function validOptionalSort(sortColumn: unknown, sortDirection: unknown): boolean {
@@ -1114,6 +1625,17 @@ function validLiveId(value: unknown): value is string {
     /^[A-Za-z0-9_-]+$/.test(value);
 }
 
+function validOutputId(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= MIN_NOTEBOOK_OUTPUT_ID_CHARS &&
+    value.length <= MAX_NOTEBOOK_OUTPUT_ID_CHARS &&
+    /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function validOptionalOutputId(value: unknown): boolean {
+  return value === undefined || validOutputId(value);
+}
+
 function validRequestId(value: unknown): value is number {
   return positiveSafeInteger(value) && value <= MAX_NOTEBOOK_LIVE_REQUEST_ID;
 }
@@ -1136,6 +1658,17 @@ function validOptionalColumnList(value: unknown): boolean {
       value.every(validColumnName) && new Set(value).size === value.length);
 }
 
+function validOptionalColumnTextLengths(value: unknown, columnCount: number): boolean {
+  return value === undefined ||
+    (Array.isArray(value) &&
+      value.length === columnCount &&
+      value.every(length => integerInRange(
+        length,
+        0,
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
+      )));
+}
+
 function validBoundedText(value: unknown, max: number): value is string {
   return typeof value === 'string' && value.length <= max;
 }
@@ -1155,6 +1688,32 @@ function isLiveChartType(value: unknown): value is NotebookLiveChartType {
 
 function isDisplayStrategy(value: unknown): value is 'grid' | 'qText' {
   return value === 'grid' || value === 'qText';
+}
+
+function parsePositionalColumnWidths(
+  value: unknown
+): PositionalColumnWidths | undefined {
+  if (Array.isArray(value)) {
+    if (!value.every(width =>
+      width === 0 || integerInRange(
+        width,
+        KX_COLUMN_MIN_WIDTH,
+        KX_COLUMN_MAX_WIDTH
+      ))) {
+      return undefined;
+    }
+    return normalizePositionalColumnWidths(value);
+  }
+  if (!isRecord(value) || !Object.keys(value).every(key =>
+    /^(0|[1-9]\d*)$/.test(key) &&
+    integerInRange(
+      value[key],
+      KX_COLUMN_MIN_WIDTH,
+      KX_COLUMN_MAX_WIDTH
+    ))) {
+    return undefined;
+  }
+  return normalizePositionalColumnWidths(value);
 }
 
 function isPresentation(value: unknown): value is NotebookSettings['presentation'] {

@@ -1,7 +1,6 @@
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import JSZip = require('jszip');
 import {
   CHART_MAX_SOURCE_ROWS,
   CHART_ZOOM_MAX_SAMPLED_POINTS,
@@ -13,13 +12,27 @@ import {
   normalizeChartType,
 } from './charting';
 import {
-  captureChartFullXRange,
-  chartZoomDataAfterResponse,
+  applyChartZoomLifecycleFailure,
+  applyChartZoomLifecycleResponse,
   chartRangeIsZoomed,
+  chartZoomCanReset,
+  chartZoomRangeKey,
+  chartZoomRangeMatchesRequest,
+  chartZoomRequestedRenderRange,
   isValidChartRange,
-  planChartZoomReset,
+  issueChartZoomLifecycleRequest,
+  reduceChartZoomLifecycle,
+  resetChartZoomLifecycle,
 } from './chart-zoom';
 export { chartRangeIsZoomed } from './chart-zoom';
+import {
+  PositionalColumnWidthPersistenceQueue,
+  PositionalColumnWidths,
+  normalizeColumnAutoFitMode,
+  normalizePositionalColumnWidths,
+  updatePositionalColumnWidth,
+  widestDisplayedColumnTextLengthsAsync,
+} from './column-sizing';
 import {
   chartLegendToggleKey,
   chartSeriesVisible,
@@ -35,14 +48,23 @@ import {
   VisibleIndexRange,
   allCellsRange,
   applyColumnarRowOrder,
-  cellValueToText,
   clampCellRange,
-  exportShape,
-  filterColumnarPanelResult,
-  rowIndexColumnName,
+  projectColumnarPanelResult,
   sortedColumnarRowOrder,
   validateXlsxSheetLimits,
 } from './kx-results';
+import {
+  CHART_PNG_DATA_URL_PREFIX,
+  CopyExportEstimate,
+  chartPngBytesFromDataUrl,
+  columnarToXlsx as sharedColumnarToXlsx,
+  estimateCopyExport,
+  kxResultExportFileExtension,
+  kxResultExportSaveFilters,
+  largeCopyExportConfirmationMessage,
+  normalizeKxResultExportFormat,
+  normalizeKxResultTextExportFormat,
+} from './kx-results-export';
 import {
   LOCAL_DATA_SERVER_FULL_EXPORT_CELL_LIMIT,
   LocalDataServer,
@@ -53,6 +75,17 @@ import {
 } from './local-data-server';
 import { endPerfSpan, isPerfTraceEnabled, perfSpan } from './perf';
 import { QTextRenderModel, qTextRenderModel } from './q-text';
+import {
+  KX_RESULT_CHART_TYPE_OPTIONS,
+  KX_RESULT_EXPORT_FORMATS,
+  KX_RESULT_UI_LABELS,
+  KX_RESULTS_SHARED_CSS,
+  KxQResultDisplayStrategy,
+  KxResultDensity,
+  KxResultElapsedTimeDisplay,
+  SharedKxResultSettings,
+} from './results-ui-contract';
+export { SharedKxResultSettings } from './results-ui-contract';
 
 type KxPanelResultMode = 'table' | 'text';
 
@@ -85,9 +118,12 @@ interface LoadingState {
 interface KxPanelMetadata {
   mode: KxPanelResultMode;
   columns: string[];
+  columnPositions: number[];
   allColumns: string[];
+  allColumnPositions: number[];
   hiddenColumnCount: number;
   hiddenColumnNames: string[];
+  hiddenColumnPositions: number[];
   rowCount: number;
   text?: string;
   qTextRender?: QTextRenderModel;
@@ -99,66 +135,28 @@ interface KxPanelMetadata {
   canceled?: boolean;
   version: number;
   settings: KxPanelSettings;
+  wholeResultColumnTextLengths?: number[];
   sort: KxPanelSortState | null;
   guardrailMessage?: string;
   chartAutoOpen?: boolean;
 }
 
-export type KxPanelDensity = 'compact' | 'standard' | 'comfortable';
-export type KxPanelElapsedTimeDisplay = 'auto' | 'milliseconds';
-export type KxPanelQResultDisplayStrategy = 'grid' | 'qText';
+export type KxPanelDensity = KxResultDensity;
+export type KxPanelElapsedTimeDisplay = KxResultElapsedTimeDisplay;
+export type KxPanelQResultDisplayStrategy = KxQResultDisplayStrategy;
 type KxPanelSortDirection = 'asc' | 'desc';
 export type KxResultsPanelRunMode = 'replace' | 'new';
 
 interface KxPanelSortState {
   columnName: string;
+  columnPosition: number;
   direction: KxPanelSortDirection;
 }
 
-interface KxPanelSettings {
-  cellWidth: number;
-  rowHeight: number;
-  fontSize: number;
-  density: KxPanelDensity;
-  showRowIndex: boolean;
-  includeHeaders: boolean;
-  includeRowIndex: boolean;
+interface KxPanelSettings extends SharedKxResultSettings {
   hideLargeResultWarnings: boolean;
   hideLargeSortWarnings: boolean;
-  copyExportConfirmCellThreshold: number;
   localDataServerFullExportCellLimit: number;
-  elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
-  chartDecimalPlaces: number;
-  chartZoomMinSampledPoints: number;
-  chartZoomMaxSampledPoints: number;
-  qTextSyntaxHighlighting: boolean;
-  qTextDisplayFormatting: boolean;
-  arrayDisplayFormat: ArrayDisplayFormat;
-  functionDisplayStrategy: KxPanelQResultDisplayStrategy;
-  dictionaryDisplayStrategy: KxPanelQResultDisplayStrategy;
-  listDisplayStrategy: KxPanelQResultDisplayStrategy;
-  objectDisplayStrategy: KxPanelQResultDisplayStrategy;
-}
-
-export interface SharedKxResultSettings {
-  cellWidth: number;
-  rowHeight: number;
-  fontSize: number;
-  density: KxPanelDensity;
-  showRowIndex: boolean;
-  includeHeaders: boolean;
-  includeRowIndex: boolean;
-  elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
-  chartDecimalPlaces: number;
-  chartMaxSourceRows: number;
-  chartZoomMaxSampledPoints: number;
-  qTextSyntaxHighlighting: boolean;
-  qTextDisplayFormatting: boolean;
-  arrayDisplayFormat: ArrayDisplayFormat;
-  functionDisplayStrategy: KxPanelQResultDisplayStrategy;
-  dictionaryDisplayStrategy: KxPanelQResultDisplayStrategy;
-  listDisplayStrategy: KxPanelQResultDisplayStrategy;
-  objectDisplayStrategy: KxPanelQResultDisplayStrategy;
 }
 
 interface SavedChartSelection {
@@ -176,38 +174,25 @@ interface KxPanelShowOptions {
   autoChart?: boolean;
 }
 
-interface CopyExportEstimate {
-  selectedRows: number;
-  selectedColumns: number;
-  outputRows: number;
-  outputColumns: number;
-  selectedCells: number;
-  outputCells: number;
-  estimatedBytes: number;
-}
-
 const COPY_WARNING_BYTES = 15 * 1024 * 1024;
 const LARGE_RESULT_WARNING_CELL_THRESHOLD = 5 * 1000 * 1000;
 const LARGE_RESULT_WARNING_ROW_THRESHOLD = 1000000;
 const LARGE_RESULT_WARNING_COLUMN_THRESHOLD = 500;
 const COPY_EXPORT_CONFIRM_CELL_THRESHOLD = 1000000;
-const COPY_EXPORT_CONFIRM_BYTES = 50 * 1024 * 1024;
-const COPY_EXPORT_SAMPLE_ROWS = 32;
-const COPY_EXPORT_SAMPLE_COLUMNS = 12;
 const SORT_CONFIRM_ROW_THRESHOLD = 250000;
 const SEARCH_MATCH_CAP = 1000;
 const SEARCH_YIELD_CELL_INTERVAL = 10000;
 const SEARCH_SCAN_CELL_LIMIT = 2000000;
 const SEARCH_SCAN_MS_LIMIT = 1500;
-const CHART_PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
-const CHART_EXPORT_MAX_BYTES = 50 * 1024 * 1024;
 const CHART_DECIMAL_PLACES_DEFAULT = 4;
 const CHART_DECIMAL_PLACES_MIN = 0;
 const CHART_DECIMAL_PLACES_MAX = 12;
 const CHART_SELECTION_STATE_PREFIX = 'vscode-kdb.results.viewer.chartSelection.v1.';
-const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   cellWidth: 160,
+  columnWidths: {},
+  autoFitColumns: true,
+  autoFitMode: 'wholeResult',
   rowHeight: 28,
   fontSize: 0,
   density: 'standard',
@@ -220,6 +205,7 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   localDataServerFullExportCellLimit: LOCAL_DATA_SERVER_FULL_EXPORT_CELL_LIMIT,
   elapsedTimeDisplay: 'auto',
   chartDecimalPlaces: CHART_DECIMAL_PLACES_DEFAULT,
+  chartMaxSourceRows: CHART_MAX_SOURCE_ROWS,
   chartZoomMinSampledPoints: CHART_ZOOM_MIN_SAMPLED_POINTS,
   chartZoomMaxSampledPoints: CHART_ZOOM_MAX_SAMPLED_POINTS,
   qTextSyntaxHighlighting: false,
@@ -247,6 +233,19 @@ const DEFAULT_DENSITY_SIZE_SETTINGS: { [density in KxPanelDensity]: Pick<KxPanel
     fontSize: 0,
   },
 };
+const positionalColumnWidthPersistence =
+  new PositionalColumnWidthPersistenceQueue(
+    () => vscode.workspace
+      .getConfiguration('vscode-kdb.results')
+      .get<unknown>('viewer.columnWidths'),
+    widths => vscode.workspace
+      .getConfiguration('vscode-kdb.results')
+      .update(
+        'viewer.columnWidths',
+        widths,
+        vscode.ConfigurationTarget.Global
+      )
+  );
 
 export class KxResultsPanel {
   private static panels: KxResultsPanel[] = [];
@@ -261,14 +260,27 @@ export class KxResultsPanel {
   private loading: LoadingState | undefined;
   private version = 0;
   private firstSliceVersion = 0;
-  private hiddenColumnNames: string[] = [];
-  private columnOrder: string[] | undefined;
+  private hiddenColumnPositions: number[] = [];
+  private columnOrder: number[] | undefined;
   private rowOrder: number[] | undefined;
   private sortState: KxPanelSortState | undefined;
   private hiddenColumnSchema: string[] | undefined;
   private columnOrderSchema: string[] | undefined;
   private baseVisibleTableCache: { version: number; source: ColumnarPanelResult; table: ColumnarPanelResult } | undefined;
   private visibleTableCache: { version: number; source: ColumnarPanelResult; table: ColumnarPanelResult } | undefined;
+  private wholeResultColumnLengthCache: {
+    version: number;
+    table: ColumnarPanelResult;
+    arrayDisplayFormat: ArrayDisplayFormat;
+    lengths: number[];
+  } | undefined;
+  private wholeResultColumnLengthScan: {
+    id: number;
+    version: number;
+    table: ColumnarPanelResult;
+    arrayDisplayFormat: ArrayDisplayFormat;
+  } | undefined;
+  private wholeResultColumnLengthScanId = 0;
   private activeSearchId = 0;
   private hideLargeResultWarningOnce = false;
   private localDataServer: LocalDataServer | undefined;
@@ -297,6 +309,8 @@ export class KxResultsPanel {
     panel.hideLargeResultWarningOnce = false;
     panel.baseVisibleTableCache = undefined;
     panel.visibleTableCache = undefined;
+    panel.wholeResultColumnLengthCache = undefined;
+    panel.cancelWholeResultColumnLengthScan();
     panel.selectionRange = undefined;
     panel.selectionVersion = panel.version;
     panel.activeChartRequestId += 1;
@@ -334,18 +348,20 @@ export class KxResultsPanel {
     this.hideLargeResultWarningOnce = false;
     this.baseVisibleTableCache = undefined;
     this.visibleTableCache = undefined;
+    this.wholeResultColumnLengthCache = undefined;
+    this.cancelWholeResultColumnLengthScan();
     this.selectionRange = undefined;
     this.selectionVersion = this.version;
     this.activeChartRequestId += 1;
     this.chartPanelRendered = false;
     this.loading = undefined;
     if (isTextPanelResult(result)) {
-      this.hiddenColumnNames = [];
+      this.hiddenColumnPositions = [];
       this.hiddenColumnSchema = [];
       this.columnOrder = undefined;
       this.columnOrderSchema = [];
     } else {
-      this.hiddenColumnNames = this.hiddenColumnNamesForNewResult(result.table.columns);
+      this.hiddenColumnPositions = this.hiddenColumnPositionsForNewResult(result.table.columns);
       this.hiddenColumnSchema = result.table.columns.slice();
       this.columnOrder = this.columnOrderForNewResult(result.table.columns);
       this.columnOrderSchema = result.table.columns.slice();
@@ -512,12 +528,14 @@ export class KxResultsPanel {
     this.loading = undefined;
     this.rowOrder = undefined;
     this.sortState = undefined;
-    this.hiddenColumnNames = [];
+    this.hiddenColumnPositions = [];
     this.hiddenColumnSchema = undefined;
     this.columnOrder = undefined;
     this.columnOrderSchema = undefined;
     this.baseVisibleTableCache = undefined;
     this.visibleTableCache = undefined;
+    this.wholeResultColumnLengthCache = undefined;
+    this.cancelWholeResultColumnLengthScan();
     this.activeSearchId += 1;
     this.activeChartRequestId += 1;
     this.chartPanelOpen = false;
@@ -592,6 +610,11 @@ export class KxResultsPanel {
       return;
     }
 
+    if (message.type === 'chartZoomReset') {
+      this.invalidateChartRequest(message);
+      return;
+    }
+
     if (message.type === 'chartPanelState') {
       this.updateChartPanelState(message);
       return;
@@ -632,6 +655,16 @@ export class KxResultsPanel {
       return;
     }
 
+    if (message.type === 'setResultColumnWidth') {
+      await updatePositionalKxResultColumnWidth(message.position, message.width);
+      return;
+    }
+
+    if (message.type === 'resetResultColumnWidths') {
+      await resetPositionalKxResultColumnWidths();
+      return;
+    }
+
     if (message.type === 'hideLargeResultWarningOnce') {
       if (Number(message.version) === this.version) {
         this.hideLargeResultWarningOnce = true;
@@ -664,7 +697,7 @@ export class KxResultsPanel {
       await this.copyRange(
         message.version,
         message.range,
-        textExportFormat(message.format),
+        normalizeKxResultTextExportFormat(message.format),
         message.includeHeaders === true,
         message.includeRowIndex === true
       );
@@ -675,7 +708,7 @@ export class KxResultsPanel {
       await this.exportRange(
         message.version,
         message.range,
-        exportFormat(message.format),
+        normalizeKxResultExportFormat(message.format),
         message.includeHeaders === true,
         message.includeRowIndex === true
       );
@@ -700,7 +733,9 @@ export class KxResultsPanel {
         ready: this.ready,
       }) : null;
     try {
-      this.post({ type: 'resultMeta', result: this.metadataForResult(this.result) });
+      const metadata = this.metadataForResult(this.result);
+      this.post({ type: 'resultMeta', result: metadata });
+      this.scheduleWholeResultColumnTextLengths(metadata.settings);
       this.postLocalDataServerStatus();
     } finally {
       if (tracePerf) {
@@ -713,7 +748,14 @@ export class KxResultsPanel {
     const qTextRender = this.result && isTextPanelResult(this.result)
       ? qTextRenderModel(this.result.text, qTextRenderOptions(settings))
       : undefined;
-    this.post({ type: 'settings', settings, version: this.version, qTextRender });
+    this.post({
+      type: 'settings',
+      settings,
+      version: this.version,
+      qTextRender,
+      wholeResultColumnTextLengths: this.wholeResultColumnTextLengths(settings),
+    });
+    this.scheduleWholeResultColumnTextLengths(settings);
   }
 
   private metadataForResult(result: KxPanelResult): KxPanelMetadata {
@@ -722,9 +764,12 @@ export class KxResultsPanel {
       return {
         mode: 'text',
         columns: [],
+        columnPositions: [],
         allColumns: [],
+        allColumnPositions: [],
         hiddenColumnCount: 0,
         hiddenColumnNames: [],
+        hiddenColumnPositions: [],
         rowCount: 0,
         text: result.text,
         qTextRender: qTextRenderModel(result.text, qTextRenderOptions(settings)),
@@ -742,14 +787,18 @@ export class KxResultsPanel {
     }
 
     const columns = this.visibleColumnNames(result);
+    const hiddenColumnPositions = this.activeHiddenColumnPositions(result);
     const hiddenColumnNames = this.activeHiddenColumnNames(result);
     const settings = panelSettings();
     return {
       mode: 'table',
       columns,
+      columnPositions: this.visibleColumnPositions(result),
       allColumns: result.table.columns.slice(),
-      hiddenColumnCount: result.table.columns.length - columns.length,
+      allColumnPositions: sourceColumnPositions(result.table.columns.length),
+      hiddenColumnCount: hiddenColumnPositions.length,
       hiddenColumnNames,
+      hiddenColumnPositions,
       rowCount: result.table.rowCount,
       query: result.query,
       connectionName: result.connectionName,
@@ -759,6 +808,7 @@ export class KxResultsPanel {
       canceled: result.canceled,
       version: this.version,
       settings,
+      wholeResultColumnTextLengths: this.wholeResultColumnTextLengths(settings),
       sort: this.visibleSortState(result),
       chartAutoOpen: this.pendingAutoChart,
       guardrailMessage: settings.hideLargeResultWarnings || this.hideLargeResultWarningOnce
@@ -975,6 +1025,15 @@ export class KxResultsPanel {
     this.chartPanelRendered = this.chartPanelOpen && message.rendered === true;
   }
 
+  private invalidateChartRequest(message: any): void {
+    const requestVersion = integerOrNull(message.version);
+    const requestId = integerOrNull(message.requestId);
+    if (requestVersion === null || requestId === null || requestVersion !== this.version) {
+      return;
+    }
+    this.activeChartRequestId = requestId;
+  }
+
   private async saveRenderedChartSelection(message: any): Promise<void> {
     const requestVersion = integerOrNull(message.version);
     const requestId = integerOrNull(message.requestId);
@@ -1075,7 +1134,10 @@ export class KxResultsPanel {
       return this.baseVisibleTableCache.table;
     }
 
-    const table = filterColumnarPanelResult(result.table, this.visibleColumnNames(result));
+    const table = projectColumnarPanelResult(
+      result.table,
+      this.visibleColumnPositions(result)
+    );
     this.baseVisibleTableCache = { version: this.version, source: result.table, table };
     return table;
   }
@@ -1104,48 +1166,150 @@ export class KxResultsPanel {
     return orderedTable;
   }
 
+  private wholeResultColumnTextLengths(
+    settings: KxPanelSettings
+  ): number[] | undefined {
+    if (!settings.autoFitColumns || settings.autoFitMode !== 'wholeResult') {
+      return undefined;
+    }
+    const table = this.visibleTable();
+    if (!table) {
+      return undefined;
+    }
+    const cached = this.wholeResultColumnLengthCache;
+    if (cached &&
+      cached.version === this.version &&
+      cached.table === table &&
+      cached.arrayDisplayFormat === settings.arrayDisplayFormat) {
+      return cached.lengths.slice();
+    }
+    return undefined;
+  }
+
+  private scheduleWholeResultColumnTextLengths(settings: KxPanelSettings): void {
+    const table = settings.autoFitColumns && settings.autoFitMode === 'wholeResult'
+      ? this.visibleTable()
+      : null;
+    if (!table) {
+      this.cancelWholeResultColumnLengthScan();
+      return;
+    }
+    const cached = this.wholeResultColumnLengthCache;
+    if (cached &&
+      cached.version === this.version &&
+      cached.table === table &&
+      cached.arrayDisplayFormat === settings.arrayDisplayFormat) {
+      this.cancelWholeResultColumnLengthScan();
+      return;
+    }
+    const pending = this.wholeResultColumnLengthScan;
+    if (pending &&
+      pending.version === this.version &&
+      pending.table === table &&
+      pending.arrayDisplayFormat === settings.arrayDisplayFormat) {
+      return;
+    }
+    const request = {
+      id: ++this.wholeResultColumnLengthScanId,
+      version: this.version,
+      table,
+      arrayDisplayFormat: settings.arrayDisplayFormat,
+    };
+    this.wholeResultColumnLengthScan = request;
+    void widestDisplayedColumnTextLengthsAsync(
+      table,
+      { arrayDisplayFormat: request.arrayDisplayFormat },
+      {
+        continueScanning: () =>
+          !this.disposed &&
+          this.wholeResultColumnLengthScan === request &&
+          this.version === request.version &&
+          this.visibleTable() === request.table,
+      }
+    ).then(lengths => {
+      if (!lengths ||
+        this.disposed ||
+        this.wholeResultColumnLengthScan !== request ||
+        this.version !== request.version ||
+        this.visibleTable() !== request.table) {
+        return;
+      }
+      this.wholeResultColumnLengthScan = undefined;
+      this.wholeResultColumnLengthCache = {
+        version: request.version,
+        table: request.table,
+        arrayDisplayFormat: request.arrayDisplayFormat,
+        lengths,
+      };
+      this.post({
+        type: 'wholeResultColumnTextLengths',
+        version: request.version,
+        lengths: lengths.slice(),
+      });
+    }).catch(error => {
+      if (this.wholeResultColumnLengthScan === request) {
+        this.wholeResultColumnLengthScan = undefined;
+      }
+      console.error(`KX result column auto-fit failed: ${toError(error).message}`);
+    });
+  }
+
+  private cancelWholeResultColumnLengthScan(): void {
+    if (!this.wholeResultColumnLengthScan) {
+      return;
+    }
+    this.wholeResultColumnLengthScanId += 1;
+    this.wholeResultColumnLengthScan = undefined;
+  }
+
   private visibleSortState(result: KxPanelTableResult): KxPanelSortState | null {
     if (!this.sortState) {
       return null;
     }
 
-    return this.visibleColumnNames(result).indexOf(this.sortState.columnName) === -1
+    return this.visibleColumnPositions(result).indexOf(this.sortState.columnPosition) === -1
       ? null
       : { ...this.sortState };
   }
 
   private visibleColumnNames(result: KxPanelTableResult): string[] {
-    const hidden = columnNameLookup(this.hiddenColumnNames);
-    return this.orderedColumnNames(result.table.columns).filter(column => !hidden[column]);
+    return this.visibleColumnPositions(result)
+      .map(position => result.table.columns[position]);
   }
 
-  private orderedColumnNames(columns: string[]): string[] {
-    const available = columnNameLookup(columns);
-    const ordered: string[] = [];
+  private visibleColumnPositions(result: KxPanelTableResult): number[] {
+    const hidden = new Set(this.hiddenColumnPositions);
+    return this.orderedColumnPositions(result.table.columns)
+      .filter(position => !hidden.has(position));
+  }
+
+  private orderedColumnPositions(columns: string[]): number[] {
+    const ordered: number[] = [];
     if (this.columnOrder) {
-      this.columnOrder.forEach(column => {
-        if (available[column] && ordered.indexOf(column) === -1) {
-          ordered.push(column);
+      this.columnOrder.forEach(position => {
+        if (isSourceColumnPosition(position, columns.length) &&
+          ordered.indexOf(position) === -1) {
+          ordered.push(position);
         }
       });
     }
-    columns.forEach(column => {
-      if (ordered.indexOf(column) === -1) {
-        ordered.push(column);
+    sourceColumnPositions(columns.length).forEach(position => {
+      if (ordered.indexOf(position) === -1) {
+        ordered.push(position);
       }
     });
     return ordered;
   }
 
+  private activeHiddenColumnPositions(result: KxPanelTableResult): number[] {
+    const hidden = new Set(this.hiddenColumnPositions);
+    return sourceColumnPositions(result.table.columns.length)
+      .filter(position => hidden.has(position));
+  }
+
   private activeHiddenColumnNames(result: KxPanelTableResult): string[] {
-    const hidden = columnNameLookup(this.hiddenColumnNames);
-    const names: string[] = [];
-    result.table.columns.forEach(column => {
-      if (hidden[column] && names.indexOf(column) === -1) {
-        names.push(column);
-      }
-    });
-    return names;
+    return this.activeHiddenColumnPositions(result)
+      .map(position => result.table.columns[position]);
   }
 
   private postSlice(message: any): void {
@@ -1332,16 +1496,29 @@ export class KxResultsPanel {
     const requestVersion = integerOrNull(message.version);
     const columnIndex = integerOrNull(message.columnIndex);
     const columnName = typeof message.columnName === 'string' ? message.columnName : '';
-    if (requestVersion === null || columnIndex === null || !this.result || requestVersion !== this.version) {
+    if (requestVersion === null || columnIndex === null || !this.result ||
+      isTextPanelResult(this.result) || requestVersion !== this.version) {
       return;
     }
+    const result = this.result;
 
     const table = this.baseVisibleTable();
     if (!table || columnIndex < 0 || columnIndex >= table.columns.length || table.columns[columnIndex] !== columnName) {
       return;
     }
+    const visibleColumnPositions = this.visibleColumnPositions(result);
+    const requestedColumnPosition =
+      message.columnPosition === null || message.columnPosition === undefined
+        ? null
+        : integerOrNull(message.columnPosition);
+    const columnPosition = requestedColumnPosition === null
+      ? visibleColumnPositions[columnIndex]
+      : requestedColumnPosition;
+    if (visibleColumnPositions[columnIndex] !== columnPosition) {
+      return;
+    }
 
-    const nextSort = nextSortState(this.sortState, columnName);
+    const nextSort = nextSortState(this.sortState, columnName, columnPosition);
     if (!nextSort) {
       this.rowOrder = undefined;
       this.sortState = undefined;
@@ -1528,7 +1705,7 @@ export class KxResultsPanel {
 
     const uri = await vscode.window.showSaveDialog({
       defaultUri: defaultExportUri(format),
-      filters: saveFilters(format),
+      filters: kxResultExportSaveFilters(format),
       saveLabel: 'Export',
     });
     if (!this.isCurrentVersion(requestVersion)) {
@@ -1623,27 +1800,41 @@ export class KxResultsPanel {
       return;
     }
     const result = this.result;
-
-    const sourceColumnName = typeof message.sourceColumnName === 'string' ? message.sourceColumnName : '';
-    const targetColumnName = typeof message.targetColumnName === 'string' ? message.targetColumnName : '';
-    if (!sourceColumnName || !targetColumnName || sourceColumnName === targetColumnName) {
+    const visibleColumnPositions = this.visibleColumnPositions(result);
+    const sourceColumnPosition = messageSourceColumnPosition(
+      message,
+      result.table.columns,
+      visibleColumnPositions,
+      'sourceColumnPosition',
+      'sourceColumn',
+      'sourceColumnName'
+    );
+    const targetColumnPosition = messageSourceColumnPosition(
+      message,
+      result.table.columns,
+      visibleColumnPositions,
+      'targetColumnPosition',
+      'targetColumn',
+      'targetColumnName'
+    );
+    if (sourceColumnPosition === null || targetColumnPosition === null ||
+      sourceColumnPosition === targetColumnPosition) {
       return;
     }
 
-    const visibleColumns = this.visibleColumnNames(result);
-    if (visibleColumns.indexOf(sourceColumnName) === -1 || visibleColumns.indexOf(targetColumnName) === -1) {
-      return;
-    }
-
-    const nextVisibleColumns = moveColumnName(visibleColumns, sourceColumnName, targetColumnName);
-    if (sameColumnNames(visibleColumns, nextVisibleColumns)) {
+    const nextVisibleColumnPositions = moveColumnPosition(
+      visibleColumnPositions,
+      sourceColumnPosition,
+      targetColumnPosition
+    );
+    if (sameColumnPositions(visibleColumnPositions, nextVisibleColumnPositions)) {
       return;
     }
 
     this.columnOrder = mergeVisibleColumnOrder(
-      this.orderedColumnNames(result.table.columns),
-      nextVisibleColumns,
-      this.hiddenColumnNames
+      this.orderedColumnPositions(result.table.columns),
+      nextVisibleColumnPositions,
+      this.hiddenColumnPositions
     );
     this.columnOrderSchema = result.table.columns.slice();
     this.refreshResultView();
@@ -1656,8 +1847,8 @@ export class KxResultsPanel {
     const result = this.result;
 
     if (message.type === 'resetHiddenColumns' || message.type === 'showAllColumns') {
-      if (this.hiddenColumnNames.length > 0) {
-        this.hiddenColumnNames = [];
+      if (this.hiddenColumnPositions.length > 0) {
+        this.hiddenColumnPositions = [];
         this.refreshResultView();
       }
       return;
@@ -1665,23 +1856,26 @@ export class KxResultsPanel {
 
     if (message.type === 'hideAllColumns') {
       this.hiddenColumnSchema = result.table.columns.slice();
-      this.hiddenColumnNames = result.table.columns.slice();
+      this.hiddenColumnPositions = sourceColumnPositions(result.table.columns.length);
       this.rowOrder = undefined;
       this.sortState = undefined;
       this.refreshResultView();
       return;
     }
 
-    const columnName = typeof message.columnName === 'string' ? message.columnName : '';
-    if (!columnName || result.table.columns.indexOf(columnName) === -1) {
-      return;
-    }
-
     if (message.type === 'hideColumn') {
-      if (this.hiddenColumnNames.indexOf(columnName) === -1) {
+      const columnPosition = messageSourceColumnPosition(
+        message,
+        result.table.columns,
+        this.visibleColumnPositions(result),
+        'columnPosition',
+        'columnIndex',
+        'columnName'
+      );
+      if (columnPosition !== null) {
         this.hiddenColumnSchema = result.table.columns.slice();
-        this.hiddenColumnNames = this.hiddenColumnNames.concat(columnName);
-        if (this.sortState && this.sortState.columnName === columnName) {
+        this.hiddenColumnPositions = this.hiddenColumnPositions.concat(columnPosition);
+        if (this.sortState && this.sortState.columnPosition === columnPosition) {
           this.rowOrder = undefined;
           this.sortState = undefined;
         }
@@ -1691,47 +1885,56 @@ export class KxResultsPanel {
     }
 
     if (message.type === 'showColumn') {
-      if (this.hiddenColumnNames.indexOf(columnName) !== -1) {
+      const columnPosition = messageSourceColumnPosition(
+        message,
+        result.table.columns,
+        this.activeHiddenColumnPositions(result),
+        'columnPosition',
+        'columnIndex',
+        'columnName'
+      );
+      if (columnPosition !== null) {
         this.hiddenColumnSchema = result.table.columns.slice();
-        this.hiddenColumnNames = this.hiddenColumnNames.filter(name => name !== columnName);
+        this.hiddenColumnPositions = this.hiddenColumnPositions
+          .filter(position => position !== columnPosition);
         this.refreshResultView();
       }
     }
   }
 
-  private hiddenColumnNamesForNewResult(columns: string[]): string[] {
+  private hiddenColumnPositionsForNewResult(columns: string[]): number[] {
     if (!sameColumnNames(this.hiddenColumnSchema, columns)) {
       return [];
     }
 
-    const available = columnNameLookup(columns);
-    const names: string[] = [];
-    this.hiddenColumnNames.forEach(column => {
-      if (available[column] && names.indexOf(column) === -1) {
-        names.push(column);
+    const positions: number[] = [];
+    this.hiddenColumnPositions.forEach(position => {
+      if (isSourceColumnPosition(position, columns.length) &&
+        positions.indexOf(position) === -1) {
+        positions.push(position);
       }
     });
-    return names;
+    return positions;
   }
 
-  private columnOrderForNewResult(columns: string[]): string[] | undefined {
+  private columnOrderForNewResult(columns: string[]): number[] | undefined {
     if (!sameColumnNames(this.columnOrderSchema, columns) || !this.columnOrder) {
       return undefined;
     }
 
-    const available = columnNameLookup(columns);
-    const names: string[] = [];
-    this.columnOrder.forEach(column => {
-      if (available[column] && names.indexOf(column) === -1) {
-        names.push(column);
+    const positions: number[] = [];
+    this.columnOrder.forEach(position => {
+      if (isSourceColumnPosition(position, columns.length) &&
+        positions.indexOf(position) === -1) {
+        positions.push(position);
       }
     });
-    columns.forEach(column => {
-      if (names.indexOf(column) === -1) {
-        names.push(column);
+    sourceColumnPositions(columns.length).forEach(position => {
+      if (positions.indexOf(position) === -1) {
+        positions.push(position);
       }
     });
-    return names;
+    return positions;
   }
 
   private refreshResultView(): void {
@@ -1739,6 +1942,8 @@ export class KxResultsPanel {
     this.firstSliceVersion = 0;
     this.baseVisibleTableCache = undefined;
     this.visibleTableCache = undefined;
+    this.wholeResultColumnLengthCache = undefined;
+    this.cancelWholeResultColumnLengthScan();
     this.selectionRange = undefined;
     this.selectionVersion = this.version;
     this.activeChartRequestId += 1;
@@ -1789,6 +1994,7 @@ export class KxResultsPanel {
   <title>KX Results</title>
   <link rel="stylesheet" href="${uplotStyleUri}">
   <style nonce="${nonce}">
+    ${KX_RESULTS_SHARED_CSS}
     :root {
       --header-height: 32px;
       --row-height: 28px;
@@ -2506,29 +2712,23 @@ export class KxResultsPanel {
     }
   </style>
 </head>
-<body>
+<body class="kx-results-surface kx-results-panel-host">
   <div id="resultsToolbar" class="toolbar">
     <div id="outputControls" class="toolbar-group output-group" role="group" aria-labelledby="outputControlsLabel">
-      <span id="outputControlsLabel" class="toolbar-group-label">Output:</span>
-      <select id="actionFormat" aria-label="Copy/export format" disabled>
-        <option value="csv">CSV</option>
-        <option value="xlsx">XLSX</option>
-        <option value="tsv">TSV</option>
-        <option value="json">JSON</option>
-        <option value="ndjson">NDJSON</option>
-        <option value="html">HTML</option>
-        <option value="markdown">Markdown</option>
+      <span id="outputControlsLabel" class="toolbar-group-label">${KX_RESULT_UI_LABELS.output}</span>
+      <select id="actionFormat" aria-label="${KX_RESULT_UI_LABELS.format}" disabled>
+        ${kxResultExportOptionsHtml()}
       </select>
       <span id="inlineOutputOptions" class="output-options-slot">
-        <label id="includeHeadersLabel" class="checkbox" title="Include column headers in copied/exported output"><input id="includeHeaders" type="checkbox" checked>Headers</label>
-        <label id="includeRowIndexLabel" class="checkbox" title="Include row numbers in copied/exported output"><input id="includeRowIndex" type="checkbox" checked>Row #</label>
+        <label id="includeHeadersLabel" class="checkbox" title="Include column headers in copied/exported output"><input id="includeHeaders" type="checkbox" checked>${KX_RESULT_UI_LABELS.headers}</label>
+        <label id="includeRowIndexLabel" class="checkbox" title="Include row numbers in copied/exported output"><input id="includeRowIndex" type="checkbox" checked>${KX_RESULT_UI_LABELS.rowIndex}</label>
       </span>
-      <button id="copy" disabled>Copy</button>
-      <button id="export" disabled>Export</button>
+      <button id="copy" disabled>${KX_RESULT_UI_LABELS.copy}</button>
+      <button id="export" disabled>${KX_RESULT_UI_LABELS.export}</button>
     </div>
-    <button id="openChart" class="chart-open-button" disabled title="Open chart" aria-label="Open chart">Chart</button>
+    <button id="openChart" class="chart-open-button" disabled title="Open chart" aria-label="Open chart">${KX_RESULT_UI_LABELS.chart}</button>
     <details id="settingsMenu" class="settings">
-      <summary id="settingsSummary" aria-label="Settings menu">Settings</summary>
+      <summary id="settingsSummary" aria-label="Settings menu">${KX_RESULT_UI_LABELS.settings}</summary>
       <div class="settings-panel" role="group" aria-label="Settings controls">
         <div class="settings-compact-actions">
           <button id="expandSettingsSections" type="button">Expand all</button>
@@ -2562,7 +2762,11 @@ export class KxResultsPanel {
         </details>
         <details class="settings-section" open>
           <summary class="settings-heading"><span>Preferences</span></summary>
-          <label class="checkbox"><input id="autoFit" type="checkbox" disabled>Auto-fit</label>
+          <label class="checkbox"><input id="autoFit" type="checkbox" disabled>Auto-fit columns</label>
+          <label class="settings-row"><span>Auto-fit scope</span><select id="autoFitMode">
+            <option value="wholeResult">Whole result</option>
+            <option value="visibleRows">Visible rows</option>
+          </select></label>
           <label class="checkbox"><input id="settingsShowRowIndex" type="checkbox">Show row #</label>
           <label class="checkbox"><input id="settingsIncludeHeaders" type="checkbox">Include headers</label>
           <label class="checkbox"><input id="settingsIncludeRowIndex" type="checkbox">Include row #</label>
@@ -2571,6 +2775,9 @@ export class KxResultsPanel {
           <label class="settings-row"><span>Copy/export confirm cells</span><input id="settingsCopyExportConfirmCellThreshold" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Local server current.* cell limit</span><input id="settingsLocalDataServerFullExportCellLimit" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Chart decimals</span><input id="settingsChartDecimalPlaces" type="number" min="0" max="12" step="1" title="Decimal places for chart numeric labels, 0-12"></label>
+          <label class="settings-row"><span>Chart source rows</span><input id="settingsChartMaxSourceRows" type="number" min="1" step="1"></label>
+          <label class="settings-row"><span>Zoom minimum points</span><input id="settingsChartZoomMinSampledPoints" type="number" min="1" step="1"></label>
+          <label class="settings-row"><span>Zoom maximum points</span><input id="settingsChartZoomMaxSampledPoints" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Elapsed time</span><select id="settingsElapsedTimeDisplay">
             <option value="auto">Auto</option>
             <option value="milliseconds">Milliseconds</option>
@@ -2605,7 +2812,7 @@ export class KxResultsPanel {
           </select></label>
           <label class="settings-row"><span>Cell width</span><input id="settingsCellWidth" type="number" min="80" max="600" step="1"></label>
           <label class="settings-row"><span>Row height</span><input id="settingsRowHeight" type="number" min="20" max="80" step="1"></label>
-          <label class="settings-row"><span>Font size</span><input id="settingsFontSize" type="number" min="0" max="32" step="1"></label>
+          <label class="settings-row"><span>Font size</span><input id="settingsFontSize" type="number" min="0" max="32" step="1" placeholder="Auto (VS Code default)" aria-label="Font size, Auto uses the VS Code default"></label>
         </details>
         <details class="settings-section">
           <summary class="settings-heading"><span>Columns</span><span id="hiddenColumns">All visible</span></summary>
@@ -2639,12 +2846,7 @@ export class KxResultsPanel {
   <div id="chartPanel" class="chart-panel" hidden>
     <div class="chart-toolbar">
       <label class="chart-field"><span>Chart type</span><select id="chartType" aria-label="Chart type">
-        <option value="line">Line</option>
-        <option value="scatter">Scatter</option>
-        <option value="step">Step</option>
-        <option value="bar">Bar</option>
-        <option value="box">Box</option>
-        <option value="candlestick">Candlestick</option>
+        ${kxResultChartTypeOptionsHtml()}
       </select></label>
       <label class="chart-field"><span>X</span><select id="chartXColumn" disabled></select></label>
       <label id="chartGroupField" class="chart-field"><span>Group by</span><select id="chartGroupColumn" aria-label="Group by column" disabled>
@@ -2657,11 +2859,11 @@ export class KxResultsPanel {
         <label class="chart-field"><span>Low</span><select id="chartLowColumn" aria-label="Low column" disabled></select></label>
         <label class="chart-field"><span>Close</span><select id="chartCloseColumn" aria-label="Close column" disabled></select></label>
       </div>
-      <button id="renderChart" disabled>Render</button>
-      <button id="exportChart" hidden disabled>Export PNG</button>
-      <button id="resetChartZoom" disabled>Reset zoom</button>
-      <button id="refineChartZoom" disabled>Refine zoom</button>
-      <button id="closeChart">Close</button>
+      <button id="renderChart" disabled>${KX_RESULT_UI_LABELS.renderChart}</button>
+      <button id="exportChart" hidden disabled>${KX_RESULT_UI_LABELS.exportChartPng}</button>
+      <button id="resetChartZoom" disabled>${KX_RESULT_UI_LABELS.resetZoom}</button>
+      <button id="refineChartZoom" disabled>${KX_RESULT_UI_LABELS.refineZoom}</button>
+      <button id="closeChart">${KX_RESULT_UI_LABELS.closeChart}</button>
       <span id="chartStatus" class="status"></span>
     </div>
     <div id="chartCanvasWrap" class="chart-canvas-wrap">
@@ -2696,6 +2898,9 @@ export class KxResultsPanel {
       const AUTO_COLUMN_WIDTH_CAP = 1200;
       const DEFAULT_SETTINGS = {
         cellWidth: 160,
+        columnWidths: {},
+        autoFitColumns: true,
+        autoFitMode: 'wholeResult',
         rowHeight: 28,
         fontSize: 0,
         density: 'standard',
@@ -2708,6 +2913,7 @@ export class KxResultsPanel {
         localDataServerFullExportCellLimit: 1000000,
         elapsedTimeDisplay: 'auto',
         chartDecimalPlaces: 4,
+        chartMaxSourceRows: ${CHART_MAX_SOURCE_ROWS},
         chartZoomMinSampledPoints: ${CHART_ZOOM_MIN_SAMPLED_POINTS},
         chartZoomMaxSampledPoints: ${CHART_ZOOM_MAX_SAMPLED_POINTS},
         qTextSyntaxHighlighting: false,
@@ -2733,6 +2939,7 @@ export class KxResultsPanel {
       const includeRowIndex = document.getElementById('includeRowIndex');
       const includeHeaders = document.getElementById('includeHeaders');
       const autoFit = document.getElementById('autoFit');
+      const autoFitMode = document.getElementById('autoFitMode');
       const interactionMode = document.getElementById('interactionMode');
       const sortStatus = document.getElementById('sortStatus');
       const searchInput = document.getElementById('searchInput');
@@ -2750,6 +2957,9 @@ export class KxResultsPanel {
       const settingsCopyExportConfirmCellThreshold = document.getElementById('settingsCopyExportConfirmCellThreshold');
       const settingsLocalDataServerFullExportCellLimit = document.getElementById('settingsLocalDataServerFullExportCellLimit');
       const settingsChartDecimalPlaces = document.getElementById('settingsChartDecimalPlaces');
+      const settingsChartMaxSourceRows = document.getElementById('settingsChartMaxSourceRows');
+      const settingsChartZoomMinSampledPoints = document.getElementById('settingsChartZoomMinSampledPoints');
+      const settingsChartZoomMaxSampledPoints = document.getElementById('settingsChartZoomMaxSampledPoints');
       const settingsElapsedTimeDisplay = document.getElementById('settingsElapsedTimeDisplay');
       const settingsArrayDisplayFormat = document.getElementById('settingsArrayDisplayFormat');
       const settingsQTextSyntaxHighlighting = document.getElementById('settingsQTextSyntaxHighlighting');
@@ -2826,6 +3036,7 @@ export class KxResultsPanel {
       let columnWidthOverrides = Object.create(null);
       let autoColumnWidths = Object.create(null);
       let columnWidthSchema = [];
+      let columnWidthPositionSchema = [];
       let resizeState = null;
       let autoFitEnabled = true;
       let columnDragState = null;
@@ -2834,13 +3045,10 @@ export class KxResultsPanel {
       let chartOptionsRequestId = 0;
       let chartOptions = { xColumns: [], yColumns: [], groupColumns: [], warnings: [] };
       let chartData = null;
-      let chartOriginalData = null;
       let chartRendered = null;
       let chartUPlot = null;
       let chartZoomed = false;
-      let chartFullXRange = null;
-      let chartRequestIsRefinement = false;
-      let chartDataIsRefinement = false;
+      let chartZoomLifecycle = reduceChartZoomLifecycle(null, { type: 'clear', requestId: 0 });
       let chartZoomStateSuspended = false;
       let chartControlsDirty = false;
       let chartHiddenSeriesKeys = [];
@@ -2850,15 +3058,21 @@ export class KxResultsPanel {
       let chartAutoRenderPending = false;
       let chartAutoRefineTimer = 0;
       let chartLastAutoRefineKey = '';
-      const CHART_PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
+      const CHART_PNG_DATA_URL_PREFIX = '${CHART_PNG_DATA_URL_PREFIX}';
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
       const CHART_AUTO_REFINE_DELAY_MS = 450;
       ${isValidChartRange.toString()}
-      ${captureChartFullXRange.toString()}
-      ${chartZoomDataAfterResponse.toString()}
-      ${planChartZoomReset.toString()}
       ${chartRangeIsZoomed.toString()}
+      ${chartZoomCanReset.toString()}
+      ${chartZoomRangeKey.toString()}
+      ${chartZoomRangeMatchesRequest.toString()}
+      ${chartZoomRequestedRenderRange.toString()}
+      ${reduceChartZoomLifecycle.toString()}
+      ${issueChartZoomLifecycleRequest.toString()}
+      ${applyChartZoomLifecycleFailure.toString()}
+      ${applyChartZoomLifecycleResponse.toString()}
+      ${resetChartZoomLifecycle.toString()}
       ${chartLegendToggleKey.toString()}
       ${chartSeriesVisible.toString()}
       ${updateHiddenChartSeriesKeys.toString()}
@@ -2873,14 +3087,36 @@ export class KxResultsPanel {
         } else if (msg.type === 'searchResults') {
           setSearchResults(msg);
         } else if (msg.type === 'settings') {
+          const arrayDisplayFormatChanged =
+            normalizeArrayDisplayFormat(msg.settings?.arrayDisplayFormat) !==
+            settings.arrayDisplayFormat;
+          if (arrayDisplayFormatChanged) {
+            invalidateRenderedCellText();
+          }
           if (toNonNegativeInteger(msg.version, -1) === data.version && msg.qTextRender) {
             data.qTextRender = normalizeQTextRenderModel(msg.qTextRender, data.text);
+          }
+          if (toNonNegativeInteger(msg.version, -1) === data.version) {
+            data.wholeResultColumnTextLengths =
+              normalizeColumnTextLengths(
+                msg.wholeResultColumnTextLengths,
+                data.columns.length
+              );
           }
           applySettings(msg.settings);
           updateSummary();
           updateLargeResultWarning();
           updateActionState();
           updateSelectionLabel();
+          renderNow();
+        } else if (msg.type === 'wholeResultColumnTextLengths' &&
+          toNonNegativeInteger(msg.version, -1) === data.version &&
+          autoFitEnabled &&
+          settings.autoFitMode === 'wholeResult') {
+          data.wholeResultColumnTextLengths =
+            normalizeColumnTextLengths(msg.lengths, data.columns.length);
+          refreshAutoColumnWidths();
+          renderColumnSettings();
           renderNow();
         } else if (msg.type === 'copied' && isCurrentVersionMessage(msg)) {
           status.textContent = 'Copied ' + msg.rows + 'x' + msg.columns + ' ' + String(msg.format || '').toUpperCase();
@@ -2932,6 +3168,12 @@ export class KxResultsPanel {
       includeHeaders.addEventListener('change', () => updateSetting('includeHeaders', !!includeHeaders.checked));
       includeRowIndex.addEventListener('change', () => updateSetting('includeRowIndex', !!includeRowIndex.checked));
       autoFit.addEventListener('change', () => setAutoFitEnabled(!!autoFit.checked));
+      autoFitMode.addEventListener('change', () => {
+        updateSetting(
+          'autoFitMode',
+          String(autoFitMode.value || '') === 'visibleRows' ? 'visibleRows' : 'wholeResult'
+        );
+      });
       interactionMode.addEventListener('change', () => {
         if (dragMode === 'reorder') {
           dragging = false;
@@ -2962,6 +3204,9 @@ export class KxResultsPanel {
       settingsCopyExportConfirmCellThreshold.addEventListener('change', () => updatePositiveIntegerSetting('copyExportConfirmCellThreshold', settingsCopyExportConfirmCellThreshold));
       settingsLocalDataServerFullExportCellLimit.addEventListener('change', () => updatePositiveIntegerSetting('localDataServerFullExportCellLimit', settingsLocalDataServerFullExportCellLimit));
       settingsChartDecimalPlaces.addEventListener('change', () => updateNumberSetting('chartDecimalPlaces', settingsChartDecimalPlaces, 0, 12));
+      settingsChartMaxSourceRows.addEventListener('change', () => updatePositiveIntegerSetting('chartMaxSourceRows', settingsChartMaxSourceRows));
+      settingsChartZoomMinSampledPoints.addEventListener('change', () => updatePositiveIntegerSetting('chartZoomMinSampledPoints', settingsChartZoomMinSampledPoints));
+      settingsChartZoomMaxSampledPoints.addEventListener('change', () => updatePositiveIntegerSetting('chartZoomMaxSampledPoints', settingsChartZoomMaxSampledPoints));
       expandSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(true));
       collapseSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(false));
       settingsElapsedTimeDisplay.addEventListener('change', () => updateSetting('elapsedTimeDisplay', String(settingsElapsedTimeDisplay.value || 'auto')));
@@ -3060,6 +3305,8 @@ export class KxResultsPanel {
         if (!resizeState) {
           return;
         }
+        resizeState.moved =
+          resizeState.moved || event.clientX !== resizeState.startX;
         const width = clampInteger(resizeState.startWidth + event.clientX - resizeState.startX, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
         setColumnWidthOverride(resizeState.column, width);
         event.preventDefault();
@@ -3072,6 +3319,13 @@ export class KxResultsPanel {
           document.body.style.userSelect = '';
         }
         if (resizeState) {
+          if (resizeState.moved) {
+            vscode.postMessage({
+              type: 'setResultColumnWidth',
+              position: Number(columnWidthKey(resizeState.column)),
+              width: columnWidth(resizeState.column)
+            });
+          }
           resizeState = null;
           document.body.style.cursor = '';
         }
@@ -3147,17 +3401,46 @@ export class KxResultsPanel {
         const mode = result.mode === 'text' ? 'text' : 'table';
         const resultText = mode === 'text' ? String(result.text || '') : '';
         const nextColumns = Array.isArray(result.columns) ? result.columns.map(String) : [];
-        if (!sameColumnNames(columnWidthSchema, nextColumns)) {
-          columnWidthOverrides = Object.create(null);
+        const nextColumnPositions = normalizeColumnPositions(
+          result.columnPositions,
+          nextColumns.length
+        );
+        let nextAllColumns = Array.isArray(result.allColumns)
+          ? result.allColumns.map(String)
+          : [];
+        let nextAllColumnPositions = normalizeColumnPositions(
+          result.allColumnPositions,
+          nextAllColumns.length
+        );
+        if (nextAllColumns.length === 0) {
+          nextAllColumns = nextColumns.slice();
+          nextAllColumnPositions = nextColumnPositions.slice();
+        }
+        const nextHiddenColumnPositions = Array.isArray(result.hiddenColumnPositions)
+          ? normalizeSourceColumnPositionList(
+            result.hiddenColumnPositions,
+            nextAllColumnPositions
+          )
+          : legacyHiddenColumnPositions(
+            result.hiddenColumnNames,
+            nextAllColumns,
+            nextAllColumnPositions
+          );
+        if (!sameColumnNames(columnWidthSchema, nextColumns) ||
+          !sameColumnNames(columnWidthPositionSchema, nextColumnPositions)) {
           autoColumnWidths = Object.create(null);
           columnWidthSchema = nextColumns.slice();
+          columnWidthPositionSchema = nextColumnPositions.slice();
         }
         data = {
           version: toNonNegativeInteger(result.version, data.version + 1),
           mode,
           columns: nextColumns,
-          allColumns: Array.isArray(result.allColumns) ? result.allColumns.map(String) : [],
+          columnPositions: nextColumnPositions,
+          allColumns: nextAllColumns,
+          allColumnPositions: nextAllColumnPositions,
           hiddenColumnNames: Array.isArray(result.hiddenColumnNames) ? result.hiddenColumnNames.map(String) : [],
+          hiddenColumnPositions: nextHiddenColumnPositions,
           hiddenColumnCount: toNonNegativeInteger(result.hiddenColumnCount, 0),
           rowCount: toNonNegativeInteger(result.rowCount, 0),
           text: resultText,
@@ -3169,12 +3452,14 @@ export class KxResultsPanel {
           elapsedMs: toNonNegativeInteger(result.elapsedMs, 0),
           error: !!result.error,
           canceled: !!result.canceled,
-          sort: normalizeSortState(result.sort),
+          sort: normalizeSortState(result.sort, nextColumns, nextColumnPositions),
+          wholeResultColumnTextLengths:
+            normalizeColumnTextLengths(
+              result.wholeResultColumnTextLengths,
+              nextColumns.length
+            ),
           hasResult: true
         };
-        if (data.allColumns.length === 0) {
-          data.allColumns = data.columns.slice();
-        }
         applySettings(settings);
         resetWindowState();
         chartAutoRenderPending = result.chartAutoOpen === true;
@@ -3218,6 +3503,9 @@ export class KxResultsPanel {
 
       function resetWindowState() {
         slice = emptySlice();
+        if (autoFitEnabled && settings.autoFitMode === 'visibleRows') {
+          autoColumnWidths = Object.create(null);
+        }
         lastRenderedColumns = emptyColumnRange();
         selection = null;
         dragging = false;
@@ -3500,7 +3788,7 @@ export class KxResultsPanel {
         const canExport = chartCanExport();
         exportChart.hidden = !canExport;
         exportChart.disabled = !canExport;
-        resetChartZoomButton.disabled = !canExport || !chartZoomed;
+        resetChartZoomButton.disabled = !chartZoomCanReset(chartZoomLifecycle, chartZoomed);
         refineChartZoomButton.disabled = !chartCanRefineZoom();
         openChart.textContent = chartPanel.hidden ? 'Chart' : (chartControlsDirty ? 'Chart*' : 'Chart');
         openChart.title = chartPanel.hidden ? 'Open chart' : (chartControlsDirty ? 'Chart settings changed — Render to update' : 'Chart open');
@@ -3534,7 +3822,6 @@ export class KxResultsPanel {
         chartPanel.hidden = true;
         chartSplitter.hidden = true;
         latestChartRequestId += 1;
-        chartRequestIsRefinement = false;
         clearChartZoomBaseline();
         chartData = null;
         chartRendered = null;
@@ -3552,7 +3839,6 @@ export class KxResultsPanel {
       function resetChartState(messageText) {
         latestChartRequestId += 1;
         chartOptionsRequestId += 1;
-        chartRequestIsRefinement = false;
         clearChartZoomBaseline();
         chartOptions = { xColumns: [], yColumns: [], groupColumns: [], warnings: [] };
         chartData = null;
@@ -3608,7 +3894,7 @@ export class KxResultsPanel {
           requestChartDataForRange(null, restored ? 'Rendering restored chart settings...' : 'Rendering chart...');
           return;
         }
-        if (chartUPlot && chartFullXRange) {
+        if (chartUPlot && chartZoomLifecycle.fullRange) {
           updateChartZoomState(chartUPlot);
         } else {
           updateChartControls();
@@ -3656,7 +3942,6 @@ export class KxResultsPanel {
 
       function renderChartOptions() {
         if (!chartRendered) {
-          chartRequestIsRefinement = false;
           clearChartZoomBaseline();
         }
         chartXColumn.textContent = '';
@@ -3906,7 +4191,6 @@ export class KxResultsPanel {
       }
 
       function onChartControlChanged() {
-        chartRequestIsRefinement = false;
         clearChartZoomBaseline();
         chartControlsDirty = true;
         hideChartTooltip();
@@ -3921,10 +4205,11 @@ export class KxResultsPanel {
       }
 
       function clearChartZoomBaseline() {
-        chartFullXRange = null;
-        chartOriginalData = null;
+        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
+          type: 'clear',
+          requestId: latestChartRequestId
+        });
         chartZoomed = false;
-        chartDataIsRefinement = false;
         chartLastAutoRefineKey = '';
         clearChartAutoRefineTimer();
       }
@@ -3990,11 +4275,10 @@ export class KxResultsPanel {
           chartStatus.textContent = chartControlStatusMessage();
           return;
         }
-        chartRequestIsRefinement = !!xRange;
-        if (!chartRequestIsRefinement) {
-          clearChartZoomBaseline();
-        }
         latestChartRequestId += 1;
+        if (!xRange) {
+          chartZoomed = false;
+        }
         chartRendered = null;
         chartControlsDirty = false;
         clearChartAutoRefineTimer();
@@ -4015,13 +4299,20 @@ export class KxResultsPanel {
           closeColumn: selectedCandlestickColumns().close,
           width: Math.max(320, Math.floor(chartCanvasWrap.clientWidth || 800))
         };
-        if (xRange) {
-          message.xMin = xRange.min;
-          message.xMax = xRange.max;
-          message.minSampledPoints = chartZoomMinSampledPoints();
-          message.maxSampledPoints = chartZoomMaxSampledPoints();
-        }
-        vscode.postMessage(message);
+        chartZoomLifecycle = issueChartZoomLifecycleRequest(
+          chartZoomLifecycle,
+          latestChartRequestId,
+          xRange,
+          request => {
+            if (request.range) {
+              message.xMin = request.range.min;
+              message.xMax = request.range.max;
+              message.minSampledPoints = chartZoomMinSampledPoints();
+              message.maxSampledPoints = chartZoomMaxSampledPoints();
+            }
+            vscode.postMessage(message);
+          }
+        );
       }
 
       function exportChartPng() {
@@ -4072,25 +4363,38 @@ export class KxResultsPanel {
         }
         const normalized = normalizeChartData(value);
         if (normalized.chartType === 'candlestick' && normalized.invalidCandlestickCount > 0) {
-          chartStatus.textContent = 'Candlestick data contains ' + formatUiCount(normalized.invalidCandlestickCount) +
-            ' invalid OHLC point' + (normalized.invalidCandlestickCount === 1 ? '' : 's') +
-            '; check finite Open, High, Low, Close values and High/Low bounds.';
-          chartData = null;
-          chartRendered = null;
-          chartControlsDirty = false;
-          drawChart();
+          setChartError({
+            requestId: normalized.requestId,
+            message: 'Candlestick data contains ' + formatUiCount(normalized.invalidCandlestickCount) +
+              ' invalid OHLC point' + (normalized.invalidCandlestickCount === 1 ? '' : 's') +
+              '; check finite Open, High, Low, Close values and High/Low bounds.'
+          });
           return;
         }
-        const chartDataState = chartZoomDataAfterResponse(
-          chartOriginalData,
+        let accepted = null;
+        applyChartZoomLifecycleResponse(
+          chartZoomLifecycle,
+          normalized.requestId,
           normalized,
-          chartRequestIsRefinement
+          value => {
+            accepted = value;
+          }
         );
-        chartData = chartDataState.data;
-        chartOriginalData = chartDataState.originalData;
-        chartDataIsRefinement = chartDataState.dataIsRefinement;
+        if (!accepted) {
+          return;
+        }
+        chartZoomLifecycle = accepted.state;
+        chartData = accepted.data;
         chartRendered = null;
         chartControlsDirty = false;
+        updateChartDataStatus();
+        drawChart();
+      }
+
+      function updateChartDataStatus() {
+        if (!chartData) {
+          return;
+        }
         const warnings = chartData.warnings.length > 0 ? ' ' + chartData.warnings.join(' ') : '';
         const grouped = chartData.groupByColumn ? ' grouped by ' + chartData.groupByColumn : '';
         chartStatus.textContent = chartData.chartType === 'candlestick'
@@ -4104,7 +4408,6 @@ export class KxResultsPanel {
             : 'Showing ' + formatUiCount(chartData.sampledPointCount) +
               ' of ' + formatUiCount(chartData.eligibleRowCount) +
               ' eligible rows' + grouped + ' (' + chartData.algorithm + ').' + warnings;
-        drawChart();
       }
 
       function normalizeChartData(value) {
@@ -4231,14 +4534,31 @@ export class KxResultsPanel {
       }
 
       function setChartError(msg) {
-        if (toNonNegativeInteger(msg.requestId, -1) !== latestChartRequestId || chartControlsDirty) {
+        if (chartControlsDirty) {
           return;
         }
-        const canRestoreOriginal = chartRequestIsRefinement && !!chartOriginalData && !!chartFullXRange;
-        chartRequestIsRefinement = false;
+        let acceptedFailure = null;
+        applyChartZoomLifecycleFailure(
+          chartZoomLifecycle,
+          toNonNegativeInteger(msg.requestId, -1),
+          value => {
+            acceptedFailure = value;
+          }
+        );
+        if (!acceptedFailure) {
+          return;
+        }
+        chartZoomLifecycle = acceptedFailure.state;
+        const fullData = chartZoomLifecycle.fullData;
+        const canRestoreOriginal = acceptedFailure.requestWasRefinement &&
+          !!fullData &&
+          !!chartZoomLifecycle.fullRange;
         if (canRestoreOriginal) {
-          chartData = { ...chartOriginalData, requestId: latestChartRequestId };
-          chartDataIsRefinement = false;
+          chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
+            type: 'reset',
+            requestId: latestChartRequestId
+          });
+          chartData = chartZoomLifecycle.data;
           chartRendered = null;
           chartControlsDirty = false;
           chartStatus.textContent = String(msg.message || 'Chart refinement failed.') + ' Original full chart restored.';
@@ -4298,13 +4618,11 @@ export class KxResultsPanel {
           chartUPlot = new window.uPlot(chartUPlotOptions(dimensions), chartAlignedData(), chartPlot);
           decorateChartLegendAccessibility(chartUPlot);
           chartRendered = { version: chartData.version, requestId: chartData.requestId };
-          chartFullXRange = captureChartFullXRange(
-            chartFullXRange,
-            chartXScaleRange(chartUPlot),
-            chartDataIsRefinement || !!chartFullXRange
-          );
+          const requestedRange = chartZoomRequestedRenderRange(chartZoomLifecycle);
+          if (requestedRange) {
+            chartUPlot.setScale('x', { min: requestedRange.min, max: requestedRange.max });
+          }
           chartZoomStateSuspended = false;
-          updateChartZoomState(chartUPlot);
           notifyChartRendered();
           updateChartControls();
         } catch (error) {
@@ -4445,6 +4763,7 @@ export class KxResultsPanel {
             }
           },
           hooks: {
+            ready: [settleChartReadyZoomState],
             draw: type === 'candlestick'
               ? [drawChartCandlesticks]
               : (type === 'bar' ? [drawChartBars] : (type === 'box' ? [drawChartBoxes] : [])),
@@ -4457,6 +4776,20 @@ export class KxResultsPanel {
             }]
           }
         };
+      }
+
+      function settleChartReadyZoomState(self) {
+        if (!chartData ||
+          chartData.version !== data.version ||
+          chartData.requestId !== latestChartRequestId) {
+          return;
+        }
+        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
+          type: 'rendered',
+          requestId: chartData.requestId,
+          naturalRange: chartXScaleRange(self)
+        });
+        updateChartZoomState(self);
       }
 
       function chartSeriesKeys(value) {
@@ -5011,22 +5344,38 @@ export class KxResultsPanel {
       }
 
       function resetChartZoom() {
-        const reset = planChartZoomReset(
-          chartData,
-          chartOriginalData,
-          chartDataIsRefinement,
-          chartFullXRange,
-          latestChartRequestId
-        );
-        chartData = reset.data;
-        chartDataIsRefinement = reset.dataIsRefinement;
-        chartRequestIsRefinement = reset.requestIsRefinement;
-        applyChartZoomResetTransient(reset);
-        if (reset.restoredOriginalData) {
-          chartRendered = null;
-          drawChart();
+        const xRange = chartZoomLifecycle.fullRange;
+        const fullData = chartZoomLifecycle.fullData;
+        const restoreFullData = !!chartZoomLifecycle.requestedRange && !!fullData && !!xRange;
+        let restoredData = null;
+        if (chartZoomLifecycle.requestedRange) {
+          latestChartRequestId += 1;
+          chartZoomLifecycle = resetChartZoomLifecycle(
+            chartZoomLifecycle,
+            latestChartRequestId,
+            restored => {
+              restoredData = restored.data;
+            },
+            requestId => {
+              vscode.postMessage({
+                type: 'chartZoomReset',
+                version: data.version,
+                requestId
+              });
+            }
+          );
+          clearChartZoomTransientState();
         }
-        if (!chartUPlot || !reset.xScale || !reset.yScale) {
+        if (restoreFullData && restoredData) {
+          chartData = restoredData;
+          chartRendered = null;
+          chartControlsDirty = false;
+          updateChartDataStatus();
+          drawChart();
+          chartStatus.textContent = 'Zoom reset to the original full data range.';
+          return;
+        }
+        if (!chartUPlot || !xRange) {
           if (chartUPlot) {
             updateChartZoomState(chartUPlot);
           } else {
@@ -5037,28 +5386,15 @@ export class KxResultsPanel {
         chartZoomStateSuspended = true;
         try {
           chartUPlot.batch(() => {
-            chartUPlot.setScale('x', reset.xScale);
-            chartUPlot.setScale('y', reset.yScale);
+            chartUPlot.setScale('x', { min: xRange.min, max: xRange.max });
+            chartUPlot.setScale('y', { min: null, max: null });
           });
         } finally {
           chartZoomStateSuspended = false;
         }
-        applyChartZoomResetTransient(reset);
+        clearChartZoomTransientState();
         updateChartZoomState(chartUPlot);
         chartStatus.textContent = 'Zoom reset to the original full data range.';
-      }
-
-      function applyChartZoomResetTransient(reset) {
-        chartLastAutoRefineKey = reset.autoRefineKey;
-        if (reset.clearAutoRefineTimer) {
-          clearChartAutoRefineTimer();
-        }
-        if (reset.clearSelection) {
-          clearChartSelection();
-        }
-        if (reset.hideTooltip) {
-          hideChartTooltip();
-        }
       }
 
       function clearChartZoomTransientState() {
@@ -5079,10 +5415,7 @@ export class KxResultsPanel {
           return;
         }
         const currentRange = chartXScaleRange(self);
-        if (!chartFullXRange && !chartDataIsRefinement) {
-          chartFullXRange = captureChartFullXRange(null, currentRange, false);
-        }
-        chartZoomed = chartRangeIsZoomed(chartFullXRange, currentRange);
+        chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange, currentRange);
         if (chartZoomed) {
           queueChartAutoRefine();
         } else {
@@ -5092,7 +5425,7 @@ export class KxResultsPanel {
       }
 
       function currentChartZoomRange() {
-        const initial = chartFullXRange;
+        const initial = chartZoomLifecycle.fullRange;
         const current = chartXScaleRange(chartUPlot);
         if (!initial || !current || !chartRangeIsZoomed(initial, current)) {
           return null;
@@ -5104,17 +5437,13 @@ export class KxResultsPanel {
 
       function queueChartAutoRefine() {
         const range = currentChartZoomRange();
-        if (!range || !chartCanExport() || chartControlsDirty || !chartDataCanAutoRefine()) {
-          clearChartAutoRefineTimer();
-          return;
-        }
-        const visiblePoints = chartVisibleSamplePointCount(range);
-        if (visiblePoints >= chartAutoRefineMinVisiblePoints() || chartData.eligibleRowCount <= visiblePoints) {
+        if (!range || !chartCanExport() || chartControlsDirty) {
           clearChartAutoRefineTimer();
           return;
         }
         const key = chartZoomRangeKey(range);
-        if (key === chartLastAutoRefineKey) {
+        if (chartZoomRangeMatchesRequest(chartZoomLifecycle, range) ||
+          key === chartLastAutoRefineKey) {
           return;
         }
         if (chartAutoRefineTimer) {
@@ -5138,41 +5467,8 @@ export class KxResultsPanel {
         }
       }
 
-      function chartVisibleSamplePointCount(range) {
-        if (!chartData || !Array.isArray(chartData.x)) {
-          return 0;
-        }
-        let count = 0;
-        chartData.x.forEach(value => {
-          if (value >= range.min && value <= range.max) {
-            count += 1;
-          }
-        });
-        return count;
-      }
-
-      function chartZoomRangeKey(range) {
-        return Number(range.min).toPrecision(12) + ':' + Number(range.max).toPrecision(12);
-      }
-
       function chartZoomMinSampledPoints() {
         return positiveIntegerSetting(settings.chartZoomMinSampledPoints, DEFAULT_SETTINGS.chartZoomMinSampledPoints);
-      }
-
-      function chartAutoRefineMinVisiblePoints() {
-        const configuredMinimum = chartZoomMinSampledPoints();
-        const availableSample = chartData ? Math.max(1, chartData.sampledPointCount) : configuredMinimum;
-        return Math.min(configuredMinimum, availableSample);
-      }
-
-      function chartDataCanAutoRefine() {
-        if (!chartData) {
-          return false;
-        }
-        return chartData.algorithm.indexOf('minmax-bucket/') === 0 ||
-          chartData.algorithm.indexOf('bar-cluster-even/') === 0 ||
-          chartData.algorithm.indexOf('box-bucket/') === 0 ||
-          chartData.algorithm.indexOf('ohlc-bucket/') === 0;
       }
 
       function chartZoomMaxSampledPoints() {
@@ -5474,6 +5770,8 @@ export class KxResultsPanel {
       function applySettings(value) {
         const previousChartDecimalPlaces = settings.chartDecimalPlaces;
         settings = normalizeSettings(value || {});
+        columnWidthOverrides = positionalColumnWidthLookup(settings.columnWidths);
+        autoFitEnabled = settings.autoFitColumns;
         layout = layoutFromSettings(settings);
         syncSettingsControls();
         const root = document.documentElement;
@@ -5485,6 +5783,7 @@ export class KxResultsPanel {
         if (settings.chartDecimalPlaces !== previousChartDecimalPlaces) {
           refreshChartFormatting();
         }
+        refreshAutoColumnWidths();
       }
 
       function layoutFromSettings(settings) {
@@ -5508,6 +5807,11 @@ export class KxResultsPanel {
         );
         return {
           cellWidth: boundedSetting(value.cellWidth, DEFAULT_SETTINGS.cellWidth, 80, 600),
+          columnWidths: normalizePositionalColumnWidths(value.columnWidths),
+          autoFitColumns: typeof value.autoFitColumns === 'boolean'
+            ? value.autoFitColumns
+            : DEFAULT_SETTINGS.autoFitColumns,
+          autoFitMode: value.autoFitMode === 'visibleRows' ? 'visibleRows' : 'wholeResult',
           rowHeight: boundedSetting(value.rowHeight, DEFAULT_SETTINGS.rowHeight, 20, 80),
           fontSize: boundedSetting(value.fontSize, DEFAULT_SETTINGS.fontSize, 0, 32),
           density: normalizeDensity(value.density),
@@ -5520,6 +5824,10 @@ export class KxResultsPanel {
           localDataServerFullExportCellLimit: positiveIntegerSetting(value.localDataServerFullExportCellLimit, DEFAULT_SETTINGS.localDataServerFullExportCellLimit),
           elapsedTimeDisplay: normalizeElapsedTimeDisplay(value.elapsedTimeDisplay),
           chartDecimalPlaces: boundedSetting(value.chartDecimalPlaces, DEFAULT_SETTINGS.chartDecimalPlaces, 0, 12),
+          chartMaxSourceRows: positiveIntegerSetting(
+            value.chartMaxSourceRows,
+            DEFAULT_SETTINGS.chartMaxSourceRows
+          ),
           chartZoomMinSampledPoints,
           chartZoomMaxSampledPoints,
           qTextSyntaxHighlighting: typeof value.qTextSyntaxHighlighting === 'boolean'
@@ -5539,6 +5847,9 @@ export class KxResultsPanel {
       function syncSettingsControls() {
         includeHeaders.checked = settings.includeHeaders;
         includeRowIndex.checked = settings.includeRowIndex;
+        autoFit.checked = settings.autoFitColumns;
+        autoFitMode.value = settings.autoFitMode;
+        autoFitMode.disabled = !settings.autoFitColumns;
         settingsShowRowIndex.checked = settings.showRowIndex;
         settingsIncludeHeaders.checked = settings.includeHeaders;
         settingsIncludeRowIndex.checked = settings.includeRowIndex;
@@ -5547,6 +5858,9 @@ export class KxResultsPanel {
         settingsCopyExportConfirmCellThreshold.value = String(settings.copyExportConfirmCellThreshold);
         settingsLocalDataServerFullExportCellLimit.value = String(settings.localDataServerFullExportCellLimit);
         settingsChartDecimalPlaces.value = String(settings.chartDecimalPlaces);
+        settingsChartMaxSourceRows.value = String(settings.chartMaxSourceRows);
+        settingsChartZoomMinSampledPoints.value = String(settings.chartZoomMinSampledPoints);
+        settingsChartZoomMaxSampledPoints.value = String(settings.chartZoomMaxSampledPoints);
         settingsElapsedTimeDisplay.value = settings.elapsedTimeDisplay;
         settingsArrayDisplayFormat.value = settings.arrayDisplayFormat;
         settingsQTextSyntaxHighlighting.checked = settings.qTextSyntaxHighlighting;
@@ -5558,12 +5872,19 @@ export class KxResultsPanel {
         settingsDensity.value = settings.density;
         settingsCellWidth.value = String(settings.cellWidth);
         settingsRowHeight.value = String(settings.rowHeight);
-        settingsFontSize.value = String(settings.fontSize);
+        settingsFontSize.value = settings.fontSize > 0 ? String(settings.fontSize) : '';
+        settingsFontSize.setAttribute(
+          'aria-valuetext',
+          settings.fontSize > 0 ? String(settings.fontSize) : 'Auto (VS Code default)'
+        );
       }
 
       function updateSetting(key, value) {
         const next = {
           cellWidth: settings.cellWidth,
+          columnWidths: { ...settings.columnWidths },
+          autoFitColumns: settings.autoFitColumns,
+          autoFitMode: settings.autoFitMode,
           rowHeight: settings.rowHeight,
           fontSize: settings.fontSize,
           density: settings.density,
@@ -5576,6 +5897,7 @@ export class KxResultsPanel {
           localDataServerFullExportCellLimit: settings.localDataServerFullExportCellLimit,
           elapsedTimeDisplay: settings.elapsedTimeDisplay,
           chartDecimalPlaces: settings.chartDecimalPlaces,
+          chartMaxSourceRows: settings.chartMaxSourceRows,
           chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
           chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
           qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
@@ -5587,22 +5909,68 @@ export class KxResultsPanel {
           objectDisplayStrategy: settings.objectDisplayStrategy
         };
         next[key] = value;
-        applySettings(next);
-        if (key === 'cellWidth' || key === 'fontSize' || key === 'density') {
-          autoColumnWidths = Object.create(null);
+        if (key === 'cellWidth' || key === 'density') {
+          next.columnWidths = {};
         }
         if (key === 'arrayDisplayFormat') {
-          slice = emptySlice();
-          pendingRequestKey = '';
-          autoColumnWidths = Object.create(null);
-          if (String(searchInput.value || '').length > 0) {
-            queueSearchRows();
-          }
+          invalidateRenderedCellText();
         }
+        applySettings(next);
         updateSummary();
         updateLargeResultWarning();
         requestRender();
         vscode.postMessage({ type: 'updateSetting', key, value, density: settings.density });
+      }
+
+      function invalidateRenderedCellText() {
+        slice = emptySlice();
+        pendingRequestKey = '';
+        latestRequestId += 1;
+        autoColumnWidths = Object.create(null);
+        if (String(searchInput.value || '').length > 0) {
+          queueSearchRows();
+        }
+      }
+
+      function normalizePositionalColumnWidths(value) {
+        if (!value || typeof value !== 'object') {
+          return {};
+        }
+        const legacyArray = Array.isArray(value);
+        const source = legacyArray
+          ? value.reduce((mapped, width, position) => {
+            if (width !== null && width !== undefined) {
+              mapped[String(position)] = width;
+            }
+            return mapped;
+          }, {})
+          : value;
+        const widths = Object.create(null);
+        Object.keys(source).forEach(key => {
+          if (!(key === '0' || /^[1-9][0-9]*$/.test(key))) {
+            return;
+          }
+          const rawWidth = source[key];
+          if (rawWidth === null || rawWidth === undefined ||
+            typeof rawWidth === 'boolean' || rawWidth === '') {
+            return;
+          }
+          const width = Number(rawWidth);
+          if (!Number.isFinite(width) ||
+            (legacyArray && width < MIN_COLUMN_WIDTH)) {
+            return;
+          }
+          widths[key] = clampInteger(
+            Math.floor(width),
+            MIN_COLUMN_WIDTH,
+            MAX_COLUMN_WIDTH
+          );
+        });
+        return widths;
+      }
+
+      function positionalColumnWidthLookup(widths) {
+        return normalizePositionalColumnWidths(widths);
       }
 
       function updateDensitySetting(value) {
@@ -5643,7 +6011,7 @@ export class KxResultsPanel {
       }
 
       function renderColumnSettings() {
-        const hidden = columnNameLookup(data.hiddenColumnNames);
+        const hidden = new Set(data.hiddenColumnPositions);
         hiddenColumns.textContent = data.hiddenColumnCount > 0
           ? data.hiddenColumnCount + ' hidden'
           : 'All visible';
@@ -5654,15 +6022,21 @@ export class KxResultsPanel {
         resetColumnWidths.disabled = !hasColumnWidthOverrides();
         columnList.textContent = '';
         const fragment = document.createDocumentFragment();
-        data.allColumns.forEach(column => {
+        data.allColumns.forEach((column, columnIndex) => {
+          const columnPosition = data.allColumnPositions[columnIndex];
           const label = document.createElement('label');
           label.className = 'column-row';
           label.setAttribute('role', 'listitem');
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
-          checkbox.checked = !hidden[column];
+          checkbox.checked = !hidden.has(columnPosition);
           checkbox.addEventListener('change', () => {
-            vscode.postMessage({ type: checkbox.checked ? 'showColumn' : 'hideColumn', columnName: column });
+            vscode.postMessage({
+              type: checkbox.checked ? 'showColumn' : 'hideColumn',
+              version: data.version,
+              columnName: column,
+              columnPosition
+            });
           });
           const text = document.createElement('span');
           text.textContent = column;
@@ -5678,30 +6052,31 @@ export class KxResultsPanel {
         return slice.endColumn >= slice.startColumn && data.columns.length > 0;
       }
 
-      function hasVisibleColumnsForAutoFit() {
-        return data.columns.length > 0 && lastRenderedColumns.end >= lastRenderedColumns.start;
-      }
-
       function updateAutoFitControlState() {
         autoFit.disabled = data.columns.length === 0;
-        autoFit.title = autoFit.disabled ? 'No visible data columns' : 'Fit headers and rendered cells as you scroll';
+        autoFit.checked = settings.autoFitColumns;
+        autoFitMode.disabled = !settings.autoFitColumns;
+        autoFit.title = autoFit.disabled
+          ? 'No visible data columns'
+          : settings.autoFitMode === 'wholeResult'
+            ? 'Fit headers and values from the complete result'
+            : 'Fit headers and currently rendered rows';
       }
 
       function setAutoFitEnabled(enabled) {
-        autoFitEnabled = enabled && data.columns.length > 0;
-        autoFit.checked = autoFitEnabled;
-        autoColumnWidths = Object.create(null);
-        status.textContent = autoFitEnabled ? 'Auto-fit enabled' : 'Auto-fit disabled';
-        updateAutoColumnWidthsFromSlice();
-        updateAutoFitControlState();
-        requestRender();
+        updateSetting('autoFitColumns', enabled);
+        status.textContent = enabled ? 'Auto-fit enabled' : 'Auto-fit disabled';
       }
 
       function updateAutoColumnWidthsFromSlice() {
-        if (!autoFitEnabled || !hasVisibleSliceColumns()) {
+        if (!autoFitEnabled || settings.autoFitMode !== 'visibleRows') {
           return;
         }
-        let changed = false;
+        const next = Object.create(null);
+        if (!hasVisibleSliceColumns()) {
+          autoColumnWidths = next;
+          return;
+        }
         for (let column = slice.startColumn; column <= slice.endColumn; column++) {
           if (column < 0 || column >= data.columns.length) {
             continue;
@@ -5710,32 +6085,65 @@ export class KxResultsPanel {
           if (Number.isFinite(columnWidthOverrides[key])) {
             continue;
           }
-          let desired = measuredColumnTextWidth(data.columns[column]);
+          let desired = measuredColumnTextWidth(String(data.columns[column] || '').length);
           for (let rowOffset = 0; rowOffset < slice.cells.length; rowOffset++) {
             const row = slice.cells[rowOffset] || [];
             const text = String(row[column - slice.startColumn] || '');
-            desired = Math.max(desired, measuredColumnTextWidth(text));
+            desired = Math.max(desired, measuredColumnTextWidth(text.length));
           }
-          desired = clampInteger(desired, MIN_COLUMN_WIDTH, AUTO_COLUMN_WIDTH_CAP);
-          if (autoColumnWidths[key] !== desired) {
-            autoColumnWidths[key] = desired;
-            changed = true;
-          }
+          next[key] = clampInteger(desired, MIN_COLUMN_WIDTH, AUTO_COLUMN_WIDTH_CAP);
         }
-        if (changed) {
-          requestRender();
-        }
+        autoColumnWidths = next;
       }
 
-      function measuredColumnTextWidth(text) {
+      function refreshAutoColumnWidths() {
+        autoColumnWidths = Object.create(null);
+        if (!autoFitEnabled) {
+          return;
+        }
+        if (settings.autoFitMode === 'visibleRows') {
+          updateAutoColumnWidthsFromSlice();
+          return;
+        }
+        data.wholeResultColumnTextLengths.forEach((length, column) => {
+          const key = columnWidthKey(column);
+          if (!Number.isFinite(columnWidthOverrides[key])) {
+            autoColumnWidths[key] = measuredColumnTextWidth(length);
+          }
+        });
+      }
+
+      function normalizeColumnTextLengths(value, columnCount) {
+        if (!Array.isArray(value)) {
+          return [];
+        }
+        const limit = Math.max(0, Math.floor(Number(columnCount) || 0));
+        return value.slice(0, limit).map(length => {
+          const number = Number(length);
+          return Number.isFinite(number) && number >= 0
+            ? Math.min(Math.floor(number), Math.ceil(AUTO_COLUMN_WIDTH_CAP / 7))
+            : 0;
+        });
+      }
+
+      function measuredColumnTextWidth(textLength) {
         const fontSize = settings.fontSize > 0 ? settings.fontSize : 13;
         const charWidth = Math.max(7, fontSize * 0.58);
-        return Math.ceil(String(text || '').length * charWidth + layout.cellPaddingX * 2 + 18);
+        return clampInteger(
+          Math.ceil(Math.max(0, Number(textLength) || 0) * charWidth + layout.cellPaddingX * 2 + 18),
+          MIN_COLUMN_WIDTH,
+          AUTO_COLUMN_WIDTH_CAP
+        );
       }
 
       function setColumnWidthOverride(column, width) {
         const key = columnWidthKey(column);
+        const position = Number(key);
+        if (!Number.isSafeInteger(position) || position < 0) {
+          return;
+        }
         columnWidthOverrides[key] = clampInteger(width, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        settings.columnWidths[key] = columnWidthOverrides[key];
         status.textContent = data.columns[column] + ' width: ' + columnWidthOverrides[key] + 'px';
         resetColumnWidths.disabled = false;
         renderNow();
@@ -5743,11 +6151,24 @@ export class KxResultsPanel {
 
       function resetColumnWidthOverrides() {
         columnWidthOverrides = Object.create(null);
-        autoColumnWidths = Object.create(null);
+        settings.columnWidths = {};
         status.textContent = autoFitEnabled ? 'Column widths reset; auto-fit active' : 'Column widths reset';
-        updateAutoColumnWidthsFromSlice();
+        refreshAutoColumnWidths();
         renderColumnSettings();
         requestRender();
+        vscode.postMessage({ type: 'resetResultColumnWidths' });
+      }
+
+      function clearColumnWidthOverride(column) {
+        const key = columnWidthKey(column);
+        const position = Number(key);
+        if (!Number.isSafeInteger(position) || position < 0) {
+          return;
+        }
+        delete columnWidthOverrides[key];
+        delete settings.columnWidths[key];
+        refreshAutoColumnWidths();
+        vscode.postMessage({ type: 'setResultColumnWidth', position, width: 0 });
       }
 
       function hasColumnWidthOverrides() {
@@ -5765,12 +6186,27 @@ export class KxResultsPanel {
           : 'Sort: none';
       }
 
-      function normalizeSortState(value) {
+      function normalizeSortState(value, columns, columnPositions) {
         if (!value || typeof value.columnName !== 'string') {
           return null;
         }
         const direction = value.direction === 'desc' ? 'desc' : value.direction === 'asc' ? 'asc' : '';
-        return direction ? { columnName: value.columnName, direction } : null;
+        const requestedPosition =
+          value.columnPosition === null || value.columnPosition === undefined
+            ? NaN
+            : Number(value.columnPosition);
+        const legacyColumnIndex = Array.isArray(columns)
+          ? columns.indexOf(value.columnName)
+          : -1;
+        const columnPosition =
+          Number.isSafeInteger(requestedPosition) && requestedPosition >= 0
+            ? requestedPosition
+            : legacyColumnIndex >= 0 && Array.isArray(columnPositions)
+              ? Number(columnPositions[legacyColumnIndex])
+              : NaN;
+        return direction && Number.isSafeInteger(columnPosition) && columnPosition >= 0
+          ? { columnName: value.columnName, columnPosition, direction }
+          : null;
       }
 
       function columnNameLookup(columnNames) {
@@ -6167,7 +6603,12 @@ export class KxResultsPanel {
       }
 
       function columnWidthKey(column) {
-        return String(data.columns[column] || column);
+        const position = data.columnPositions[column];
+        return String(
+          Number.isFinite(position)
+            ? Math.max(0, Math.floor(position))
+            : Math.max(0, column)
+        );
       }
 
       function requestSlice(rows, columns) {
@@ -6362,10 +6803,17 @@ export class KxResultsPanel {
           return;
         }
         const column = Number(event.currentTarget.dataset.column);
+        const position = Number(columnWidthKey(column));
+        if (!Number.isSafeInteger(position) || position < 0) {
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
         resizeState = {
           column,
           startX: event.clientX,
-          startWidth: columnWidth(column)
+          startWidth: columnWidth(column),
+          moved: false
         };
         dragging = false;
         dragMode = 'resize';
@@ -6377,10 +6825,13 @@ export class KxResultsPanel {
 
       function onColumnResizeDoubleClick(event) {
         const column = Number(event.currentTarget.dataset.column);
-        const key = columnWidthKey(column);
-        delete columnWidthOverrides[key];
-        delete autoColumnWidths[key];
-        updateAutoColumnWidthsFromSlice();
+        const position = Number(columnWidthKey(column));
+        if (!Number.isSafeInteger(position) || position < 0) {
+          event.stopPropagation();
+          event.preventDefault();
+          return;
+        }
+        clearColumnWidthOverride(column);
         status.textContent = data.columns[column] + ' width reset';
         renderColumnSettings();
         requestRender();
@@ -6432,7 +6883,8 @@ export class KxResultsPanel {
             type: 'sortColumn',
             version: data.version,
             columnIndex: column,
-            columnName: data.columns[column]
+            columnName: data.columns[column],
+            columnPosition: data.columnPositions[column]
           });
           event.preventDefault();
           return;
@@ -6523,17 +6975,21 @@ export class KxResultsPanel {
         const targetColumn = Number(columnDragState.targetColumn);
         const sourceColumnName = data.columns[sourceColumn] || '';
         const targetColumnName = data.columns[targetColumn] || '';
+        const sourceColumnPosition = data.columnPositions[sourceColumn];
+        const targetColumnPosition = data.columnPositions[targetColumn];
         if (
-          sourceColumnName &&
-          targetColumnName &&
+          Number.isSafeInteger(sourceColumnPosition) &&
+          Number.isSafeInteger(targetColumnPosition) &&
           sourceColumn !== targetColumn
         ) {
-          status.textContent = 'Moving ' + sourceColumnName;
+          status.textContent = 'Moving ' + (sourceColumnName || 'column ' + (sourceColumnPosition + 1));
           vscode.postMessage({
             type: 'reorderColumn',
             version: data.version,
             sourceColumn,
             targetColumn,
+            sourceColumnPosition,
+            targetColumnPosition,
             sourceColumnName,
             targetColumnName
           });
@@ -6760,13 +7216,60 @@ export class KxResultsPanel {
         };
       }
 
+      function normalizeColumnPositions(value, columnCount) {
+        const positions = Array.isArray(value) ? value : [];
+        const count = Math.max(0, Math.floor(Number(columnCount) || 0));
+        const normalized = [];
+        for (let column = 0; column < count; column++) {
+          const position = Number(positions[column]);
+          normalized.push(
+            Number.isFinite(position) && position >= 0
+              ? Math.floor(position)
+              : column
+          );
+        }
+        return normalized;
+      }
+
+      function normalizeSourceColumnPositionList(value, availablePositions) {
+        const available = new Set(
+          Array.isArray(availablePositions)
+            ? availablePositions.filter(position =>
+              Number.isSafeInteger(position) && position >= 0)
+            : []
+        );
+        const used = new Set();
+        return (Array.isArray(value) ? value : []).reduce((positions, item) => {
+          const position = Number(item);
+          if (Number.isSafeInteger(position) && available.has(position) && !used.has(position)) {
+            used.add(position);
+            positions.push(position);
+          }
+          return positions;
+        }, []);
+      }
+
+      function legacyHiddenColumnPositions(hiddenNames, allColumns, allColumnPositions) {
+        const names = Array.isArray(hiddenNames) ? hiddenNames.map(String) : [];
+        const hidden = columnNameLookup(names);
+        return allColumns.reduce((positions, column, index) => {
+          if (hidden[column]) {
+            positions.push(allColumnPositions[index]);
+          }
+          return positions;
+        }, []);
+      }
+
       function emptyData() {
         return {
           version: 0,
           mode: 'table',
           columns: [],
+          columnPositions: [],
           allColumns: [],
+          allColumnPositions: [],
           hiddenColumnNames: [],
+          hiddenColumnPositions: [],
           hiddenColumnCount: 0,
           rowCount: 0,
           text: '',
@@ -6779,6 +7282,7 @@ export class KxResultsPanel {
           error: false,
           canceled: false,
           sort: null,
+          wholeResultColumnTextLengths: [],
           hasResult: false
         };
       }
@@ -6841,6 +7345,18 @@ export class KxResultsPanel {
   }
 }
 
+function kxResultExportOptionsHtml(): string {
+  return KX_RESULT_EXPORT_FORMATS
+    .map(format => `<option value="${format.value}">${format.label}</option>`)
+    .join('');
+}
+
+function kxResultChartTypeOptionsHtml(): string {
+  return KX_RESULT_CHART_TYPE_OPTIONS
+    .map(option => `<option value="${option.value}">${option.label}</option>`)
+    .join('');
+}
+
 function yieldToEventLoop(): Promise<void> {
   return new Promise<void>(resolve => setTimeout(resolve, 0));
 }
@@ -6860,6 +7376,14 @@ function panelSettings(): KxPanelSettings {
   const size = panelSizeSettings(config, density);
   return {
     cellWidth: size.cellWidth,
+    columnWidths: normalizePositionalColumnWidths(
+      config.get<unknown>('viewer.columnWidths')
+    ),
+    autoFitColumns: booleanSetting(
+      config.get<boolean>('viewer.autoFitColumns'),
+      DEFAULT_PANEL_SETTINGS.autoFitColumns
+    ),
+    autoFitMode: normalizeColumnAutoFitMode(config.get<string>('viewer.autoFitMode')),
     rowHeight: size.rowHeight,
     fontSize: size.fontSize,
     density,
@@ -6884,6 +7408,9 @@ function panelSettings(): KxPanelSettings {
     ),
     elapsedTimeDisplay: panelElapsedTimeDisplay(config.get<string>('elapsedTimeDisplay')),
     chartDecimalPlaces: chartDecimalPlacesSettingValue(config.get<number>('viewer.chartDecimalPlaces')),
+    chartMaxSourceRows: chartMaxSourceRowsSettingValue(
+      config.get<number>('viewer.chartMaxSourceRows')
+    ),
     ...chartZoomSamplePointSettings(config),
     qTextSyntaxHighlighting: booleanSetting(
       config.get<boolean>('qText.syntaxHighlighting'),
@@ -6905,6 +7432,9 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
   const settings = panelSettings();
   return {
     cellWidth: settings.cellWidth,
+    columnWidths: { ...settings.columnWidths },
+    autoFitColumns: settings.autoFitColumns,
+    autoFitMode: settings.autoFitMode,
     rowHeight: settings.rowHeight,
     fontSize: settings.fontSize,
     density: settings.density,
@@ -6913,7 +7443,9 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     includeRowIndex: settings.includeRowIndex,
     elapsedTimeDisplay: settings.elapsedTimeDisplay,
     chartDecimalPlaces: settings.chartDecimalPlaces,
-    chartMaxSourceRows: chartMaxSourceRowsSetting(),
+    chartMaxSourceRows: settings.chartMaxSourceRows,
+    copyExportConfirmCellThreshold: settings.copyExportConfirmCellThreshold,
+    chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
     chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
     qTextDisplayFormatting: settings.qTextDisplayFormatting,
@@ -6939,9 +7471,52 @@ export async function updateSharedKxResultSetting(
     normalized.key,
     panelDensity(density === undefined ? config.get<string>('density') : density)
   );
-  await config.update(settingKey, normalized.value, vscode.ConfigurationTarget.Global);
+  const settingUpdate = config.update(
+    settingKey,
+    normalized.value,
+    vscode.ConfigurationTarget.Global
+  );
+  const columnWidthReset =
+    normalized.key === 'cellWidth' || normalized.key === 'density'
+      ? persistPositionalKxResultColumnWidths(() => ({}))
+      : undefined;
+  await (columnWidthReset
+    ? Promise.all([settingUpdate, columnWidthReset])
+    : settingUpdate);
   KxResultsPanel.resultSettingsChanged();
   return true;
+}
+
+export async function updatePositionalKxResultColumnWidth(
+  zeroBasedPosition: unknown,
+  width: unknown
+): Promise<boolean> {
+  const position = Number(zeroBasedPosition);
+  const numericWidth = Number(width);
+  if (!Number.isSafeInteger(position) || position < 0 ||
+    !Number.isFinite(numericWidth) ||
+    (numericWidth !== 0 && (numericWidth < 80 || numericWidth > 2_000))) {
+    return false;
+  }
+  await persistPositionalKxResultColumnWidths(current =>
+    updatePositionalColumnWidth(
+      current,
+      position,
+      numericWidth === 0 ? null : numericWidth
+    ));
+  KxResultsPanel.resultSettingsChanged();
+  return true;
+}
+
+export async function resetPositionalKxResultColumnWidths(): Promise<void> {
+  await persistPositionalKxResultColumnWidths(() => ({}));
+  KxResultsPanel.resultSettingsChanged();
+}
+
+function persistPositionalKxResultColumnWidths(
+  update: (current: PositionalColumnWidths) => unknown
+): Promise<PositionalColumnWidths> {
+  return positionalColumnWidthPersistence.update(update);
 }
 
 function qTextRenderOptions(settings: KxPanelSettings): { syntaxHighlighting: boolean; displayFormatting: boolean } {
@@ -7029,8 +7604,12 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
   }
   if (
     key === 'arrayDisplayFormat' ||
+    key === 'autoFitColumns' ||
+    key === 'autoFitMode' ||
     key === 'chartMaxSourceRows' ||
     key === 'chartDecimalPlaces' ||
+    key === 'chartZoomMinSampledPoints' ||
+    key === 'chartZoomMaxSampledPoints' ||
     key === 'functionDisplayStrategy' ||
     key === 'dictionaryDisplayStrategy' ||
     key === 'listDisplayStrategy' ||
@@ -7073,6 +7652,8 @@ type PanelSettingUpdateValidator = (value: any) => PanelSettingUpdateValue | nul
 
 const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValidator } = {
   cellWidth: value => numberSettingUpdate(value, 80, 600),
+  autoFitColumns: booleanSettingUpdate,
+  autoFitMode: autoFitModeSettingUpdate,
   rowHeight: value => numberSettingUpdate(value, 20, 80),
   fontSize: value => numberSettingUpdate(value, 0, 32),
   density: densitySettingUpdate,
@@ -7086,6 +7667,8 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   elapsedTimeDisplay: elapsedTimeDisplaySettingUpdate,
   chartDecimalPlaces: value => numberSettingUpdate(value, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX),
   chartMaxSourceRows: positiveIntegerSettingUpdate,
+  chartZoomMinSampledPoints: positiveIntegerSettingUpdate,
+  chartZoomMaxSampledPoints: positiveIntegerSettingUpdate,
   arrayDisplayFormat: arrayDisplayFormatSettingUpdate,
   functionDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'qText'),
   dictionaryDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
@@ -7182,6 +7765,10 @@ function elapsedTimeDisplaySettingUpdate(value: any): string | null {
 
 function arrayDisplayFormatSettingUpdate(value: any): string | null {
   return value === 'commaSpace' || value === 'space' || value === 'raw' ? value : null;
+}
+
+function autoFitModeSettingUpdate(value: any): string | null {
+  return value === 'wholeResult' || value === 'visibleRows' ? value : null;
 }
 
 function qResultDisplayStrategySettingUpdate(value: any, fallback: KxPanelQResultDisplayStrategy): string | null {
@@ -7330,9 +7917,59 @@ function uniqueChartColumnNames(values: string[]): string[] {
   return result;
 }
 
-function moveColumnName(columns: string[], sourceColumnName: string, targetColumnName: string): string[] {
-  const sourceIndex = columns.indexOf(sourceColumnName);
-  const targetIndex = columns.indexOf(targetColumnName);
+function sourceColumnPositions(columnCount: number): number[] {
+  const count = Math.max(0, Math.floor(Number(columnCount) || 0));
+  return Array.from({ length: count }, (_unused, position) => position);
+}
+
+function isSourceColumnPosition(position: number, columnCount: number): boolean {
+  return Number.isSafeInteger(position) && position >= 0 && position < columnCount;
+}
+
+function messageSourceColumnPosition(
+  message: any,
+  columns: string[],
+  candidatePositions: number[],
+  positionKey: string,
+  displayedIndexKey: string,
+  nameKey: string
+): number | null {
+  if (message && message[positionKey] !== null &&
+    message[positionKey] !== undefined) {
+    const requestedPosition = integerOrNull(message[positionKey]);
+    if (requestedPosition !== null &&
+      candidatePositions.indexOf(requestedPosition) !== -1) {
+      return requestedPosition;
+    }
+    return null;
+  }
+
+  if (message && message[displayedIndexKey] !== null &&
+    message[displayedIndexKey] !== undefined) {
+    const displayedIndex = integerOrNull(message[displayedIndexKey]);
+    if (displayedIndex !== null &&
+      displayedIndex >= 0 &&
+      displayedIndex < candidatePositions.length) {
+      return candidatePositions[displayedIndex];
+    }
+    return null;
+  }
+
+  const columnName = message && typeof message[nameKey] === 'string'
+    ? message[nameKey]
+    : null;
+  if (columnName === null) {
+    return null;
+  }
+  const matchingPosition = candidatePositions.find(
+    position => columns[position] === columnName
+  );
+  return matchingPosition === undefined ? null : matchingPosition;
+}
+
+function moveColumnPosition(columns: number[], sourceColumn: number, targetColumn: number): number[] {
+  const sourceIndex = columns.indexOf(sourceColumn);
+  const targetIndex = columns.indexOf(targetColumn);
   if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) {
     return columns.slice();
   }
@@ -7343,27 +7980,36 @@ function moveColumnName(columns: string[], sourceColumnName: string, targetColum
   return next;
 }
 
-function mergeVisibleColumnOrder(fullOrder: string[], visibleOrder: string[], hiddenColumns: string[]): string[] {
-  const hidden = columnNameLookup(hiddenColumns);
+function mergeVisibleColumnOrder(fullOrder: number[], visibleOrder: number[], hiddenColumns: number[]): number[] {
+  const hidden = new Set(hiddenColumns);
   const visible = visibleOrder.slice();
   let visibleIndex = 0;
   return fullOrder.map(column => {
-    if (hidden[column]) {
+    if (hidden.has(column)) {
       return column;
     }
     const next = visible[visibleIndex];
     visibleIndex += 1;
-    return next || column;
+    return next === undefined ? column : next;
   });
 }
 
-function nextSortState(current: KxPanelSortState | undefined, columnName: string): KxPanelSortState | undefined {
-  if (!current || current.columnName !== columnName) {
-    return { columnName, direction: 'asc' };
+function sameColumnPositions(left: number[], right: number[]): boolean {
+  return left.length === right.length &&
+    left.every((position, index) => position === right[index]);
+}
+
+function nextSortState(
+  current: KxPanelSortState | undefined,
+  columnName: string,
+  columnPosition: number
+): KxPanelSortState | undefined {
+  if (!current || current.columnPosition !== columnPosition) {
+    return { columnName, columnPosition, direction: 'asc' };
   }
 
   if (current.direction === 'asc') {
-    return { columnName, direction: 'desc' };
+    return { columnName, columnPosition, direction: 'desc' };
   }
 
   return undefined;
@@ -7413,33 +8059,6 @@ function integerOrNull(value: any): number | null {
   return Number.isFinite(number) ? Math.floor(number) : null;
 }
 
-function textExportFormat(value: any): TextExportFormat {
-  switch (value) {
-    case 'csv':
-    case 'json':
-    case 'ndjson':
-    case 'html':
-    case 'markdown':
-    case 'tsv':
-      return value;
-  }
-  return 'csv';
-}
-
-function exportFormat(value: any): ExportFormat {
-  switch (value) {
-    case 'csv':
-    case 'xlsx':
-    case 'json':
-    case 'ndjson':
-    case 'html':
-    case 'markdown':
-    case 'tsv':
-      return value;
-  }
-  return 'csv';
-}
-
 function localDataServerEndpoint(value: any): LocalDataServerEndpoint {
   switch (value) {
     case 'metadata.json':
@@ -7455,30 +8074,11 @@ function localDataServerEndpoint(value: any): LocalDataServerEndpoint {
   return 'current.csv';
 }
 
-function saveFilters(format: ExportFormat): { [name: string]: string[] } {
-  switch (format) {
-    case 'csv':
-      return { CSV: ['csv'] };
-    case 'xlsx':
-      return { XLSX: ['xlsx'] };
-    case 'json':
-      return { JSON: ['json'] };
-    case 'ndjson':
-      return { NDJSON: ['ndjson'] };
-    case 'html':
-      return { HTML: ['html', 'htm'] };
-    case 'markdown':
-      return { Markdown: ['md', 'markdown'] };
-    case 'tsv':
-      return { TSV: ['tsv'] };
-  }
-}
-
 function defaultExportUri(format: ExportFormat): vscode.Uri {
   const folder = vscode.workspace.workspaceFolders && vscode.workspace.workspaceFolders.length > 0
     ? vscode.workspace.workspaceFolders[0].uri.fsPath
     : os.homedir();
-  const extension = format === 'markdown' ? 'md' : format;
+  const extension = kxResultExportFileExtension(format);
   return vscode.Uri.file(path.join(folder, `kx-results.${extension}`));
 }
 
@@ -7494,34 +8094,6 @@ function defaultChartExportUri(): vscode.Uri {
     ? vscode.workspace.workspaceFolders[0].uri.fsPath
     : os.homedir();
   return vscode.Uri.file(path.join(folder, 'kx-chart.png'));
-}
-
-function chartPngBytesFromDataUrl(value: any): Uint8Array {
-  if (typeof value !== 'string' || !value.startsWith(CHART_PNG_DATA_URL_PREFIX)) {
-    throw new Error('Chart export requires a PNG data URL.');
-  }
-
-  const base64 = value.slice(CHART_PNG_DATA_URL_PREFIX.length);
-  if (base64.length === 0 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(base64)) {
-    throw new Error('Invalid chart PNG data URL.');
-  }
-
-  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
-  const decodedBytes = base64.length / 4 * 3 - padding;
-  if (decodedBytes > CHART_EXPORT_MAX_BYTES) {
-    throw new Error(`Chart PNG export is too large: ${formatBytes(decodedBytes)}.`);
-  }
-
-  const content = Buffer.from(base64, 'base64');
-  if (content.length < PNG_SIGNATURE.length) {
-    throw new Error('Invalid chart PNG data.');
-  }
-  for (let index = 0; index < PNG_SIGNATURE.length; index++) {
-    if (content[index] !== PNG_SIGNATURE[index]) {
-      throw new Error('Invalid chart PNG data.');
-    }
-  }
-  return content;
 }
 
 function formatBytes(bytes: number): string {
@@ -7546,159 +8118,6 @@ function resultSizeGuardrailMessage(rowCount: number, columnCount: number): stri
     `(${formatCount(cells)} cells). Viewing is not blocked, but copy/export/search/sort may take longer.`;
 }
 
-function estimateCopyExport(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  format: ExportFormat,
-  includeHeaders: boolean,
-  includeRowIndex: boolean,
-  cellTextOptions: CellTextOptions = {}
-): CopyExportEstimate {
-  const shape = exportShape(range, { includeHeaders, includeRowIndex });
-  const averageCellBytes = estimateAverageCellBytes(result, range, shape.selectedRows, shape.selectedColumns, cellTextOptions);
-  const estimatedDataBytes = shape.selectedCells * (averageCellBytes + formatCellOverhead(format));
-  const estimatedHeaderBytes = includeHeaders
-    ? estimateHeaderBytes(result, range, includeRowIndex) + shape.outputColumns * formatCellOverhead(format)
-    : 0;
-  const estimatedRowIndexBytes = includeRowIndex ? estimateRowIndexBytes(range, shape.selectedRows) : 0;
-  const estimatedBytes = Math.ceil(
-    estimatedDataBytes +
-    estimatedHeaderBytes +
-    estimatedRowIndexBytes +
-    shape.outputRows * formatRowOverhead(format) +
-    formatDocumentOverhead(format)
-  );
-
-  return {
-    selectedRows: shape.selectedRows,
-    selectedColumns: shape.selectedColumns,
-    outputRows: shape.outputRows,
-    outputColumns: shape.outputColumns,
-    selectedCells: shape.selectedCells,
-    outputCells: shape.outputCells,
-    estimatedBytes,
-  };
-}
-
-function largeCopyExportConfirmationMessage(
-  action: 'copy' | 'export',
-  format: ExportFormat,
-  estimate: CopyExportEstimate,
-  confirmCellThreshold = COPY_EXPORT_CONFIRM_CELL_THRESHOLD
-): string | undefined {
-  if (
-    estimate.selectedCells < confirmCellThreshold &&
-    estimate.estimatedBytes < COPY_EXPORT_CONFIRM_BYTES
-  ) {
-    return undefined;
-  }
-
-  const actionLabel = action === 'copy' ? 'Copy' : 'Export';
-  return `${actionLabel} ${format.toUpperCase()} selection is large: ` +
-    `${formatCount(estimate.selectedRows)} rows x ${formatCount(estimate.selectedColumns)} columns ` +
-    `(${formatCount(estimate.selectedCells)} cells; estimated ${formatBytes(estimate.estimatedBytes)}). ` +
-    `Continue?`;
-}
-
-function estimateAverageCellBytes(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  selectedRows: number,
-  selectedColumns: number,
-  cellTextOptions: CellTextOptions = {}
-): number {
-  if (selectedRows <= 0 || selectedColumns <= 0) {
-    return 4;
-  }
-
-  const sampledRows = Math.min(selectedRows, COPY_EXPORT_SAMPLE_ROWS);
-  const sampledColumns = Math.min(selectedColumns, COPY_EXPORT_SAMPLE_COLUMNS);
-  const rowStep = Math.max(1, Math.floor(selectedRows / sampledRows));
-  const columnStep = Math.max(1, Math.floor(selectedColumns / sampledColumns));
-  let sampledCells = 0;
-  let sampledBytes = 0;
-
-  for (let rowOffset = 0; rowOffset < selectedRows && sampledCells < sampledRows * sampledColumns; rowOffset += rowStep) {
-    const rowIndex = Math.min(range.endRow, range.startRow + rowOffset);
-    for (let columnOffset = 0; columnOffset < selectedColumns && sampledCells < sampledRows * sampledColumns; columnOffset += columnStep) {
-      const columnIndex = Math.min(range.endColumn, range.startColumn + columnOffset);
-      sampledBytes += Buffer.byteLength(result.cellText(rowIndex, columnIndex, cellTextOptions), 'utf8');
-      sampledCells += 1;
-    }
-  }
-
-  return sampledCells > 0 ? Math.max(4, sampledBytes / sampledCells) : 4;
-}
-
-function estimateHeaderBytes(result: ColumnarPanelResult, range: CellRange, includeRowIndex: boolean): number {
-  let bytes = includeRowIndex ? Buffer.byteLength(rowIndexColumnName(result.columns, range), 'utf8') : 0;
-  for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-    bytes += Buffer.byteLength(result.columns[columnIndex], 'utf8');
-  }
-  return bytes;
-}
-
-function estimateRowIndexBytes(range: CellRange, selectedRows: number): number {
-  if (selectedRows <= 0) {
-    return 0;
-  }
-  const first = range.startRow + 1;
-  const last = range.endRow + 1;
-  const averageDigits = (String(first).length + String(last).length) / 2;
-  return Math.ceil(selectedRows * averageDigits);
-}
-
-function formatCellOverhead(format: ExportFormat): number {
-  switch (format) {
-    case 'html':
-      return 18;
-    case 'json':
-    case 'ndjson':
-      return 10;
-    case 'markdown':
-      return 4;
-    case 'xlsx':
-      return 64;
-    case 'csv':
-    case 'tsv':
-      return 2;
-  }
-}
-
-function formatRowOverhead(format: ExportFormat): number {
-  switch (format) {
-    case 'html':
-      return 12;
-    case 'markdown':
-      return 4;
-    case 'json':
-      return 4;
-    case 'xlsx':
-      return 18;
-    case 'csv':
-    case 'tsv':
-    case 'ndjson':
-      return 1;
-  }
-}
-
-function formatDocumentOverhead(format: ExportFormat): number {
-  switch (format) {
-    case 'html':
-      return 64;
-    case 'markdown':
-      return 32;
-    case 'xlsx':
-      return 2048;
-    case 'json':
-      return 2;
-    case 'csv':
-    case 'tsv':
-    case 'ndjson':
-      return 0;
-  }
-}
-
 function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -7710,151 +8129,5 @@ async function columnarToXlsx(
   includeRowIndex: boolean,
   cellTextOptions: CellTextOptions = {}
 ): Promise<Uint8Array> {
-  const limitError = validateXlsxSheetLimits(range, { includeHeaders, includeRowIndex });
-  if (limitError) {
-    throw new Error(limitError);
-  }
-
-  const zip = new JSZip();
-  zip.file('[Content_Types].xml', xmlDeclaration() +
-    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
-    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
-    '<Default Extension="xml" ContentType="application/xml"/>' +
-    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
-    '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' +
-    '<Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>' +
-    '</Types>');
-  zip.file('_rels/.rels', xmlDeclaration() +
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
-    '</Relationships>');
-  zip.file('xl/workbook.xml', xmlDeclaration() +
-    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
-    '<sheets><sheet name="Results" sheetId="1" r:id="rId1"/></sheets>' +
-    '</workbook>');
-  zip.file('xl/_rels/workbook.xml.rels', xmlDeclaration() +
-    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
-    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>' +
-    '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
-    '</Relationships>');
-  zip.file('xl/styles.xml', stylesXml());
-  zip.file('xl/worksheets/sheet1.xml', sheetXml(result, range, includeHeaders, includeRowIndex, cellTextOptions));
-  return zip.generateAsync({ type: 'uint8array', compression: 'DEFLATE' });
-}
-
-function sheetXml(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  includeHeaders: boolean,
-  includeRowIndex: boolean,
-  cellTextOptions: CellTextOptions
-): string {
-  const selectedRows = range.endRow - range.startRow + 1;
-  const selectedColumns = range.endColumn - range.startColumn + 1 + (includeRowIndex ? 1 : 0);
-  const outputRows = selectedRows + (includeHeaders ? 1 : 0);
-  const dimension = `A1:${excelColumnName(selectedColumns - 1)}${Math.max(outputRows, 1)}`;
-  return xmlDeclaration() +
-    '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    `<dimension ref="${dimension}"/>` +
-    '<sheetData>' +
-    sheetRowsXml(result, range, includeHeaders, includeRowIndex, cellTextOptions) +
-    '</sheetData>' +
-    '</worksheet>';
-}
-
-function sheetRowsXml(
-  result: ColumnarPanelResult,
-  range: CellRange,
-  includeHeaders: boolean,
-  includeRowIndex: boolean,
-  cellTextOptions: CellTextOptions
-): string {
-  const parts: string[] = [];
-  let outputRow = 1;
-  if (includeHeaders) {
-    const headers: string[] = [];
-    if (includeRowIndex) {
-      headers.push(cellValueToText(rowIndexColumnName(result.columns, range)));
-    }
-    for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      headers.push(cellValueToText(result.columns[columnIndex]));
-    }
-    parts.push(sheetRowXml(outputRow, headers));
-    outputRow += 1;
-  }
-
-  for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
-    const values: string[] = [];
-    if (includeRowIndex) {
-      values.push(String(rowIndex + 1));
-    }
-    for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      values.push(result.cellText(rowIndex, columnIndex, cellTextOptions));
-    }
-    parts.push(sheetRowXml(outputRow, values));
-    outputRow += 1;
-  }
-  return parts.join('');
-}
-
-function sheetRowXml(rowNumber: number, values: string[]): string {
-  const parts = [`<row r="${rowNumber}">`];
-  for (let columnIndex = 0; columnIndex < values.length; columnIndex++) {
-    parts.push(textCellXml(excelCellRef(columnIndex, rowNumber), values[columnIndex]));
-  }
-  parts.push('</row>');
-  return parts.join('');
-}
-
-function textCellXml(ref: string, value: string): string {
-  return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${escapeXml(value)}</t></is></c>`;
-}
-
-function excelCellRef(columnIndex: number, rowNumber: number): string {
-  return `${excelColumnName(columnIndex)}${rowNumber}`;
-}
-
-function excelColumnName(columnIndex: number): string {
-  let value = columnIndex + 1;
-  let name = '';
-  while (value > 0) {
-    const modulo = (value - 1) % 26;
-    name = String.fromCharCode(65 + modulo) + name;
-    value = Math.floor((value - modulo) / 26);
-  }
-  return name;
-}
-
-function stylesXml(): string {
-  return xmlDeclaration() +
-    '<styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
-    '<fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts>' +
-    '<fills count="1"><fill><patternFill patternType="none"/></fill></fills>' +
-    '<borders count="1"><border/></borders>' +
-    '<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>' +
-    '<cellXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/></cellXfs>' +
-    '<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>' +
-    '</styleSheet>';
-}
-
-function xmlDeclaration(): string {
-  return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>';
-}
-
-function escapeXml(value: string): string {
-  return value.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F&<>"']/g, char => {
-    switch (char) {
-      case '&':
-        return '&amp;';
-      case '<':
-        return '&lt;';
-      case '>':
-        return '&gt;';
-      case '"':
-        return '&quot;';
-      case '\'':
-        return '&apos;';
-    }
-    return '';
-  });
+  return sharedColumnarToXlsx(result, range, includeHeaders, includeRowIndex, cellTextOptions);
 }

@@ -9,6 +9,7 @@ mkdocs.yml
 src/**
 test/**
 scripts/**
+python/**
 tmp/**
 temp/**
 source/**
