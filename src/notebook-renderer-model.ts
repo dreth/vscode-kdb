@@ -27,7 +27,6 @@ export interface NotebookGridWindowInput {
   viewportHeight: number;
   rowHeight: number;
   cellWidth: number;
-  columnWidths?: readonly number[];
   rowIndexWidth: number;
   headerHeight: number;
   rowOverscan: number;
@@ -50,14 +49,6 @@ export const NOTEBOOK_GRID_MIN_HEIGHT = 72;
 export const NOTEBOOK_GRID_DEFAULT_MAX_HEIGHT = 420;
 export const NOTEBOOK_GRID_RESIZE_MAX_HEIGHT = 900;
 export const NOTEBOOK_CHART_MAX_Y_COLUMNS = 16;
-export function notebookSavedRowOrder(
-  rowCount: number,
-  compareRows: (left: number, right: number) => number
-): number[] {
-  const count = nonNegativeInteger(rowCount);
-  return Array.from({ length: count }, (_value, index) => index)
-    .sort((left, right) => compareRows(left, right) || left - right);
-}
 
 export function notebookGridDefaultHeight(
   rowCount: number,
@@ -94,40 +85,17 @@ export function notebookGridWindow(input: NotebookGridWindowInput): NotebookGrid
   const rawStartRow = Math.floor(
     Math.max(0, finiteNumber(input.scrollTop) - nonNegativeInteger(input.headerHeight)) / rowHeight
   );
-  const variableWidths = input.columnWidths?.length === columnCount
-    ? input.columnWidths.map(width => positiveInteger(width, cellWidth))
-    : undefined;
-  const horizontalOffset = Math.max(
-    0,
-    finiteNumber(input.scrollLeft) - nonNegativeInteger(input.rowIndexWidth)
+  const rawStartColumn = Math.floor(
+    Math.max(0, finiteNumber(input.scrollLeft) - nonNegativeInteger(input.rowIndexWidth)) / cellWidth
   );
-  let rawStartColumn = 0;
-  let firstColumnOffset = 0;
-  if (variableWidths) {
-    while (rawStartColumn + 1 < columnCount &&
-      firstColumnOffset + variableWidths[rawStartColumn] <= horizontalOffset) {
-      firstColumnOffset += variableWidths[rawStartColumn];
-      rawStartColumn += 1;
-    }
-  } else {
-    rawStartColumn = Math.floor(horizontalOffset / cellWidth);
-    firstColumnOffset = rawStartColumn * cellWidth;
-  }
   const visibleRows = Math.max(1, Math.ceil(positiveInteger(input.viewportHeight, 1) / rowHeight));
-  const availableWidth = Math.max(
+  const visibleColumns = Math.max(
     1,
-    positiveInteger(input.viewportWidth, 1) - nonNegativeInteger(input.rowIndexWidth)
+    Math.ceil(
+      Math.max(1, positiveInteger(input.viewportWidth, 1) - nonNegativeInteger(input.rowIndexWidth)) /
+      cellWidth
+    )
   );
-  let visibleColumns = 1;
-  if (variableWidths) {
-    let covered = Math.max(0, firstColumnOffset + variableWidths[rawStartColumn] - horizontalOffset);
-    while (rawStartColumn + visibleColumns < columnCount && covered < availableWidth) {
-      covered += variableWidths[rawStartColumn + visibleColumns];
-      visibleColumns += 1;
-    }
-  } else {
-    visibleColumns = Math.max(1, Math.ceil(availableWidth / cellWidth));
-  }
   const startRow = Math.max(0, rawStartRow - rowOverscan);
   const startColumn = Math.max(0, rawStartColumn - columnOverscan);
   const maxRows = Math.max(1, positiveInteger(input.maxRows, visibleRows));
@@ -278,90 +246,6 @@ export function notebookSearchEnterAction(
 export interface NotebookSavedSearchMatch {
   displayRow: number;
   sourceRow: number;
-}
-
-export interface NotebookSavedSearchCursor {
-  matches: NotebookSavedSearchMatch[];
-  capped: boolean;
-  partial: boolean;
-  scannedRows: number;
-  scannedCells: number;
-  nextDisplayRow: number;
-  nextColumn: number;
-}
-
-export interface NotebookSavedSearchChunkInput {
-  rowCount: number;
-  query: string;
-  maximumMatches: number;
-  maximumCells: number;
-  maximumChunkRows: number;
-  maximumChunkCells: number;
-  sourceRow: (displayRow: number) => number;
-  columnCount: (sourceRow: number) => number;
-  cellText: (sourceRow: number, column: number) => string;
-  shouldYield?: (chunkCells: number) => boolean;
-}
-
-export function scanNotebookSavedSearchChunk(
-  cursor: NotebookSavedSearchCursor,
-  input: NotebookSavedSearchChunkInput
-): { complete: boolean; chunkRows: number; chunkCells: number } {
-  const rowCount = nonNegativeInteger(input.rowCount);
-  const maximumMatches = nonNegativeInteger(input.maximumMatches);
-  const maximumCells = nonNegativeInteger(input.maximumCells);
-  const maximumChunkRows = Math.max(1, nonNegativeInteger(input.maximumChunkRows));
-  const maximumChunkCells = Math.max(1, nonNegativeInteger(input.maximumChunkCells));
-  const needle = input.query.toLocaleLowerCase();
-  let chunkRows = 0;
-  let chunkCells = 0;
-  let stopped = !needle || maximumMatches === 0 || maximumCells === 0;
-  while (!stopped && cursor.nextDisplayRow < rowCount &&
-    chunkRows < maximumChunkRows && chunkCells < maximumChunkCells) {
-    const displayRow = cursor.nextDisplayRow;
-    const sourceRow = input.sourceRow(displayRow);
-    const columnCount = nonNegativeInteger(input.columnCount(sourceRow));
-    let matched = false;
-    while (cursor.nextColumn < columnCount) {
-      if (cursor.scannedCells >= maximumCells) {
-        cursor.partial = true;
-        stopped = true;
-        break;
-      }
-      const column = cursor.nextColumn;
-      cursor.nextColumn += 1;
-      cursor.scannedCells += 1;
-      chunkCells += 1;
-      if (input.cellText(sourceRow, column).toLocaleLowerCase().includes(needle)) {
-        matched = true;
-        cursor.nextColumn = columnCount;
-        break;
-      }
-      if (chunkCells >= maximumChunkCells || input.shouldYield?.(chunkCells)) {
-        break;
-      }
-    }
-    if (stopped || cursor.nextColumn < columnCount) {
-      break;
-    }
-    if (matched) {
-      cursor.matches.push({ displayRow, sourceRow });
-      if (cursor.matches.length >= maximumMatches) {
-        cursor.capped = true;
-        cursor.partial = displayRow + 1 < rowCount;
-        stopped = true;
-      }
-    }
-    cursor.nextDisplayRow += 1;
-    cursor.nextColumn = 0;
-    cursor.scannedRows += 1;
-    chunkRows += 1;
-  }
-  return {
-    complete: stopped || cursor.nextDisplayRow >= rowCount,
-    chunkRows,
-    chunkCells,
-  };
 }
 
 export function notebookSavedSearchMatches(

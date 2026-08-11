@@ -969,24 +969,22 @@
 <p>Normal selection/current-line and script runs reuse an existing KX panel. <strong>Run Selection in New Result</strong> opens another panel. The first panel uses <code>vscode-kdb.results.viewer.initialViewColumn</code>; a new panel uses the current KX result panel's editor group when one is available.</p>
 <p>Panels preserve editor focus on creation. Replacing a loading result locally cancels the previous panel wait so its late response cannot overwrite newer output.</p>
 <h3 id="notebook-live-results-and-saved-snapshots">Notebook live results and saved snapshots</h3>
-<p>For a current first-party direct result, <strong>Open in KX Results</strong> can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The compact inline adaptation provides natural/resizable table height, stable two-axis virtual scrolling, sticky headers/row numbers, capped Search with <code>Enter</code> / <code>Shift+Enter</code> navigation, drag/Shift/keyboard range selection, and bounded selection copy through the full live value. Its selection-only <strong>Tools</strong> menu uses one format selector and one Copy action instead of disabled duplicate copy buttons.</p>
+<p>For a current first-party direct result, <strong>Open in KX Results</strong> can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The compact inline adaptation provides natural/resizable table height, stable two-axis virtual scrolling, sticky headers/row numbers, capped Search with <code>Enter</code> / <code>Shift+Enter</code> navigation, sort below 250,000 rows, drag/Shift/keyboard range selection, and bounded selection copy through the full live value. Its selection-only <strong>Tools</strong> menu uses one format selector and one Copy action instead of disabled duplicate copy buttons.</p>
 <p>Inline Chart uses all six real panel types and their capability-valid X, multi-Y, Group By, or OHLC selectors. Config changes wait for explicit <strong>Render</strong>, and hidden legend series remain hidden through chart refreshes. The notebook renderer and panel share durable <code>vscode-kdb.results.*</code> settings.</p>
-<p>Every new first-party Direct IPC output includes a strict <code>application/vnd.kx.result+json</code> v2 payload with a fresh opaque output identity and <code>preview</code> or <code>full</code> persistence mode. Preview mode defaults to 20 rows and records schema, total count, and an explicit truncation notice. A current live result enables the per-output <strong>Preserve full result</strong> checkbox; a persisted full v2 payload also keeps it enabled after reopening so it can be reduced back to the configured preview. Full mode directly stores every exactly representable row, column, and cell without preview row/byte ceilings. A genuine exact-representation failure is reported as an ordinary technical failure, never as a successful full preview. Legacy/Python v1 output remains accepted unchanged but cannot claim omitted rows or enable full persistence.</p>
-<p>Each live record is bound to notebook URI/current-cell URI for the extension-host session, atomically moved when an output rewrite gives the cell a new URI, removed on cell rerun, cell removal, or notebook close, cleared on deactivation, and subject to a 512-record oldest-first cap. If a preview's record is absent, <strong>KX: Open Saved Notebook Preview in Results Panel</strong> opens only stored rows and reports persisted versus total row count.</p>
+<p>Every direct output also includes a validated bounded <code>application/vnd.kx.result+json</code> v1 snapshot. The default table snapshot is 20 rows: tables at or below that size persist fully, while larger tables persist headers/schema, 20 rows, total count, and an explicit truncation notice. qText/scalars/small values remain complete within the byte limit. Each opaque live record is bound to notebook URI/current-cell URI for the extension-host session (mixed mode rebinds it after its output edit), removed on cell rerun, cell removal, or notebook close, cleared on deactivation, and subject to a 512-record oldest-first cap. If the record is absent, <strong>KX: Open Saved Notebook Preview in Results Panel</strong> opens only the snapshot and reports persisted versus total row count.</p>
 <p>Panel handoff never reruns the cell or opens another q connection. If snapshot output is truncated, omitted rows are not in the notebook and cannot be recovered after reopening. Python <code>%%q</code> helper output never receives a Direct IPC live record. A user evaluator may independently target the same server, but the two routes do not share extension-managed session state.</p>
 <h2 id="selection-and-navigation">Selection and navigation</h2>
 <p>The grid supports:</p>
 <ul>
 <li>a single cell or rectangular range;</li>
 <li>whole-row selection;</li>
-<li>whole-column selection with <code>Ctrl</code>/<code>Cmd</code>+click or <code>Ctrl</code>/<code>Cmd</code>+Space, with <code>Shift</code> extending the current selection;</li>
+<li>whole-column selection when header mode is <strong>Select</strong>;</li>
 <li>full-table selection;</li>
 <li>keyboard navigation and clipboard shortcuts; and</li>
 <li>deselection.</li>
 </ul>
 <p>With no selection, copy and export use the complete visible table. Hidden columns are excluded. The left row-number display is included only when <strong>Row #</strong> output is enabled.</p>
 <h2 id="view-and-column-controls">View and column controls</h2>
-<p>Headers are focusable and expose their sort state and position to assistive technology. A click cycles source order → ascending → descending → source order. Pointer movement of at least 5 CSS pixels reorders and suppresses sorting. <code>Enter</code>/<code>Space</code> sorts; <code>Alt</code>+Left/Right reorders. Identity is the source column ordinal, so duplicate names remain distinct. The notebook renderer keeps order local to the logical output; a panel carries order only while its complete source-ordinal schema matches.</p>
 <p>Open <strong>Settings</strong> in the panel toolbar:</p>
 <table>
 <thead>
@@ -996,6 +994,18 @@
 </tr>
 </thead>
 <tbody>
+<tr>
+<td>Header mode: Drag</td>
+<td>Drag headers to reorder visible columns.</td>
+</tr>
+<tr>
+<td>Header mode: Select</td>
+<td>Select a complete column from its header.</td>
+</tr>
+<tr>
+<td>Header mode: Sort</td>
+<td>Cycle ascending, descending, and original order using display text.</td>
+</tr>
 <tr>
 <td>Search</td>
 <td>Case-insensitive search over visible column display text, with previous/next match navigation.</td>
@@ -1015,7 +1025,6 @@
 </tbody>
 </table>
 <p>Sort, search, copy, export, charting, and the local data server operate on the current visible column set and order where applicable. A sort changes result row order without changing q server data. Hidden-column and reorder choices carry to the next result in the same panel only when its full column schema matches.</p>
-<p>Virtual and paged tables stripe odd absolute display rows with <code>--vscode-tree-tableOddRowsBackground</code> and a subtle RGBA fallback. Selection, search matches, and loading states take precedence. High-contrast and forced-colors modes use the theme odd-row color when defined and otherwise fall back to transparent.</p>
 <p>Search is bounded and reports when results are capped or the scan is partial. Large sorts prompt before work unless the warning is explicitly disabled.</p>
 <h2 id="loading-errors-and-cancellation">Loading, errors, and cancellation</h2>
 <p>The toolbar shows <strong>Cancel</strong> while a result wait is active. A canceled panel clearly states that q may still be running. Genuine q errors are shown as errors with the connection endpoint context; they are not rendered as successful result data.</p>

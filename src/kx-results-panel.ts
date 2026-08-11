@@ -14,22 +14,10 @@ import {
 } from './charting';
 import {
   captureChartFullXRange,
-  chartAlgorithmSupportsSourceResampling,
-  chartZoomAutoRefineQueueAction,
-  chartZoomLifecycleAfterLocalViewport,
   chartZoomDataAfterResponse,
   chartRangeIsZoomed,
-  chartZoomRangeKey,
-  chartZoomRequestedRenderRange,
-  chartZoomResponseIsPending,
-  chartZoomShouldRequestRange,
-  chartViewportNeedsSourceResampling,
-  clampChartViewport,
   isValidChartRange,
-  panChartViewport,
-  panChartViewportByPixels,
-  reduceChartZoomLifecycle,
-  runCurrentChartBuild,
+  planChartZoomReset,
 } from './chart-zoom';
 export { chartRangeIsZoomed } from './chart-zoom';
 import {
@@ -37,21 +25,6 @@ import {
   chartSeriesVisible,
   updateHiddenChartSeriesKeys,
 } from './chart-series-state';
-import {
-  absoluteDisplayRowClass,
-  beginHeaderPointer,
-  fullResultColumnSelection,
-  headerPointerIntent,
-  moveResultColumn,
-  moveResultColumnBy,
-  nextResultTableSortState,
-  resolvedResultColumnWidth,
-  resultColumnSourceOrdinals,
-  resultTableHeaderAriaLabel,
-  resultTableAriaSort,
-  resultTableSortIndicator,
-  updateHeaderPointer,
-} from './result-table-interaction';
 import {
   ArrayDisplayFormat,
   CellRange,
@@ -65,7 +38,7 @@ import {
   cellValueToText,
   clampCellRange,
   exportShape,
-  filterColumnarPanelResultBySourceOrdinals,
+  filterColumnarPanelResult,
   rowIndexColumnName,
   sortedColumnarRowOrder,
   validateXlsxSheetLimits,
@@ -113,10 +86,8 @@ interface KxPanelMetadata {
   mode: KxPanelResultMode;
   columns: string[];
   allColumns: string[];
-  sourceOrdinals: number[];
   hiddenColumnCount: number;
   hiddenColumnNames: string[];
-  hiddenSourceOrdinals: number[];
   rowCount: number;
   text?: string;
   qTextRender?: QTextRenderModel;
@@ -141,7 +112,6 @@ export type KxResultsPanelRunMode = 'replace' | 'new';
 
 interface KxPanelSortState {
   columnName: string;
-  sourceOrdinal: number;
   direction: KxPanelSortDirection;
 }
 
@@ -181,7 +151,6 @@ export interface SharedKxResultSettings {
   elapsedTimeDisplay: KxPanelElapsedTimeDisplay;
   chartDecimalPlaces: number;
   chartMaxSourceRows: number;
-  chartZoomMinSampledPoints: number;
   chartZoomMaxSampledPoints: number;
   qTextSyntaxHighlighting: boolean;
   qTextDisplayFormatting: boolean;
@@ -292,12 +261,10 @@ export class KxResultsPanel {
   private loading: LoadingState | undefined;
   private version = 0;
   private firstSliceVersion = 0;
-  private hiddenColumnOrdinals: number[] = [];
-  private columnOrder: number[] | undefined;
+  private hiddenColumnNames: string[] = [];
+  private columnOrder: string[] | undefined;
   private rowOrder: number[] | undefined;
   private sortState: KxPanelSortState | undefined;
-  private sortIntentState: KxPanelSortState | undefined;
-  private activeSortId = 0;
   private hiddenColumnSchema: string[] | undefined;
   private columnOrderSchema: string[] | undefined;
   private baseVisibleTableCache: { version: number; source: ColumnarPanelResult; table: ColumnarPanelResult } | undefined;
@@ -327,8 +294,6 @@ export class KxResultsPanel {
     panel.firstSliceVersion = 0;
     panel.rowOrder = undefined;
     panel.sortState = undefined;
-    panel.sortIntentState = undefined;
-    panel.activeSortId += 1;
     panel.hideLargeResultWarningOnce = false;
     panel.baseVisibleTableCache = undefined;
     panel.visibleTableCache = undefined;
@@ -366,8 +331,6 @@ export class KxResultsPanel {
     this.firstSliceVersion = 0;
     this.rowOrder = undefined;
     this.sortState = undefined;
-    this.sortIntentState = undefined;
-    this.activeSortId += 1;
     this.hideLargeResultWarningOnce = false;
     this.baseVisibleTableCache = undefined;
     this.visibleTableCache = undefined;
@@ -377,12 +340,12 @@ export class KxResultsPanel {
     this.chartPanelRendered = false;
     this.loading = undefined;
     if (isTextPanelResult(result)) {
-      this.hiddenColumnOrdinals = [];
+      this.hiddenColumnNames = [];
       this.hiddenColumnSchema = [];
       this.columnOrder = undefined;
       this.columnOrderSchema = [];
     } else {
-      this.hiddenColumnOrdinals = this.hiddenColumnOrdinalsForNewResult(result.table.columns);
+      this.hiddenColumnNames = this.hiddenColumnNamesForNewResult(result.table.columns);
       this.hiddenColumnSchema = result.table.columns.slice();
       this.columnOrder = this.columnOrderForNewResult(result.table.columns);
       this.columnOrderSchema = result.table.columns.slice();
@@ -549,9 +512,7 @@ export class KxResultsPanel {
     this.loading = undefined;
     this.rowOrder = undefined;
     this.sortState = undefined;
-    this.sortIntentState = undefined;
-    this.activeSortId += 1;
-    this.hiddenColumnOrdinals = [];
+    this.hiddenColumnNames = [];
     this.hiddenColumnSchema = undefined;
     this.columnOrder = undefined;
     this.columnOrderSchema = undefined;
@@ -762,10 +723,8 @@ export class KxResultsPanel {
         mode: 'text',
         columns: [],
         allColumns: [],
-        sourceOrdinals: [],
         hiddenColumnCount: 0,
         hiddenColumnNames: [],
-        hiddenSourceOrdinals: [],
         rowCount: 0,
         text: result.text,
         qTextRender: qTextRenderModel(result.text, qTextRenderOptions(settings)),
@@ -782,18 +741,15 @@ export class KxResultsPanel {
       };
     }
 
-    const sourceOrdinals = this.visibleColumnOrdinals(result);
-    const columns = sourceOrdinals.map(ordinal => result.table.columns[ordinal]);
+    const columns = this.visibleColumnNames(result);
     const hiddenColumnNames = this.activeHiddenColumnNames(result);
     const settings = panelSettings();
     return {
       mode: 'table',
       columns,
       allColumns: result.table.columns.slice(),
-      sourceOrdinals,
       hiddenColumnCount: result.table.columns.length - columns.length,
       hiddenColumnNames,
-      hiddenSourceOrdinals: this.activeHiddenColumnOrdinals(result),
       rowCount: result.table.rowCount,
       query: result.query,
       connectionName: result.connectionName,
@@ -970,36 +926,28 @@ export class KxResultsPanel {
 
     this.activeChartRequestId = requestId;
     try {
-      const data = await runCurrentChartBuild(
-        yieldToEventLoop,
-        () => this.version === requestVersion && this.activeChartRequestId === requestId,
-        () => {
-          const xMin = Number.isFinite(Number(message.xMin)) ? Number(message.xMin) : undefined;
-          const xMax = Number.isFinite(Number(message.xMax)) ? Number(message.xMax) : undefined;
-          const zoomSamplePoints = xMin !== undefined && xMax !== undefined ? chartZoomSamplePointSettings() : null;
-          return buildChartData(table, {
-            chartType: normalizeChartType(message.chartType),
-            version: requestVersion,
-            requestId,
-            xColumn: typeof message.xColumn === 'string' ? message.xColumn : '',
-            yColumns: Array.isArray(message.yColumns) ? message.yColumns.map(String) : [],
-            groupByColumn: typeof message.groupByColumn === 'string' ? message.groupByColumn : '',
-            openColumn: typeof message.openColumn === 'string' ? message.openColumn : '',
-            highColumn: typeof message.highColumn === 'string' ? message.highColumn : '',
-            lowColumn: typeof message.lowColumn === 'string' ? message.lowColumn : '',
-            closeColumn: typeof message.closeColumn === 'string' ? message.closeColumn : '',
-            xMin,
-            xMax,
-            width: Number(message.width) || 0,
-            maxSourceRows: chartMaxSourceRowsSetting(),
-            maxSampledPoints: zoomSamplePoints ? zoomSamplePoints.chartZoomMaxSampledPoints : undefined,
-            minSampledPoints: zoomSamplePoints ? zoomSamplePoints.chartZoomMinSampledPoints : undefined,
-          });
-        }
-      );
-      if (data === undefined) {
-        return;
-      }
+      await yieldToEventLoop();
+      const xMin = Number.isFinite(Number(message.xMin)) ? Number(message.xMin) : undefined;
+      const xMax = Number.isFinite(Number(message.xMax)) ? Number(message.xMax) : undefined;
+      const zoomSamplePoints = xMin !== undefined && xMax !== undefined ? chartZoomSamplePointSettings() : null;
+      const data = buildChartData(table, {
+        chartType: normalizeChartType(message.chartType),
+        version: requestVersion,
+        requestId,
+        xColumn: typeof message.xColumn === 'string' ? message.xColumn : '',
+        yColumns: Array.isArray(message.yColumns) ? message.yColumns.map(String) : [],
+        groupByColumn: typeof message.groupByColumn === 'string' ? message.groupByColumn : '',
+        openColumn: typeof message.openColumn === 'string' ? message.openColumn : '',
+        highColumn: typeof message.highColumn === 'string' ? message.highColumn : '',
+        lowColumn: typeof message.lowColumn === 'string' ? message.lowColumn : '',
+        closeColumn: typeof message.closeColumn === 'string' ? message.closeColumn : '',
+        xMin,
+        xMax,
+        width: Number(message.width) || 0,
+        maxSourceRows: chartMaxSourceRowsSetting(),
+        maxSampledPoints: zoomSamplePoints ? zoomSamplePoints.chartZoomMaxSampledPoints : undefined,
+        minSampledPoints: zoomSamplePoints ? zoomSamplePoints.chartZoomMinSampledPoints : undefined,
+      });
       if (this.version !== requestVersion || this.activeChartRequestId !== requestId) {
         return;
       }
@@ -1127,10 +1075,7 @@ export class KxResultsPanel {
       return this.baseVisibleTableCache.table;
     }
 
-    const table = filterColumnarPanelResultBySourceOrdinals(
-      result.table,
-      this.visibleColumnOrdinals(result)
-    );
+    const table = filterColumnarPanelResult(result.table, this.visibleColumnNames(result));
     this.baseVisibleTableCache = { version: this.version, source: result.table, table };
     return table;
   }
@@ -1164,46 +1109,43 @@ export class KxResultsPanel {
       return null;
     }
 
-    return this.visibleColumnOrdinals(result).indexOf(this.sortState.sourceOrdinal) === -1
+    return this.visibleColumnNames(result).indexOf(this.sortState.columnName) === -1
       ? null
       : { ...this.sortState };
   }
 
   private visibleColumnNames(result: KxPanelTableResult): string[] {
-    return this.visibleColumnOrdinals(result).map(ordinal => result.table.columns[ordinal]);
+    const hidden = columnNameLookup(this.hiddenColumnNames);
+    return this.orderedColumnNames(result.table.columns).filter(column => !hidden[column]);
   }
 
-  private visibleColumnOrdinals(result: KxPanelTableResult): number[] {
-    const hidden = new Set(this.hiddenColumnOrdinals);
-    return this.orderedColumnOrdinals(result.table.columns).filter(ordinal => !hidden.has(ordinal));
-  }
-
-  private orderedColumnOrdinals(columns: string[]): number[] {
-    const ordered: number[] = [];
+  private orderedColumnNames(columns: string[]): string[] {
+    const available = columnNameLookup(columns);
+    const ordered: string[] = [];
     if (this.columnOrder) {
-      this.columnOrder.forEach(ordinal => {
-        if (Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < columns.length &&
-          ordered.indexOf(ordinal) === -1) {
-          ordered.push(ordinal);
+      this.columnOrder.forEach(column => {
+        if (available[column] && ordered.indexOf(column) === -1) {
+          ordered.push(column);
         }
       });
     }
-    columns.forEach((_column, ordinal) => {
-      if (ordered.indexOf(ordinal) === -1) {
-        ordered.push(ordinal);
+    columns.forEach(column => {
+      if (ordered.indexOf(column) === -1) {
+        ordered.push(column);
       }
     });
     return ordered;
   }
 
   private activeHiddenColumnNames(result: KxPanelTableResult): string[] {
-    return this.activeHiddenColumnOrdinals(result).map(ordinal => result.table.columns[ordinal]);
-  }
-
-  private activeHiddenColumnOrdinals(result: KxPanelTableResult): number[] {
-    return this.hiddenColumnOrdinals.filter(ordinal =>
-      Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < result.table.columns.length
-    );
+    const hidden = columnNameLookup(this.hiddenColumnNames);
+    const names: string[] = [];
+    result.table.columns.forEach(column => {
+      if (hidden[column] && names.indexOf(column) === -1) {
+        names.push(column);
+      }
+    });
+    return names;
   }
 
   private postSlice(message: any): void {
@@ -1389,42 +1331,23 @@ export class KxResultsPanel {
   private async sortColumn(message: any): Promise<void> {
     const requestVersion = integerOrNull(message.version);
     const columnIndex = integerOrNull(message.columnIndex);
-    const sourceOrdinal = integerOrNull(message.sourceOrdinal);
     const columnName = typeof message.columnName === 'string' ? message.columnName : '';
-    if (requestVersion === null || columnIndex === null || sourceOrdinal === null ||
-      !this.result || isTextPanelResult(this.result) || requestVersion !== this.version) {
+    if (requestVersion === null || columnIndex === null || !this.result || requestVersion !== this.version) {
       return;
     }
 
     const table = this.baseVisibleTable();
-    const visibleOrdinals = this.visibleColumnOrdinals(this.result);
-    if (!table || columnIndex < 0 || columnIndex >= table.columns.length ||
-      table.columns[columnIndex] !== columnName || visibleOrdinals[columnIndex] !== sourceOrdinal) {
+    if (!table || columnIndex < 0 || columnIndex >= table.columns.length || table.columns[columnIndex] !== columnName) {
       return;
     }
 
-    const sortId = ++this.activeSortId;
-    const nextSortPlan = nextResultTableSortState(
-      this.sortIntentState
-        ? { column: String(this.sortIntentState.sourceOrdinal), direction: this.sortIntentState.direction }
-        : undefined,
-      String(sourceOrdinal)
-    );
-    if (!nextSortPlan) {
-      this.sortIntentState = undefined;
+    const nextSort = nextSortState(this.sortState, columnName);
+    if (!nextSort) {
       this.rowOrder = undefined;
       this.sortState = undefined;
       this.refreshResultView();
       return;
     }
-    const nextSort: KxPanelSortState = {
-      columnName,
-      sourceOrdinal,
-      direction: nextSortPlan.direction,
-    };
-    this.sortIntentState = nextSort;
-    const isCurrentSort = (): boolean =>
-      this.activeSortId === sortId && this.isCurrentVersion(requestVersion);
 
     if (table.rowCount >= SORT_CONFIRM_ROW_THRESHOLD && !panelSettings().hideLargeSortWarnings) {
       const choice = await vscode.window.showWarningMessage(
@@ -1433,7 +1356,7 @@ export class KxResultsPanel {
         "Sort and Don't Warn Again",
         'Cancel'
       );
-      if (!isCurrentSort()) {
+      if (!this.isCurrentVersion(requestVersion)) {
         return;
       }
       if (choice === "Sort and Don't Warn Again") {
@@ -1443,14 +1366,11 @@ export class KxResultsPanel {
           vscode.ConfigurationTarget.Global
         );
         KxResultsPanel.postSettingsToOpenPanels();
-        if (!isCurrentSort()) {
+        if (!this.isCurrentVersion(requestVersion)) {
           return;
         }
       }
       if (choice !== 'Sort' && choice !== "Sort and Don't Warn Again") {
-        if (isCurrentSort()) {
-          this.sortIntentState = this.sortState;
-        }
         this.post({ type: 'sortSkipped', version: requestVersion });
         return;
       }
@@ -1473,20 +1393,16 @@ export class KxResultsPanel {
         cancellable: false,
       }, async () => {
         await yieldToEventLoop();
-        if (!isCurrentSort()) {
-          return;
-        }
         sortedRowOrder = sortedColumnarRowOrder(table, columnIndex, nextSort.direction, panelCellTextOptions());
       });
 
-      if (!this.result || !isCurrentSort() || !sortedRowOrder) {
+      if (!this.result || this.version !== requestVersion || !sortedRowOrder) {
         cancelled = true;
         return;
       }
 
       this.rowOrder = sortedRowOrder;
       this.sortState = nextSort;
-      this.sortIntentState = nextSort;
       this.refreshResultView();
     } finally {
       if (tracePerf) {
@@ -1708,30 +1624,26 @@ export class KxResultsPanel {
     }
     const result = this.result;
 
-    const sourceOrdinal = integerOrNull(message.sourceOrdinal);
-    const targetOrdinal = integerOrNull(message.targetOrdinal);
-    if (sourceOrdinal === null || targetOrdinal === null || sourceOrdinal === targetOrdinal) {
+    const sourceColumnName = typeof message.sourceColumnName === 'string' ? message.sourceColumnName : '';
+    const targetColumnName = typeof message.targetColumnName === 'string' ? message.targetColumnName : '';
+    if (!sourceColumnName || !targetColumnName || sourceColumnName === targetColumnName) {
       return;
     }
 
-    const visibleOrdinals = this.visibleColumnOrdinals(result);
-    if (visibleOrdinals.indexOf(sourceOrdinal) === -1 || visibleOrdinals.indexOf(targetOrdinal) === -1) {
+    const visibleColumns = this.visibleColumnNames(result);
+    if (visibleColumns.indexOf(sourceColumnName) === -1 || visibleColumns.indexOf(targetColumnName) === -1) {
       return;
     }
 
-    const nextVisibleOrdinals = moveResultColumn(
-      visibleOrdinals,
-      visibleOrdinals.indexOf(sourceOrdinal),
-      visibleOrdinals.indexOf(targetOrdinal)
-    );
-    if (sameColumnOrdinals(visibleOrdinals, nextVisibleOrdinals)) {
+    const nextVisibleColumns = moveColumnName(visibleColumns, sourceColumnName, targetColumnName);
+    if (sameColumnNames(visibleColumns, nextVisibleColumns)) {
       return;
     }
 
     this.columnOrder = mergeVisibleColumnOrder(
-      this.orderedColumnOrdinals(result.table.columns),
-      nextVisibleOrdinals,
-      this.hiddenColumnOrdinals
+      this.orderedColumnNames(result.table.columns),
+      nextVisibleColumns,
+      this.hiddenColumnNames
     );
     this.columnOrderSchema = result.table.columns.slice();
     this.refreshResultView();
@@ -1744,8 +1656,8 @@ export class KxResultsPanel {
     const result = this.result;
 
     if (message.type === 'resetHiddenColumns' || message.type === 'showAllColumns') {
-      if (this.hiddenColumnOrdinals.length > 0) {
-        this.hiddenColumnOrdinals = [];
+      if (this.hiddenColumnNames.length > 0) {
+        this.hiddenColumnNames = [];
         this.refreshResultView();
       }
       return;
@@ -1753,29 +1665,25 @@ export class KxResultsPanel {
 
     if (message.type === 'hideAllColumns') {
       this.hiddenColumnSchema = result.table.columns.slice();
-      this.hiddenColumnOrdinals = result.table.columns.map((_column, ordinal) => ordinal);
+      this.hiddenColumnNames = result.table.columns.slice();
       this.rowOrder = undefined;
       this.sortState = undefined;
-      this.sortIntentState = undefined;
-      this.activeSortId += 1;
       this.refreshResultView();
       return;
     }
 
-    const sourceOrdinal = integerOrNull(message.sourceOrdinal);
-    if (sourceOrdinal === null || sourceOrdinal < 0 || sourceOrdinal >= result.table.columns.length) {
+    const columnName = typeof message.columnName === 'string' ? message.columnName : '';
+    if (!columnName || result.table.columns.indexOf(columnName) === -1) {
       return;
     }
 
     if (message.type === 'hideColumn') {
-      if (this.hiddenColumnOrdinals.indexOf(sourceOrdinal) === -1) {
+      if (this.hiddenColumnNames.indexOf(columnName) === -1) {
         this.hiddenColumnSchema = result.table.columns.slice();
-        this.hiddenColumnOrdinals = this.hiddenColumnOrdinals.concat(sourceOrdinal);
-        if (this.sortState && this.sortState.sourceOrdinal === sourceOrdinal) {
+        this.hiddenColumnNames = this.hiddenColumnNames.concat(columnName);
+        if (this.sortState && this.sortState.columnName === columnName) {
           this.rowOrder = undefined;
           this.sortState = undefined;
-          this.sortIntentState = undefined;
-          this.activeSortId += 1;
         }
         this.refreshResultView();
       }
@@ -1783,52 +1691,50 @@ export class KxResultsPanel {
     }
 
     if (message.type === 'showColumn') {
-      if (this.hiddenColumnOrdinals.indexOf(sourceOrdinal) !== -1) {
+      if (this.hiddenColumnNames.indexOf(columnName) !== -1) {
         this.hiddenColumnSchema = result.table.columns.slice();
-        this.hiddenColumnOrdinals = this.hiddenColumnOrdinals.filter(ordinal => ordinal !== sourceOrdinal);
+        this.hiddenColumnNames = this.hiddenColumnNames.filter(name => name !== columnName);
         this.refreshResultView();
       }
     }
   }
 
-  private hiddenColumnOrdinalsForNewResult(columns: string[]): number[] {
+  private hiddenColumnNamesForNewResult(columns: string[]): string[] {
     if (!sameColumnNames(this.hiddenColumnSchema, columns)) {
       return [];
     }
 
-    const ordinals: number[] = [];
-    this.hiddenColumnOrdinals.forEach(ordinal => {
-      if (Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < columns.length &&
-        ordinals.indexOf(ordinal) === -1) {
-        ordinals.push(ordinal);
+    const available = columnNameLookup(columns);
+    const names: string[] = [];
+    this.hiddenColumnNames.forEach(column => {
+      if (available[column] && names.indexOf(column) === -1) {
+        names.push(column);
       }
     });
-    return ordinals;
+    return names;
   }
 
-  private columnOrderForNewResult(columns: string[]): number[] | undefined {
+  private columnOrderForNewResult(columns: string[]): string[] | undefined {
     if (!sameColumnNames(this.columnOrderSchema, columns) || !this.columnOrder) {
       return undefined;
     }
 
-    const ordinals: number[] = [];
-    this.columnOrder.forEach(ordinal => {
-      if (Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < columns.length &&
-        ordinals.indexOf(ordinal) === -1) {
-        ordinals.push(ordinal);
+    const available = columnNameLookup(columns);
+    const names: string[] = [];
+    this.columnOrder.forEach(column => {
+      if (available[column] && names.indexOf(column) === -1) {
+        names.push(column);
       }
     });
-    columns.forEach((_column, ordinal) => {
-      if (ordinals.indexOf(ordinal) === -1) {
-        ordinals.push(ordinal);
+    columns.forEach(column => {
+      if (names.indexOf(column) === -1) {
+        names.push(column);
       }
     });
-    return ordinals;
+    return names;
   }
 
   private refreshResultView(): void {
-    this.activeSortId += 1;
-    this.sortIntentState = this.sortState;
     this.version += 1;
     this.firstSliceVersion = 0;
     this.baseVisibleTableCache = undefined;
@@ -2339,14 +2245,6 @@ export class KxResultsPanel {
       overflow: hidden;
       box-sizing: border-box;
     }
-    .chart-canvas-wrap:focus {
-      outline: 1px solid var(--vscode-focusBorder);
-      outline-offset: -1px;
-    }
-    .chart-canvas-wrap.is-panning,
-    .chart-canvas-wrap.is-panning * {
-      cursor: grabbing !important;
-    }
     .chart-splitter {
       flex: 0 0 7px;
       cursor: ns-resize;
@@ -2569,11 +2467,6 @@ export class KxResultsPanel {
       background: var(--vscode-list-hoverBackground, var(--vscode-editorGroupHeader-tabsBackground));
       box-shadow: inset 0 0 0 1px var(--vscode-focusBorder);
     }
-    .header .cell:focus-visible {
-      outline: 1px solid var(--vscode-focusBorder);
-      outline-offset: -2px;
-      z-index: 7;
-    }
     .header .cell.drag-target-before::before,
     .header .cell.drag-target-after::after {
       content: "";
@@ -2596,12 +2489,6 @@ export class KxResultsPanel {
       text-align: right;
       background: var(--vscode-sideBar-background);
     }
-    .row.row-odd .cell:not(.selected):not(.search-match):not(.loading) {
-      background: var(--vscode-tree-tableOddRowsBackground, rgba(127, 127, 127, 0.055));
-    }
-    .cell.loading {
-      background: var(--vscode-editor-background);
-    }
     .selected {
       background: var(--vscode-list-activeSelectionBackground);
       color: var(--vscode-list-activeSelectionForeground);
@@ -2616,15 +2503,6 @@ export class KxResultsPanel {
       position: absolute;
       padding: 16px;
       color: var(--vscode-descriptionForeground);
-    }
-    body.vscode-high-contrast .row.row-odd .cell:not(.selected):not(.search-match):not(.loading),
-    body.vscode-high-contrast-light .row.row-odd .cell:not(.selected):not(.search-match):not(.loading) {
-      background: var(--vscode-tree-tableOddRowsBackground, transparent);
-    }
-    @media (forced-colors: active) {
-      .row.row-odd .cell:not(.selected):not(.search-match):not(.loading) {
-        background: var(--vscode-tree-tableOddRowsBackground, transparent);
-      }
     }
   </style>
 </head>
@@ -2658,6 +2536,11 @@ export class KxResultsPanel {
         </div>
         <details class="settings-section">
           <summary class="settings-heading"><span>View</span><span id="sortStatus" class="tool-menu-note">Sort: none</span></summary>
+          <label class="settings-row"><span>Header mode</span><select id="interactionMode" aria-label="Header mode">
+            <option value="drag">Drag</option>
+            <option value="select">Select</option>
+            <option value="sort">Sort</option>
+          </select></label>
           <span class="search">
             <input id="searchInput" type="search" placeholder="Search" aria-label="Search visible cells" disabled>
             <button id="searchPrev" disabled>Prev</button>
@@ -2776,21 +2659,19 @@ export class KxResultsPanel {
       </div>
       <button id="renderChart" disabled>Render</button>
       <button id="exportChart" hidden disabled>Export PNG</button>
-      <button id="panChartLeft" disabled aria-label="Pan chart left by 20 percent">Pan left</button>
-      <button id="panChartRight" disabled aria-label="Pan chart right by 20 percent">Pan right</button>
       <button id="resetChartZoom" disabled>Reset zoom</button>
-      <button id="refineChartZoom" disabled>Refine view</button>
+      <button id="refineChartZoom" disabled>Refine zoom</button>
       <button id="closeChart">Close</button>
       <span id="chartStatus" class="status"></span>
     </div>
-    <div id="chartCanvasWrap" class="chart-canvas-wrap" role="region" tabindex="0" aria-label="Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.">
+    <div id="chartCanvasWrap" class="chart-canvas-wrap">
       <div id="chartPlot" class="chart-plot"></div>
       <div id="chartTooltip" class="chart-tooltip" hidden></div>
     </div>
     <div id="chartLegend" class="chart-legend"></div>
   </div>
   <div id="chartSplitter" class="chart-splitter" role="separator" aria-orientation="horizontal" aria-label="Resize chart and table" title="Drag to resize chart and table" hidden></div>
-  <div id="viewport" tabindex="0" role="grid" aria-label="KX result table" aria-multiselectable="true" data-vscode-context='{"webviewSection":"kxResultsTable","preventDefaultContextMenuItems":true}'>
+  <div id="viewport" tabindex="0" data-vscode-context='{"webviewSection":"kxResultsTable","preventDefaultContextMenuItems":true}'>
     <div id="canvas">
       <div id="header" class="header" role="row"></div>
       <div id="rows"></div>
@@ -2852,6 +2733,7 @@ export class KxResultsPanel {
       const includeRowIndex = document.getElementById('includeRowIndex');
       const includeHeaders = document.getElementById('includeHeaders');
       const autoFit = document.getElementById('autoFit');
+      const interactionMode = document.getElementById('interactionMode');
       const sortStatus = document.getElementById('sortStatus');
       const searchInput = document.getElementById('searchInput');
       const searchPrev = document.getElementById('searchPrev');
@@ -2918,8 +2800,6 @@ export class KxResultsPanel {
       const chartCloseColumn = document.getElementById('chartCloseColumn');
       const renderChart = document.getElementById('renderChart');
       const exportChart = document.getElementById('exportChart');
-      const panChartLeftButton = document.getElementById('panChartLeft');
-      const panChartRightButton = document.getElementById('panChartRight');
       const resetChartZoomButton = document.getElementById('resetChartZoom');
       const refineChartZoomButton = document.getElementById('refineChartZoom');
       const closeChart = document.getElementById('closeChart');
@@ -2949,8 +2829,6 @@ export class KxResultsPanel {
       let resizeState = null;
       let autoFitEnabled = true;
       let columnDragState = null;
-      let headerPointerState = null;
-      let focusedHeaderSourceOrdinal = -1;
       let localDataServer = null;
       let latestChartRequestId = 0;
       let chartOptionsRequestId = 0;
@@ -2971,10 +2849,7 @@ export class KxResultsPanel {
       let chartHeight = 280;
       let chartAutoRenderPending = false;
       let chartAutoRefineTimer = 0;
-      let chartAutoRefineScheduledRange = null;
       let chartLastAutoRefineKey = '';
-      let chartZoomLifecycle = reduceChartZoomLifecycle(null, { type: 'clear', requestId: 0 });
-      let chartPanState = null;
       const CHART_PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
@@ -2982,33 +2857,11 @@ export class KxResultsPanel {
       ${isValidChartRange.toString()}
       ${captureChartFullXRange.toString()}
       ${chartZoomDataAfterResponse.toString()}
+      ${planChartZoomReset.toString()}
       ${chartRangeIsZoomed.toString()}
-      ${chartZoomAutoRefineQueueAction.toString()}
-      ${chartZoomRangeKey.toString()}
-      ${chartZoomRequestedRenderRange.toString()}
-      ${chartZoomResponseIsPending.toString()}
-      ${chartZoomShouldRequestRange.toString()}
-      ${chartAlgorithmSupportsSourceResampling.toString()}
-      ${chartViewportNeedsSourceResampling.toString()}
-      ${clampChartViewport.toString()}
-      ${panChartViewport.toString()}
-      ${panChartViewportByPixels.toString()}
-      ${reduceChartZoomLifecycle.toString()}
-      ${chartZoomLifecycleAfterLocalViewport.toString()}
       ${chartLegendToggleKey.toString()}
       ${chartSeriesVisible.toString()}
       ${updateHiddenChartSeriesKeys.toString()}
-      ${absoluteDisplayRowClass.toString()}
-      ${beginHeaderPointer.toString()}
-      ${fullResultColumnSelection.toString()}
-      ${updateHeaderPointer.toString()}
-      ${headerPointerIntent.toString()}
-      ${moveResultColumnBy.toString()}
-      ${resultColumnSourceOrdinals.toString()}
-      ${resolvedResultColumnWidth.toString()}
-      ${resultTableAriaSort.toString()}
-      ${resultTableSortIndicator.toString()}
-      ${resultTableHeaderAriaLabel.toString()}
       window.addEventListener('message', event => {
         const msg = event.data || {};
         if (msg.type === 'loading') {
@@ -3079,6 +2932,16 @@ export class KxResultsPanel {
       includeHeaders.addEventListener('change', () => updateSetting('includeHeaders', !!includeHeaders.checked));
       includeRowIndex.addEventListener('change', () => updateSetting('includeRowIndex', !!includeRowIndex.checked));
       autoFit.addEventListener('change', () => setAutoFitEnabled(!!autoFit.checked));
+      interactionMode.addEventListener('change', () => {
+        if (dragMode === 'reorder') {
+          dragging = false;
+          dragMode = '';
+          clearColumnDragState();
+          status.textContent = '';
+        }
+        updateSortStatus();
+        renderNow();
+      });
       searchInput.addEventListener('input', queueSearchRows);
       searchInput.addEventListener('keydown', event => {
         if (event.key === 'Enter') {
@@ -3154,22 +3017,10 @@ export class KxResultsPanel {
       chartCloseColumn.addEventListener('change', onChartControlChanged);
       renderChart.addEventListener('click', requestChartData);
       exportChart.addEventListener('click', exportChartPng);
-      panChartLeftButton.addEventListener('click', () => panChartByFraction(-0.2, 'button'));
-      panChartRightButton.addEventListener('click', () => panChartByFraction(0.2, 'button'));
       resetChartZoomButton.addEventListener('click', resetChartZoom);
       refineChartZoomButton.addEventListener('click', refineChartZoom);
       closeChart.addEventListener('click', closeChartPanel);
       chartCanvasWrap.addEventListener('mouseleave', hideChartTooltip);
-      chartCanvasWrap.addEventListener('keydown', event => {
-        if (event.key === 'Home') {
-          resetChartZoom();
-          event.preventDefault();
-        } else if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
-          panChartByFraction(event.key === 'ArrowLeft' ? -0.2 : 0.2, 'keyboard');
-          event.preventDefault();
-        }
-      });
-      chartCanvasWrap.addEventListener('mousedown', startChartPan, true);
       chartCanvasWrap.addEventListener('dblclick', event => {
         if (chartZoomed && chartCanExport()) {
           event.preventDefault();
@@ -3200,22 +3051,7 @@ export class KxResultsPanel {
           copySelection();
         }
       });
-      document.addEventListener('focusin', event => {
-        if (!header.contains(event.target)) {
-          focusedHeaderSourceOrdinal = -1;
-        }
-      });
       window.addEventListener('mousemove', event => {
-        if (chartPanState) {
-          updateChartPan(event);
-          event.preventDefault();
-          return;
-        }
-        if (headerPointerState) {
-          updatePendingHeaderPointer(event);
-          event.preventDefault();
-          return;
-        }
         if (chartResizeState) {
           setChartHeight(chartResizeState.startHeight + event.clientY - chartResizeState.startY);
           event.preventDefault();
@@ -3228,19 +3064,7 @@ export class KxResultsPanel {
         setColumnWidthOverride(resizeState.column, width);
         event.preventDefault();
       });
-      window.addEventListener('mouseup', event => {
-        if (chartPanState) {
-          finishChartPan(event);
-          return;
-        }
-        if (headerPointerState) {
-          finishPendingHeaderPointer(event);
-          dragging = false;
-          clearColumnDragState();
-          dragMode = '';
-          requestRender();
-          return;
-        }
+      window.addEventListener('mouseup', () => {
         if (chartResizeState) {
           chartResizeState = null;
           chartSplitter.classList.remove('is-dragging');
@@ -3299,7 +3123,6 @@ export class KxResultsPanel {
         data.connectionName = state.connectionName || '';
         data.sort = null;
         data.hasResult = false;
-        focusedHeaderSourceOrdinal = -1;
         resetWindowState();
         summary.textContent = 'Running on ' + (state.connectionName || 'KX');
         status.textContent = '';
@@ -3324,29 +3147,17 @@ export class KxResultsPanel {
         const mode = result.mode === 'text' ? 'text' : 'table';
         const resultText = mode === 'text' ? String(result.text || '') : '';
         const nextColumns = Array.isArray(result.columns) ? result.columns.map(String) : [];
-        const nextAllColumns = Array.isArray(result.allColumns)
-          ? result.allColumns.map(String)
-          : nextColumns.slice();
-        // Widths belong to immutable source ordinals, not the current visible
-        // display order. Reorder/hide/show therefore keeps each source width.
-        if (!sameColumnNames(columnWidthSchema, nextAllColumns)) {
+        if (!sameColumnNames(columnWidthSchema, nextColumns)) {
           columnWidthOverrides = Object.create(null);
           autoColumnWidths = Object.create(null);
-          columnWidthSchema = nextAllColumns.slice();
+          columnWidthSchema = nextColumns.slice();
         }
         data = {
           version: toNonNegativeInteger(result.version, data.version + 1),
           mode,
           columns: nextColumns,
-          allColumns: nextAllColumns,
-          sourceOrdinals: Array.isArray(result.sourceOrdinals) &&
-            result.sourceOrdinals.length === nextColumns.length
-            ? result.sourceOrdinals.map(value => toInteger(value, -1))
-            : resultColumnSourceOrdinals(nextAllColumns, nextColumns),
+          allColumns: Array.isArray(result.allColumns) ? result.allColumns.map(String) : [],
           hiddenColumnNames: Array.isArray(result.hiddenColumnNames) ? result.hiddenColumnNames.map(String) : [],
-          hiddenSourceOrdinals: Array.isArray(result.hiddenSourceOrdinals)
-            ? result.hiddenSourceOrdinals.map(value => toInteger(value, -1)).filter(value => value >= 0)
-            : [],
           hiddenColumnCount: toNonNegativeInteger(result.hiddenColumnCount, 0),
           rowCount: toNonNegativeInteger(result.rowCount, 0),
           text: resultText,
@@ -3409,7 +3220,6 @@ export class KxResultsPanel {
         slice = emptySlice();
         lastRenderedColumns = emptyColumnRange();
         selection = null;
-        headerPointerState = null;
         dragging = false;
         clearColumnDragState();
         dragMode = '';
@@ -3635,11 +3445,7 @@ export class KxResultsPanel {
       }
 
       function hasTableCells() {
-        return hasTableColumns() && data.rowCount > 0;
-      }
-
-      function hasTableColumns() {
-        return !isTextResult() && data.columns.length > 0;
+        return !isTextResult() && data.rowCount > 0 && data.columns.length > 0;
       }
 
       function setLocalDataServerStatus(server, message) {
@@ -3694,8 +3500,6 @@ export class KxResultsPanel {
         const canExport = chartCanExport();
         exportChart.hidden = !canExport;
         exportChart.disabled = !canExport;
-        panChartLeftButton.disabled = !canExport || !chartFullXRange || chartControlsDirty;
-        panChartRightButton.disabled = !canExport || !chartFullXRange || chartControlsDirty;
         resetChartZoomButton.disabled = !canExport || !chartZoomed;
         refineChartZoomButton.disabled = !chartCanRefineZoom();
         openChart.textContent = chartPanel.hidden ? 'Chart' : (chartControlsDirty ? 'Chart*' : 'Chart');
@@ -3746,6 +3550,7 @@ export class KxResultsPanel {
       }
 
       function resetChartState(messageText) {
+        latestChartRequestId += 1;
         chartOptionsRequestId += 1;
         chartRequestIsRefinement = false;
         clearChartZoomBaseline();
@@ -4018,7 +3823,6 @@ export class KxResultsPanel {
 
       function chartCanExport() {
         return !chartPanel.hidden &&
-          !chartControlsDirty &&
           !!chartRendered &&
           chartRendered.version === data.version &&
           chartRendered.requestId === latestChartRequestId &&
@@ -4117,16 +3921,11 @@ export class KxResultsPanel {
       }
 
       function clearChartZoomBaseline() {
-        clearChartPanState();
         chartFullXRange = null;
         chartOriginalData = null;
         chartZoomed = false;
         chartDataIsRefinement = false;
         chartLastAutoRefineKey = '';
-        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
-          type: 'clear',
-          requestId: latestChartRequestId
-        });
         clearChartAutoRefineTimer();
       }
 
@@ -4173,17 +3972,17 @@ export class KxResultsPanel {
 
       function refineChartZoom() {
         if (chartControlsDirty) {
-          chartStatus.textContent = 'Render changed chart settings before refining the current view.';
+          chartStatus.textContent = 'Render changed chart settings before refining zoom.';
           updateChartControls();
           return;
         }
         const range = currentChartZoomRange();
         if (!range) {
-          chartStatus.textContent = 'Change the visible X range before refining the current view.';
+          chartStatus.textContent = 'Zoom the chart before refining.';
           updateChartControls();
           return;
         }
-        requestChartDataForRange(range, 'Refining chart to current view...');
+        requestChartDataForRange(range, 'Refining chart to zoom range...');
       }
 
       function requestChartDataForRange(xRange, messageText) {
@@ -4196,11 +3995,6 @@ export class KxResultsPanel {
           clearChartZoomBaseline();
         }
         latestChartRequestId += 1;
-        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
-          type: 'request',
-          requestId: latestChartRequestId,
-          range: xRange
-        });
         chartRendered = null;
         chartControlsDirty = false;
         clearChartAutoRefineTimer();
@@ -4273,18 +4067,18 @@ export class KxResultsPanel {
       function setChartData(value) {
         if (toNonNegativeInteger(value.version, -1) !== data.version ||
           toNonNegativeInteger(value.requestId, -1) !== latestChartRequestId ||
-          !chartZoomResponseIsPending(chartZoomLifecycle, toNonNegativeInteger(value.requestId, -1)) ||
           chartControlsDirty) {
           return;
         }
         const normalized = normalizeChartData(value);
         if (normalized.chartType === 'candlestick' && normalized.invalidCandlestickCount > 0) {
-          setChartError({
-            requestId: normalized.requestId,
-            message: 'Candlestick data contains ' + formatUiCount(normalized.invalidCandlestickCount) +
-              ' invalid OHLC point' + (normalized.invalidCandlestickCount === 1 ? '' : 's') +
-              '; check finite Open, High, Low, Close values and High/Low bounds.'
-          });
+          chartStatus.textContent = 'Candlestick data contains ' + formatUiCount(normalized.invalidCandlestickCount) +
+            ' invalid OHLC point' + (normalized.invalidCandlestickCount === 1 ? '' : 's') +
+            '; check finite Open, High, Low, Close values and High/Low bounds.';
+          chartData = null;
+          chartRendered = null;
+          chartControlsDirty = false;
+          drawChart();
           return;
         }
         const chartDataState = chartZoomDataAfterResponse(
@@ -4295,25 +4089,6 @@ export class KxResultsPanel {
         chartData = chartDataState.data;
         chartOriginalData = chartDataState.originalData;
         chartDataIsRefinement = chartDataState.dataIsRefinement;
-        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
-          type: 'response',
-          requestId: normalized.requestId,
-          data: normalized
-        });
-        chartStatus.dataset.requestId = String(chartData.requestId);
-        chartStatus.dataset.sourceRowCount = String(chartData.sourceRowCount);
-        chartStatus.dataset.eligibleRowCount = String(chartData.eligibleRowCount);
-        chartStatus.dataset.sampledPointCount = String(chartData.sampledPointCount);
-        chartStatus.dataset.algorithm = String(chartData.algorithm || 'none');
-        chartStatus.dataset.chartType = chartData.chartType;
-        const requestedRange = chartZoomRequestedRenderRange(chartZoomLifecycle);
-        if (requestedRange) {
-          chartStatus.dataset.rangeMin = String(requestedRange.min);
-          chartStatus.dataset.rangeMax = String(requestedRange.max);
-        } else {
-          delete chartStatus.dataset.rangeMin;
-          delete chartStatus.dataset.rangeMax;
-        }
         chartRendered = null;
         chartControlsDirty = false;
         const warnings = chartData.warnings.length > 0 ? ' ' + chartData.warnings.join(' ') : '';
@@ -4456,15 +4231,9 @@ export class KxResultsPanel {
       }
 
       function setChartError(msg) {
-        const requestId = toNonNegativeInteger(msg.requestId, -1);
-        if (requestId !== latestChartRequestId ||
-          !chartZoomResponseIsPending(chartZoomLifecycle, requestId) || chartControlsDirty) {
+        if (toNonNegativeInteger(msg.requestId, -1) !== latestChartRequestId || chartControlsDirty) {
           return;
         }
-        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
-          type: 'failed',
-          requestId
-        });
         const canRestoreOriginal = chartRequestIsRefinement && !!chartOriginalData && !!chartFullXRange;
         chartRequestIsRefinement = false;
         if (canRestoreOriginal) {
@@ -4529,18 +4298,11 @@ export class KxResultsPanel {
           chartUPlot = new window.uPlot(chartUPlotOptions(dimensions), chartAlignedData(), chartPlot);
           decorateChartLegendAccessibility(chartUPlot);
           chartRendered = { version: chartData.version, requestId: chartData.requestId };
-          const requestedRange = chartZoomRequestedRenderRange(chartZoomLifecycle);
-          if (requestedRange) {
-            chartUPlot.setScale('x', { min: requestedRange.min, max: requestedRange.max });
-          } else {
-            const renderedRange = chartXScaleRange(chartUPlot);
-            chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
-              type: 'rendered',
-              requestId: chartData.requestId,
-              naturalRange: renderedRange
-            });
-          }
-          chartFullXRange = chartZoomLifecycle.fullRange;
+          chartFullXRange = captureChartFullXRange(
+            chartFullXRange,
+            chartXScaleRange(chartUPlot),
+            chartDataIsRefinement || !!chartFullXRange
+          );
           chartZoomStateSuspended = false;
           updateChartZoomState(chartUPlot);
           notifyChartRendered();
@@ -4628,7 +4390,6 @@ export class KxResultsPanel {
               config.paths = stepped({ align: 1 });
             } else if (type === 'bar') {
               config.fill = chartAlphaColor(color, 0.42);
-              config.paths = () => null;
             }
             series.push(config);
           });
@@ -4642,13 +4403,11 @@ export class KxResultsPanel {
           scales: {
             x: {
               time: chartData.xKind === 'temporal',
-              range: chartNeedsXPadding()
-                ? (_self, min, max) => chartUPlot ? [min, max] : chartPaddedXRange(min, max)
-                : undefined
+              range: chartNeedsXPadding() ? (_self, min, max) => chartPaddedXRange(min, max) : undefined
             },
             y: {
               auto: true,
-              range: chartNeedsYRange() ? (self, min, max) => chartYScaleRange(self, min, max) : undefined
+              range: chartNeedsYRange() ? (_self, min, max) => chartYScaleRange(min, max) : undefined
             }
           },
           axes: [
@@ -4970,10 +4729,10 @@ export class KxResultsPanel {
         return chartData && (chartData.chartType === 'bar' || chartData.chartType === 'box' || chartData.chartType === 'candlestick');
       }
 
-      function chartYScaleRange(self, min, max) {
+      function chartYScaleRange(min, max) {
         const statsRange = chartData && chartData.chartType === 'box'
-          ? chartBoxYRange(self)
-          : (chartData && chartData.chartType === 'candlestick' ? chartCandlestickYRange(self) : null);
+          ? chartBoxYRange()
+          : (chartData && chartData.chartType === 'candlestick' ? chartCandlestickYRange() : null);
         let low = statsRange ? statsRange.min : (Number.isFinite(min) ? min : 0);
         let high = statsRange ? statsRange.max : (Number.isFinite(max) ? max : low);
         if (chartData && chartData.chartType === 'bar') {
@@ -4992,46 +4751,21 @@ export class KxResultsPanel {
         return [low, high];
       }
 
-      function chartXIsVisible(self, index) {
-        const count = chartData && chartData.x ? chartData.x.length : 0;
-        const indexes = self && self.series && self.series[0] && self.series[0].idxs;
-        if (!Array.isArray(indexes) || indexes.length < 2 || count === 0) {
-          return index >= 0 && index < count;
-        }
-        const start = Math.max(0, Math.min(count - 1, Math.floor(indexes[0])));
-        const end = Math.max(0, Math.min(count - 1, Math.floor(indexes[1])));
-        return Number.isFinite(indexes[0]) && Number.isFinite(indexes[1]) &&
-          index >= start && index <= end;
-      }
-
-      function chartCandlestickYRange(self) {
+      function chartCandlestickYRange() {
         let min = Infinity;
         let max = -Infinity;
-        if (self && self.series && self.series[1] && self.series[1].show === false) {
-          return null;
-        }
-        chartData.candlesticks.forEach((candle, index) => {
-          if (!chartXIsVisible(self, index)) {
-            return;
-          }
+        chartData.candlesticks.forEach(candle => {
           min = Math.min(min, candle.low);
           max = Math.max(max, candle.high);
         });
         return min === Infinity ? null : { min, max };
       }
 
-      function chartBoxYRange(self) {
+      function chartBoxYRange() {
         let min = Infinity;
         let max = -Infinity;
-        chartData.boxSeries.forEach((series, seriesIndex) => {
-          if (self && self.series && self.series[seriesIndex + 1] &&
-            self.series[seriesIndex + 1].show === false) {
-            return;
-          }
-          series.stats.forEach((stats, statsIndex) => {
-            if (!chartXIsVisible(self, statsIndex)) {
-              return;
-            }
+        chartData.boxSeries.forEach(series => {
+          series.stats.forEach(stats => {
             if (!stats) {
               return;
             }
@@ -5103,7 +4837,7 @@ export class KxResultsPanel {
         const slotWidth = groupWidth / seriesCount;
         if (slotWidth < 1.75 * pxRatio) {
           if (chartStatus.textContent.indexOf('Dense box groups') === -1) {
-            chartStatus.textContent += ' Dense box groups too narrow to distinguish were skipped; refine the current view or select fewer Y columns.';
+            chartStatus.textContent += ' Dense box groups too narrow to distinguish were skipped; refine zoom or select fewer Y columns.';
           }
           return;
         }
@@ -5277,44 +5011,54 @@ export class KxResultsPanel {
       }
 
       function resetChartZoom() {
-        clearChartPanState();
-        const fullData = chartZoomLifecycle.fullData || chartOriginalData;
-        const fullRange = chartZoomLifecycle.fullRange || chartFullXRange;
-        if (!fullRange) {
-          clearChartZoomTransientState();
-          updateChartControls();
-          return;
-        }
-        chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, { type: 'reset' });
-        chartFullXRange = fullRange;
-        chartRequestIsRefinement = false;
-        chartDataIsRefinement = false;
-        if (fullData) {
-          chartData = Object.assign({}, fullData, {
-            version: data.version,
-            requestId: latestChartRequestId
-          });
-          chartOriginalData = fullData;
+        const reset = planChartZoomReset(
+          chartData,
+          chartOriginalData,
+          chartDataIsRefinement,
+          chartFullXRange,
+          latestChartRequestId
+        );
+        chartData = reset.data;
+        chartDataIsRefinement = reset.dataIsRefinement;
+        chartRequestIsRefinement = reset.requestIsRefinement;
+        applyChartZoomResetTransient(reset);
+        if (reset.restoredOriginalData) {
           chartRendered = null;
           drawChart();
         }
-        if (!chartUPlot) {
-          clearChartZoomTransientState();
-          updateChartControls();
+        if (!chartUPlot || !reset.xScale || !reset.yScale) {
+          if (chartUPlot) {
+            updateChartZoomState(chartUPlot);
+          } else {
+            updateChartControls();
+          }
           return;
         }
         chartZoomStateSuspended = true;
         try {
           chartUPlot.batch(() => {
-            chartUPlot.setScale('x', { min: fullRange.min, max: fullRange.max });
-            chartUPlot.setScale('y', { min: null, max: null });
+            chartUPlot.setScale('x', reset.xScale);
+            chartUPlot.setScale('y', reset.yScale);
           });
         } finally {
           chartZoomStateSuspended = false;
         }
-        clearChartZoomTransientState();
+        applyChartZoomResetTransient(reset);
         updateChartZoomState(chartUPlot);
         chartStatus.textContent = 'Zoom reset to the original full data range.';
+      }
+
+      function applyChartZoomResetTransient(reset) {
+        chartLastAutoRefineKey = reset.autoRefineKey;
+        if (reset.clearAutoRefineTimer) {
+          clearChartAutoRefineTimer();
+        }
+        if (reset.clearSelection) {
+          clearChartSelection();
+        }
+        if (reset.hideTooltip) {
+          hideChartTooltip();
+        }
       }
 
       function clearChartZoomTransientState() {
@@ -5348,7 +5092,7 @@ export class KxResultsPanel {
       }
 
       function currentChartZoomRange() {
-        const initial = chartZoomLifecycle.fullRange || chartFullXRange;
+        const initial = chartFullXRange;
         const current = chartXScaleRange(chartUPlot);
         if (!initial || !current || !chartRangeIsZoomed(initial, current)) {
           return null;
@@ -5358,213 +5102,33 @@ export class KxResultsPanel {
         return max > min ? { min, max } : null;
       }
 
-      function currentChartViewportRange() {
-        return clampChartViewport(
-          chartXScaleRange(chartUPlot),
-          chartZoomLifecycle.fullRange || chartFullXRange
-        );
-      }
-
-      function setChartViewportLocally(range) {
-        if (!chartUPlot || !isValidChartRange(range)) {
-          return;
-        }
-        chartZoomStateSuspended = true;
-        try {
-          chartUPlot.batch(() => {
-            chartUPlot.setScale('x', { min: range.min, max: range.max });
-            chartUPlot.setScale('y', { min: null, max: null });
-          });
-        } finally {
-          chartZoomStateSuspended = false;
-        }
-        clearChartSelection();
-        hideChartTooltip();
-      }
-
-      function panChartByFraction(fraction, reason) {
-        if (chartControlsDirty) {
-          return;
-        }
-        const current = currentChartViewportRange();
-        const range = panChartViewport(
-          current,
-          chartZoomLifecycle.fullRange || chartFullXRange,
-          fraction
-        );
-        if (!range || (current && chartZoomRangeKey(range) === chartZoomRangeKey(current))) {
-          return;
-        }
-        setChartViewportLocally(range);
-        chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange || chartFullXRange, range);
-        completeChartViewport(range, reason);
-        updateChartControls();
-      }
-
-      function startChartPan(event) {
-        if (event.button === 0) {
-          chartCanvasWrap.focus({ preventScroll: true });
-        }
-        if (chartControlsDirty && event.button === 0) {
-          chartStatus.textContent = 'Render changed chart settings before changing the current view.';
-          updateChartControls();
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        if (!event.shiftKey || event.button !== 0 || !chartUPlot || chartControlsDirty) {
-          return;
-        }
-        const range = currentChartViewportRange();
-        if (!range) {
-          return;
-        }
-        chartPanState = { startX: event.clientX, range };
-        chartCanvasWrap.classList.add('is-panning');
-        event.preventDefault();
-        event.stopPropagation();
-      }
-
-      function updateChartPan(event) {
-        if (!chartPanState || !chartUPlot) {
-          return;
-        }
-        const plotWidth = Math.max(
-          1,
-          Number(chartUPlot.bbox && chartUPlot.bbox.width || 0) / chartPxRatio()
-        );
-        const range = panChartViewportByPixels(
-          chartPanState.range,
-          chartZoomLifecycle.fullRange || chartFullXRange,
-          event.clientX - chartPanState.startX,
-          plotWidth
-        );
-        if (range) {
-          setChartViewportLocally(range);
-        }
-      }
-
-      function finishChartPan(event) {
-        const started = chartPanState && chartPanState.range;
-        updateChartPan(event);
-        const range = currentChartViewportRange();
-        chartPanState = null;
-        chartCanvasWrap.classList.remove('is-panning');
-        if (range && (!started || chartZoomRangeKey(range) !== chartZoomRangeKey(started))) {
-          chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange || chartFullXRange, range);
-          completeChartViewport(range, 'pan');
-          updateChartControls();
-        }
-        event.preventDefault();
-      }
-
-      function clearChartPanState() {
-        chartPanState = null;
-        chartCanvasWrap.classList.remove('is-panning');
-      }
-
       function queueChartAutoRefine() {
         const range = currentChartZoomRange();
-        if (!range || !chartCanQueueViewport()) {
+        if (!range || !chartCanExport() || chartControlsDirty || !chartDataCanAutoRefine()) {
           clearChartAutoRefineTimer();
           return;
-        }
-        completeChartViewport(range, 'zoom');
-      }
-
-      function completeChartViewport(range, reason) {
-        const clamped = clampChartViewport(range, chartZoomLifecycle.fullRange || chartFullXRange);
-        if (!clamped || !chartRangeIsZoomed(chartZoomLifecycle.fullRange || chartFullXRange, clamped)) {
-          resetChartZoom();
-          return;
-        }
-        if (!chartViewportNeedsSourceRefinement(clamped, reason)) {
-          const localSettlement = chartZoomLifecycleAfterLocalViewport(chartZoomLifecycle);
-          chartZoomLifecycle = localSettlement.lifecycle;
-          if (localSettlement.invalidatedPendingRequest) {
-            chartRequestIsRefinement = false;
-            chartLastAutoRefineKey = '';
-            if (chartData) {
-              chartData = Object.assign({}, chartData, {
-                version: data.version,
-                requestId: latestChartRequestId
-              });
-              chartRendered = {
-                version: data.version,
-                requestId: latestChartRequestId
-              };
-              notifyChartRendered();
-            }
-            chartStatus.textContent = 'Current viewport is available from the rendered chart.';
-            updateChartControls();
-          }
-          clearChartAutoRefineTimer();
-          return;
-        }
-        if (!chartZoomShouldRequestRange(chartZoomLifecycle, clamped, chartLastAutoRefineKey)) {
-          return;
-        }
-        const requestSettledRange = (settled, nested) => {
-          chartLastAutoRefineKey = chartZoomRangeKey(settled);
-          requestChartDataForRange(
-            settled,
-            reason === 'pan' || reason === 'button' || reason === 'keyboard'
-              ? 'Resampling panned chart range...'
-              : (nested
-                ? 'Auto-refining nested chart view...'
-                : 'Auto-refining current chart view...')
-          );
-        };
-        if (chartZoomLifecycle.pendingRequestId !== null) {
-          requestSettledRange(clamped, true);
-          return;
-        }
-        const action = chartZoomAutoRefineQueueAction(chartAutoRefineScheduledRange, clamped);
-        if (action.type === 'duplicate') {
-          return;
-        }
-        if (action.type === 'flush') {
-          clearChartAutoRefineTimer();
-          action.ranges.forEach((settled, index) => {
-            if (!chartCanQueueViewport() ||
-              !chartZoomShouldRequestRange(chartZoomLifecycle, settled, chartLastAutoRefineKey)) {
-              return;
-            }
-            requestSettledRange(settled, index > 0);
-          });
-          return;
-        }
-        chartAutoRefineScheduledRange = action.range;
-        chartAutoRefineTimer = setTimeout(() => {
-          chartAutoRefineTimer = 0;
-          const settled = chartAutoRefineScheduledRange;
-          chartAutoRefineScheduledRange = null;
-          if (!settled || !chartCanQueueViewport() ||
-            chartZoomRangeKey(settled) !== chartZoomRangeKey(clamped)) {
-            return;
-          }
-          requestSettledRange(settled, false);
-        }, CHART_AUTO_REFINE_DELAY_MS);
-      }
-
-      function chartViewportNeedsSourceRefinement(range, reason) {
-        if (!chartData) {
-          return false;
         }
         const visiblePoints = chartVisibleSamplePointCount(range);
-        return chartViewportNeedsSourceResampling({
-          dataIsRefinement: chartDataIsRefinement,
-          canResample: chartAlgorithmSupportsSourceResampling(chartData.algorithm),
-          eligiblePointCount: chartData.eligibleRowCount,
-          visibleSamplePointCount: visiblePoints,
-          sampledPointCount: chartData.sampledPointCount,
-          minSampledPoints: chartZoomMinSampledPoints()
-        });
-      }
-
-      function chartCanQueueViewport() {
-        return !chartPanel.hidden && !!chartUPlot && !!chartData &&
-          !!(chartZoomLifecycle.fullRange || chartFullXRange) && !chartControlsDirty;
+        if (visiblePoints >= chartAutoRefineMinVisiblePoints() || chartData.eligibleRowCount <= visiblePoints) {
+          clearChartAutoRefineTimer();
+          return;
+        }
+        const key = chartZoomRangeKey(range);
+        if (key === chartLastAutoRefineKey) {
+          return;
+        }
+        if (chartAutoRefineTimer) {
+          clearTimeout(chartAutoRefineTimer);
+        }
+        chartAutoRefineTimer = setTimeout(() => {
+          chartAutoRefineTimer = 0;
+          const current = currentChartZoomRange();
+          if (!current || chartZoomRangeKey(current) !== key || !chartCanExport() || chartControlsDirty) {
+            return;
+          }
+          chartLastAutoRefineKey = key;
+          requestChartDataForRange(current, 'Auto-refining zoom range...');
+        }, CHART_AUTO_REFINE_DELAY_MS);
       }
 
       function clearChartAutoRefineTimer() {
@@ -5572,7 +5136,6 @@ export class KxResultsPanel {
           clearTimeout(chartAutoRefineTimer);
           chartAutoRefineTimer = 0;
         }
-        chartAutoRefineScheduledRange = null;
       }
 
       function chartVisibleSamplePointCount(range) {
@@ -5588,8 +5151,28 @@ export class KxResultsPanel {
         return count;
       }
 
+      function chartZoomRangeKey(range) {
+        return Number(range.min).toPrecision(12) + ':' + Number(range.max).toPrecision(12);
+      }
+
       function chartZoomMinSampledPoints() {
         return positiveIntegerSetting(settings.chartZoomMinSampledPoints, DEFAULT_SETTINGS.chartZoomMinSampledPoints);
+      }
+
+      function chartAutoRefineMinVisiblePoints() {
+        const configuredMinimum = chartZoomMinSampledPoints();
+        const availableSample = chartData ? Math.max(1, chartData.sampledPointCount) : configuredMinimum;
+        return Math.min(configuredMinimum, availableSample);
+      }
+
+      function chartDataCanAutoRefine() {
+        if (!chartData) {
+          return false;
+        }
+        return chartData.algorithm.indexOf('minmax-bucket/') === 0 ||
+          chartData.algorithm.indexOf('bar-cluster-even/') === 0 ||
+          chartData.algorithm.indexOf('box-bucket/') === 0 ||
+          chartData.algorithm.indexOf('ohlc-bucket/') === 0;
       }
 
       function chartZoomMaxSampledPoints() {
@@ -6060,7 +5643,7 @@ export class KxResultsPanel {
       }
 
       function renderColumnSettings() {
-        const hidden = new Set(data.hiddenSourceOrdinals);
+        const hidden = columnNameLookup(data.hiddenColumnNames);
         hiddenColumns.textContent = data.hiddenColumnCount > 0
           ? data.hiddenColumnCount + ' hidden'
           : 'All visible';
@@ -6071,19 +5654,15 @@ export class KxResultsPanel {
         resetColumnWidths.disabled = !hasColumnWidthOverrides();
         columnList.textContent = '';
         const fragment = document.createDocumentFragment();
-        data.allColumns.forEach((column, sourceOrdinal) => {
+        data.allColumns.forEach(column => {
           const label = document.createElement('label');
           label.className = 'column-row';
           label.setAttribute('role', 'listitem');
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
-          checkbox.checked = !hidden.has(sourceOrdinal);
+          checkbox.checked = !hidden[column];
           checkbox.addEventListener('change', () => {
-            vscode.postMessage({
-              type: checkbox.checked ? 'showColumn' : 'hideColumn',
-              sourceOrdinal,
-              columnName: column
-            });
+            vscode.postMessage({ type: checkbox.checked ? 'showColumn' : 'hideColumn', columnName: column });
           });
           const text = document.createElement('span');
           text.textContent = column;
@@ -6175,6 +5754,11 @@ export class KxResultsPanel {
         return Object.keys(columnWidthOverrides).length > 0;
       }
 
+      function headerMode() {
+        const value = String(interactionMode.value || 'drag');
+        return value === 'sort' || value === 'select' ? value : 'drag';
+      }
+
       function updateSortStatus() {
         sortStatus.textContent = data.sort
           ? 'Sort: ' + data.sort.columnName + ' ' + data.sort.direction
@@ -6182,14 +5766,11 @@ export class KxResultsPanel {
       }
 
       function normalizeSortState(value) {
-        if (!value || typeof value.columnName !== 'string' ||
-          !Number.isSafeInteger(value.sourceOrdinal) || value.sourceOrdinal < 0) {
+        if (!value || typeof value.columnName !== 'string') {
           return null;
         }
         const direction = value.direction === 'desc' ? 'desc' : value.direction === 'asc' ? 'asc' : '';
-        return direction
-          ? { columnName: value.columnName, sourceOrdinal: value.sourceOrdinal, direction }
-          : null;
+        return direction ? { columnName: value.columnName, direction } : null;
       }
 
       function columnNameLookup(columnNames) {
@@ -6330,11 +5911,6 @@ export class KxResultsPanel {
         textViewer.textContent = '';
         const columnCount = data.columns.length;
         const rowCount = data.rowCount;
-        viewport.setAttribute('aria-rowcount', String(rowCount + 1));
-        viewport.setAttribute(
-          'aria-colcount',
-          String(columnCount + (layout.showRowIndex ? 1 : 0))
-        );
         const metrics = columnMetrics();
         const verticalState = scrollStateForViewport();
         const horizontalState = horizontalScrollState(viewport.scrollLeft, viewport.clientWidth, metrics.totalWidth);
@@ -6578,22 +6154,20 @@ export class KxResultsPanel {
       }
 
       function columnWidth(column) {
-        return resolvedResultColumnWidth(
-          data.sourceOrdinals[column],
-          settings.cellWidth,
-          columnWidthOverrides,
-          autoFitEnabled,
-          autoColumnWidths,
-          MIN_COLUMN_WIDTH,
-          MAX_COLUMN_WIDTH
-        );
+        const key = columnWidthKey(column);
+        const override = columnWidthOverrides[key];
+        if (Number.isFinite(override)) {
+          return clampInteger(override, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        }
+        const autoWidth = autoColumnWidths[key];
+        if (autoFitEnabled && Number.isFinite(autoWidth)) {
+          return clampInteger(autoWidth, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        }
+        return clampInteger(settings.cellWidth, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
       }
 
       function columnWidthKey(column) {
-        const sourceOrdinal = data.sourceOrdinals[column];
-        return String(Number.isSafeInteger(sourceOrdinal) && sourceOrdinal >= 0
-          ? sourceOrdinal
-          : column);
+        return String(data.columns[column] || column);
       }
 
       function requestSlice(rows, columns) {
@@ -6622,8 +6196,6 @@ export class KxResultsPanel {
 
       function renderHeader(columns, horizontalState, metrics) {
         header.className = columnDragState && dragMode === 'reorder' ? 'header drag-active' : 'header';
-        header.setAttribute('role', 'row');
-        header.setAttribute('aria-rowindex', '1');
         const range = normalizedSelection();
         const cells = layout.showRowIndex ? [createCell({
           text: '#',
@@ -6637,7 +6209,6 @@ export class KxResultsPanel {
           className: 'cell index'
         })] : [];
         replaceChildren(header, cells.concat(headerCells(columns, range, horizontalState, metrics)));
-        restoreFocusedHeader();
       }
 
       function headerCells(columns, range, horizontalState, metrics) {
@@ -6645,9 +6216,7 @@ export class KxResultsPanel {
         for (let column = columns.start; column <= columns.end; column++) {
           const width = columnWidthAt(metrics, column);
           cells.push(createCell({
-            text: data.columns[column] + (data.sort && data.sort.columnName === data.columns[column]
-              ? ' ' + resultTableSortIndicator(true, data.sort.direction)
-              : ''),
+            text: data.columns[column],
             row: -1,
             column,
             left: physicalLeftForVirtual(horizontalState, layout.indexWidth + columnLeft(metrics, column)),
@@ -6656,19 +6225,7 @@ export class KxResultsPanel {
             headerCell: true,
             selected: isColumnSelected(column, range),
             className: headerCellClassName(column),
-            title: headerCellTitle(column),
-            tabIndex: 0,
-            ariaSort: resultTableAriaSort(
-              !!data.sort && data.sort.columnName === data.columns[column],
-              data.sort ? data.sort.direction : undefined
-            ),
-            ariaLabel: resultTableHeaderAriaLabel(
-              data.columns[column],
-              column,
-              data.columns.length,
-              !!data.sort && data.sort.columnName === data.columns[column],
-              data.sort ? data.sort.direction : undefined
-            )
+            title: headerCellTitle(column)
           }));
         }
         return cells;
@@ -6709,9 +6266,8 @@ export class KxResultsPanel {
         const fragment = document.createDocumentFragment();
         for (let row = rows.start; row <= rows.end; row++) {
           const rowElement = document.createElement('div');
-          rowElement.className = 'row ' + absoluteDisplayRowClass(row);
+          rowElement.className = 'row';
           rowElement.setAttribute('role', 'row');
-          rowElement.setAttribute('aria-rowindex', String(row + 2));
           rowElement.style.top = renderedRowTop(row, verticalState, layout) + 'px';
           rowElement.style.width = canvas.style.width;
           const searchMatched = isSearchMatchedRow(row);
@@ -6746,7 +6302,7 @@ export class KxResultsPanel {
               selected,
               searchMatch: searchMatched,
               searchActive,
-              className: 'cell' + (hasCells ? '' : ' loading')
+              className: 'cell'
             }));
           }
           fragment.appendChild(rowElement);
@@ -6765,42 +6321,18 @@ export class KxResultsPanel {
           (options.selected ? ' selected' : '') +
           (options.searchMatch ? ' search-match' : '') +
           (options.searchActive ? ' search-active' : '');
-        cell.setAttribute(
-          'role',
-          options.row >= 0 && options.column < 0
-            ? 'rowheader'
-            : options.headerCell
-              ? 'columnheader'
-              : 'gridcell'
-        );
-        const ariaColumn = options.column < 0
-          ? 1
-          : options.column + 1 + (layout.showRowIndex ? 1 : 0);
-        cell.setAttribute('aria-colindex', String(ariaColumn));
-        if (options.row >= 0 || options.headerCell) {
-          cell.setAttribute('aria-selected', options.selected ? 'true' : 'false');
-        }
+        cell.setAttribute('role', options.row >= 0 && options.column < 0 ? 'rowheader' : options.headerCell ? 'columnheader' : 'cell');
         cell.style.left = options.left + 'px';
         cell.style.top = options.top + 'px';
         cell.style.width = options.width + 'px';
         cell.title = String(options.title || options.text || '');
         cell.textContent = String(options.text || '');
-        if (options.tabIndex === 0) {
-          cell.tabIndex = 0;
-        }
-        if (options.ariaSort) {
-          cell.setAttribute('aria-sort', options.ariaSort);
-        }
-        if (options.ariaLabel) {
-          cell.setAttribute('aria-label', options.ariaLabel);
-        }
         if (options.headerCell && options.column >= 0) {
           const handle = document.createElement('span');
           handle.className = 'resize-handle';
           handle.title = 'Drag to resize column';
           handle.dataset.column = String(options.column);
           handle.addEventListener('mousedown', onColumnResizeMouseDown);
-          handle.addEventListener('click', event => event.stopPropagation());
           handle.addEventListener('dblclick', onColumnResizeDoubleClick);
           cell.appendChild(handle);
         }
@@ -6818,7 +6350,6 @@ export class KxResultsPanel {
         } else if (options.row === -1 && options.column >= 0) {
           cell.addEventListener('mousedown', onColumnMouseDown);
           cell.addEventListener('mouseenter', onColumnMouseEnter);
-          cell.addEventListener('keydown', onColumnKeyDown);
         } else if (options.row >= 0 && options.column === -1) {
           cell.addEventListener('mousedown', onRowMouseDown);
           cell.addEventListener('mouseenter', onRowMouseEnter);
@@ -6888,157 +6419,53 @@ export class KxResultsPanel {
       }
 
       function onColumnMouseDown(event) {
-        if (event.button !== 0 || !hasTableColumns()) {
+        if (event.button !== 0 || !hasTableCells()) {
           return;
         }
         const column = Number(event.currentTarget.dataset.column);
-        headerPointerState = Object.assign(
-          beginHeaderPointer(column, event.clientX, event.clientY),
-          {
-            columnSelectionModifier: event.ctrlKey || event.metaKey,
-            extendSelection: event.shiftKey
-          }
-        );
-        dragging = false;
-        dragMode = 'header-pending';
-        event.currentTarget.focus({ preventScroll: true });
+        if (headerMode() === 'sort') {
+          dragging = false;
+          clearColumnDragState();
+          dragMode = '';
+          status.textContent = '';
+          vscode.postMessage({
+            type: 'sortColumn',
+            version: data.version,
+            columnIndex: column,
+            columnName: data.columns[column]
+          });
+          event.preventDefault();
+          return;
+        }
+        if (headerMode() === 'drag') {
+          dragging = true;
+          dragMode = 'reorder';
+          beginColumnReorder(column);
+          viewport.focus();
+          renderNow();
+          event.preventDefault();
+          return;
+        }
+        const anchorColumn = event.shiftKey && selection ? selection.anchorColumn : column;
+        dragging = true;
+        dragMode = 'column';
+        selection = { anchorRow: 0, anchorColumn, focusRow: data.rowCount - 1, focusColumn: column };
+        viewport.focus();
+        updateSelection();
         event.preventDefault();
       }
 
       function onColumnMouseEnter(event) {
-        if (headerPointerState) {
-          headerPointerState = updateHeaderPointer(
-            headerPointerState,
-            headerPointerState.currentX,
-            headerPointerState.currentY,
-            Number(event.currentTarget.dataset.column)
-          );
-        }
         if (dragging && dragMode === 'reorder' && columnDragState) {
           updateColumnDragTarget(Number(event.currentTarget.dataset.column));
-        }
-      }
-
-      function updatePendingHeaderPointer(event) {
-        if (!headerPointerState) {
           return;
         }
-        const target = document.elementFromPoint(event.clientX, event.clientY);
-        const headerCell = target && target.closest ? target.closest('.header .cell[data-column]') : null;
-        const targetColumn = headerCell ? Number(headerCell.dataset.column) : headerPointerState.targetColumn;
-        headerPointerState = updateHeaderPointer(
-          headerPointerState,
-          event.clientX,
-          event.clientY,
-          Number.isSafeInteger(targetColumn) ? targetColumn : headerPointerState.targetColumn
-        );
-        if (headerPointerState.reorder) {
-          if (dragMode !== 'reorder') {
-            dragging = true;
-            dragMode = 'reorder';
-            beginColumnReorder(headerPointerState.sourceColumn);
-          }
-          updateColumnDragTarget(headerPointerState.targetColumn);
-        }
-      }
-
-      function finishPendingHeaderPointer(event) {
-        if (!headerPointerState) {
+        if (!dragging || dragMode !== 'column' || !selection) {
           return;
         }
-        updatePendingHeaderPointer(event);
-        const completed = headerPointerState;
-        headerPointerState = null;
-        focusedHeaderSourceOrdinal = data.sourceOrdinals[completed.sourceColumn] ?? -1;
-        const intent = headerPointerIntent(
-          completed,
-          completed.columnSelectionModifier,
-          completed.extendSelection
-        );
-        if (intent === 'reorder') {
-          finishColumnReorder();
-        } else if (intent === 'select') {
-          selectFullColumn(completed.sourceColumn, completed.extendSelection);
-        } else {
-          requestColumnSort(completed.sourceColumn);
-        }
-      }
-
-      function requestColumnSort(column) {
-        const columnName = data.columns[column] || '';
-        if (!columnName) {
-          return;
-        }
-        status.textContent = '';
-        vscode.postMessage({
-          type: 'sortColumn',
-          version: data.version,
-          columnIndex: column,
-          columnName,
-          sourceOrdinal: data.sourceOrdinals[column]
-        });
-      }
-
-      function selectFullColumn(column, extend) {
-        selection = fullResultColumnSelection(selection, column, data.rowCount, extend);
-        if (!selection) {
-          return;
-        }
+        selection.focusRow = data.rowCount - 1;
+        selection.focusColumn = Number(event.currentTarget.dataset.column);
         updateSelection();
-      }
-
-      function onColumnKeyDown(event) {
-        const column = Number(event.currentTarget.dataset.column);
-        focusedHeaderSourceOrdinal = data.sourceOrdinals[column] ?? -1;
-        if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
-          const plan = moveResultColumnBy(
-            data.columns.length,
-            column,
-            event.key === 'ArrowLeft' ? -1 : 1
-          );
-          if (plan) {
-            columnDragState = {
-              sourceColumn: plan.sourceColumn,
-              targetColumn: plan.targetColumn
-            };
-            finishColumnReorder();
-            clearColumnDragState();
-          }
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        if ((event.ctrlKey || event.metaKey) && event.key === ' ') {
-          selectFullColumn(column, event.shiftKey);
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
-        if (event.key === 'Enter' || event.key === ' ') {
-          requestColumnSort(column);
-          event.preventDefault();
-          event.stopPropagation();
-        }
-      }
-
-      function restoreFocusedHeader() {
-        if (focusedHeaderSourceOrdinal < 0) {
-          return;
-        }
-        const sourceOrdinal = focusedHeaderSourceOrdinal;
-        requestAnimationFrame(() => {
-          if (focusedHeaderSourceOrdinal !== sourceOrdinal) {
-            return;
-          }
-          const cells = header.querySelectorAll('.cell[data-column]');
-          for (const cell of cells) {
-            const column = Number(cell.dataset.column);
-            if (data.sourceOrdinals[column] === sourceOrdinal) {
-              cell.focus({ preventScroll: true });
-              break;
-            }
-          }
-        });
       }
 
       function beginColumnReorder(column) {
@@ -7107,8 +6534,6 @@ export class KxResultsPanel {
             version: data.version,
             sourceColumn,
             targetColumn,
-            sourceOrdinal: data.sourceOrdinals[sourceColumn],
-            targetOrdinal: data.sourceOrdinals[targetColumn],
             sourceColumnName,
             targetColumnName
           });
@@ -7341,9 +6766,7 @@ export class KxResultsPanel {
           mode: 'table',
           columns: [],
           allColumns: [],
-          sourceOrdinals: [],
           hiddenColumnNames: [],
-          hiddenSourceOrdinals: [],
           hiddenColumnCount: 0,
           rowCount: 0,
           text: '',
@@ -7491,7 +6914,6 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     elapsedTimeDisplay: settings.elapsedTimeDisplay,
     chartDecimalPlaces: settings.chartDecimalPlaces,
     chartMaxSourceRows: chartMaxSourceRowsSetting(),
-    chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
     chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
     qTextDisplayFormatting: settings.qTextDisplayFormatting,
@@ -7908,26 +7330,43 @@ function uniqueChartColumnNames(values: string[]): string[] {
   return result;
 }
 
-function sameColumnOrdinals(left: readonly number[], right: readonly number[]): boolean {
-  return left.length === right.length && left.every((ordinal, index) => ordinal === right[index]);
+function moveColumnName(columns: string[], sourceColumnName: string, targetColumnName: string): string[] {
+  const sourceIndex = columns.indexOf(sourceColumnName);
+  const targetIndex = columns.indexOf(targetColumnName);
+  if (sourceIndex === -1 || targetIndex === -1 || sourceIndex === targetIndex) {
+    return columns.slice();
+  }
+
+  const next = columns.slice();
+  const moved = next.splice(sourceIndex, 1)[0];
+  next.splice(targetIndex, 0, moved);
+  return next;
 }
 
-function mergeVisibleColumnOrder(
-  fullOrder: number[],
-  visibleOrder: number[],
-  hiddenColumns: number[]
-): number[] {
-  const hidden = new Set(hiddenColumns);
+function mergeVisibleColumnOrder(fullOrder: string[], visibleOrder: string[], hiddenColumns: string[]): string[] {
+  const hidden = columnNameLookup(hiddenColumns);
   const visible = visibleOrder.slice();
   let visibleIndex = 0;
-  return fullOrder.map(ordinal => {
-    if (hidden.has(ordinal)) {
-      return ordinal;
+  return fullOrder.map(column => {
+    if (hidden[column]) {
+      return column;
     }
     const next = visible[visibleIndex];
     visibleIndex += 1;
-    return next === undefined ? ordinal : next;
+    return next || column;
   });
+}
+
+function nextSortState(current: KxPanelSortState | undefined, columnName: string): KxPanelSortState | undefined {
+  if (!current || current.columnName !== columnName) {
+    return { columnName, direction: 'asc' };
+  }
+
+  if (current.direction === 'asc') {
+    return { columnName, direction: 'desc' };
+  }
+
+  return undefined;
 }
 
 function messageRange(value: any, itemCount: number): VisibleIndexRange {

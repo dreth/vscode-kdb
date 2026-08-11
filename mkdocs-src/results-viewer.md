@@ -1,6 +1,6 @@
 # Results Viewer
 
-Every normal `.q` editor run targets the extension-owned **KX Results** viewer. There is no SQLTools result target or session-file fallback. A live **KX q (Direct IPC)** notebook result can hand the same in-memory decoded value to this viewer while its bound live record exists. Python-helper, reopened, and expired direct results can transfer only the rows actually saved in their payload: a bounded preview or an explicitly preserved full v2 result.
+Every normal `.q` editor run targets the extension-owned **KX Results** viewer. There is no SQLTools result target or session-file fallback. A live **KX q (Direct IPC)** notebook result can hand the same in-memory decoded value to this viewer while its bound live record exists. Python-helper, reopened, and expired direct results can transfer only their bounded saved snapshot.
 
 ## Grid and q-text modes
 
@@ -37,13 +37,11 @@ Panels preserve editor focus on creation. Replacing a loading result locally can
 
 ### Notebook live results and saved snapshots
 
-For a current first-party direct result, **Open in KX Results** can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The compact inline adaptation provides natural/resizable table height, stable two-axis virtual scrolling, sticky headers/row numbers, capped Search with `Enter` / `Shift+Enter` navigation, drag/Shift/keyboard range selection, and bounded selection copy through the full live value. Its selection-only **Tools** menu uses one format selector and one Copy action instead of disabled duplicate copy buttons.
+For a current first-party direct result, **Open in KX Results** can use its full extension-host value and the standard panel's grid/qText policies, virtualization, selection, search, sort, column controls, charting, copy, and supported exports. The compact inline adaptation provides natural/resizable table height, stable two-axis virtual scrolling, sticky headers/row numbers, capped Search with `Enter` / `Shift+Enter` navigation, sort below 250,000 rows, drag/Shift/keyboard range selection, and bounded selection copy through the full live value. Its selection-only **Tools** menu uses one format selector and one Copy action instead of disabled duplicate copy buttons.
 
 Inline Chart uses all six real panel types and their capability-valid X, multi-Y, Group By, or OHLC selectors. Config changes wait for explicit **Render**, and hidden legend series remain hidden through chart refreshes. The notebook renderer and panel share durable `vscode-kdb.results.*` settings.
 
-Every new first-party Direct IPC output includes a strict `application/vnd.kx.result+json` v2 payload with a fresh opaque output identity and `preview` or `full` persistence mode. Preview mode defaults to 20 rows and records schema, total count, and an explicit truncation notice. A current live result enables the per-output **Preserve full result** checkbox; a persisted full v2 payload also keeps it enabled after reopening so it can be reduced back to the configured preview. Full mode directly stores every exactly representable row, column, and cell without preview row/byte ceilings. A genuine exact-representation failure is reported as an ordinary technical failure, never as a successful full preview. Legacy/Python v1 output remains accepted unchanged but cannot claim omitted rows or enable full persistence.
-
-Each live record is bound to notebook URI/current-cell URI for the extension-host session, atomically moved when an output rewrite gives the cell a new URI, removed on cell rerun, cell removal, or notebook close, cleared on deactivation, and subject to a 512-record oldest-first cap. If a preview's record is absent, **KX: Open Saved Notebook Preview in Results Panel** opens only stored rows and reports persisted versus total row count.
+Every direct output also includes a validated bounded `application/vnd.kx.result+json` v1 snapshot. The default table snapshot is 20 rows: tables at or below that size persist fully, while larger tables persist headers/schema, 20 rows, total count, and an explicit truncation notice. qText/scalars/small values remain complete within the byte limit. Each opaque live record is bound to notebook URI/current-cell URI for the extension-host session (mixed mode rebinds it after its output edit), removed on cell rerun, cell removal, or notebook close, cleared on deactivation, and subject to a 512-record oldest-first cap. If the record is absent, **KX: Open Saved Notebook Preview in Results Panel** opens only the snapshot and reports persisted versus total row count.
 
 Panel handoff never reruns the cell or opens another q connection. If snapshot output is truncated, omitted rows are not in the notebook and cannot be recovered after reopening. Python `%%q` helper output never receives a Direct IPC live record. A user evaluator may independently target the same server, but the two routes do not share extension-managed session state.
 
@@ -53,7 +51,7 @@ The grid supports:
 
 - a single cell or rectangular range;
 - whole-row selection;
-- whole-column selection with `Ctrl`/`Cmd`+click or `Ctrl`/`Cmd`+Space, with `Shift` extending the current selection;
+- whole-column selection when header mode is **Select**;
 - full-table selection;
 - keyboard navigation and clipboard shortcuts; and
 - deselection.
@@ -62,20 +60,19 @@ With no selection, copy and export use the complete visible table. Hidden column
 
 ## View and column controls
 
-Headers are focusable and expose their sort state and position to assistive technology. A click cycles source order → ascending → descending → source order. Pointer movement of at least 5 CSS pixels reorders and suppresses sorting. `Enter`/`Space` sorts; `Alt`+Left/Right reorders. Identity is the source column ordinal, so duplicate names remain distinct. The notebook renderer keeps order local to the logical output; a panel carries order only while its complete source-ordinal schema matches.
-
 Open **Settings** in the panel toolbar:
 
 | Control | Behavior |
 | --- | --- |
+| Header mode: Drag | Drag headers to reorder visible columns. |
+| Header mode: Select | Select a complete column from its header. |
+| Header mode: Sort | Cycle ascending, descending, and original order using display text. |
 | Search | Case-insensitive search over visible column display text, with previous/next match navigation. |
 | Columns | Show, hide, or reset columns; reset explicit widths. |
 | Auto-fit | Size visible columns from headers and rendered cells while scrolling. |
 | Density | Choose compact, standard, or comfortable dimensions. |
 
 Sort, search, copy, export, charting, and the local data server operate on the current visible column set and order where applicable. A sort changes result row order without changing q server data. Hidden-column and reorder choices carry to the next result in the same panel only when its full column schema matches.
-
-Virtual and paged tables stripe odd absolute display rows with `--vscode-tree-tableOddRowsBackground` and a subtle RGBA fallback. Selection, search matches, and loading states take precedence. High-contrast and forced-colors modes use the theme odd-row color when defined and otherwise fall back to transparent.
 
 Search is bounded and reports when results are capped or the scan is partial. Large sorts prompt before work unless the warning is explicitly disabled.
 

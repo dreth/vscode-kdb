@@ -21,28 +21,10 @@ import {
   DirectQNotebookBridge,
   KxQNotebookRunner,
 } from './notebook-controller';
-import {
-  LiveNotebookResultStore,
-  LiveNotebookSlice,
-  LiveNotebookSliceRequest,
-} from './notebook-live-results';
-import {
-} from './notebook-contract';
-import {
-  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
-  parseNotebookLiveResultReference,
-  parseNotebookOutputReferenceFromMetadata,
-  parseNotebookPortableOutputBinding,
-} from './notebook-message';
+import { LiveNotebookResultStore } from './notebook-live-results';
 import { resolveNotebookQTarget } from './notebook-q-target';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
-import {
-  QCellValue,
-  QResultDisplayOptions,
-  QTable,
-  QValue,
-  qValueToColumnarPanel,
-} from './q-ipc';
+import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 import {
   HistoryExecutionKind,
   historyRerunRequiresConfirmation,
@@ -69,23 +51,6 @@ export interface KxExtensionHostTestApi {
   hasPassword(id: string): Promise<boolean>;
   resolveNotebookTarget(metadata: unknown): KxConnection | undefined;
   isDirectControllerRegistered(): boolean;
-  queueNotebookTable(
-    columns: readonly string[],
-    rows: readonly (readonly QCellValue[])[]
-  ): void;
-  holdNextNotebookQuery(): ExtensionHostNotebookQueryGate;
-  notebookQueryCalls(): readonly { connectionId: string; source: string }[];
-  hasLiveNotebookResult(liveId: string, notebookUri: string): boolean;
-  notebookLiveSlice(
-    liveId: string,
-    notebookUri: string,
-    request: LiveNotebookSliceRequest
-  ): LiveNotebookSlice | undefined;
-}
-
-export interface ExtensionHostNotebookQueryGate {
-  readonly issued: Promise<void>;
-  release(): void;
 }
 
 export interface KxExtensionExports {
@@ -93,11 +58,6 @@ export interface KxExtensionExports {
 }
 
 export function activate(context: vscode.ExtensionContext): KxExtensionExports | undefined {
-  const extensionHostTestEnabled = context.extensionMode === vscode.ExtensionMode.Test &&
-    process.env.VSCODE_KDB_EXTENSION_HOST_TEST === '1';
-  const extensionHostNotebookExecutor = extensionHostTestEnabled
-    ? new ExtensionHostNotebookExecutor()
-    : undefined;
   const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
   const diagnostics = new KxDiagnostics(output);
   configurePerfOutput(value => output.appendLine(value));
@@ -107,12 +67,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   const connectionCommands = new ConnectionCommands(store, manager, tree);
   const liveNotebookResults = new LiveNotebookResultStore();
   const notebookRunner = new KxQNotebookRunner(
-    directQNotebookBridge(
-      store,
-      manager,
-      tree,
-      extensionHostNotebookExecutor?.executeScript
-    ),
+    directQNotebookBridge(store, manager, tree),
     liveNotebookResults
   );
   const notebookIntegration = new NotebookIntegration(context, {
@@ -180,11 +135,12 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
     vscode.workspace.onDidCloseNotebookDocument(notebook =>
       liveNotebookResults.closeNotebook(notebook.uri.toString())),
     vscode.workspace.onDidChangeNotebookDocument(event => {
-      const bindings = liveNotebookBindings(event.notebook, event);
-      liveNotebookResults.reconcileNotebookBindings(
-        event.notebook.uri.toString(),
-        bindings
-      );
+      const notebookUri = event.notebook.uri.toString();
+      for (const change of event.contentChanges) {
+        for (const cell of change.removedCells) {
+          liveNotebookResults.removeCell(notebookUri, cell.document.uri.toString());
+        }
+      }
     }),
     { dispose: () => configurePerfOutput(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
@@ -227,7 +183,8 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
     })
   );
 
-  if (!extensionHostTestEnabled || !extensionHostNotebookExecutor) {
+  if (context.extensionMode !== vscode.ExtensionMode.Test ||
+      process.env.VSCODE_KDB_EXTENSION_HOST_TEST !== '1') {
     return undefined;
   }
   const safeConnection = (connection: KxConnection | undefined): KxConnection | undefined =>
@@ -260,29 +217,6 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       },
       isDirectControllerRegistered: () =>
         notebookRunner.isDirectControllerRegistered(),
-      queueNotebookTable: (
-        columns: readonly string[],
-        rows: readonly (readonly QCellValue[])[]
-      ) =>
-        extensionHostNotebookExecutor.queueTable(columns, rows),
-      holdNextNotebookQuery: () => extensionHostNotebookExecutor.holdNextQuery(),
-      notebookQueryCalls: () => extensionHostNotebookExecutor.calls(),
-      hasLiveNotebookResult: (liveId: string, notebookUri: string) =>
-        liveNotebookResults.has(liveId, notebookUri),
-      notebookLiveSlice: (
-        liveId: string,
-        notebookUri: string,
-        request: LiveNotebookSliceRequest
-      ) => {
-        const slice = liveNotebookResults.slice(liveId, notebookUri, request);
-        return slice
-          ? {
-            ...slice,
-            columnOrdinals: slice.columnOrdinals.slice(),
-            cells: slice.cells.map(row => row.slice()),
-          }
-          : undefined;
-      },
     }),
   });
 }
@@ -697,16 +631,15 @@ function sameExecutionTarget(left: KxConnection, right: KxConnection): boolean {
 function directQNotebookBridge(
   store: ConnectionStore,
   manager: ConnectionManager,
-  tree: ConnectionsTreeProvider,
-  executeScriptOverride?: DirectQNotebookBridge['executeScript']
+  tree: ConnectionsTreeProvider
 ): DirectQNotebookBridge {
   return {
     activeConnection: () => store.activeConnection(),
     connections: () => store.connections(),
     connectionById: connectionId => store.connection(connectionId),
     isConnected: connectionId => manager.isConnected(connectionId),
-    executeScript: executeScriptOverride ?? ((connection, source, onIssued, signal, shouldIssue) =>
-      manager.executeScript(connection, source, onIssued, signal, shouldIssue)),
+    executeScript: (connection, source, onIssued, signal) =>
+      manager.executeScript(connection, source, onIssued, signal),
     errorMessage: async (error, connection) => {
       const secrets: string[] = [];
       let secretLookupFailed = false;
@@ -738,222 +671,6 @@ function directQNotebookBridge(
       });
     },
   };
-}
-
-class ExtensionHostNotebookExecutor {
-  private readonly queuedTables: QTable[] = [];
-  private readonly queryCalls: Array<{ connectionId: string; source: string }> = [];
-  private nextQueryGate: {
-    issued: Promise<void>;
-    markIssued: () => void;
-    released: Promise<void>;
-    release: () => void;
-  } | undefined;
-
-  public readonly executeScript: DirectQNotebookBridge['executeScript'] = async (
-    connection,
-    source,
-    onIssued,
-    signal,
-    shouldIssue
-  ) => {
-    if (signal.aborted) {
-      throw new Error('Extension Host notebook test execution was canceled before issue.');
-    }
-    if (shouldIssue && !shouldIssue()) {
-      throw new Error('Extension Host notebook test execution became stale before issue.');
-    }
-    const table = this.queuedTables.shift();
-    if (!table) {
-      throw new Error('Extension Host notebook test result queue is empty.');
-    }
-    this.queryCalls.push({ connectionId: connection.id, source });
-    onIssued();
-    const gate = this.nextQueryGate;
-    this.nextQueryGate = undefined;
-    gate?.markIssued();
-    await gate?.released;
-    if (signal.aborted) {
-      throw new Error('Extension Host notebook test execution was canceled after issue.');
-    }
-    return table;
-  };
-
-  public holdNextQuery(): ExtensionHostNotebookQueryGate {
-    if (this.nextQueryGate) {
-      throw new Error('An Extension Host notebook test query is already held.');
-    }
-    let markIssued!: () => void;
-    let release!: () => void;
-    const issued = new Promise<void>(resolve => { markIssued = resolve; });
-    const released = new Promise<void>(resolve => { release = resolve; });
-    this.nextQueryGate = { issued, markIssued, released, release };
-    return Object.freeze({ issued, release });
-  }
-
-  public queueTable(
-    columns: readonly string[],
-    rows: readonly (readonly QCellValue[])[]
-  ): void {
-    if (!Array.isArray(columns) || columns.length === 0 || columns.length > 4_096 ||
-      columns.some(column => typeof column !== 'string' || column.length === 0) ||
-      new Set(columns).size !== columns.length) {
-      throw new Error('Extension Host notebook test columns must be 1..4,096 unique names.');
-    }
-    if (!Array.isArray(rows) || rows.length > 1_000_000 ||
-      rows.some(row => !Array.isArray(row) || row.length !== columns.length ||
-        row.some(value => !isExtensionHostTestCell(value)))) {
-      throw new Error('Extension Host notebook test rows must be rectangular primitive cells.');
-    }
-    const copiedRows = rows.map(row => row.slice());
-    this.queuedTables.push({
-      qtype: 'table',
-      columns: columns.slice(),
-      rows: copiedRows.map(row => Object.fromEntries(
-        columns.map((column, index) => [column, row[index]])
-      )),
-      columnData: [],
-      rowCount: copiedRows.length,
-      rowsMaterialized: true,
-    });
-  }
-
-  public calls(): readonly { connectionId: string; source: string }[] {
-    return this.queryCalls.map(call => ({ ...call }));
-  }
-}
-
-function isExtensionHostTestCell(value: unknown): value is QCellValue {
-  return value === null || typeof value === 'string' || typeof value === 'boolean' ||
-    (typeof value === 'number' && Number.isFinite(value));
-}
-
-interface LiveNotebookBinding {
-  id: string;
-  cellUri: string;
-  outputId: string;
-}
-
-interface LiveBindingCellIndex {
-  bindings: LiveNotebookBinding[];
-  outputs: readonly vscode.NotebookCellOutput[];
-}
-
-interface LiveBindingNotebookIndex {
-  cells: Map<string, LiveBindingCellIndex>;
-}
-
-interface ChangedLiveBindingCell {
-  cell?: vscode.NotebookCell;
-  outputsChanged: boolean;
-}
-
-const liveBindingIndexes = new WeakMap<vscode.NotebookDocument, LiveBindingNotebookIndex>();
-
-function liveNotebookBindings(
-  notebook: vscode.NotebookDocument,
-  event?: vscode.NotebookDocumentChangeEvent
-): LiveNotebookBinding[] {
-  const cached = liveBindingIndexes.get(notebook);
-  if (!cached || !event) {
-    const built = buildLiveBindingIndex(notebook);
-    liveBindingIndexes.set(notebook, built);
-    return flattenedLiveBindings(built);
-  }
-
-  const changed = changedNotebookCells(event);
-  for (const [cellUri, change] of changed) {
-    const cell = change.cell;
-    const previous = cached.cells.get(cellUri);
-    if (cell && previous && !change.outputsChanged &&
-      sameNotebookOutputs(previous.outputs, cell.outputs)) {
-      continue;
-    }
-    if (previous) {
-      cached.cells.delete(cellUri);
-    }
-    if (!cell) {
-      continue;
-    }
-    const next = scanLiveBindingCell(cell);
-    cached.cells.set(cellUri, next);
-  }
-  return flattenedLiveBindings(cached);
-}
-
-function buildLiveBindingIndex(
-  notebook: vscode.NotebookDocument
-): LiveBindingNotebookIndex {
-  const index: LiveBindingNotebookIndex = {
-    cells: new Map<string, LiveBindingCellIndex>(),
-  };
-  for (const cell of notebook.getCells()) {
-    const scanned = scanLiveBindingCell(cell);
-    index.cells.set(cell.document.uri.toString(), scanned);
-  }
-  return index;
-}
-
-function scanLiveBindingCell(cell: vscode.NotebookCell): LiveBindingCellIndex {
-  const bindings: LiveNotebookBinding[] = [];
-  const cellUri = cell.document.uri.toString();
-  for (const output of cell.outputs) {
-    const live = parseNotebookLiveResultReference(
-      output.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
-    );
-    const outer = parseNotebookOutputReferenceFromMetadata(output.metadata);
-    if (!live || !outer) {
-      continue;
-    }
-    const portable = parseNotebookPortableOutputBinding(output.metadata, output.items);
-    // Both first-party identities are required. A copied or hand-authored
-    // live-only metadata object must not claim a session result.
-    if (portable) {
-      bindings.push({ id: live.id, cellUri, outputId: portable.id });
-    }
-  }
-  return {
-    bindings,
-    outputs: cell.outputs.slice(),
-  };
-}
-
-function sameNotebookOutputs(
-  previous: readonly vscode.NotebookCellOutput[],
-  current: readonly vscode.NotebookCellOutput[]
-): boolean {
-  return previous.length === current.length &&
-    previous.every((output, index) => output === current[index]);
-}
-
-function flattenedLiveBindings(index: LiveBindingNotebookIndex): LiveNotebookBinding[] {
-  const bindings: LiveNotebookBinding[] = [];
-  for (const cell of index.cells.values()) {
-    bindings.push(...cell.bindings);
-  }
-  return bindings;
-}
-
-function changedNotebookCells(
-  event: vscode.NotebookDocumentChangeEvent
-): Map<string, ChangedLiveBindingCell> {
-  const cells = new Map<string, ChangedLiveBindingCell>();
-  for (const change of event.contentChanges) {
-    for (const cell of change.removedCells) {
-      cells.set(cell.document.uri.toString(), { outputsChanged: true });
-    }
-    for (const cell of change.addedCells) {
-      cells.set(cell.document.uri.toString(), { cell, outputsChanged: true });
-    }
-  }
-  for (const change of event.cellChanges) {
-    const cellUri = change.cell.document.uri.toString();
-    cells.set(cellUri, {
-      cell: change.cell,
-      outputsChanged: cells.get(cellUri)?.outputsChanged || change.outputs !== undefined,
-    });
-  }
-  return cells;
 }
 
 class QRunCodeLensProvider implements vscode.CodeLensProvider {
