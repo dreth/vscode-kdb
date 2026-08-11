@@ -1,13 +1,14 @@
 'use strict';
 
 const fs = require('fs');
+const net = require('net');
+const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { runNotebookVisualAcceptance } = require('../test/extension-host/visual-controller');
 
 const REPOSITORY_ROOT = path.resolve(__dirname, '..');
-const E2E_ROOT = path.join(REPOSITORY_ROOT, '.vscode-test', 'e2e');
-const USER_DATA_DIR = path.join(E2E_ROOT, 'user-data');
-const EXTENSIONS_DIR = path.join(E2E_ROOT, 'extensions');
+const TEMP_ROOT = path.resolve(os.tmpdir());
 const EXTENSION_TESTS_PATH = path.join(REPOSITORY_ROOT, 'test', 'extension-host', 'index.js');
 const SIBLING_TEST_ROOT = path.resolve(
   REPOSITORY_ROOT,
@@ -29,10 +30,13 @@ const VSCODE_LIBRARY_PATH = process.env.VSCODE_KDB_E2E_LIBS ||
     fs.statSync(DEFAULT_LIBRARY_PATH, { throwIfNoEntry: false })?.isDirectory()
     ? DEFAULT_LIBRARY_PATH
     : undefined);
-const TEST_TIMEOUT_MS = 90_000;
+const TEST_TIMEOUT_MS = 150_000;
 
 let xvfbProcess;
 let vscodeProcess;
+let e2eRoot;
+let userDataDir;
+let extensionsDir;
 
 function firstExistingFile(candidates) {
   return candidates.find(candidate =>
@@ -49,16 +53,26 @@ function assertFile(target, label) {
 
 function resetE2eRoot() {
   cleanE2eRoot();
-  fs.mkdirSync(USER_DATA_DIR, { recursive: true });
-  fs.mkdirSync(EXTENSIONS_DIR, { recursive: true });
+  e2eRoot = fs.mkdtempSync(path.join(TEMP_ROOT, 'vscode-kdb-e2e-'));
+  userDataDir = path.join(e2eRoot, 'user-data');
+  extensionsDir = path.join(e2eRoot, 'extensions');
+  fs.mkdirSync(userDataDir, { recursive: true });
+  fs.mkdirSync(extensionsDir, { recursive: true });
 }
 
 function cleanE2eRoot() {
-  const expected = path.join(REPOSITORY_ROOT, '.vscode-test', 'e2e');
-  if (E2E_ROOT !== expected || !E2E_ROOT.startsWith(`${REPOSITORY_ROOT}${path.sep}`)) {
-    throw new Error(`Refusing to clean unexpected Extension Host test path: ${E2E_ROOT}`);
+  if (!e2eRoot) {
+    return;
   }
-  fs.rmSync(E2E_ROOT, { recursive: true, force: true });
+  const resolved = path.resolve(e2eRoot);
+  if (path.dirname(resolved) !== TEMP_ROOT ||
+    !path.basename(resolved).startsWith('vscode-kdb-e2e-')) {
+    throw new Error(`Refusing to clean unexpected Extension Host test path: ${resolved}`);
+  }
+  fs.rmSync(resolved, { recursive: true, force: true });
+  e2eRoot = undefined;
+  userDataDir = undefined;
+  extensionsDir = undefined;
 }
 
 function stopProcess(child) {
@@ -129,7 +143,7 @@ function startXvfb() {
   });
 }
 
-function runVsCode(display) {
+function runVsCode(display, remoteDebuggingPort, controlDir, phase) {
   const existingLibraryPath = process.env.LD_LIBRARY_PATH;
   const libraryPath = [VSCODE_LIBRARY_PATH, existingLibraryPath].filter(Boolean).join(':');
   const args = [
@@ -138,8 +152,9 @@ function runVsCode(display) {
     '--skip-welcome',
     '--skip-release-notes',
     '--disable-workspace-trust',
-    `--user-data-dir=${USER_DATA_DIR}`,
-    `--extensions-dir=${EXTENSIONS_DIR}`,
+    `--remote-debugging-port=${remoteDebuggingPort}`,
+    `--user-data-dir=${userDataDir}`,
+    `--extensions-dir=${extensionsDir}`,
     `--extensionDevelopmentPath=${REPOSITORY_ROOT}`,
     `--extensionTestsPath=${EXTENSION_TESTS_PATH}`,
     REPOSITORY_ROOT,
@@ -152,6 +167,9 @@ function runVsCode(display) {
         ...process.env,
         DISPLAY: display,
         VSCODE_KDB_EXTENSION_HOST_TEST: '1',
+        VSCODE_KDB_EXTENSION_HOST_NOTEBOOK_EXECUTOR: '1',
+        VSCODE_KDB_E2E_CONTROL_DIR: controlDir,
+        VSCODE_KDB_E2E_PHASE: phase,
         ...(libraryPath ? { LD_LIBRARY_PATH: libraryPath } : {}),
       },
       stdio: 'inherit',
@@ -205,11 +223,50 @@ async function main() {
   }
 
   resetE2eRoot();
+  const controlDir = path.join(e2eRoot, 'control');
+  fs.mkdirSync(controlDir, { recursive: true });
   console.log(`Extension Host runtime: ${VSCODE_PATH}`);
   const { display } = await startXvfb();
   console.log(`Extension Host display: ${display}`);
-  await runVsCode(display);
+  const savePort = await availablePort();
+  await runVsCode(display, savePort, controlDir, 'save');
+  const savedMarker = path.join(controlDir, 'notebook-host-saved.json');
+  if (!fs.statSync(savedMarker, { throwIfNoEntry: false })?.isFile()) {
+    throw new Error('The save-phase Extension Host did not produce its durable notebook marker.');
+  }
+  const remoteDebuggingPort = await availablePort();
+  console.log(`Extension Host reopen CDP port: ${remoteDebuggingPort}`);
+  const [host, visual] = await Promise.allSettled([
+    runVsCode(display, remoteDebuggingPort, controlDir, 'reopen'),
+    runNotebookVisualAcceptance({ port: remoteDebuggingPort, controlDir }),
+  ]);
+  if (host.status === 'rejected' && visual.status === 'rejected') {
+    throw new Error(
+      `Extension Host and native renderer acceptance failed:\n` +
+      `host: ${host.reason?.stack || String(host.reason)}\n` +
+      `renderer: ${visual.reason?.stack || String(visual.reason)}`
+    );
+  }
+  if (host.status === 'rejected') {
+    throw host.reason;
+  }
+  if (visual.status === 'rejected') {
+    throw visual.reason;
+  }
   console.log('Extension Host smoke test passed.');
+}
+
+function availablePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
+    server.unref();
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
+      const address = server.address();
+      const port = address && typeof address === 'object' ? address.port : 0;
+      server.close(error => error ? reject(error) : resolve(port));
+    });
+  });
 }
 
 function cleanup() {

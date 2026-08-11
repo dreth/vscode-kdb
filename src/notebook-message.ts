@@ -1,4 +1,5 @@
 import {
+  KX_NOTEBOOK_MIME,
   MAX_NOTEBOOK_ROW_LIMIT,
   PortableKxResult,
   validatePortableKxResult,
@@ -57,6 +58,13 @@ export type NotebookOutputBindingReference = NotebookLiveResultReference;
 export type NotebookRendererMessage =
   | { type: 'ready' }
   | {
+    type: 'bindOutput' | 'unbindOutput';
+    outputId: string;
+    liveId?: string;
+    renderGeneration: number;
+    requestId: number;
+  }
+  | {
     type: 'openPreview';
     outputId?: string;
     payload: PortableKxResult;
@@ -79,6 +87,7 @@ export type NotebookRendererMessage =
     startColumn: number;
     endColumn: number;
     columnIndexes?: number[];
+    sortOrdinal?: number;
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
@@ -89,6 +98,7 @@ export type NotebookRendererMessage =
     requestId: number;
     query: string;
     columnIndexes?: number[];
+    sortOrdinal?: number;
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
@@ -122,6 +132,7 @@ export type NotebookRendererMessage =
     includeHeaders: boolean;
     includeRowIndex: boolean;
     columnIndexes?: number[];
+    sortOrdinal?: number;
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
@@ -138,6 +149,7 @@ export type NotebookRendererMessage =
     includeHeaders: boolean;
     includeRowIndex: boolean;
     columnIndexes?: number[];
+    sortOrdinal?: number;
     sortColumn?: string;
     sortDirection?: NotebookLiveSortDirection;
   }
@@ -188,6 +200,14 @@ export type NotebookRendererMessage =
   }
   | { type: 'rerunPreview'; outputId?: string; payload: PortableKxResult; requestId: number }
   | { type: 'openLiveResult'; outputId: string; liveId: string; requestId: number }
+  | {
+    type: 'setOutputPersistence';
+    outputId: string;
+    liveId?: string;
+    renderGeneration: number;
+    requestId: number;
+    mode: 'preview' | 'full';
+  }
   | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean }
   | { type: 'setResultColumnWidth'; position: number; width: number }
   | { type: 'resetResultColumnWidths' };
@@ -240,6 +260,7 @@ export interface NotebookLiveSliceMessage {
   endRow: number;
   startColumn: number;
   endColumn: number;
+  columnOrdinals: number[];
   cells: string[][];
   error?: string;
 }
@@ -336,6 +357,17 @@ export interface NotebookActionResultMessage {
   message: string;
 }
 
+export interface NotebookOutputPersistenceMessage {
+  type: 'outputPersistence';
+  outputId: string;
+  renderGeneration: number;
+  requestId: number;
+  mode: 'preview' | 'full';
+  enabled: boolean;
+  checked: boolean;
+  message?: string;
+}
+
 export type NotebookRendererHostMessage =
   | NotebookRendererSettingsMessage
   | NotebookLiveResultMessage
@@ -344,7 +376,8 @@ export type NotebookRendererHostMessage =
   | NotebookLiveSearchMessage
   | NotebookLiveChartMessage
   | NotebookLiveCopyMessage
-  | NotebookActionResultMessage;
+  | NotebookActionResultMessage
+  | NotebookOutputPersistenceMessage;
 
 export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMessage | undefined {
   if (!isRecord(raw) || typeof raw.type !== 'string') {
@@ -352,6 +385,25 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
   }
   if (raw.type === 'ready') {
     return Object.keys(raw).length === 1 ? { type: 'ready' } : undefined;
+  }
+  if (raw.type === 'bindOutput' || raw.type === 'unbindOutput') {
+    return hasOnlyKeys(raw, [
+      'type',
+      'outputId',
+      'liveId',
+      'renderGeneration',
+      'requestId',
+    ]) && validOutputId(raw.outputId) &&
+      (raw.liveId === undefined || validLiveId(raw.liveId)) &&
+      validRequestId(raw.renderGeneration) && validRequestId(raw.requestId)
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        ...(typeof raw.liveId === 'string' ? { liveId: raw.liveId } : {}),
+        renderGeneration: raw.renderGeneration,
+        requestId: raw.requestId,
+      }
+      : undefined;
   }
   if (raw.type === 'openPreview') {
     if (!hasOnlyKeys(raw, ['type', 'outputId', 'payload', 'requestId']) ||
@@ -440,6 +492,29 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
       }
       : undefined;
   }
+  if (raw.type === 'setOutputPersistence') {
+    return hasOnlyKeys(raw, [
+      'type',
+      'outputId',
+      'liveId',
+      'renderGeneration',
+      'requestId',
+      'mode',
+    ]) &&
+      validOutputId(raw.outputId) &&
+      (raw.liveId === undefined || validLiveId(raw.liveId)) &&
+      validRequestId(raw.renderGeneration) && validRequestId(raw.requestId) &&
+      (raw.mode === 'preview' || raw.mode === 'full')
+      ? {
+        type: raw.type,
+        outputId: raw.outputId,
+        ...(typeof raw.liveId === 'string' ? { liveId: raw.liveId } : {}),
+        renderGeneration: raw.renderGeneration,
+        requestId: raw.requestId,
+        mode: raw.mode,
+      }
+      : undefined;
+  }
   if (raw.type === 'updateResultSetting') {
     return parseResultSettingUpdate(raw);
   }
@@ -494,6 +569,9 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   if (raw.type === 'actionResult') {
     return parseActionResultMessage(raw);
   }
+  if (raw.type === 'outputPersistence') {
+    return parseOutputPersistenceMessage(raw);
+  }
   return undefined;
 }
 
@@ -520,6 +598,72 @@ export function parseNotebookOutputBindingReference(
     : undefined;
 }
 
+/** Accept the immediate renderer metadata and the nested Jupyter metadata that
+ * survives an .ipynb save/reopen, while rejecting malformed conflicts. */
+export function parseNotebookOutputBindingFromMetadata(
+  raw: unknown
+): NotebookOutputBindingReference | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const hasDirect = Object.prototype.hasOwnProperty.call(
+    raw,
+    NOTEBOOK_OUTPUT_BINDING_METADATA_KEY
+  );
+  const nestedMetadata = isRecord(raw.metadata) ? raw.metadata : undefined;
+  const hasNested = !!nestedMetadata && Object.prototype.hasOwnProperty.call(
+    nestedMetadata,
+    NOTEBOOK_OUTPUT_BINDING_METADATA_KEY
+  );
+  const direct = parseNotebookOutputBindingReference(
+    raw[NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]
+  );
+  const nested = parseNotebookOutputBindingReference(
+    nestedMetadata?.[NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]
+  );
+  if ((hasDirect && !direct) || (hasNested && !nested) ||
+    (direct && nested && direct.id !== nested.id)) {
+    return undefined;
+  }
+  return direct ?? nested;
+}
+
+/** Proves that durable outer metadata is backed by one matching first-party
+ * v2 MIME item. Callers can inspect outer metadata before invoking this parser. */
+export function parseNotebookPortableOutputBinding(
+  metadata: unknown,
+  items: readonly { mime: string; data: Uint8Array }[]
+): NotebookOutputBindingReference | undefined {
+  const outer = parseNotebookOutputBindingFromMetadata(metadata);
+  if (!outer || !Array.isArray(items)) {
+    return undefined;
+  }
+  let portableItem: { mime: string; data: Uint8Array } | undefined;
+  for (const item of items) {
+    if (!item || item.mime !== KX_NOTEBOOK_MIME) {
+      continue;
+    }
+    if (portableItem || !(item.data instanceof Uint8Array)) {
+      return undefined;
+    }
+    portableItem = item;
+  }
+  if (!portableItem) {
+    return undefined;
+  }
+  try {
+    const validation = validatePortableKxResult(
+      JSON.parse(new TextDecoder().decode(portableItem.data))
+    );
+    return validation.ok && validation.value.version === 2 &&
+      validation.value.outputId === outer.id
+      ? outer
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
@@ -531,6 +675,7 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
     'startColumn',
     'endColumn',
     'columnIndexes',
+    'sortOrdinal',
     'sortColumn',
     'sortDirection',
   ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
@@ -550,7 +695,7 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
   if (rowCount < 1 || rowCount > MAX_NOTEBOOK_LIVE_SLICE_ROWS ||
     columnCount < 1 || columnCount > MAX_NOTEBOOK_LIVE_SLICE_COLUMNS ||
     rowCount * columnCount > MAX_NOTEBOOK_LIVE_SLICE_CELLS ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortColumn, raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   return {
@@ -575,13 +720,14 @@ function parseLiveSearchRequest(raw: Record<string, unknown>): NotebookRendererM
     'requestId',
     'query',
     'columnIndexes',
+    'sortOrdinal',
     'sortColumn',
     'sortDirection',
   ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
     !validRequestId(raw.requestId) ||
     typeof raw.query !== 'string' || raw.query.length > MAX_NOTEBOOK_LIVE_SEARCH_CHARS ||
     !validOptionalColumnIndexes(raw.columnIndexes) ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortColumn, raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   return {
@@ -685,6 +831,7 @@ function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMes
     'includeHeaders',
     'includeRowIndex',
     'columnIndexes',
+    'sortOrdinal',
     'sortColumn',
     'sortDirection',
   ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
@@ -696,7 +843,7 @@ function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMes
     typeof raw.includeHeaders !== 'boolean' ||
     typeof raw.includeRowIndex !== 'boolean' ||
     !validOptionalColumnIndexes(raw.columnIndexes) ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortColumn, raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   const columnIndexes = optionalColumnIndexes(raw.columnIndexes);
@@ -736,6 +883,7 @@ function parseLiveExportRequest(raw: Record<string, unknown>): NotebookRendererM
     'includeHeaders',
     'includeRowIndex',
     'columnIndexes',
+    'sortOrdinal',
     'sortColumn',
     'sortDirection',
   ]) || !validOutputId(raw.outputId) || !validLiveId(raw.liveId) ||
@@ -744,7 +892,7 @@ function parseLiveExportRequest(raw: Record<string, unknown>): NotebookRendererM
     typeof raw.includeHeaders !== 'boolean' ||
     typeof raw.includeRowIndex !== 'boolean' ||
     !validOptionalColumnIndexes(raw.columnIndexes) ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortColumn, raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   const columnIndexes = optionalColumnIndexes(raw.columnIndexes);
@@ -906,9 +1054,11 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
     'presentation',
     'rowLimit',
     'byteLimit',
+    'preserveFullResultByDefault',
     'resultSettings',
   ]) || !isPresentation(raw.presentation) || !positiveSafeInteger(raw.rowLimit) ||
-    !positiveSafeInteger(raw.byteLimit)) {
+    !positiveSafeInteger(raw.byteLimit) ||
+    typeof raw.preserveFullResultByDefault !== 'boolean') {
     return undefined;
   }
   const resultSettings = parseSharedResultSettings(raw.resultSettings);
@@ -918,6 +1068,7 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
       presentation: raw.presentation,
       rowLimit: raw.rowLimit,
       byteLimit: raw.byteLimit,
+      preserveFullResultByDefault: raw.preserveFullResultByDefault,
       resultSettings,
     }
     : undefined;
@@ -1036,11 +1187,13 @@ function parseLiveSliceMessage(raw: Record<string, unknown>): NotebookLiveSliceM
     'endRow',
     'startColumn',
     'endColumn',
+    'columnOrdinals',
     'cells',
     'error',
   ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
     !nonNegativeSafeInteger(raw.startRow) || !integerAtLeast(raw.endRow, -1) ||
     !nonNegativeSafeInteger(raw.startColumn) || !integerAtLeast(raw.endColumn, -1) ||
+    !validColumnOrdinals(raw.columnOrdinals, true) ||
     !Array.isArray(raw.cells) || raw.cells.length > MAX_NOTEBOOK_LIVE_SLICE_ROWS ||
     !validOptionalText(raw.error, 4_096)) {
     return undefined;
@@ -1062,14 +1215,15 @@ function parseLiveSliceMessage(raw: Record<string, unknown>): NotebookLiveSliceM
     cells.push(rawRow.slice());
   }
   if (cells.length === 0) {
-    if (raw.endRow !== -1 || raw.endColumn !== -1) {
+    if (raw.endRow !== -1 || raw.endColumn !== -1 || raw.columnOrdinals.length !== 0) {
       return undefined;
     }
   } else {
     const width = cells[0].length;
     if (!cells.every(row => row.length === width) ||
       raw.endRow !== raw.startRow + cells.length - 1 ||
-      raw.endColumn !== raw.startColumn + width - 1) {
+      raw.endColumn !== raw.startColumn + width - 1 ||
+      raw.columnOrdinals.length !== width) {
       return undefined;
     }
   }
@@ -1081,6 +1235,7 @@ function parseLiveSliceMessage(raw: Record<string, unknown>): NotebookLiveSliceM
     endRow: raw.endRow,
     startColumn: raw.startColumn,
     endColumn: raw.endColumn,
+    columnOrdinals: raw.columnOrdinals.slice(),
     cells,
     ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
   };
@@ -1181,6 +1336,37 @@ function parseActionResultMessage(
     ok: raw.ok,
     canceled: raw.canceled,
     message: raw.message,
+  };
+}
+
+function parseOutputPersistenceMessage(
+  raw: Record<string, unknown>
+): NotebookOutputPersistenceMessage | undefined {
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'outputId',
+    'renderGeneration',
+    'requestId',
+    'mode',
+    'enabled',
+    'checked',
+    'message',
+  ]) || !validOutputId(raw.outputId) || !validRequestId(raw.renderGeneration) ||
+    !validRequestId(raw.requestId) ||
+    (raw.mode !== 'preview' && raw.mode !== 'full') ||
+    typeof raw.enabled !== 'boolean' || typeof raw.checked !== 'boolean' ||
+    !validOptionalText(raw.message, 4_096)) {
+    return undefined;
+  }
+  return {
+    type: 'outputPersistence',
+    outputId: raw.outputId,
+    renderGeneration: raw.renderGeneration,
+    requestId: raw.requestId,
+    mode: raw.mode,
+    enabled: raw.enabled,
+    checked: raw.checked,
+    ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
   };
 }
 
@@ -1571,6 +1757,12 @@ function validOptionalColumnIndexes(value: unknown): boolean {
       value.every(nonNegativeSafeInteger) && new Set(value).size === value.length);
 }
 
+function validColumnOrdinals(value: unknown, allowEmpty = false): value is number[] {
+  return Array.isArray(value) && (allowEmpty || value.length > 0) &&
+    value.length <= MAX_NOTEBOOK_LIVE_COLUMNS &&
+    value.every(nonNegativeSafeInteger) && new Set(value).size === value.length;
+}
+
 function optionalColumnIndexes(value: unknown): number[] | undefined {
   return Array.isArray(value) ? (value as number[]).slice() : undefined;
 }
@@ -1601,19 +1793,32 @@ function isExportFormat(value: unknown): value is ExportFormat {
   return value === 'xlsx' || isTextExportFormat(value);
 }
 
-function validOptionalSort(sortColumn: unknown, sortDirection: unknown): boolean {
-  if (sortColumn === undefined && sortDirection === undefined) {
+function validOptionalSort(
+  sortColumn: unknown,
+  sortOrdinal: unknown,
+  sortDirection: unknown
+): boolean {
+  if (sortColumn === undefined && sortOrdinal === undefined && sortDirection === undefined) {
     return true;
   }
-  return validColumnName(sortColumn) && (sortDirection === 'asc' || sortDirection === 'desc');
+  const hasColumn = validColumnName(sortColumn);
+  const hasOrdinal = nonNegativeSafeInteger(sortOrdinal);
+  return hasColumn !== hasOrdinal &&
+    (sortDirection === 'asc' || sortDirection === 'desc');
 }
 
 function sortFields(raw: Record<string, unknown>): {
+  sortOrdinal?: number;
   sortColumn?: string;
   sortDirection?: NotebookLiveSortDirection;
 } {
-  return typeof raw.sortColumn === 'string' &&
-    (raw.sortDirection === 'asc' || raw.sortDirection === 'desc')
+  if (raw.sortDirection !== 'asc' && raw.sortDirection !== 'desc') {
+    return {};
+  }
+  if (nonNegativeSafeInteger(raw.sortOrdinal)) {
+    return { sortOrdinal: raw.sortOrdinal, sortDirection: raw.sortDirection };
+  }
+  return typeof raw.sortColumn === 'string'
     ? { sortColumn: raw.sortColumn, sortDirection: raw.sortDirection }
     : {};
 }

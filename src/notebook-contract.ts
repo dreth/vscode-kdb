@@ -5,9 +5,11 @@ import {
   createColumnarPanelResult,
 } from './kx-results';
 import { isQTemporalType } from './q-type';
+import { compareResultCellText } from './result-table-interaction';
 
 export const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
 export const KX_NOTEBOOK_CONTRACT_VERSION = 1;
+export const KX_NOTEBOOK_CONTRACT_VERSION_V2 = 2;
 
 export const DEFAULT_NOTEBOOK_ROW_LIMIT = 20;
 export const MIN_NOTEBOOK_ROW_LIMIT = 1;
@@ -29,6 +31,13 @@ const MAX_PORTABLE_JSON_DEPTH = 128;
 const MAX_PORTABLE_JSON_NODES = 20_000;
 
 export type NotebookResultMarker = '%%q' | 'direct-ipc';
+export type NotebookPersistenceMode = 'preview' | 'full';
+
+export interface NotebookPersistenceMetadata {
+  mode: NotebookPersistenceMode;
+  previewRowLimit: number;
+  byteLimit: number;
+}
 
 export type PortableCellKind =
   | 'null'
@@ -104,7 +113,9 @@ Record<NotebookTruncationReason, string> = {
 };
 
 export interface PortableKxTableResult {
-  version: 1;
+  version: 1 | 2;
+  outputId?: string;
+  persistence?: NotebookPersistenceMetadata;
   kind: 'table';
   schema: {
     columns: PortableColumn[];
@@ -115,6 +126,7 @@ export interface PortableKxTableResult {
   };
   result: {
     rowCount: number;
+    columnCount?: number;
     previewRowCount: number;
     truncated: boolean;
     truncationReasons: NotebookTruncationReason[];
@@ -131,7 +143,9 @@ export interface PortableKxTableResult {
 }
 
 export interface PortableKxTextResult {
-  version: 1;
+  version: 1 | 2;
+  outputId?: string;
+  persistence?: NotebookPersistenceMetadata;
   kind: 'qText';
   data: {
     text: string;
@@ -167,12 +181,28 @@ export interface NotebookResultInput {
 
 export interface NotebookTextResultInput {
   text: string;
+  rowLimit?: number;
   byteLimit?: number;
   label?: string;
   elapsedMs?: number;
   qSource?: string;
   marker?: NotebookResultMarker;
 }
+
+export interface NotebookV2ResultOptions {
+  outputId: string;
+  persistenceMode: NotebookPersistenceMode;
+}
+
+export type NotebookV2CreationResult<T extends PortableKxResult = PortableKxResult> =
+  | { ok: true; value: T; serializedBytes: number }
+  | {
+    ok: false;
+    error: string;
+    rowCount: number;
+    columnCount: number;
+    serializedBytes?: number;
+  };
 
 export type NotebookValidationResult =
   | { ok: true; value: PortableKxResult }
@@ -386,10 +416,328 @@ export function createPortableKxTextResult(input: NotebookTextResultInput): Port
   return payload;
 }
 
+export function createPortableKxResultV2(
+  input: NotebookResultInput,
+  options: NotebookV2ResultOptions
+): NotebookV2CreationResult<PortableKxTableResult> {
+  let rowCount = 0;
+  let columnCount = 0;
+  try {
+    rowCount = Math.max(
+      nonNegativeSafeInteger(input.rowCount, input.rows.length),
+      input.rows.length
+    );
+    columnCount = input.columns.length;
+    if (!validNotebookOutputId(options.outputId)) {
+      return v2Failure('KX notebook output identifier is invalid.', rowCount, columnCount);
+    }
+    if (input.marker !== 'direct-ipc') {
+      return v2Failure(
+        'Portable v2 output is reserved for first-party Direct IPC results.',
+        rowCount,
+        columnCount
+      );
+    }
+    if (options.persistenceMode !== 'preview' && options.persistenceMode !== 'full') {
+      return v2Failure('KX notebook persistence mode is invalid.', rowCount, columnCount);
+    }
+    return options.persistenceMode === 'full'
+      ? createPortableKxFullTable(input, options.outputId, rowCount, columnCount)
+      : createPortableKxPreviewTableV2(input, options.outputId, rowCount, columnCount);
+  } catch {
+    return v2Failure(
+      options.persistenceMode === 'full'
+        ? 'Full notebook persistence could not convert every source value exactly.'
+        : 'Notebook preview creation could not inspect the source result.',
+      rowCount,
+      columnCount
+    );
+  }
+}
+
+function createPortableKxFullTable(
+  input: NotebookResultInput,
+  outputId: string,
+  rowCount: number,
+  columnCount: number
+): NotebookV2CreationResult<PortableKxTableResult> {
+  const rowLimit = boundedInteger(
+    input.rowLimit,
+    DEFAULT_NOTEBOOK_ROW_LIMIT,
+    MIN_NOTEBOOK_ROW_LIMIT,
+    MAX_NOTEBOOK_ROW_LIMIT
+  );
+  const byteLimit = boundedInteger(
+    input.byteLimit,
+    DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    MIN_NOTEBOOK_BYTE_LIMIT,
+    MAX_NOTEBOOK_BYTE_LIMIT
+  );
+  const columns = strictPortableColumns(input.columns);
+  if (!columns) {
+    return v2Failure(
+      'Full notebook persistence requires exactly representable column names and types.',
+      rowCount,
+      columnCount
+    );
+  }
+  const usesCellAccessor = typeof input.cellValue === 'function';
+  if (!usesCellAccessor && input.rows.length < rowCount) {
+    return v2Failure(
+      'Full notebook persistence requires every source row to be available.',
+      rowCount,
+      columnCount
+    );
+  }
+  if (!usesCellAccessor && input.rows.slice(0, rowCount).some(row =>
+    !Array.isArray(row) || row.length !== columnCount
+  )) {
+    return v2Failure(
+      'Full notebook persistence requires every source row to match the declared schema exactly.',
+      rowCount,
+      columnCount
+    );
+  }
+
+  const rows: PortableCell[][] = [];
+  const chart = normalizeChart(input.chart, columns);
+  const payload: PortableKxTableResult = {
+    version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
+    outputId,
+    persistence: { mode: 'full', previewRowLimit: rowLimit, byteLimit },
+    kind: 'table',
+    schema: { columns },
+    data: { encoding: 'rows', rows },
+    result: {
+      rowCount,
+      columnCount,
+      previewRowCount: rowCount,
+      truncated: false,
+      truncationReasons: [],
+      rowLimit,
+      byteLimit,
+    },
+    provenance: strictFirstPartyProvenance(input),
+    ...(chart ? { chart } : {}),
+  };
+  for (let rowIndex = 0; rowIndex < rowCount; rowIndex++) {
+    const row: PortableCell[] = [];
+    for (let columnIndex = 0; columnIndex < columnCount; columnIndex++) {
+      const raw = usesCellAccessor
+        ? input.cellValue!(rowIndex, columnIndex)
+        : input.rows[rowIndex][columnIndex];
+      const cell = strictPortableCell(raw, columns[columnIndex]?.type);
+      if (!cell) {
+        return v2Failure(
+          `Full notebook persistence cannot exactly encode row ${rowIndex + 1}, column ${columnIndex + 1}.`,
+          rowCount,
+          columnCount
+        );
+      }
+      row.push(cell);
+    }
+    rows.push(row);
+  }
+  try {
+    return { ok: true, value: payload, serializedBytes: portableKxResultBytes(payload) };
+  } catch {
+    return v2Failure(
+      'Full notebook persistence could not serialize the complete result exactly.',
+      rowCount,
+      columnCount
+    );
+  }
+}
+
+function createPortableKxPreviewTableV2(
+  input: NotebookResultInput,
+  outputId: string,
+  rowCount: number,
+  columnCount: number
+): NotebookV2CreationResult<PortableKxTableResult> {
+  const rowLimit = boundedInteger(
+    input.rowLimit,
+    DEFAULT_NOTEBOOK_ROW_LIMIT,
+    MIN_NOTEBOOK_ROW_LIMIT,
+    MAX_NOTEBOOK_ROW_LIMIT
+  );
+  const byteLimit = boundedInteger(
+    input.byteLimit,
+    DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    MIN_NOTEBOOK_BYTE_LIMIT,
+    MAX_NOTEBOOK_BYTE_LIMIT
+  );
+  const legacy = createPortableKxResult({ ...input, rowLimit, byteLimit });
+  const payload: PortableKxTableResult = {
+    ...legacy,
+    version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
+    outputId,
+    persistence: { mode: 'preview', previewRowLimit: rowLimit, byteLimit },
+    result: { ...legacy.result, rowCount, columnCount },
+  };
+  fitV2PreviewTableToBudget(payload);
+  const serializedBytes = portableKxResultBytes(payload);
+  return serializedBytes <= byteLimit
+    ? { ok: true, value: payload, serializedBytes }
+    : {
+      ...v2Failure(
+        'The configured notebook byte limit is too small for the result metadata.',
+        rowCount,
+        columnCount
+      ),
+      serializedBytes,
+    };
+}
+
+export function createPortableKxTextResultV2(
+  input: NotebookTextResultInput,
+  options: NotebookV2ResultOptions
+): NotebookV2CreationResult<PortableKxTextResult> {
+  const byteLimit = boundedInteger(
+    input.byteLimit,
+    DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    MIN_NOTEBOOK_BYTE_LIMIT,
+    MAX_NOTEBOOK_BYTE_LIMIT
+  );
+  const rowLimit = boundedInteger(
+    input.rowLimit,
+    DEFAULT_NOTEBOOK_ROW_LIMIT,
+    MIN_NOTEBOOK_ROW_LIMIT,
+    MAX_NOTEBOOK_ROW_LIMIT
+  );
+  if (!validNotebookOutputId(options.outputId)) {
+    return v2Failure('KX notebook output identifier is invalid.', 0, 0);
+  }
+  if (input.marker !== 'direct-ipc') {
+    return v2Failure('Portable v2 output is reserved for first-party Direct IPC results.', 0, 0);
+  }
+  if (options.persistenceMode === 'full') {
+    if (typeof input.text !== 'string') {
+      return v2Failure('Full notebook qText persistence requires exact text.', 0, 0);
+    }
+    const payload: PortableKxTextResult = {
+      version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
+      outputId: options.outputId,
+      persistence: { mode: 'full', previewRowLimit: rowLimit, byteLimit },
+      kind: 'qText',
+      data: { text: input.text },
+      result: { truncated: false, truncationReasons: [], byteLimit },
+      provenance: strictFirstPartyProvenance(input),
+    };
+    try {
+      return { ok: true, value: payload, serializedBytes: portableKxResultBytes(payload) };
+    } catch {
+      return v2Failure('Full notebook qText could not be serialized exactly.', 0, 0);
+    }
+  }
+  if (options.persistenceMode !== 'preview') {
+    return v2Failure('KX notebook persistence mode is invalid.', 0, 0);
+  }
+  const legacy = createPortableKxTextResult({ ...input, byteLimit });
+  const payload: PortableKxTextResult = {
+    ...legacy,
+    version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
+    outputId: options.outputId,
+    persistence: { mode: 'preview', previewRowLimit: rowLimit, byteLimit },
+  };
+  fitV2PreviewTextToBudget(payload);
+  const serializedBytes = portableKxResultBytes(payload);
+  return serializedBytes <= byteLimit
+    ? { ok: true, value: payload, serializedBytes }
+    : {
+      ...v2Failure('The configured notebook byte limit is too small for qText metadata.', 0, 0),
+      serializedBytes,
+    };
+}
+
+export function createPortableKxPreviewFromV2Full(
+  value: PortableKxResult,
+  rowLimitValue: number,
+  byteLimitValue: number
+): NotebookV2CreationResult {
+  const validation = validatePortableKxResult(value);
+  if (!validation.ok || validation.value.version !== KX_NOTEBOOK_CONTRACT_VERSION_V2 ||
+    validation.value.persistence?.mode !== 'full' || !validation.value.outputId) {
+    return v2Failure('Only a valid persisted v2 full result can be converted to preview.', 0, 0);
+  }
+  const full = validation.value;
+  const rowLimit = boundedInteger(
+    rowLimitValue,
+    DEFAULT_NOTEBOOK_ROW_LIMIT,
+    MIN_NOTEBOOK_ROW_LIMIT,
+    MAX_NOTEBOOK_ROW_LIMIT
+  );
+  const byteLimit = boundedInteger(
+    byteLimitValue,
+    DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    MIN_NOTEBOOK_BYTE_LIMIT,
+    MAX_NOTEBOOK_BYTE_LIMIT
+  );
+  if (full.kind === 'qText') {
+    const payload: PortableKxTextResult = {
+      ...full,
+      persistence: { mode: 'preview', previewRowLimit: rowLimit, byteLimit },
+      data: { text: full.data.text },
+      result: { truncated: false, truncationReasons: [], byteLimit },
+    };
+    fitV2PreviewTextToBudget(payload);
+    const serializedBytes = portableKxResultBytes(payload);
+    return serializedBytes <= byteLimit
+      ? { ok: true, value: payload, serializedBytes }
+      : {
+        ...v2Failure('The configured notebook byte limit is too small for qText metadata.', 0, 0),
+        serializedBytes,
+      };
+  }
+
+  const columns = full.schema.columns.slice(0, MAX_NOTEBOOK_COLUMNS);
+  const rows = full.data.rows.slice(0, rowLimit).map(row => row.slice(0, columns.length));
+  const reasons = new Set<NotebookTruncationReason>();
+  if (rows.length < full.result.rowCount) {
+    reasons.add('rowLimit');
+  }
+  if (columns.length < (full.result.columnCount ?? full.schema.columns.length)) {
+    reasons.add('columnLimit');
+  }
+  const payload: PortableKxTableResult = {
+    ...full,
+    persistence: { mode: 'preview', previewRowLimit: rowLimit, byteLimit },
+    schema: { columns },
+    data: { encoding: 'rows', rows },
+    result: {
+      rowCount: full.result.rowCount,
+      columnCount: full.result.columnCount ?? full.schema.columns.length,
+      previewRowCount: rows.length,
+      truncated: reasons.size > 0,
+      truncationReasons: [...reasons],
+      rowLimit,
+      byteLimit,
+    },
+    ...(full.chart && validateChart(full.chart, columns)
+      ? { chart: full.chart }
+      : { chart: undefined }),
+  };
+  fitV2PreviewTableToBudget(payload);
+  const serializedBytes = portableKxResultBytes(payload);
+  return serializedBytes <= byteLimit
+    ? { ok: true, value: payload, serializedBytes }
+    : {
+      ...v2Failure(
+        'The configured notebook byte limit is too small for result metadata.',
+        full.result.rowCount,
+        full.result.columnCount ?? full.schema.columns.length
+      ),
+      serializedBytes,
+    };
+}
+
 export function validatePortableKxResult(raw: unknown): NotebookValidationResult {
   try {
     if (!isRecord(raw)) {
       return invalid('KX notebook output must be a JSON object.');
+    }
+    if (raw.version === KX_NOTEBOOK_CONTRACT_VERSION_V2) {
+      return validatePortableKxResultV2(raw);
     }
     if (raw.version !== KX_NOTEBOOK_CONTRACT_VERSION) {
       return invalid('Unsupported KX notebook output contract version or result kind.');
@@ -523,6 +871,218 @@ export function validatePortableKxResult(raw: unknown): NotebookValidationResult
   }
 }
 
+function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValidationResult {
+  if (!validNotebookOutputId(raw.outputId) || !isRecord(raw.persistence) ||
+    !hasOnlyKeys(raw.persistence, ['mode', 'previewRowLimit', 'byteLimit']) ||
+    (raw.persistence.mode !== 'preview' && raw.persistence.mode !== 'full') ||
+    !safeIntegerInRange(
+      raw.persistence.previewRowLimit,
+      MIN_NOTEBOOK_ROW_LIMIT,
+      MAX_NOTEBOOK_ROW_LIMIT
+    ) ||
+    !safeIntegerInRange(
+      raw.persistence.byteLimit,
+      MIN_NOTEBOOK_BYTE_LIMIT,
+      MAX_NOTEBOOK_BYTE_LIMIT
+    )) {
+    return invalid('KX notebook v2 persistence metadata is invalid.');
+  }
+  if (raw.kind === 'qText') {
+    return validatePortableKxTextResultV2(raw);
+  }
+  if (raw.kind !== 'table' || !hasOnlyKeys(raw, [
+    'version',
+    'outputId',
+    'persistence',
+    'kind',
+    'schema',
+    'data',
+    'result',
+    'provenance',
+    'chart',
+  ])) {
+    return invalid('Unsupported KX notebook v2 result kind or fields.');
+  }
+  const mode = raw.persistence.mode as NotebookPersistenceMode;
+  const byteLimit = raw.persistence.byteLimit as number;
+  const previewRowLimit = raw.persistence.previewRowLimit as number;
+  if (!isRecord(raw.schema) || !hasOnlyKeys(raw.schema, ['columns']) ||
+    !Array.isArray(raw.schema.columns) ||
+    (mode === 'preview' && raw.schema.columns.length > MAX_NOTEBOOK_COLUMNS)) {
+    return invalid('KX notebook v2 schema is invalid.');
+  }
+  const columns: PortableColumn[] = [];
+  for (const column of raw.schema.columns) {
+    if (!isRecord(column) || !hasOnlyKeys(column, ['name', 'type']) ||
+      (mode === 'full'
+        ? typeof column.name !== 'string' || typeof column.type !== 'string'
+        : !boundedString(column.name, 1, MAX_NOTEBOOK_COLUMN_NAME_CHARS) ||
+          !boundedString(column.type, 1, MAX_NOTEBOOK_TYPE_NAME_CHARS))) {
+      return invalid('KX notebook v2 contains an invalid column definition.');
+    }
+    columns.push({ name: column.name as string, type: column.type as string });
+  }
+  if (mode === 'preview' && new Set(columns.map(column => column.name)).size !== columns.length) {
+    return invalid('KX notebook v2 preview column names must be unique.');
+  }
+  if (!isRecord(raw.data) || !hasOnlyKeys(raw.data, ['encoding', 'rows']) ||
+    raw.data.encoding !== 'rows' || !Array.isArray(raw.data.rows) ||
+    !isRecord(raw.result) || !hasOnlyKeys(raw.result, [
+      'rowCount',
+      'columnCount',
+      'previewRowCount',
+      'truncated',
+      'truncationReasons',
+      'rowLimit',
+      'byteLimit',
+    ])) {
+    return invalid('KX notebook v2 table data or result metadata is invalid.');
+  }
+  const result = raw.result;
+  if (!safeIntegerInRange(result.rowCount, 0, Number.MAX_SAFE_INTEGER) ||
+    !safeIntegerInRange(result.columnCount, 0, Number.MAX_SAFE_INTEGER) ||
+    !safeIntegerInRange(
+      result.previewRowCount,
+      0,
+      mode === 'full' ? Number.MAX_SAFE_INTEGER : MAX_NOTEBOOK_ROW_LIMIT
+    ) ||
+    !safeIntegerInRange(result.rowLimit, MIN_NOTEBOOK_ROW_LIMIT, MAX_NOTEBOOK_ROW_LIMIT) ||
+    result.rowLimit !== previewRowLimit || result.byteLimit !== byteLimit ||
+    typeof result.truncated !== 'boolean' || !Array.isArray(result.truncationReasons) ||
+    result.columnCount < columns.length || result.previewRowCount !== raw.data.rows.length ||
+    result.previewRowCount > result.rowCount) {
+    return invalid('KX notebook v2 bounds metadata is inconsistent.');
+  }
+  const truncationReasons: NotebookTruncationReason[] = [];
+  for (const reason of result.truncationReasons) {
+    if (typeof reason !== 'string' || !TRUNCATION_REASONS.has(reason as NotebookTruncationReason)) {
+      return invalid('KX notebook v2 contains an invalid truncation reason.');
+    }
+    truncationReasons.push(reason as NotebookTruncationReason);
+  }
+  if (new Set(truncationReasons).size !== truncationReasons.length) {
+    return invalid('KX notebook v2 truncation reasons must be unique.');
+  }
+  if (mode === 'full') {
+    if (result.truncated || truncationReasons.length !== 0 ||
+      result.previewRowCount !== result.rowCount || result.columnCount !== columns.length) {
+      return invalid('KX notebook v2 full output must contain every row and column.');
+    }
+  } else if (result.previewRowCount > result.rowLimit ||
+    result.truncated !== (
+      truncationReasons.length > 0 ||
+      result.previewRowCount < result.rowCount ||
+      columns.length < result.columnCount
+    )) {
+    return invalid('KX notebook v2 preview truncation metadata is inconsistent.');
+  }
+
+  const rows = raw.data.rows as unknown as PortableCell[][];
+  for (const rawRow of raw.data.rows) {
+    if (!Array.isArray(rawRow) || rawRow.length !== columns.length) {
+      return invalid('KX notebook v2 contains a row with the wrong column count.');
+    }
+    for (const rawCell of rawRow) {
+      if (!validateCell(rawCell, mode === 'full')) {
+        return invalid('KX notebook v2 contains an invalid typed cell.');
+      }
+    }
+  }
+  const provenance = validatedProvenance(raw.provenance, mode === 'full');
+  if (!provenance || provenance.marker !== 'direct-ipc') {
+    return invalid('KX notebook v2 provenance is invalid.');
+  }
+  const chart = raw.chart === undefined ? undefined : validateChart(raw.chart, columns);
+  if (raw.chart !== undefined && !chart) {
+    return invalid('KX notebook v2 chart specification is invalid.');
+  }
+  const value: PortableKxTableResult = {
+    version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
+    outputId: raw.outputId,
+    persistence: { mode, previewRowLimit, byteLimit },
+    kind: 'table',
+    schema: { columns },
+    data: { encoding: 'rows', rows },
+    result: {
+      rowCount: result.rowCount,
+      columnCount: result.columnCount,
+      previewRowCount: result.previewRowCount,
+      truncated: result.truncated,
+      truncationReasons,
+      rowLimit: result.rowLimit,
+      byteLimit,
+    },
+    provenance,
+    ...(chart ? { chart } : {}),
+  };
+  return mode === 'full' || portableKxResultBytes(value) <= byteLimit
+    ? { ok: true, value }
+    : invalid('KX notebook v2 preview exceeds its declared byte limit.');
+}
+
+function validatePortableKxTextResultV2(
+  raw: Record<string, unknown>
+): NotebookValidationResult {
+  if (!hasOnlyKeys(raw, [
+    'version',
+    'outputId',
+    'persistence',
+    'kind',
+    'data',
+    'result',
+    'provenance',
+  ]) || !isRecord(raw.persistence) || !isRecord(raw.data) ||
+    !hasOnlyKeys(raw.data, ['text']) ||
+    (raw.persistence.mode === 'full'
+      ? typeof raw.data.text !== 'string'
+      : !boundedString(raw.data.text, 0, MAX_NOTEBOOK_QTEXT_CHARS)) ||
+    !isRecord(raw.result) || !hasOnlyKeys(raw.result, [
+      'truncated',
+      'truncationReasons',
+      'byteLimit',
+    ]) || typeof raw.result.truncated !== 'boolean' ||
+    !Array.isArray(raw.result.truncationReasons) ||
+    raw.result.byteLimit !== raw.persistence.byteLimit) {
+    return invalid('KX notebook v2 qText output is invalid.');
+  }
+  const reasons: NotebookTruncationReason[] = [];
+  for (const reason of raw.result.truncationReasons) {
+    if (typeof reason !== 'string' || !TRUNCATION_REASONS.has(reason as NotebookTruncationReason)) {
+      return invalid('KX notebook v2 qText output has an invalid truncation reason.');
+    }
+    reasons.push(reason as NotebookTruncationReason);
+  }
+  if (new Set(reasons).size !== reasons.length ||
+    raw.result.truncated !== (reasons.length > 0) ||
+    (raw.persistence.mode === 'full' && raw.result.truncated)) {
+    return invalid('KX notebook v2 qText truncation metadata is inconsistent.');
+  }
+  const provenance = validatedProvenance(raw.provenance, raw.persistence.mode === 'full');
+  if (!provenance || provenance.marker !== 'direct-ipc') {
+    return invalid('KX notebook v2 qText provenance is invalid.');
+  }
+  const value: PortableKxTextResult = {
+    version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
+    outputId: raw.outputId as string,
+    persistence: {
+      mode: raw.persistence.mode as NotebookPersistenceMode,
+      previewRowLimit: raw.persistence.previewRowLimit as number,
+      byteLimit: raw.persistence.byteLimit as number,
+    },
+    kind: 'qText',
+    data: { text: raw.data.text as string },
+    result: {
+      truncated: raw.result.truncated,
+      truncationReasons: reasons,
+      byteLimit: raw.result.byteLimit as number,
+    },
+    provenance,
+  };
+  return value.persistence?.mode === 'full' || portableKxResultBytes(value) <= value.result.byteLimit
+    ? { ok: true, value }
+    : invalid('KX notebook v2 qText preview exceeds its declared byte limit.');
+}
+
 function validatePortableKxTextResult(raw: Record<string, unknown>): NotebookValidationResult {
   if (!hasOnlyKeys(raw, ['version', 'kind', 'data', 'result', 'provenance']) ||
     !isRecord(raw.data) || !hasOnlyKeys(raw.data, ['text']) ||
@@ -613,6 +1173,59 @@ export function portableCellText(
     return cellValueToText(portableCellValue(cell), options);
   }
   return String(cell.value);
+}
+
+/** Deterministic saved-table ordering with nulls last, kind-aware mixed values,
+ * and exact bigint/number comparisons without lossy Number coercion. */
+export function comparePortableCells(
+  left: PortableCell,
+  right: PortableCell,
+  direction: 'asc' | 'desc' = 'asc'
+): number {
+  if (left.kind === 'null' || right.kind === 'null') {
+    if (left.kind === 'null' && right.kind === 'null') {
+      return 0;
+    }
+    return left.kind === 'null' ? 1 : -1;
+  }
+  const compared = compareNonNullPortableCells(left, right);
+  return direction === 'desc' ? -compared : compared;
+}
+
+function compareNonNullPortableCells(
+  left: Exclude<PortableCell, PortableNullCell>,
+  right: Exclude<PortableCell, PortableNullCell>
+): number {
+  if ((left.kind === 'number' || left.kind === 'bigint') &&
+    (right.kind === 'number' || right.kind === 'bigint')) {
+    try {
+      const leftNumeric = left.kind === 'bigint' ? BigInt(left.value) : left.value;
+      const rightNumeric = right.kind === 'bigint' ? BigInt(right.value) : right.value;
+      return leftNumeric < rightNumeric ? -1 : leftNumeric > rightNumeric ? 1 : 0;
+    } catch {
+      // Unvalidated cells fall through to stable kind/text ordering.
+    }
+  }
+  if (left.kind === 'boolean' && right.kind === 'boolean') {
+    return Number(left.value) - Number(right.value);
+  }
+  const kindDifference = portableSortKindRank(left.kind) - portableSortKindRank(right.kind);
+  return kindDifference || compareResultCellText(
+    portableCellText(left),
+    portableCellText(right),
+    'asc'
+  );
+}
+
+function portableSortKindRank(kind: Exclude<PortableCellKind, 'null'>): number {
+  switch (kind) {
+    case 'boolean': return 0;
+    case 'number':
+    case 'bigint': return 1;
+    case 'temporal': return 2;
+    case 'string': return 3;
+    case 'json': return 4;
+  }
 }
 
 function portableJsonShapeIsSafe(value: unknown): boolean {
@@ -719,19 +1332,18 @@ export function notebookResultStaticHtml(value: PortableKxResult): string {
     parts.push(' &middot; ', escapeHtml(formatElapsed(result.provenance.elapsedMs)));
   }
   parts.push('</div>');
+  const persistedFull = result.version === KX_NOTEBOOK_CONTRACT_VERSION_V2 &&
+    result.persistence?.mode === 'full';
   parts.push(
     '<div class="kx-note">Schema: ',
     result.schema.columns.map(column => `${escapeHtml(column.name)} (${escapeHtml(column.type)})`).join(', ') || 'no columns',
     '</div>',
     '<div class="kx-note">Rows: ',
     String(result.result.rowCount),
-    '; saved here: ',
-    String(result.result.previewRowCount),
-    ' (row limit ',
-    String(result.result.rowLimit),
-    ', byte limit ',
-    String(result.result.byteLimit),
-    ').</div>'
+    persistedFull
+      ? `; all ${result.result.previewRowCount} rows persisted.</div>`
+      : `; saved here: ${result.result.previewRowCount} (row limit ` +
+        `${result.result.rowLimit}, byte limit ${result.result.byteLimit}).</div>`
   );
   if (result.result.truncated) {
     parts.push(
@@ -780,19 +1392,28 @@ export function notebookResultPlainText(value: PortableKxResult): string {
       ? `${result.data.text}\n... [${notebookSavedPreviewNotice(result)}]`
       : result.data.text;
   }
+  const persistedFull = result.version === KX_NOTEBOOK_CONTRACT_VERSION_V2 &&
+    result.persistence?.mode === 'full';
+  const plainColumns = result.schema.columns.slice(0, 100);
+  const omittedColumns = result.schema.columns.length - plainColumns.length;
   const lines = [
     `KX/q result${result.provenance.label ? ` - ${result.provenance.label}` : ''}`,
-    `Schema: ${result.schema.columns.map(column => `${column.name} (${column.type})`).join(', ') || 'no columns'}`,
-    `Rows: ${result.result.rowCount}; saved here: ${result.result.previewRowCount}; ` +
-      `limits: ${result.result.rowLimit} rows / ${result.result.byteLimit} bytes`,
+    `Schema: ${plainColumns.map(column => `${column.name} (${column.type})`).join(', ') || 'no columns'}` +
+      (omittedColumns > 0 ? `, … (${omittedColumns} more columns)` : ''),
+    persistedFull
+      ? `Rows: ${result.result.rowCount}; all rows persisted`
+      : `Rows: ${result.result.rowCount}; saved here: ${result.result.previewRowCount}; ` +
+        `limits: ${result.result.rowLimit} rows / ${result.result.byteLimit} bytes`,
   ];
   if (result.result.truncated) {
     lines.push(notebookSavedPreviewNotice(result));
   }
   const plainRows = result.data.rows.slice(0, 20);
-  if (result.schema.columns.length > 0) {
-    lines.push(result.schema.columns.map(column => plainCell(column.name)).join('\t'));
-    plainRows.forEach(row => lines.push(row.map(cell => plainCell(portableCellText(cell))).join('\t')));
+  if (plainColumns.length > 0) {
+    lines.push(plainColumns.map(column => plainCell(column.name)).join('\t'));
+    plainRows.forEach(row => lines.push(
+      row.slice(0, plainColumns.length).map(cell => plainCell(portableCellText(cell))).join('\t')
+    ));
   }
   if (plainRows.length < result.result.previewRowCount) {
     lines.push(`Plain-text output shows ${plainRows.length} of ${result.result.previewRowCount} saved rows.`);
@@ -861,7 +1482,116 @@ function portableCell(
   return { kind: 'json', value: clipped };
 }
 
-function validateCell(raw: unknown): PortableCell | undefined {
+function strictPortableColumns(
+  rawColumns: Array<string | PortableColumn>
+): PortableColumn[] | undefined {
+  const columns: PortableColumn[] = [];
+  for (const raw of rawColumns) {
+    const name = typeof raw === 'string' ? raw : raw.name;
+    const type = typeof raw === 'string' ? 'mixed' : raw.type;
+    if (typeof name !== 'string' || typeof type !== 'string') {
+      return undefined;
+    }
+    columns.push({ name, type });
+  }
+  return columns;
+}
+
+function strictPortableCell(value: unknown, qType?: string): PortableCell | undefined {
+  if (value === null) {
+    return { kind: 'null' };
+  }
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'boolean') {
+    return { kind: 'boolean', value };
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && !Object.is(value, -0)
+      ? { kind: 'number', value }
+      : undefined;
+  }
+  if (typeof value === 'bigint') {
+    return { kind: 'bigint', value: value.toString() };
+  }
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime())
+      ? { kind: 'temporal', value: value.toISOString() }
+      : undefined;
+  }
+  if (typeof value === 'string') {
+    return { kind: isQTemporalType(qType) ? 'temporal' : 'string', value };
+  }
+  if (!losslessJsonValue(value)) {
+    return undefined;
+  }
+  try {
+    const text = JSON.stringify(value);
+    return typeof text === 'string' ? { kind: 'json', value: text } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function losslessJsonValue(value: unknown): boolean {
+  return losslessJsonValueWithin(value, new Set<object>());
+}
+
+function losslessJsonValueWithin(value: unknown, seen: Set<object>): boolean {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && !Object.is(value, -0);
+  }
+  if (typeof value !== 'object' || seen.has(value)) {
+    return false;
+  }
+  if (Object.getPrototypeOf(value) !== Object.prototype &&
+    Object.getPrototypeOf(value) !== null && !Array.isArray(value)) {
+    return false;
+  }
+  seen.add(value);
+  try {
+    if (Array.isArray(value)) {
+      const keys = Reflect.ownKeys(value);
+      if (keys.length !== value.length + 1 || keys.some(key => {
+        if (key === 'length') {
+          return false;
+        }
+        return typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length;
+      })) {
+        return false;
+      }
+      for (let index = 0; index < value.length; index++) {
+        const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+        if (!descriptor || !('value' in descriptor) || descriptor.value === undefined ||
+          !losslessJsonValueWithin(descriptor.value, seen)) {
+          return false;
+        }
+      }
+      return true;
+    }
+    for (const key of Reflect.ownKeys(value)) {
+      if (typeof key !== 'string') {
+        return false;
+      }
+      const descriptor = Object.getOwnPropertyDescriptor(value, key);
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor) ||
+        descriptor.value === undefined || !losslessJsonValueWithin(descriptor.value, seen)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    seen.delete(value);
+  }
+}
+
+function validateCell(raw: unknown, unbounded = false): PortableCell | undefined {
   if (!isRecord(raw) || typeof raw.kind !== 'string' || !CELL_KINDS.has(raw.kind as PortableCellKind)) {
     return undefined;
   }
@@ -879,9 +1609,21 @@ function validateCell(raw: unknown): PortableCell | undefined {
       ? { kind: 'number', value: raw.value }
       : undefined;
   }
-  return boundedString(raw.value, 0, MAX_NOTEBOOK_CELL_STRING_CHARS)
-    ? { kind: raw.kind as PortableTextCell['kind'], value: raw.value }
-    : undefined;
+  if (!(unbounded
+    ? typeof raw.value === 'string'
+    : boundedString(raw.value, 0, MAX_NOTEBOOK_CELL_STRING_CHARS))) {
+    return undefined;
+  }
+  if (unbounded && raw.kind === 'json') {
+    try {
+      if (!losslessJsonValue(JSON.parse(raw.value as string))) {
+        return undefined;
+      }
+    } catch {
+      return undefined;
+    }
+  }
+  return { kind: raw.kind as PortableTextCell['kind'], value: raw.value as string };
 }
 
 function normalizeChart(
@@ -1187,6 +1929,124 @@ function portableKxResultBytesForRowCount(
   return portableKxResultMetadataBytes(payload) +
     prefixBytes[rowCount] +
     Math.max(0, rowCount - 1);
+}
+
+function fitV2PreviewTableToBudget(payload: PortableKxTableResult): void {
+  const byteLimit = payload.result.byteLimit;
+  const reasons = new Set(payload.result.truncationReasons);
+  if (portableKxResultBytes(payload) > byteLimit && payload.data.rows.length > 0) {
+    reasons.add('byteLimit');
+    const allRows = payload.data.rows;
+    let lower = 0;
+    let upper = allRows.length;
+    let accepted = 0;
+    while (lower <= upper) {
+      const candidate = Math.floor((lower + upper) / 2);
+      payload.data.rows = allRows.slice(0, candidate);
+      refreshV2PreviewSummary(payload, reasons);
+      if (portableKxResultBytes(payload) <= byteLimit) {
+        accepted = candidate;
+        lower = candidate + 1;
+      } else {
+        upper = candidate - 1;
+      }
+    }
+    payload.data.rows = allRows.slice(0, accepted);
+    refreshV2PreviewSummary(payload, reasons);
+  }
+  while (payload.schema.columns.length > 0 && portableKxResultBytes(payload) > byteLimit) {
+    payload.schema.columns.pop();
+    payload.data.rows = payload.data.rows.map(row => row.slice(0, payload.schema.columns.length));
+    reasons.add('columnLimit');
+    if (payload.chart && !validateChart(payload.chart, payload.schema.columns)) {
+      delete payload.chart;
+    }
+    refreshV2PreviewSummary(payload, reasons);
+  }
+  refreshV2PreviewSummary(payload, reasons);
+}
+
+function refreshV2PreviewSummary(
+  payload: PortableKxTableResult,
+  reasons: Set<NotebookTruncationReason>
+): void {
+  payload.result.previewRowCount = payload.data.rows.length;
+  payload.result.truncationReasons = [...reasons];
+  payload.result.truncated = reasons.size > 0 ||
+    payload.result.previewRowCount < payload.result.rowCount ||
+    payload.schema.columns.length < (payload.result.columnCount ?? payload.schema.columns.length);
+}
+
+function fitV2PreviewTextToBudget(payload: PortableKxTextResult): void {
+  const byteLimit = payload.result.byteLimit;
+  if (portableKxResultBytes(payload) <= byteLimit) {
+    return;
+  }
+  payload.result.truncated = true;
+  if (!payload.result.truncationReasons.includes('byteLimit')) {
+    payload.result.truncationReasons.push('byteLimit');
+  }
+  const original = payload.data.text;
+  let lower = 0;
+  let upper = original.length;
+  let accepted = 0;
+  while (lower <= upper) {
+    const candidate = Math.floor((lower + upper) / 2);
+    payload.data.text = safeTextPrefix(original, candidate);
+    if (portableKxResultBytes(payload) <= byteLimit) {
+      accepted = candidate;
+      lower = candidate + 1;
+    } else {
+      upper = candidate - 1;
+    }
+  }
+  payload.data.text = safeTextPrefix(original, accepted);
+}
+
+function strictFirstPartyProvenance(
+  input: Pick<NotebookResultInput, 'label' | 'elapsedMs' | 'qSource'>
+): PortableKxResult['provenance'] {
+  return {
+    marker: 'direct-ipc',
+    ...(typeof input.label === 'string' ? { label: input.label } : {}),
+    ...(finiteNonNegative(input.elapsedMs) ? { elapsedMs: input.elapsedMs } : {}),
+    ...(typeof input.qSource === 'string' ? { qSource: input.qSource } : {}),
+  };
+}
+
+function validatedProvenance(
+  raw: unknown,
+  unbounded = false
+): PortableKxResult['provenance'] | undefined {
+  if (!isRecord(raw) || !hasOnlyKeys(raw, ['marker', 'label', 'elapsedMs', 'qSource']) ||
+    (raw.marker !== '%%q' && raw.marker !== 'direct-ipc') ||
+    (raw.label !== undefined && (unbounded
+      ? typeof raw.label !== 'string'
+      : !boundedString(raw.label, 1, MAX_NOTEBOOK_LABEL_CHARS))) ||
+    (raw.qSource !== undefined && (unbounded
+      ? typeof raw.qSource !== 'string'
+      : !boundedString(raw.qSource, 0, MAX_NOTEBOOK_Q_SOURCE_CHARS))) ||
+    (raw.elapsedMs !== undefined && !finiteNonNegative(raw.elapsedMs))) {
+    return undefined;
+  }
+  return {
+    marker: raw.marker,
+    ...(raw.label === undefined ? {} : { label: raw.label as string }),
+    ...(raw.elapsedMs === undefined ? {} : { elapsedMs: raw.elapsedMs }),
+    ...(raw.qSource === undefined ? {} : { qSource: raw.qSource as string }),
+  };
+}
+
+function validNotebookOutputId(value: unknown): value is string {
+  return typeof value === 'string' && /^[A-Za-z0-9_-]{32,128}$/.test(value);
+}
+
+function v2Failure(
+  error: string,
+  rowCount: number,
+  columnCount: number
+): Extract<NotebookV2CreationResult, { ok: false }> {
+  return { ok: false, error, rowCount, columnCount };
 }
 
 function optionalBoundedString<Key extends 'label' | 'qSource'>(

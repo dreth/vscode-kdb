@@ -1387,6 +1387,7 @@ async function exerciseOrdinaryResultColumnSizing(cdpPort, resultConfiguration) 
         value.autoFit &&
         value.autoFitMode === 'wholeResult' &&
         value.widths.length === 3 &&
+        value.firstRowWidths.length === value.widths.length &&
         value.widths[2] >= 400 &&
         value.firstRowWidths.every((width, index) =>
           Math.abs(width - value.widths[index]) <= 1)
@@ -2587,14 +2588,14 @@ function snapshotAllColumnsHaveWidth(snapshot, expectedWidth) {
 
 function ordinaryColumnSizingSnapshot(root) {
   const renderedCells = [
-    ...root.querySelectorAll('#rows [role="cell"][data-row][data-column]'),
+    ...root.querySelectorAll('#rows [role="gridcell"][data-row][data-column]'),
   ];
   const widths = elementsByNumericData(
     root.querySelectorAll('#header [role="columnheader"][data-column]'),
     'column'
   ).map(element => Math.round(element.getBoundingClientRect().width));
   const firstRowWidths = elementsByNumericData(
-    root.querySelectorAll('#rows [role="cell"][data-row="0"][data-column]'),
+    root.querySelectorAll('#rows [role="gridcell"][data-row="0"][data-column]'),
     'column'
   ).map(element => Math.round(element.getBoundingClientRect().width));
   return {
@@ -2606,7 +2607,7 @@ function ordinaryColumnSizingSnapshot(root) {
     firstRowWidths,
     renderedFirstColumnWidths: [
       ...root.querySelectorAll(
-        '#rows [role="cell"][data-row][data-column="0"]'
+        '#rows [role="gridcell"][data-row][data-column="0"]'
       ),
     ].map(element => Math.round(element.getBoundingClientRect().width)),
     renderedColumnWidths: renderedCells.reduce((result, element) => {
@@ -2687,7 +2688,7 @@ function notebookColumnSizingSnapshot(root) {
 
 function scrollOrdinaryGridToRow(root, row) {
   const viewport = root.querySelector('#viewport');
-  const firstCell = root.querySelector('#rows [role="cell"][data-row]');
+  const firstCell = root.querySelector('#rows [role="gridcell"][data-row]');
   if (!viewport) {
     throw new Error('ordinary result viewport missing');
   }
@@ -3117,7 +3118,10 @@ function assertLiveCase(fixture, output) {
       `${fixture.id} must use VS Code's native notebook error item`
     );
   } else {
-    assert(mimes.includes(KX_NOTEBOOK_MIME), `${fixture.id} did not produce KX MIME`);
+    assert(
+      mimes.includes(KX_NOTEBOOK_MIME),
+      `${fixture.id} did not produce KX MIME; mimes=${JSON.stringify(mimes)} metadataKeys=${JSON.stringify(Object.keys(output.metadata || {}))} errors=${JSON.stringify(output.items.filter(item => item.mime === 'application/vnd.code.notebook.error').map(item => Buffer.from(item.data).toString('utf8')))}`
+    );
     assert(
       output.metadata?.[LIVE_RESULT_METADATA_KEY],
       `${fixture.id} must retain a real current-session live-result reference`
@@ -3327,7 +3331,7 @@ async function exerciseLiveSelectionAndSearch(renderer) {
   }));
   assert(initial.table && initial.search, 'live result table/search controls must render');
   assert.strictEqual(initial.rowCount, '65');
-  assert.strictEqual(initial.columnCount, '4');
+  assert.strictEqual(initial.columnCount, '5');
 
   await renderer.evaluate(root => {
     const view = root.ownerDocument.defaultView;
@@ -3529,7 +3533,7 @@ async function exerciseColumnsOverlay(renderer) {
       sizeChecked:
         root.querySelector('input[aria-label="Show column size"]')?.checked,
     }),
-    value => value.summary === 'Columns (3/4)' && value.columnCount === '3' &&
+    value => value.summary === 'Columns (3/4)' && value.columnCount === '4' &&
       value.open && value.focusedControl === 'Show column size' &&
       value.sizeChecked === false
   );
@@ -3873,7 +3877,7 @@ async function exerciseLiveChartControls(renderer) {
     renderer,
     root => root.querySelector('[aria-label="KX result table"]')
       ?.getAttribute('aria-colcount') || '',
-    value => value === '4'
+    value => value === '5'
   );
   await renderer.evaluate(root => {
     const chart = [...root.querySelectorAll('.kx-primary-toolbar button')]
@@ -4053,7 +4057,7 @@ async function exerciseLiveChartControls(renderer) {
     renderer,
     root => root.querySelector('[aria-label="KX result table"]')
       ?.getAttribute('aria-colcount') || '',
-    value => value === '4'
+    value => value === '5'
   );
   await renderer.evaluate(root => {
     const close = [...root.querySelectorAll('.kx-primary-toolbar button')]
@@ -4088,7 +4092,7 @@ async function exerciseSavedSelectionSearchAndChart(
   chartDrag,
   cdpPort
 ) {
-  const search = await renderer.evaluate(root => {
+  await renderer.evaluate(root => {
     const view = root.ownerDocument.defaultView;
     const input = root.querySelector('[aria-label="Search saved result rows"]');
     if (!(input instanceof view.HTMLInputElement)) {
@@ -4097,25 +4101,55 @@ async function exerciseSavedSelectionSearchAndChart(
     input.focus();
     input.value = 'MSFT';
     input.dispatchEvent(new view.Event('input', { bubbles: true }));
-    const describedBy = input.getAttribute('aria-describedby');
-    const status = () => describedBy
+    return true;
+  });
+  const savedSearchStatus = root => {
+    const input = root.querySelector('[aria-label="Search saved result rows"]');
+    const describedBy = input?.getAttribute('aria-describedby');
+    return describedBy
       ? root.ownerDocument.getElementById(describedBy)?.textContent || ''
       : '';
-    const button = label => [...root.querySelectorAll('.kx-live-tools button')]
-      .find(candidate => candidate.textContent?.trim() === label);
-    const initial = status();
-    button('Next')?.click();
-    const first = status();
-    button('Next')?.click();
-    const second = status();
-    button('Prev')?.click();
-    return {
-      initial,
-      first,
-      second,
-      previous: status(),
-    };
+  };
+  const initial = await waitForRenderer(
+    'saved search response',
+    renderer,
+    savedSearchStatus,
+    value => value === '6 matches'
+  );
+  await renderer.evaluate(root => {
+    [...root.querySelectorAll('.kx-live-tools button')]
+      .find(candidate => candidate.textContent?.trim() === 'Next')?.click();
+    return true;
   });
+  const first = await waitForRenderer(
+    'saved first Next match',
+    renderer,
+    savedSearchStatus,
+    value => value === '1/6'
+  );
+  await renderer.evaluate(root => {
+    [...root.querySelectorAll('.kx-live-tools button')]
+      .find(candidate => candidate.textContent?.trim() === 'Next')?.click();
+    return true;
+  });
+  const second = await waitForRenderer(
+    'saved second Next match',
+    renderer,
+    savedSearchStatus,
+    value => value === '2/6'
+  );
+  await renderer.evaluate(root => {
+    [...root.querySelectorAll('.kx-live-tools button')]
+      .find(candidate => candidate.textContent?.trim() === 'Prev')?.click();
+    return true;
+  });
+  const previous = await waitForRenderer(
+    'saved Prev match',
+    renderer,
+    savedSearchStatus,
+    value => value === '1/6'
+  );
+  const search = { initial, first, second, previous };
   assert.strictEqual(search.initial, '6 matches');
   assert.strictEqual(search.first, '1/6');
   assert.strictEqual(search.second, '2/6');
@@ -4495,6 +4529,9 @@ async function exerciseSavedSelectionSearchAndChart(
     root => root.querySelector('.kx-chart-host .u-select')?.getBoundingClientRect().width || 0,
     value => value <= 1
   );
+  await installCanvasTextRecorder(renderer);
+  await clearCanvasTextRecorder(renderer);
+  await forceChartRedraw(renderer);
   const resetDomainTicks = await waitForCanvasTicks('reset chart domain ticks', renderer);
   assert(
     resetDomainTicks.minimum < zoomDomainTicks.minimum &&
@@ -5664,8 +5701,8 @@ async function assertNarrowLayout(cdpPort) {
     assert(savedEvidence.width > 250 && savedEvidence.width < 560);
     assert(liveEvidence.width > 250 && liveEvidence.width < 560);
     assert.match(savedEvidence.notice, /Omitted content is not stored in this notebook/);
-    assert.strictEqual(savedEvidence.columnCount, '3');
-    assert.strictEqual(liveEvidence.columnCount, '4');
+    assert.strictEqual(savedEvidence.columnCount, '4');
+    assert.strictEqual(liveEvidence.columnCount, '5');
     for (const label of ['Open saved preview', 'Rerun cell']) {
       assert(savedEvidence.buttons.includes(label), `narrow saved preview must retain ${label}`);
     }

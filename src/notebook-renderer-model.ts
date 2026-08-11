@@ -52,6 +52,16 @@ export const NOTEBOOK_GRID_DEFAULT_MAX_HEIGHT = 420;
 export const NOTEBOOK_GRID_RESIZE_MAX_HEIGHT = 900;
 export const NOTEBOOK_CHART_MAX_Y_COLUMNS = 16;
 
+/** Build a stable, unbounded display-row order for a fully persisted result. */
+export function notebookSavedRowOrder(
+  rowCount: number,
+  compareRows: (left: number, right: number) => number
+): number[] {
+  const count = nonNegativeInteger(rowCount);
+  return Array.from({ length: count }, (_value, index) => index)
+    .sort((left, right) => compareRows(left, right) || left - right);
+}
+
 export function reconcileNotebookHiddenColumnIndexes(
   previousColumns: readonly string[],
   previousHiddenColumnIndexes: readonly number[],
@@ -318,6 +328,91 @@ export function notebookSearchEnterAction(
 export interface NotebookSavedSearchMatch {
   displayRow: number;
   sourceRow: number;
+}
+
+export interface NotebookSavedSearchCursor {
+  matches: NotebookSavedSearchMatch[];
+  capped: boolean;
+  partial: boolean;
+  scannedRows: number;
+  scannedCells: number;
+  nextDisplayRow: number;
+  nextColumn: number;
+}
+
+export interface NotebookSavedSearchChunkInput {
+  rowCount: number;
+  query: string;
+  maximumMatches: number;
+  maximumCells: number;
+  maximumChunkRows: number;
+  maximumChunkCells: number;
+  sourceRow: (displayRow: number) => number;
+  columnCount: (sourceRow: number) => number;
+  cellText: (sourceRow: number, column: number) => string;
+  shouldYield?: (chunkCells: number) => boolean;
+}
+
+/** Advance a saved-result search without synchronously scanning the full table. */
+export function scanNotebookSavedSearchChunk(
+  cursor: NotebookSavedSearchCursor,
+  input: NotebookSavedSearchChunkInput
+): { complete: boolean; chunkRows: number; chunkCells: number } {
+  const rowCount = nonNegativeInteger(input.rowCount);
+  const maximumMatches = nonNegativeInteger(input.maximumMatches);
+  const maximumCells = nonNegativeInteger(input.maximumCells);
+  const maximumChunkRows = Math.max(1, nonNegativeInteger(input.maximumChunkRows));
+  const maximumChunkCells = Math.max(1, nonNegativeInteger(input.maximumChunkCells));
+  const needle = input.query.toLocaleLowerCase();
+  let chunkRows = 0;
+  let chunkCells = 0;
+  let stopped = !needle || maximumMatches === 0 || maximumCells === 0;
+  while (!stopped && cursor.nextDisplayRow < rowCount &&
+    chunkRows < maximumChunkRows && chunkCells < maximumChunkCells) {
+    const displayRow = cursor.nextDisplayRow;
+    const sourceRow = input.sourceRow(displayRow);
+    const columnCount = nonNegativeInteger(input.columnCount(sourceRow));
+    let matched = false;
+    while (cursor.nextColumn < columnCount) {
+      if (cursor.scannedCells >= maximumCells) {
+        cursor.partial = true;
+        stopped = true;
+        break;
+      }
+      const column = cursor.nextColumn;
+      cursor.nextColumn += 1;
+      cursor.scannedCells += 1;
+      chunkCells += 1;
+      if (input.cellText(sourceRow, column).toLocaleLowerCase().includes(needle)) {
+        matched = true;
+        cursor.nextColumn = columnCount;
+        break;
+      }
+      if (chunkCells >= maximumChunkCells || input.shouldYield?.(chunkCells)) {
+        break;
+      }
+    }
+    if (stopped || cursor.nextColumn < columnCount) {
+      break;
+    }
+    if (matched) {
+      cursor.matches.push({ displayRow, sourceRow });
+      if (cursor.matches.length >= maximumMatches) {
+        cursor.capped = true;
+        cursor.partial = displayRow + 1 < rowCount;
+        stopped = true;
+      }
+    }
+    cursor.nextDisplayRow += 1;
+    cursor.nextColumn = 0;
+    cursor.scannedRows += 1;
+    chunkRows += 1;
+  }
+  return {
+    complete: stopped || cursor.nextDisplayRow >= rowCount,
+    chunkRows,
+    chunkCells,
+  };
 }
 
 export function notebookSavedSearchMatches(
