@@ -3,6 +3,115 @@ export interface ChartRange {
   readonly max: number;
 }
 
+export interface ChartYExtent {
+  readonly min: number;
+  readonly max: number;
+}
+
+export interface ChartYExtentSeries {
+  readonly visible: boolean;
+  readonly extents: readonly (ChartYExtent | null | undefined)[];
+}
+
+export interface ChartVisibleIndexBounds {
+  readonly start: number;
+  readonly end: number;
+}
+
+export type ChartZoomAutoRefineQueueAction =
+  | { readonly type: 'schedule'; readonly range: ChartRange }
+  | { readonly type: 'duplicate' }
+  | { readonly type: 'flush'; readonly ranges: readonly ChartRange[] };
+
+/** Normalize uPlot's current X-series index window without consulting a stale scale. */
+export function chartVisibleIndexBounds(
+  indexes: readonly number[] | null | undefined,
+  length: number
+): ChartVisibleIndexBounds | undefined {
+  const count = Math.max(0, Math.floor(length));
+  if (count === 0 || !indexes || indexes.length < 2) {
+    return undefined;
+  }
+  const start = Math.max(0, Math.min(count - 1, Math.floor(indexes[0])));
+  const end = Math.max(0, Math.min(count - 1, Math.floor(indexes[1])));
+  return Number.isFinite(indexes[0]) && Number.isFinite(indexes[1]) && end >= start
+    ? { start, end }
+    : undefined;
+}
+
+/** Pad discrete glyph families only during initial auto-scale, never an explicit viewport. */
+export function chartXRangeWithInitialPadding(
+  min: number,
+  max: number,
+  domain: ChartRange | null | undefined,
+  step: number,
+  initialAutoScale: boolean
+): ChartRange {
+  if (!initialAutoScale) {
+    return { min, max };
+  }
+  const low = isValidChartRange(domain) ? Math.min(min, domain.min) : min;
+  const high = isValidChartRange(domain) ? Math.max(max, domain.max) : max;
+  const padding = Number.isFinite(step) && step > 0 ? step * 0.55 : 0.55;
+  return { min: low - padding, max: high + padding };
+}
+
+/** Compute Y auto-scale only from visible-X points in visible series. */
+export function chartYRangeForVisibleX(
+  xValues: readonly number[],
+  series: readonly ChartYExtentSeries[],
+  xRange: ChartRange | null | undefined,
+  includeZero = false
+): ChartRange | undefined {
+  const xMin = xRange && Number.isFinite(xRange.min) ? xRange.min : -Infinity;
+  const xMax = xRange && Number.isFinite(xRange.max) ? xRange.max : Infinity;
+  let min = Infinity;
+  let max = -Infinity;
+  for (const candidate of series) {
+    if (!candidate.visible) {
+      continue;
+    }
+    for (let index = 0; index < candidate.extents.length; index += 1) {
+      const x = xValues[index];
+      const extent = candidate.extents[index];
+      if (!Number.isFinite(x) || x < xMin || x > xMax || !extent ||
+        !Number.isFinite(extent.min) || !Number.isFinite(extent.max)) {
+        continue;
+      }
+      min = Math.min(min, extent.min, extent.max);
+      max = Math.max(max, extent.min, extent.max);
+    }
+  }
+  if (!Number.isFinite(min) || !Number.isFinite(max)) {
+    return undefined;
+  }
+  return {
+    min: includeZero ? Math.min(0, min) : min,
+    max: includeZero ? Math.max(0, max) : max,
+  };
+}
+
+/** Preserve distinct completed viewports while coalescing duplicate callbacks. */
+export function chartZoomAutoRefineQueueAction(
+  scheduledRange: ChartRange | null | undefined,
+  nextRange: ChartRange
+): ChartZoomAutoRefineQueueAction {
+  const next = { min: nextRange.min, max: nextRange.max };
+  if (!scheduledRange) {
+    return { type: 'schedule', range: next };
+  }
+  if (chartZoomRangeKey(scheduledRange) === chartZoomRangeKey(next)) {
+    return { type: 'duplicate' };
+  }
+  return {
+    type: 'flush',
+    ranges: [
+      { min: scheduledRange.min, max: scheduledRange.max },
+      next,
+    ],
+  };
+}
+
 export interface ChartZoomDataState<T> {
   readonly data: T;
   readonly originalData: T | null;
@@ -460,6 +569,63 @@ export function chartZoomRangeKey(range: ChartRange): string {
   const min = Object.is(Number(range.min), -0) ? 0 : Number(range.min);
   const max = Object.is(Number(range.max), -0) ? 0 : Number(range.max);
   return `${min}:${max}`;
+}
+
+/** Clamp a viewport while preserving its span whenever the full domain allows it. */
+export function clampChartViewport(
+  range: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined
+): ChartRange | null {
+  if (!isValidChartRange(range) || !isValidChartRange(fullRange)) {
+    return null;
+  }
+  const fullSpan = fullRange.max - fullRange.min;
+  const requestedSpan = range.max - range.min;
+  if (requestedSpan >= fullSpan) {
+    return { min: fullRange.min, max: fullRange.max };
+  }
+  let min = range.min;
+  let max = range.max;
+  if (min < fullRange.min) {
+    min = fullRange.min;
+    max = min + requestedSpan;
+  }
+  if (max > fullRange.max) {
+    max = fullRange.max;
+    min = max - requestedSpan;
+  }
+  return { min, max };
+}
+
+/** Shift an absolute viewport by a fraction of its span without changing Y. */
+export function panChartViewport(
+  currentRange: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined,
+  spanFraction: number
+): ChartRange | null {
+  if (!isValidChartRange(currentRange) || !isValidChartRange(fullRange) ||
+    !Number.isFinite(spanFraction)) {
+    return null;
+  }
+  const span = currentRange.max - currentRange.min;
+  const delta = span * spanFraction;
+  return clampChartViewport({
+    min: currentRange.min + delta,
+    max: currentRange.max + delta,
+  }, fullRange);
+}
+
+/** Dragging content right moves the viewed domain left (grab-content motion). */
+export function panChartViewportByPixels(
+  currentRange: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined,
+  deltaPixels: number,
+  plotWidth: number
+): ChartRange | null {
+  if (!Number.isFinite(deltaPixels) || !Number.isFinite(plotWidth) || plotWidth <= 0) {
+    return null;
+  }
+  return panChartViewport(currentRange, fullRange, -deltaPixels / plotWidth);
 }
 
 export function chartRequestIsCurrent(

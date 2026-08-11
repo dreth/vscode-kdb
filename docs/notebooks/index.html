@@ -478,15 +478,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#live-kx-result-and-saved-snapshot" class="md-nav__link">
+  <a href="#live-kx-result-and-saved-output" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Live KX result and saved snapshot
+        Live KX result and saved output
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Live KX result and saved snapshot">
+    <nav class="md-nav" aria-label="Live KX result and saved output">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -501,10 +501,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#portable-snapshot-limits" class="md-nav__link">
+  <a href="#portable-preview-and-full-results" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Portable snapshot limits
+        Portable preview and full results
       
     </span>
   </a>
@@ -894,15 +894,15 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#live-kx-result-and-saved-snapshot" class="md-nav__link">
+  <a href="#live-kx-result-and-saved-output" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Live KX result and saved snapshot
+        Live KX result and saved output
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Live KX result and saved snapshot">
+    <nav class="md-nav" aria-label="Live KX result and saved output">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
@@ -917,10 +917,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#portable-snapshot-limits" class="md-nav__link">
+  <a href="#portable-preview-and-full-results" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Portable snapshot limits
+        Portable preview and full results
       
     </span>
   </a>
@@ -1073,16 +1073,17 @@
 <p>This path has no <code>.Q.ld</code> or q release-date gate. The extension does not enforce an exact minimum q version.</p>
 <p>A saved but disconnected target may connect on demand after an explicit KX execution gesture. Its profile/global connect and query timeouts apply. A missing mixed target stays actionable rather than falling through. Connect, timeout, q, and decode failures become sanitized notebook error output; credentials are not included.</p>
 <p>Cancellation before dispatch prevents the query. Cancellation after a synchronous IPC request was sent ends the local wait; mixed mode writes a cancellation result only if the q cell is still unchanged, while the optional selected controller completes its native execution. q work or side effects already sent may continue on the server.</p>
-<h2 id="live-kx-result-and-saved-snapshot">Live KX result and saved snapshot</h2>
+<h2 id="live-kx-result-and-saved-output">Live KX result and saved output</h2>
 <p>A successful Direct IPC result from the default mixed runner or optional controller has two representations:</p>
 <ol>
 <li>an extension-host live result backed by the decoded q value; and</li>
-<li>a safe bounded <code>application/vnd.kx.result+json</code> version 1 snapshot plus <code>text/plain</code> fallback stored in notebook output.</li>
+<li>a strict first-party <code>application/vnd.kx.result+json</code> version 2 payload with a fresh output identity, <code>preview</code> or <code>full</code> persistence mode, and a bounded <code>text/plain</code> fallback stored in notebook output.</li>
 </ol>
-<p>While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. A newly completed mixed-runner edit binds its replacement cell/output back to the staged live record, so the first render can immediately page, export, chart, and hand off the full value instead of falling through to <strong>Saved preview</strong>. The optional selected KX controller binds its native output through the same live registry. q general null/no-value responses produced by assignments, declarations, and calls such as <code>hopen</code>, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.</p>
+<p>While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. Every execution gets fresh output and live identities. A completed mixed-runner edit atomically binds its replacement cell/output back to that run's staged live record across supported same-URI and structural cell reconciliations, so repeated identical q still dispatches and the newest first render can immediately page, export, chart, and hand off the full value. Stale renderer generations and requests cannot claim the new record. The optional selected KX controller binds its native output through the same live registry. q general null/no-value responses produced by assignments, declarations, and calls such as <code>hopen</code>, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.</p>
 <p>The renderer and standard panel consume one KX Results UI contract for toolbar labels, formats, chart families, settings definitions, state summaries, focus behavior, and theme tokens. A live table exposes <strong>Output:</strong>, CSV/XLSX/TSV/JSON/NDJSON/HTML/Markdown, <strong>Headers</strong>, <strong>Row #</strong>, <strong>Copy</strong>, <strong>Export</strong>, <strong>Chart</strong>, <strong>Columns</strong>, and <strong>Settings</strong>. XLSX is export-only. With no selected rectangle, Copy or Export uses every visible column in its current order; otherwise it uses the selected range. The toolbar wraps or overflows at narrow cell widths without removing working actions.</p>
-<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Three-state sort, bounded Search with explicit <strong>Prev</strong>/<strong>Next</strong>, drag selection, Shift-range selection, and keyboard navigation remain available. Columns can be shown, hidden, reset, moved, and resized; drag a header edge to set one positional width or double-click it to reset that position. Live slice, search, sort, copy, export, and chart requests honor the visible order. Inline clipboard work is capped at 20,000 cells. File export is performed by the extension host and uses the shared copy/export confirmation threshold.</p>
-<p>Notebook and panel grids share one sparse map of persistent zero-based original/source-position widths plus the <strong>Auto-fit columns</strong> checkbox and <strong>Whole result</strong>/<strong>Visible rows</strong> scope. The map is not limited by the notebook transport's bounded live-column count, and legacy array-shaped state is normalized on read. Hide/reorder operations do not retarget source slots. Whole-result fitting is the stable default: a live record measures all rows in its full in-memory result, including off-screen array/list values, while a saved preview can measure only its persisted rows. Visible-row mode adapts to the current virtual slice/page. Unchecking auto-fit runs no automatic measurement. Manual widths override auto-fit; <strong>Reset column widths</strong>, <strong>Cell width</strong>, and density preset changes clear every positional override consistently.</p>
+<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Header click cycles source/ascending/descending order, movement of at least 5 CSS pixels reorders without sorting, <code>Ctrl</code>/<code>Cmd</code>+click or <code>Ctrl</code>/<code>Cmd</code>+Space selects a column, <code>Enter</code>/<code>Space</code> sorts, and <code>Alt</code>+Left/Right reorders. Accessible labels and <code>aria-sort</code> expose the current state. Column identity and order are source-ordinal and stay local to the logical output and valid schema, including duplicate names, live refresh, and full/preview rerender; they never leak when VS Code reuses a renderer item ID for another output.</p>
+<p>Bounded Search retains explicit <strong>Prev</strong>/<strong>Next</strong> navigation, and drag/Shift/keyboard body selection remains available. Columns can be shown, hidden, reset, moved, and resized; drag a header edge to set one positional width or double-click it to reset that position. Live slice, search, sort, copy, export, and chart requests honor source ordinals in the visible order. A selected rectangle of at most 20,000 cells can be copied through the owning live record, including rows and more than 128 selected columns outside the currently loaded virtual slice. Odd absolute display rows use theme-aware subtle striping, with selection/search/loading precedence and forced-color safety. File export is performed by the extension host and uses the shared copy/export confirmation threshold.</p>
+<p>Notebook and panel grids share one sparse map of persistent zero-based original/source-position widths plus the <strong>Auto-fit columns</strong> checkbox and <strong>Whole result</strong>/<strong>Visible rows</strong> scope. The map is not limited by the notebook transport's bounded live-column count, and legacy array-shaped state is normalized on read. Hide/reorder operations do not retarget source slots. Whole-result fitting is the stable default: a live record measures all rows in its full in-memory result, including off-screen array/list values, while saved output measures every row actually persisted in its preview or full v2 payload. Visible-row mode adapts to the current virtual slice/page. Unchecking auto-fit runs no automatic measurement. Manual widths override auto-fit; <strong>Reset column widths</strong>, <strong>Cell width</strong>, and density preset changes clear every positional override consistently.</p>
 <p>The full panel retains interactions tied to its editor-sized host: the draggable table/chart splitter, running-query controls, and the local data server. Those host-specific controls do not justify a different notebook toolbar or data/display model. <strong>Open in KX Results</strong> hands the same decoded live value to that exact panel without rerunning q.</p>
 <p>Inline charts use the same real capability model as the panel:</p>
 <table>
@@ -1112,21 +1113,21 @@
 </tbody>
 </table>
 <p>Decoded q numeric types (<code>byte</code>, <code>short</code>, <code>int</code>, <code>long</code>, <code>real</code>, <code>float</code>) are valid Y/OHLC values. q <code>timestamp</code>, <code>month</code>, <code>date</code>, <code>datetime</code>, <code>timespan</code>, <code>minute</code>, <code>second</code>, and <code>time</code> columns are temporal X choices for every chart family above and are not offered as numeric Y/OHLC fields. Saved portable schema uses the same classification.</p>
-<p>The notebook does not expose a redundant Point cap control. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and chart sampling defaults still bound work, and live inline chart requests have a hard 10,000-point safety ceiling. Compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed. The chart stays below the table. Multi-series charts keep a visible color-keyed legend; its pointer and <strong>Enter</strong>/<strong>Space</strong> buttons expose accurate pressed/hidden state, and the Y-series selector repeats the same swatches beside selected and available names. The selector stays contained and scrollable at narrow widths. Axis labels/ticks remain readable while gridlines stay secondary because both use VS Code theme tokens rather than fixed light/dark colors. Legend-hidden series remain hidden through zoom, Reset zoom/double-click, explicit rerender, resize, renderer settings messages, and compatible configuration updates.</p>
-<p>Every distinct completed live-handle zoom, including a second zoom nested inside a refined response, requests its absolute range from the retained full source after the debounce. Identical scale notifications are deduplicated, while programmatic reconstruction/settings/resize/hide-show scales do not recursively request data. A refined range keeps every eligible row through 7,000 (including below 3,000 without upsampling) and reduces larger ranges to about 7,000. <strong>Reset zoom</strong> invalidates stale replies and restores the original full sample/domain without another request. <strong>Export PNG</strong> uses the extension save dialog.</p>
-<p><code>vscode-kdb.results.*</code> is the common durable settings source for notebook output and the standard panel. Supported density/sizing, positional column widths, auto-fit controls, copy/export threshold, array formatting, qText and value-display strategies, elapsed-time display, and chart precision/source/sampling changes use a validated renderer/extension message path. A supported setting or manual width changed inline updates the same global VS Code configuration used by other KX notebook outputs and open KX panels, and survives VS Code restart. Stored font size <code>0</code> still means the VS Code default and remains numeric in messages/configuration; notebook Settings shows it as <strong>Auto</strong>. The overlay is constrained and scrollable within the result, has a visible <strong>Close</strong> action, closes with <strong>Escape</strong>, and returns keyboard focus to its summary. Selection, visible-column order, sort, search, result height, chart configuration, legend-hidden state, and zoom remain transient per-output UI state.</p>
+<p>The notebook does not expose a redundant Point cap control. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and the fixed ranged-density contract still bound work, and live inline chart requests have a hard 10,000-point safety ceiling. Compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed; zoom, pan, refine, and reset input stays disabled until that explicit render completes. Plain drag zooms X; <code>Shift</code>+drag, Pan left/right, or Left/Right pans X by 20% of the visible span; Home and Reset restore the immutable full range. Multi-series charts keep a visible color-keyed legend; its pointer and <strong>Enter</strong>/<strong>Space</strong> buttons expose accurate pressed/hidden state, and the Y-series selector repeats the same swatches beside selected and available names. The selector stays contained and scrollable at narrow widths. Axis labels/ticks remain readable while gridlines stay secondary because both use VS Code theme tokens rather than fixed light/dark colors. Legend-hidden series remain hidden through zoom, pan, Reset/double-click, explicit rerender, resize, renderer settings messages, and compatible configuration updates.</p>
+<p>Every distinct completed live-handle zoom or pan, including a second viewport change nested inside a refined response, settles on its absolute range from the retained full source after the debounce. For the same range, pan uses the exact unchanged zoom range-loading and resampling decision. Identical scale notifications are deduplicated, while programmatic reconstruction/settings/resize/hide-show scales do not recursively request data. A settled range keeps every eligible row through 7,000 (including below 3,000 without upsampling) and reduces larger ranges to about 7,000. Late replies cannot overwrite a reset or newer range, Y remains automatic for visible X, and <strong>Reset zoom</strong> restores the original full sample/domain without another request. Saved charts rebuild only from their immutable stored preview or full payload. <strong>Export PNG</strong> uses the extension save dialog.</p>
+<p><code>vscode-kdb.results.*</code> is the common durable settings source for notebook output and the standard panel. Supported density/sizing, positional column widths, auto-fit controls, copy/export threshold, array formatting, qText and value-display strategies, elapsed-time display, and chart precision/source guardrails use a validated renderer/extension message path. A supported setting or manual width changed inline updates the same global VS Code configuration used by other KX notebook outputs and open KX panels, and survives VS Code restart. Stored font size <code>0</code> still means the VS Code default and remains numeric in messages/configuration; notebook Settings shows it as <strong>Auto</strong>. The overlay is constrained and scrollable within the result, has a visible <strong>Close</strong> action, closes with <strong>Escape</strong>, and returns keyboard focus to its summary. Selection, visible-column order, sort, search, result height, chart configuration, legend-hidden state, zoom, and pan remain transient per-output UI state.</p>
 <h3 id="exact-live-lifetime">Exact live lifetime</h3>
 <p>The live registry exists only in memory for the current extension-host session:</p>
 <ul>
-<li>every opaque record is bound to its notebook URI and current cell URI (mixed mode rebinds it after the output edit replaces the q cell handle);</li>
-<li>rerunning a cell replaces that cell's record;</li>
+<li>every run receives fresh opaque output and live IDs bound to its notebook URI and current cell URI; supported output rewrites atomically move only that run's binding to the exact replacement cell/output;</li>
+<li>rerunning a cell replaces that cell's record without allowing a stale renderer generation or request to claim the new identity;</li>
 <li>removing a cell removes that cell's record;</li>
 <li>closing a notebook removes all records for that notebook;</li>
 <li>deactivation clears the registry; and</li>
 <li>a maximum of 512 records is retained, with the oldest evicted first.</li>
 </ul>
-<p>The opaque live ID persisted beside the snapshot is not an IPC handle and cannot recreate a result. Output metadata also carries an opaque binding ID so extension-host actions can target the exact cell output; direct output may reuse the live ID as that targeting value. It contains no result or connection data and grants no reopened live access. If a record is absent because the notebook was reopened, the extension host ended, the cell was rerun, the notebook closed, or the cap evicted it, the renderer falls back to the saved bounded snapshot.</p>
-<h3 id="portable-snapshot-limits">Portable snapshot limits</h3>
+<p>The opaque live ID persisted beside the portable payload is not an IPC handle and cannot recreate a result. Output metadata also carries an opaque binding ID so extension-host actions can target the exact cell output; direct output may reuse the live ID as that targeting value. It contains no result or connection data and grants no reopened live access. If a record is absent because the notebook was reopened, the extension host ended, the cell was rerun, the notebook closed, or the cap evicted it, the renderer uses only rows owned by the saved preview or full v2 payload.</p>
+<h3 id="portable-preview-and-full-results">Portable preview and full results</h3>
 <table>
 <thead>
 <tr>
@@ -1147,26 +1148,22 @@
 <td><code>16384</code>-<code>10000000</code></td>
 </tr>
 <tr>
-<td>Portable columns</td>
-<td>n/a</td>
-<td>At most <code>256</code></td>
-</tr>
-<tr>
-<td>Portable cell text</td>
-<td>n/a</td>
-<td>At most <code>32768</code> characters</td>
+<td><code>vscode-kdb.notebook.preserveFullResultByDefault</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
 </tr>
 </tbody>
 </table>
-<p>First-party direct output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and <code>text/plain</code>. At the default, tables with 20 rows or fewer persist every row; larger tables persist a 20-row preview with headers/schema and an explicit omitted-row notice. The current live session value remains full and virtualized in KX Results, but the <code>.ipynb</code> does not own it. Direct output does not add <code>text/html</code> or a persisted chart specification. The separate Python companion can add escaped <code>text/html</code> and an optional persisted chart specification. Neither route stores credentials, passwords, authentication tokens, connection objects, recoverable IPC handles, or the unbounded live result; the first-party output-binding ID described above is opaque targeting metadata, not an authentication or data-recovery token. The companion does not emit that extension binding. Omitted rows cannot be recovered from a saved or reopened <code>.ipynb</code>.</p>
-<p>The saved-result renderer keeps the same table hierarchy, shared output formats, visible-column controls, positional resizing/auto-fit behavior, range behavior, explicit truncation notices, and capability-valid chart workflow, but every data action is limited to persisted rows. It identifies itself as <strong>Saved preview</strong>, reports stored versus total rows, and offers <strong>Open saved preview</strong> and <strong>Rerun cell</strong> when no live handle exists. Opening, copying, exporting, or charting that preview never claims or reconstructs omitted rows. Whole-result auto-fit and saved-preview zoom operate only within stored data; saved zoom cannot request refinement outside it. Direct saved-output chart choices remain transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
+<p>Preview mode is the default. <code>maxOutputRows</code> and <code>maxOutputBytes</code> control only preview persistence and the direct <code>text/plain</code> fallback remains bounded. The per-output <strong>Preserve full result</strong> checkbox is enabled only when a current first-party live result or an already-persisted v2 full payload can supply complete data. Checking it directly stores every exactly representable row, column, and cell without preview row/byte ceilings. If exact representation is technically impossible, KX reports an ordinary failure and does not label a preview as full. Unchecking rewrites the output to the current configured preview.</p>
+<p><code>vscode-kdb.notebook.preserveFullResultByDefault</code> checks full persistence for new Direct IPC output and defaults to <code>false</code>. Full v2 output survives ordinary <code>.ipynb</code> JSON save/reload. Legacy/Python v1 output remains accepted unchanged and displays an honest disabled checkbox. Reopened truncated previews cannot recover omitted rows without rerunning q. Direct output excludes extension-managed connection credentials, session objects, and IPC handles; user-returned q values remain eligible for exact persistence. Direct output does not add <code>text/html</code> or a persisted chart specification; the separate Python companion can add escaped <code>text/html</code> and an optional chart specification. The first-party output-binding ID described above is opaque targeting metadata, not an authentication or data-recovery token, and the companion does not emit it.</p>
+<p>The saved-result renderer keeps the same table hierarchy, shared output formats, visible-column controls, positional resizing/auto-fit behavior, header sorting, range behavior, explicit truncation notices, and capability-valid chart workflow, but every data action is limited to persisted rows. It identifies preview or full persistence honestly, reports stored versus total rows, and offers <strong>Open saved preview</strong> and <strong>Rerun cell</strong> for a truncated preview when no live handle exists. Opening, copying, exporting, or charting a preview never claims or reconstructs omitted rows; an explicitly preserved full v2 result owns every portable row after reopening and can be unchecked back to preview. Whole-result auto-fit and saved zoom operate only within stored data; saved zoom cannot request refinement outside it. Direct saved-output chart choices remain transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
 <p><code>vscode-kdb.notebook.presentation</code> accepts:</p>
 <ul>
 <li><code>inline</code> (default);</li>
 <li><code>panel</code>; or</li>
 <li><code>both</code>.</li>
 </ul>
-<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell. A live value opens in the full panel while its record exists. Expired/reopened output can open only the bounded rows stored in the notebook; <strong>Rerun cell</strong> is an explicit new execution, not recovery of the old live value.</p>
+<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell. A live value opens in the full panel while its record exists. Expired/reopened output can open only rows actually stored in the notebook, whether a bounded preview or an explicitly preserved full v2 payload; <strong>Rerun cell</strong> is an explicit new execution, not recovery of omitted preview rows.</p>
 <h2 id="separate-python-q-helper-route">Separate Python <code>%%q</code> helper route</h2>
 <p>Use the released <code>kx-notebook==0.1.0</code> companion only when q should run through the selected Python/IPython kernel. Its distribution name is <code>kx-notebook</code>; its import and IPython extension name is <code>kx_notebook</code>. This is distinct from mixed mode's <strong>Run q Cell (KX)</strong>: the companion remains inside Python, requires <code>%%q</code>, and does not share q variables, namespace state, session identity, live-result records, or output-binding metadata with extension-managed Direct IPC.</p>
 <p>Python 3.9 through 3.13 is supported. Install the exact release into the same environment selected as the notebook kernel:</p>

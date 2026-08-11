@@ -10,7 +10,9 @@ const COMPILED_MODULES = Object.freeze({
     qText: 'q-text.js',
     namespace: 'connection.js',
     chart: 'charting.js',
+    chartViewport: 'chart-zoom.js',
     results: 'kx-results.js',
+    resultTable: 'result-table-interaction.js',
     localServer: 'local-data-server.js',
     panel: 'kx-results-panel.js',
   }),
@@ -19,7 +21,10 @@ const COMPILED_MODULES = Object.freeze({
     qText: 'q-text.js',
     namespace: 'ls/driver.js',
     chart: 'charting.js',
+    chartViewport: 'chart-zoom-state.js',
     results: 'kdb-results.js',
+    resultTable: 'result-table-interaction.js',
+    gridWidths: 'grid-column-widths.js',
     localServer: 'local-data-server.js',
     panel: 'results-panel.js',
   }),
@@ -27,23 +32,57 @@ const COMPILED_MODULES = Object.freeze({
 
 const PRIVATE_EXPORT_NAME = '__crossParityPrivate';
 
-function loadParityAdapters({ standaloneRoot, referenceRoot }) {
+function loadParityAdapters({
+  standaloneRoot,
+  referenceRoot,
+  standaloneOutRoot,
+  referenceOutRoot,
+}) {
   return {
-    standalone: loadAdapter(standaloneRoot, COMPILED_MODULES.standalone, 'standalone'),
-    reference: loadAdapter(referenceRoot, COMPILED_MODULES.reference, 'reference'),
+    standalone: loadAdapter(
+      standaloneRoot,
+      standaloneOutRoot,
+      COMPILED_MODULES.standalone,
+      'standalone'
+    ),
+    reference: loadAdapter(
+      referenceRoot,
+      referenceOutRoot,
+      COMPILED_MODULES.reference,
+      'reference'
+    ),
   };
 }
 
-function loadAdapter(repoRoot, modulePaths, label) {
+function loadAdapter(repoRoot, requestedOutRoot, modulePaths, label) {
   const root = realDirectory(repoRoot, `${label} repository`);
-  const outRoot = realDirectory(path.join(root, 'out'), `${label} compiled output`);
+  if (!requestedOutRoot) {
+    throw new Error(`${label} isolated compiled output root is required.`);
+  }
+  const outRoot = realDirectory(requestedOutRoot, `${label} isolated compiled output`);
+  if (isPathContained(root, outRoot)) {
+    throw new Error(`${label} parity output must be isolated outside the repository: ${outRoot}`);
+  }
   clearRequireCacheUnder(outRoot);
 
   const ipc = requireCompiledModule(outRoot, modulePaths.ipc, `${label} q IPC`);
   const qText = requireCompiledModule(outRoot, modulePaths.qText, `${label} q text`);
   const namespace = requireCompiledModule(outRoot, modulePaths.namespace, `${label} namespace`);
   const chart = requireCompiledModule(outRoot, modulePaths.chart, `${label} chart`);
+  const chartViewport = requireCompiledModule(
+    outRoot,
+    modulePaths.chartViewport,
+    `${label} chart viewport`
+  );
   const results = requireCompiledModule(outRoot, modulePaths.results, `${label} results`);
+  const resultTable = requireCompiledModule(
+    outRoot,
+    modulePaths.resultTable,
+    `${label} result table interaction`
+  );
+  const gridWidths = modulePaths.gridWidths
+    ? requireCompiledModule(outRoot, modulePaths.gridWidths, `${label} grid column widths`)
+    : undefined;
   const localServer = requireCompiledModule(outRoot, modulePaths.localServer, `${label} local data server`);
   const columnarToXlsx = loadPrivateColumnarToXlsx(
     outRoot,
@@ -56,10 +95,14 @@ function loadAdapter(repoRoot, modulePaths, label) {
     qText,
     namespace,
     chart,
+    chartViewport,
     results,
+    resultTable,
+    gridWidths,
     localServer,
     xlsx: Object.freeze({ columnarToXlsx }),
     packageJson: readPackageJson(root, label),
+    outRoot,
     root,
   });
 }

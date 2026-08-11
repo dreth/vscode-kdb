@@ -10,10 +10,10 @@ const JSZip = require('jszip');
 const fixtures = require('./fixtures');
 const { buildMachineSummary, buildSummary } = require('./summary');
 const {
-  assertStrictStandaloneState,
-  referenceStatusSnapshot,
+  assertRepositoryPairUnchanged,
+  assertVerificationMode,
+  repositoryPairSnapshot,
   runCheckedCommand,
-  runReferenceCommand,
 } = require('../../scripts/run-cross-parity');
 const {
   assertExpectedRevision,
@@ -41,7 +41,7 @@ const tests = [
   ['status summaries classify every outcome', testStatusSummary],
   ['revision and reference dirty-state checks fail closed', testReferenceGuards],
   ['runner preflight failures are transparent', testRunnerPreflightFailures],
-  ['failed commands retain reference-state and timeout failures', testGuardedCommandFailures],
+  ['failed commands retain dirty-state and timeout failures', testGuardedCommandFailures],
   ['machine summaries fail closed', testMachineSummary],
 ];
 
@@ -344,11 +344,26 @@ function testReferenceGuards() {
 }
 
 function testRunnerPreflightFailures() {
-  assert.doesNotThrow(() => assertStrictStandaloneState(' M package.json\n', false));
-  assert.doesNotThrow(() => assertStrictStandaloneState('', true));
+  const clean = { entries: [] };
+  const dirty = { entries: [{ status: ' M', path: 'package.json' }] };
+  assert.doesNotThrow(() => assertVerificationMode('worktree', {
+    standalone: dirty,
+    reference: dirty,
+  }));
+  assert.doesNotThrow(() => assertVerificationMode('pinned-clean', {
+    standalone: clean,
+    reference: clean,
+  }));
   assert.throws(
-    () => assertStrictStandaloneState(' M package.json\n', true),
-    /requires a clean standalone/
+    () => assertVerificationMode('pinned-clean', {
+      standalone: dirty,
+      reference: clean,
+    }),
+    /Pinned-clean parity requires clean standalone and reference worktrees/
+  );
+  assert.throws(
+    () => assertVerificationMode('unbounded', { standalone: clean, reference: clean }),
+    /Unsupported parity verification mode/
   );
 
   const root = path.resolve(__dirname, '../..');
@@ -378,37 +393,49 @@ function testRunnerPreflightFailures() {
 
 async function testGuardedCommandFailures() {
   const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vscode-kdb-parity-guard-'));
+  const standaloneRoot = path.join(fixtureRoot, 'standalone');
+  const referenceRoot = path.join(fixtureRoot, 'reference');
   try {
-    fs.mkdirSync(path.join(fixtureRoot, 'docs'));
-    const trackedFile = path.join(fixtureRoot, 'docs', 'fixture.txt');
-    fs.writeFileSync(trackedFile, 'before\n');
-    runFixtureCommand('git', ['init', '--quiet'], fixtureRoot);
-    runFixtureCommand('git', ['add', 'docs/fixture.txt'], fixtureRoot);
-    runFixtureCommand('git', [
-      '-c', 'user.name=Parity Fixture',
-      '-c', 'user.email=parity-fixture@example.invalid',
-      'commit', '--quiet', '-m', 'fixture',
-    ], fixtureRoot);
+    initializeFixtureRepository(standaloneRoot);
+    initializeFixtureRepository(referenceRoot);
+    const trackedFile = path.join(referenceRoot, 'docs', 'fixture.txt');
+    fs.appendFileSync(trackedFile, 'dirty-before\n');
+    const baseline = repositoryPairSnapshot(standaloneRoot, referenceRoot);
+    assert.match(baseline.standalone.hash, /^[0-9a-f]{64}$/);
+    assert.match(baseline.reference.hash, /^[0-9a-f]{64}$/);
+    assert.deepStrictEqual(
+      baseline.reference.entries.map(entry => `${entry.status} ${entry.path}`),
+      [' M docs/fixture.txt']
+    );
 
-    const baseline = referenceStatusSnapshot(fixtureRoot);
-    let guardedError;
+    let commandError;
     try {
-      await runReferenceCommand({
+      await runCheckedCommand({
         name: 'failing reference fixture',
         command: process.execPath,
         args: ['-e', `require('fs').appendFileSync(${JSON.stringify(trackedFile)}, 'after\\n'); process.exit(7);`],
-        cwd: fixtureRoot,
+        cwd: referenceRoot,
         display: 'node failing-reference-fixture',
         silent: true,
         timeoutMs: 1000,
-      }, baseline);
+      });
     } catch (error) {
-      guardedError = error;
+      commandError = error;
     }
-    assert.ok(guardedError instanceof AggregateError);
-    assert.match(guardedError.message, /failed and the reference repository state changed/);
-    assert.match(guardedError.commandError.message, /failed with exit 7/);
-    assert.match(guardedError.statusError.message, /state changed/);
+    assert.ok(commandError instanceof Error);
+    assert.match(commandError.message, /failed with exit 7/);
+
+    const after = repositoryPairSnapshot(standaloneRoot, referenceRoot);
+    assert.strictEqual(after.standalone.hash, baseline.standalone.hash);
+    assert.strictEqual(after.reference.statusHash, baseline.reference.statusHash);
+    assert.notStrictEqual(after.reference.hash, baseline.reference.hash);
+    assert.throws(
+      () => assertRepositoryPairUnchanged(baseline, after, 'fixture verification'),
+      /worktree\/index state changed/
+    );
+    assert.doesNotThrow(() =>
+      assertRepositoryPairUnchanged(after, after, 'unchanged fixture verification')
+    );
 
     let timeoutError;
     try {
@@ -416,7 +443,7 @@ async function testGuardedCommandFailures() {
         name: 'timeout fixture',
         command: process.execPath,
         args: ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000);"],
-        cwd: fixtureRoot,
+        cwd: referenceRoot,
         display: 'node timeout-fixture',
         silent: true,
         timeoutMs: 50,
@@ -430,6 +457,18 @@ async function testGuardedCommandFailures() {
   } finally {
     fs.rmSync(fixtureRoot, { recursive: true, force: true });
   }
+}
+
+function initializeFixtureRepository(root) {
+  fs.mkdirSync(path.join(root, 'docs'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'docs', 'fixture.txt'), 'before\n');
+  runFixtureCommand('git', ['init', '--quiet'], root);
+  runFixtureCommand('git', ['add', 'docs/fixture.txt'], root);
+  runFixtureCommand('git', [
+    '-c', 'user.name=Parity Fixture',
+    '-c', 'user.email=parity-fixture@example.invalid',
+    'commit', '--quiet', '-m', 'fixture',
+  ], root);
 }
 
 function runFixtureCommand(command, args, cwd) {

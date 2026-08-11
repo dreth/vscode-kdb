@@ -847,7 +847,7 @@ function validateArtifacts() {
     throw new Error('Visual acceptance report has invalid live selection/search evidence.');
   }
   const columns = interaction('live-columns-overlay');
-  if (columns.summary !== 'Columns (3/4)' || columns.columnCount !== '3' ||
+  if (columns.summary !== 'Columns (3/4)' || columns.columnCount !== '4' ||
       columns.open !== true || columns.focusedControl !== 'Move row right' ||
       columns.firstVisibleHeader !== 'sym' ||
       columns.boundary?.open !== true || columns.boundary?.position !== 3 ||

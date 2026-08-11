@@ -565,6 +565,127 @@ function createChartFixtures() {
   ];
 }
 
+function createChartViewportFixture() {
+  return {
+    fullRange: { min: 0, max: 100 },
+    clampCases: [
+      { id: 'inside', range: { min: 20, max: 40 }, expected: { min: 20, max: 40 } },
+      { id: 'left-edge', range: { min: -10, max: 20 }, expected: { min: 0, max: 30 } },
+      { id: 'right-edge', range: { min: 90, max: 120 }, expected: { min: 70, max: 100 } },
+      { id: 'overspan', range: { min: -50, max: 150 }, expected: { min: 0, max: 100 } },
+    ],
+    panCases: [
+      { id: 'button-left', range: { min: 20, max: 40 }, fraction: -0.2, expected: { min: 16, max: 36 } },
+      { id: 'button-right', range: { min: 20, max: 40 }, fraction: 0.2, expected: { min: 24, max: 44 } },
+      { id: 'right-clamp', range: { min: 90, max: 100 }, fraction: 0.2, expected: { min: 90, max: 100 } },
+    ],
+    pixelCases: [
+      { id: 'grab-right', range: { min: 20, max: 40 }, deltaPixels: 100, plotWidth: 500, expected: { min: 16, max: 36 } },
+      { id: 'grab-left', range: { min: 20, max: 40 }, deltaPixels: -100, plotWidth: 500, expected: { min: 24, max: 44 } },
+    ],
+    lifecycle: {
+      actions: [
+        { type: 'clear', requestId: 1 },
+        { type: 'request', requestId: 2, range: null },
+        { type: 'response', requestId: 2, data: 'full-data' },
+        { type: 'rendered', requestId: 2, naturalRange: { min: 0, max: 100 } },
+        { type: 'request', requestId: 3, range: { min: 20, max: 60 } },
+        { type: 'response', requestId: 2, data: 'stale-data' },
+        { type: 'response', requestId: 3, data: 'refined-data' },
+        { type: 'reset' },
+      ],
+      expected: {
+        activeRequestId: 3,
+        pendingRequestId: null,
+        requestedRange: null,
+        fullRange: { min: 0, max: 100 },
+        fullData: 'full-data',
+      },
+    },
+    resetWhilePending: {
+      actions: [
+        { type: 'clear', requestId: 10 },
+        { type: 'request', requestId: 11, range: null },
+        { type: 'response', requestId: 11, data: 'pending-reset-full' },
+        { type: 'rendered', requestId: 11, naturalRange: { min: 0, max: 100 } },
+        { type: 'request', requestId: 12, range: { min: 25, max: 50 } },
+        { type: 'reset' },
+      ],
+      lateSuccess: { type: 'response', requestId: 12, data: 'must-not-win' },
+      lateFailure: { type: 'failed', requestId: 12 },
+      expected: {
+        activeRequestId: 12,
+        pendingRequestId: null,
+        requestedRange: null,
+        fullRange: { min: 0, max: 100 },
+        fullData: 'pending-reset-full',
+      },
+    },
+    queueCases: [
+      {
+        id: 'first-completion',
+        scheduledRange: null,
+        nextRange: { min: 10, max: 30 },
+        expected: { type: 'schedule', range: { min: 10, max: 30 } },
+      },
+      {
+        id: 'duplicate-completion',
+        scheduledRange: { min: 10, max: 30 },
+        nextRange: { min: 10, max: 30 },
+        expected: { type: 'duplicate' },
+      },
+      {
+        id: 'distinct-completions',
+        scheduledRange: { min: 10, max: 30 },
+        nextRange: { min: 40, max: 60 },
+        expected: {
+          type: 'flush',
+          ranges: [{ min: 10, max: 30 }, { min: 40, max: 60 }],
+        },
+      },
+    ],
+  };
+}
+
+function createResultTableInteractionFixture() {
+  return {
+    columns: ['sym', 'price', 'size'],
+    pointer: {
+      sourceColumn: 1,
+      startX: 10,
+      startY: 20,
+      jitterX: 14.999,
+      thresholdX: 15,
+      returnedX: 11,
+      targetColumn: 2,
+    },
+    moveCases: [
+      { id: 'first-to-last', sourceColumn: 0, targetColumn: 2, expected: ['price', 'size', 'sym'] },
+      { id: 'invalid-is-copy', sourceColumn: -1, targetColumn: 2, expected: ['sym', 'price', 'size'] },
+    ],
+    moveByCases: [
+      { id: 'keyboard-left', focusedColumn: 1, delta: -1, expected: { sourceColumn: 1, targetColumn: 0 } },
+      { id: 'keyboard-right', focusedColumn: 1, delta: 1, expected: { sourceColumn: 1, targetColumn: 2 } },
+      { id: 'keyboard-edge', focusedColumn: 0, delta: -1, expected: null },
+    ],
+    rowCount: 7,
+    simpleSelection: {
+      anchorRow: 0,
+      anchorColumn: 1,
+      focusRow: 6,
+      focusColumn: 1,
+    },
+    extendedSelection: {
+      anchorRow: 0,
+      anchorColumn: 1,
+      focusRow: 6,
+      focusColumn: 2,
+    },
+    ariaLabel: 'price, column 2 of 3, sorted descending; click to sort, drag to reorder, Control or Command click to select column',
+    rowClasses: ['row-even', 'row-odd', 'row-even', 'row-odd'],
+  };
+}
+
 function createExportFixture() {
   return {
     rows: [
@@ -702,6 +823,8 @@ module.exports = {
   LIVE_NAMESPACE_FIXTURES,
   createIpcFixtures,
   createChartFixtures,
+  createChartViewportFixture,
+  createResultTableInteractionFixture,
   createExportFixture,
   createLocalServerFixture,
   createOversizedLocalServerFixture,

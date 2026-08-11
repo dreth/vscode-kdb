@@ -2,6 +2,14 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## 0.2.14 - 2026-08-11
+
+- Unified chart viewport handling across the KX Results panel and notebook output. Plain drag zooms X; `Shift`+drag, Pan left/right, Left/Right, and Home provide clamped X-only pan/reset. Pan completion now uses the exact unchanged zoom range-loading/resampling decision for the same absolute X range, with stale-reply/reset protection and automatic visible-range Y for all six chart families.
+- Replaced table header modes with one accessible interaction in panel and notebook tables: click tri-state sort, 5 CSS pixel drag reorder, modifier whole-column selection, Enter/Space sort, Alt+Left/Right reorder, `aria-sort`/focus labels, output/schema-local order, source-ordinal live copy, and absolute-row theme/forced-colors-safe striping.
+- Fixed repeated identical mixed-notebook execution so supported structural and same-URI `cellChanges` reconciliations both commit fresh output atomically. Every run now gets unique output/live identities, stale renderer generations and requests are ignored, current command-cell membership is resolved before issue, and live rows beyond a bounded preview remain available after the second run.
+- Added strict first-party portable v2 Direct IPC output with configurable preview rows, fresh output identity, per-output **Preserve full result**, default-off `vscode-kdb.notebook.preserveFullResultByDefault`, exact full-result save/reload, and uncheck-to-preview. Full persistence is a direct user choice, reports an ordinary technical failure when exact representation is impossible, and excludes only extension-managed connection credentials, sessions, and IPC handles. Legacy/Python v1 remains accepted with an honest disabled full-result control.
+- Added focused chart/table/notebook identity and persistence regressions for structural output URI moves, wide source-ordinal live copy, renderer item reuse, exact conversion failures, repeated q dispatch, and fresh live-result ownership.
+
 ## 0.2.13 - 2026-07-29
 
 - Added **KX: Select Query Connection** to the Command Palette. Normal editor q runs reuse the stable active profile ID persisted in extension global state, auto-activate a sole profile only on first use, and prompt again if a remembered target stops resolving even when one profile remains. Concurrent runs share one in-flight picker result or cancellation, while the explicit Palette command always opens its own selector. The new command changes the same active profile used by subsequent normal runs; the existing sidebar **Set Active Connection** behavior remains compatible, the selector persists only the profile ID, and passwords remain in SecretStorage.

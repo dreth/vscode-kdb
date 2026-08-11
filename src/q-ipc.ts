@@ -151,6 +151,7 @@ interface PendingQuery {
   queryId: number;
   query: string;
   onIssued?: () => void;
+  shouldIssue?: () => boolean;
   queuedAtMs: number;
   startedAtMs?: number;
   callerSettled: boolean;
@@ -531,7 +532,12 @@ export class KdbIpcClient {
     }
   }
 
-  public query(query: string, onIssued?: () => void, signal?: AbortSignal): Promise<QValue> {
+  public query(
+    query: string,
+    onIssued?: () => void,
+    signal?: AbortSignal,
+    shouldIssue?: () => boolean
+  ): Promise<QValue> {
     const queryId = nextQueryId++;
     if (signal?.aborted) {
       const error = new KdbQueryCanceledError();
@@ -559,6 +565,7 @@ export class KdbIpcClient {
         queryId,
         query,
         onIssued,
+        shouldIssue,
         queuedAtMs: Date.now(),
         callerSettled: false,
         diagnosticEnded: false,
@@ -655,7 +662,34 @@ export class KdbIpcClient {
       return;
     }
 
-    const pending = this.queue.shift();
+    let pending: PendingQuery | undefined;
+    while ((pending = this.queue.shift())) {
+      let mayIssue = !pending.signal?.aborted;
+      if (mayIssue && pending.shouldIssue) {
+        try {
+          mayIssue = pending.shouldIssue();
+        } catch {
+          mayIssue = false;
+        }
+      }
+      if (mayIssue) {
+        break;
+      }
+      const error = new KdbQueryCanceledError(
+        'KX query canceled before it reached the q socket.'
+      );
+      if (pending.perf) {
+        finishQueryPerf(pending.perf, {
+          error: true,
+          errorName: error.name,
+          canceled: true,
+          queued: true,
+          preIssueGuard: true,
+        });
+      }
+      this.rejectQuery(pending, error, 'canceled');
+      pending = undefined;
+    }
     if (!pending) {
       return;
     }
@@ -1220,6 +1254,139 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
     kind: 'scalar',
     rowsMaterialized: false,
   };
+}
+
+/**
+ * Builds the same rectangular result shape without replacing nested q values
+ * with display-only summaries. Unsupported cells return `undefined`, allowing
+ * strict portable-v2 creation to reject the entire full result honestly.
+ */
+export function qValueToLosslessPortablePanel(
+  value: QValue,
+  _options?: QResultDisplayOptions
+): QPanelResult | undefined {
+  if (Array.isArray(value) && value.length > 0) {
+    const plainRows = losslessPlainObjectListColumns(value);
+    if (plainRows.kind === 'plain') {
+      const columns = plainRows.columns;
+      return {
+        mode: 'grid',
+        cols: columns,
+        result: createColumnarPanelResult(
+          columns,
+          value.length,
+          (rowIndex, columnIndex) => {
+            const row = value[rowIndex] as unknown as Record<string, QValue> | undefined;
+            const column = columns[columnIndex];
+            return row && Object.prototype.hasOwnProperty.call(row, column)
+              ? losslessPortableQCell(row[column])
+              : undefined;
+          }
+        ),
+        kind: 'list',
+        rowsMaterialized: true,
+      };
+    }
+  }
+  if (isPlainObject(value)) {
+    const row = value as unknown as Record<string, QValue>;
+    const columns = plainObjectColumns(row);
+    return {
+      mode: 'grid',
+      cols: columns,
+      result: createColumnarPanelResult(
+        columns,
+        1,
+        (_rowIndex, columnIndex) => {
+          const column = columns[columnIndex];
+          return Object.prototype.hasOwnProperty.call(row, column)
+            ? losslessPortableQCell(row[column])
+            : undefined;
+        }
+      ),
+      kind: 'object',
+      rowsMaterialized: true,
+    };
+  }
+
+  const panel = qValueToColumnarPanel(value, {
+    functionDisplayStrategy: 'grid',
+    dictionaryDisplayStrategy: 'grid',
+    listDisplayStrategy: 'grid',
+    objectDisplayStrategy: 'grid',
+  });
+  if (panel.mode === 'text') {
+    return losslessQTextResult(value) ? panel : undefined;
+  }
+  if (isQTable(value)) {
+    return {
+      ...panel,
+      result: createColumnarPanelResult(
+        value.columns,
+        qTableRowCount(value),
+        (rowIndex, columnIndex) => losslessPortableQCell(
+          qTableRawCellValue(value, rowIndex, columnIndex)
+        ),
+        value.columnTypes
+      ),
+    };
+  }
+  if (isQKeyedTable(value)) {
+    return {
+      ...panel,
+      result: createColumnarPanelResult(
+        value.columns,
+        qKeyedTableRowCount(value),
+        (rowIndex, columnIndex) => losslessPortableQCell(
+          columnIndex < value.keyTable.columns.length
+            ? qTableRawCellValue(value.keyTable, rowIndex, columnIndex)
+            : qTableRawCellValue(
+              value.valueTable,
+              rowIndex,
+              columnIndex - value.keyTable.columns.length
+            )
+        ),
+        value.columnTypes
+      ),
+    };
+  }
+  if (isQFunction(value)) {
+    return {
+      mode: 'grid',
+      cols: ['value'],
+      result: createColumnarPanelResult(['value'], 1, () => losslessPortableQCell(value)),
+      kind: 'function',
+      rowsMaterialized: false,
+    };
+  }
+  if (isQDict(value)) {
+    return {
+      ...panel,
+      result: createColumnarPanelResult(
+        panel.result.columns,
+        value.entries.length,
+        (rowIndex, columnIndex) => {
+          const entry = value.entries[rowIndex];
+          return entry
+            ? losslessPortableQCell(columnIndex === 0 ? entry.key : entry.value)
+            : undefined;
+        }
+      ),
+    };
+  }
+  if (Array.isArray(value)) {
+    return {
+      ...panel,
+      result: createColumnarPanelResult(
+        panel.result.columns,
+        value.length,
+        (rowIndex, columnIndex) => columnIndex === 0
+          ? rowIndex
+          : losslessPortableQCell(value[rowIndex])
+      ),
+    };
+  }
+  return panel;
 }
 
 /**
@@ -2288,14 +2455,18 @@ function qIpcTypeName(type: number): string | undefined {
 }
 
 function qTableCellValue(table: QTable, rowIndex: number, columnIndex: number): QDisplayValue {
+  return normalizeCell(qTableRawCellValue(table, rowIndex, columnIndex));
+}
+
+function qTableRawCellValue(table: QTable, rowIndex: number, columnIndex: number): QValue {
   if (columnIndex < 0 || columnIndex >= table.columns.length) {
     return null;
   }
   if (table.columnData && columnIndex < table.columnData.length) {
-    return normalizeCell(vectorValueAt(table.columnData[columnIndex], rowIndex));
+    return vectorValueAt(table.columnData[columnIndex], rowIndex);
   }
   const row = table.rows[rowIndex];
-  return row ? normalizeCell(row[table.columns[columnIndex]] as QValue) : null;
+  return row ? row[table.columns[columnIndex]] as QValue : null;
 }
 
 function qTablePanelCellValue(table: QTable, rowIndex: number, columnIndex: number): unknown {
@@ -2400,6 +2571,84 @@ function normalizePanelCell(value: QValue): unknown {
     return value;
   }
   return normalizeNestedValue(value);
+}
+
+function losslessQTextResult(value: QValue): boolean {
+  return value === null || isQGeneralNull(value) ||
+    (typeof value === 'string' && value.length === 0) ||
+    (Array.isArray(value) && value.length === 0);
+}
+
+function losslessPortableQCell(value: QValue): unknown {
+  return losslessPortableQValue(value, new Set<object>()) ? value : undefined;
+}
+
+function losslessPortableQValue(value: QValue, seen: Set<object>): boolean {
+  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
+    return true;
+  }
+  if (typeof value === 'number') {
+    return Number.isFinite(value) && !Object.is(value, -0);
+  }
+  if (typeof value === 'bigint') {
+    return true;
+  }
+  if (value instanceof Date) {
+    return Number.isFinite(value.getTime());
+  }
+  if (!value || typeof value !== 'object' || seen.has(value as object)) {
+    return false;
+  }
+  seen.add(value as object);
+  try {
+    if (Array.isArray(value)) {
+      return value.every(item => losslessPortableQValue(item, seen));
+    }
+    const prototype = Object.getPrototypeOf(value as object);
+    if (prototype !== Object.prototype && prototype !== null) {
+      return false;
+    }
+    for (const key in value as unknown as Record<string, QValue>) {
+      if (Object.prototype.hasOwnProperty.call(value, key) &&
+          !losslessPortableQValue((value as unknown as Record<string, QValue>)[key], seen)) {
+        return false;
+      }
+    }
+    return true;
+  } finally {
+    seen.delete(value as object);
+  }
+}
+
+type PlainObjectListColumns =
+  | { kind: 'plain'; columns: string[] }
+  | { kind: 'not-plain' };
+
+function losslessPlainObjectListColumns(value: QValue[]): PlainObjectListColumns {
+  const columns: string[] = [];
+  const known = new Set<string>();
+  for (const candidate of value) {
+    if (!isPlainObject(candidate)) {
+      return { kind: 'not-plain' };
+    }
+    for (const key in candidate as unknown as Record<string, QValue>) {
+      if (Object.prototype.hasOwnProperty.call(candidate, key) && !known.has(key)) {
+        known.add(key);
+        columns.push(key);
+      }
+    }
+  }
+  return { kind: 'plain', columns };
+}
+
+function plainObjectColumns(value: Record<string, QValue>): string[] {
+  const columns: string[] = [];
+  for (const key in value) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      columns.push(key);
+    }
+  }
+  return columns;
 }
 
 function normalizeNestedValue(value: QValue): QNestedDisplayValue {

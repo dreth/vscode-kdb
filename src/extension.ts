@@ -21,10 +21,20 @@ import {
   DirectQNotebookBridge,
   KxQNotebookRunner,
 } from './notebook-controller';
-import { LiveNotebookResultStore } from './notebook-live-results';
+import {
+  LiveNotebookResultStore,
+  LiveNotebookSlice,
+  LiveNotebookSliceRequest,
+} from './notebook-live-results';
 import { resolveNotebookQTarget } from './notebook-q-target';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
-import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
+import {
+  QCellValue,
+  QResultDisplayOptions,
+  QTable,
+  QValue,
+  qValueToColumnarPanel,
+} from './q-ipc';
 import {
   HistoryExecutionKind,
   historyRerunRequiresConfirmation,
@@ -53,6 +63,23 @@ export interface KxExtensionHostTestApi {
   hasPassword(id: string): Promise<boolean>;
   resolveNotebookTarget(metadata: unknown): KxConnection | undefined;
   isDirectControllerRegistered(): boolean;
+  queueNotebookTable(
+    columns: readonly string[],
+    rows: readonly (readonly QCellValue[])[]
+  ): void;
+  holdNextNotebookQuery(): ExtensionHostNotebookQueryGate;
+  notebookQueryCalls(): readonly { connectionId: string; source: string }[];
+  hasLiveNotebookResult(liveId: string, notebookUri: string): boolean;
+  notebookLiveSlice(
+    liveId: string,
+    notebookUri: string,
+    request: LiveNotebookSliceRequest
+  ): LiveNotebookSlice | undefined;
+}
+
+export interface ExtensionHostNotebookQueryGate {
+  readonly issued: Promise<void>;
+  release(): void;
 }
 
 export interface KxExtensionExports {
@@ -60,6 +87,13 @@ export interface KxExtensionExports {
 }
 
 export function activate(context: vscode.ExtensionContext): KxExtensionExports | undefined {
+  const extensionHostTestEnabled = context.extensionMode === vscode.ExtensionMode.Test &&
+    process.env.VSCODE_KDB_EXTENSION_HOST_TEST === '1';
+  const extensionHostNotebookExecutor = extensionHostTestEnabled
+    ? new ExtensionHostNotebookExecutor()
+    : undefined;
+  const extensionHostNotebookExecutorEnabled = extensionHostTestEnabled &&
+    process.env.VSCODE_KDB_EXTENSION_HOST_NOTEBOOK_EXECUTOR === '1';
   const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
   const diagnostics = new KxDiagnostics(output);
   configurePerfOutput(value => output.appendLine(value));
@@ -68,8 +102,16 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   const tree = new ConnectionsTreeProvider(store, manager);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
   const liveNotebookResults = new LiveNotebookResultStore();
+  const notebookBridge = extensionHostNotebookExecutorEnabled && extensionHostNotebookExecutor
+    ? directQNotebookBridge(
+      store,
+      manager,
+      tree,
+      extensionHostNotebookExecutor.executeScript
+    )
+    : directQNotebookBridge(store, manager, tree);
   const notebookRunner = new KxQNotebookRunner(
-    directQNotebookBridge(store, manager, tree),
+    notebookBridge,
     liveNotebookResults
   );
   const notebookIntegration = new NotebookIntegration(context, {
@@ -186,7 +228,8 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   );
 
   if (context.extensionMode !== vscode.ExtensionMode.Test ||
-      process.env.VSCODE_KDB_EXTENSION_HOST_TEST !== '1') {
+      process.env.VSCODE_KDB_EXTENSION_HOST_TEST !== '1' ||
+      !extensionHostNotebookExecutor) {
     return undefined;
   }
   const safeConnection = (connection: KxConnection | undefined): KxConnection | undefined =>
@@ -219,6 +262,29 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       },
       isDirectControllerRegistered: () =>
         notebookRunner.isDirectControllerRegistered(),
+      queueNotebookTable: (
+        columns: readonly string[],
+        rows: readonly (readonly QCellValue[])[]
+      ) =>
+        extensionHostNotebookExecutor.queueTable(columns, rows),
+      holdNextNotebookQuery: () => extensionHostNotebookExecutor.holdNextQuery(),
+      notebookQueryCalls: () => extensionHostNotebookExecutor.calls(),
+      hasLiveNotebookResult: (liveId: string, notebookUri: string) =>
+        liveNotebookResults.has(liveId, notebookUri),
+      notebookLiveSlice: (
+        liveId: string,
+        notebookUri: string,
+        request: LiveNotebookSliceRequest
+      ) => {
+        const slice = liveNotebookResults.slice(liveId, notebookUri, request);
+        return slice
+          ? {
+            ...slice,
+            columnOrdinals: slice.columnOrdinals.slice(),
+            cells: slice.cells.map(row => row.slice()),
+          }
+          : undefined;
+      },
     }),
   });
 }
@@ -624,15 +690,16 @@ function sameExecutionTarget(left: KxConnection, right: KxConnection): boolean {
 function directQNotebookBridge(
   store: ConnectionStore,
   manager: ConnectionManager,
-  tree: ConnectionsTreeProvider
+  tree: ConnectionsTreeProvider,
+  executeScriptOverride?: DirectQNotebookBridge['executeScript']
 ): DirectQNotebookBridge {
   return {
     activeConnection: () => store.activeConnection(),
     connections: () => store.connections(),
     connectionById: connectionId => store.connection(connectionId),
     isConnected: connectionId => manager.isConnected(connectionId),
-    executeScript: (connection, source, onIssued, signal) =>
-      manager.executeScript(connection, source, onIssued, signal),
+    executeScript: executeScriptOverride ?? ((connection, source, onIssued, signal, shouldIssue) =>
+      manager.executeScript(connection, source, onIssued, signal, shouldIssue)),
     errorMessage: async (error, connection) => {
       const secrets: string[] = [];
       let secretLookupFailed = false;
@@ -664,6 +731,95 @@ function directQNotebookBridge(
       });
     },
   };
+}
+
+class ExtensionHostNotebookExecutor {
+  private readonly queuedTables: QTable[] = [];
+  private readonly queryCalls: Array<{ connectionId: string; source: string }> = [];
+  private nextQueryGate: {
+    issued: Promise<void>;
+    markIssued: () => void;
+    released: Promise<void>;
+    release: () => void;
+  } | undefined;
+
+  public readonly executeScript: DirectQNotebookBridge['executeScript'] = async (
+    connection,
+    source,
+    onIssued,
+    signal,
+    shouldIssue
+  ) => {
+    if (signal.aborted) {
+      throw new Error('Extension Host notebook test execution was canceled before issue.');
+    }
+    if (shouldIssue && !shouldIssue()) {
+      throw new Error('Extension Host notebook test execution became stale before issue.');
+    }
+    const table = this.queuedTables.shift();
+    if (!table) {
+      throw new Error('Extension Host notebook test result queue is empty.');
+    }
+    this.queryCalls.push({ connectionId: connection.id, source });
+    onIssued();
+    const gate = this.nextQueryGate;
+    this.nextQueryGate = undefined;
+    gate?.markIssued();
+    await gate?.released;
+    if (signal.aborted) {
+      throw new Error('Extension Host notebook test execution was canceled after issue.');
+    }
+    return table;
+  };
+
+  public holdNextQuery(): ExtensionHostNotebookQueryGate {
+    if (this.nextQueryGate) {
+      throw new Error('An Extension Host notebook test query is already held.');
+    }
+    let markIssued!: () => void;
+    let release!: () => void;
+    const issued = new Promise<void>(resolve => { markIssued = resolve; });
+    const released = new Promise<void>(resolve => { release = resolve; });
+    this.nextQueryGate = { issued, markIssued, released, release };
+    return Object.freeze({ issued, release });
+  }
+
+  public queueTable(
+    columns: readonly string[],
+    rows: readonly (readonly QCellValue[])[]
+  ): void {
+    if (!Array.isArray(columns) || columns.length === 0 || columns.length > 4_096 ||
+      columns.some(column => typeof column !== 'string' || column.length === 0) ||
+      new Set(columns).size !== columns.length) {
+      throw new Error('Extension Host notebook test columns must be 1..4,096 unique names.');
+    }
+    if (!Array.isArray(rows) || rows.length > 1_000_000 ||
+      rows.some(row => !Array.isArray(row) || row.length !== columns.length ||
+        row.some(value => !isExtensionHostTestCell(value)))) {
+      throw new Error('Extension Host notebook test rows must be rectangular primitive cells.');
+    }
+    const copiedRows = rows.map(row => row.slice());
+    this.queuedTables.push({
+      qtype: 'table',
+      columns: columns.slice(),
+      columnTypes: [],
+      rows: copiedRows.map(row => Object.fromEntries(
+        columns.map((column, index) => [column, row[index]])
+      )),
+      columnData: [],
+      rowCount: copiedRows.length,
+      rowsMaterialized: true,
+    });
+  }
+
+  public calls(): readonly { connectionId: string; source: string }[] {
+    return this.queryCalls.map(call => ({ ...call }));
+  }
+}
+
+function isExtensionHostTestCell(value: unknown): value is QCellValue {
+  return value === null || typeof value === 'string' || typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value));
 }
 
 class QRunCodeLensProvider implements vscode.CodeLensProvider {
