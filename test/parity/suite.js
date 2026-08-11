@@ -11,6 +11,8 @@ async function runParitySuite(ctx) {
   await codecCases(ctx);
   await editorAndNamespaceCases(ctx);
   await chartCases(ctx);
+  await chartViewportCases(ctx);
+  await resultTableInteractionCases(ctx);
   await exportCases(ctx);
   await ipcLifecycleCases(ctx);
   await localServerCases(ctx);
@@ -138,9 +140,8 @@ async function editorAndNamespaceCases(ctx) {
     id: 'editor-blank-line-q-block-helper',
     area: 'blank-line-bounded q block execution',
     mode: 'deterministic',
-    expectedStatus: 'GAP',
-    rank: 3,
-    action: 'Make an explicit first-party product decision: implement a standalone q-block helper/command with tests, or formally exclude it and reclassify this row by design.',
+    expectedStatus: 'DIFFERENT_BY_DESIGN',
+    rationale: 'Standalone intentionally executes an exact selection or physical current line. SQLTools owns its optional legacy q-block helpers, which are outside KX result-view parity.',
     detail: 'Reference exposes currentQBlock/selectedTextOrCurrentBlock; standalone intentionally preserves current-line behavior but has not resolved the separate optional block command.',
   }, t => {
     t.equal(typeof reference.qText.currentQBlock, 'function');
@@ -239,6 +240,311 @@ async function chartCases(ctx) {
     t.equal(left.candlesticks[0].close, 17);
     t.equal(left.candlesticks[0].high, 18);
     t.equal(left.candlesticks[0].low, 8);
+  });
+}
+
+async function chartViewportCases(ctx) {
+  const { standalone, reference, fixtures } = ctx;
+  const fixture = fixtures.createChartViewportFixture();
+
+  await ctx.case(caseDef(
+    'chart-viewport-clamp-pan-direction',
+    'chart viewport clamp, button pan, and grab-content direction',
+    'deterministic',
+    'PASS',
+    'Both products applied identical absolute X-only viewport clamping and pan direction at domain edges.'
+  ), t => {
+    for (const item of fixture.clampCases) {
+      const left = standalone.chartViewport.clampChartViewport(item.range, fixture.fullRange);
+      const right = reference.chartViewport.clampChartViewport(item.range, fixture.fullRange);
+      t.deepEqual(left, right);
+      t.deepEqual(left, item.expected);
+    }
+    for (const item of fixture.panCases) {
+      const left = standalone.chartViewport.panChartViewport(item.range, fixture.fullRange, item.fraction);
+      const right = reference.chartViewport.panChartViewport(item.range, fixture.fullRange, item.fraction);
+      t.deepEqual(left, right);
+      t.deepEqual(left, item.expected);
+    }
+    for (const item of fixture.pixelCases) {
+      const left = standalone.chartViewport.panChartViewportByPixels(
+        item.range,
+        fixture.fullRange,
+        item.deltaPixels,
+        item.plotWidth
+      );
+      const right = reference.chartViewport.panChartViewportByPixels(
+        item.range,
+        fixture.fullRange,
+        item.deltaPixels,
+        item.plotWidth
+      );
+      t.deepEqual(left, right);
+      t.deepEqual(left, item.expected);
+    }
+  });
+
+  await ctx.case(caseDef(
+    'chart-viewport-lifecycle-and-queue',
+    'chart viewport stale-response, reset, and completion queue lifecycle',
+    'deterministic',
+    'PASS',
+    'Both reducers retained the immutable full response, ignored a stale response, reset the exact range, and preserved distinct completed requests.'
+  ), t => {
+    let left;
+    let right;
+    for (const action of fixture.lifecycle.actions) {
+      left = standalone.chartViewport.reduceChartZoomLifecycle(left, action);
+      right = reference.chartViewport.reduceChartZoomLifecycle(right, action);
+      t.deepEqual(left, right);
+    }
+    t.deepEqual(left, fixture.lifecycle.expected);
+    let pendingLeft;
+    let pendingRight;
+    for (const action of fixture.resetWhilePending.actions) {
+      pendingLeft = standalone.chartViewport.reduceChartZoomLifecycle(pendingLeft, action);
+      pendingRight = reference.chartViewport.reduceChartZoomLifecycle(pendingRight, action);
+      t.deepEqual(pendingLeft, pendingRight);
+    }
+    t.deepEqual(pendingLeft, fixture.resetWhilePending.expected);
+    const lateSuccessLeft = standalone.chartViewport.reduceChartZoomLifecycle(
+      pendingLeft,
+      fixture.resetWhilePending.lateSuccess
+    );
+    const lateSuccessRight = reference.chartViewport.reduceChartZoomLifecycle(
+      pendingRight,
+      fixture.resetWhilePending.lateSuccess
+    );
+    t.deepEqual(lateSuccessLeft, lateSuccessRight);
+    t.deepEqual(lateSuccessLeft, fixture.resetWhilePending.expected);
+    const lateFailureLeft = standalone.chartViewport.reduceChartZoomLifecycle(
+      pendingLeft,
+      fixture.resetWhilePending.lateFailure
+    );
+    const lateFailureRight = reference.chartViewport.reduceChartZoomLifecycle(
+      pendingRight,
+      fixture.resetWhilePending.lateFailure
+    );
+    t.deepEqual(lateFailureLeft, lateFailureRight);
+    t.deepEqual(lateFailureLeft, fixture.resetWhilePending.expected);
+    for (const item of fixture.queueCases) {
+      const leftAction = standalone.chartViewport.chartZoomAutoRefineQueueAction(
+        item.scheduledRange,
+        item.nextRange
+      );
+      const rightAction = reference.chartViewport.chartZoomAutoRefineQueueAction(
+        item.scheduledRange,
+        item.nextRange
+      );
+      t.deepEqual(leftAction, rightAction);
+      t.deepEqual(leftAction, item.expected);
+    }
+  });
+}
+
+async function resultTableInteractionCases(ctx) {
+  const { standalone, reference, fixtures } = ctx;
+  const fixture = fixtures.createResultTableInteractionFixture();
+  const left = standalone.resultTable;
+  const right = reference.resultTable;
+
+  await ctx.case(caseDef(
+    'result-table-header-sort-drag-select',
+    'result table header sort, drag, selection, and keyboard reorder',
+    'deterministic',
+    'PASS',
+    'Both products applied the same tri-state sort, five-pixel sticky drag threshold, modifier intent, column moves, and full-column selection.'
+  ), t => {
+    let leftSort;
+    let rightSort;
+    for (const expected of [
+      { column: 'price', direction: 'asc' },
+      { column: 'price', direction: 'desc' },
+      undefined,
+    ]) {
+      leftSort = left.nextResultTableSortState(leftSort, 'price');
+      rightSort = right.nextResultTableSortState(rightSort, 'price');
+      t.deepEqual(leftSort, rightSort);
+      t.deepEqual(leftSort, expected);
+    }
+
+    const pointer = fixture.pointer;
+    const leftStart = left.beginHeaderPointer(pointer.sourceColumn, pointer.startX, pointer.startY);
+    const rightStart = right.beginHeaderPointer(pointer.sourceColumn, pointer.startX, pointer.startY);
+    t.deepEqual(leftStart, rightStart);
+    const leftJitter = left.updateHeaderPointer(
+      leftStart,
+      pointer.jitterX,
+      pointer.startY,
+      pointer.targetColumn
+    );
+    const rightJitter = right.updateHeaderPointer(
+      rightStart,
+      pointer.jitterX,
+      pointer.startY,
+      pointer.targetColumn
+    );
+    t.deepEqual(leftJitter, rightJitter);
+    t.equal(leftJitter.reorder, false);
+    t.equal(left.headerPointerIntent(leftJitter, false), 'sort');
+    t.equal(right.headerPointerIntent(rightJitter, false), 'sort');
+    t.equal(left.headerPointerIntent(leftJitter, true), 'select');
+    t.equal(right.headerPointerIntent(rightJitter, true), 'select');
+    t.equal(left.headerPointerIntent(leftJitter, false, true), 'sort');
+    t.equal(right.headerPointerIntent(rightJitter, false, true), 'sort');
+
+    const leftDrag = left.updateHeaderPointer(
+      leftJitter,
+      pointer.thresholdX,
+      pointer.startY,
+      pointer.targetColumn
+    );
+    const rightDrag = right.updateHeaderPointer(
+      rightJitter,
+      pointer.thresholdX,
+      pointer.startY,
+      pointer.targetColumn
+    );
+    t.deepEqual(leftDrag, rightDrag);
+    t.equal(leftDrag.reorder, true);
+    t.equal(left.headerPointerIntent(leftDrag, true), 'reorder');
+    t.equal(right.headerPointerIntent(rightDrag, true), 'reorder');
+    const leftSticky = left.updateHeaderPointer(
+      leftDrag,
+      pointer.returnedX,
+      pointer.startY,
+      pointer.sourceColumn
+    );
+    const rightSticky = right.updateHeaderPointer(
+      rightDrag,
+      pointer.returnedX,
+      pointer.startY,
+      pointer.sourceColumn
+    );
+    t.deepEqual(leftSticky, rightSticky);
+    t.equal(leftSticky.reorder, true);
+
+    for (const item of fixture.moveCases) {
+      const leftOrder = left.moveResultColumn(fixture.columns, item.sourceColumn, item.targetColumn);
+      const rightOrder = right.moveResultColumn(fixture.columns, item.sourceColumn, item.targetColumn);
+      t.deepEqual(leftOrder, rightOrder);
+      t.deepEqual(leftOrder, item.expected);
+      t.equal(leftOrder === fixture.columns, false);
+    }
+    for (const item of fixture.moveByCases) {
+      const leftMove = left.moveResultColumnBy(fixture.columns.length, item.focusedColumn, item.delta);
+      const rightMove = right.moveResultColumnBy(fixture.columns.length, item.focusedColumn, item.delta);
+      t.deepEqual(leftMove, rightMove);
+      t.deepEqual(leftMove, item.expected);
+    }
+
+    const leftSelection = left.fullResultColumnSelection(undefined, 1, fixture.rowCount, false);
+    const rightSelection = right.fullResultColumnSelection(undefined, 1, fixture.rowCount, false);
+    t.deepEqual(leftSelection, rightSelection);
+    t.deepEqual(leftSelection, fixture.simpleSelection);
+    const leftExtended = left.fullResultColumnSelection(leftSelection, 2, fixture.rowCount, true);
+    const rightExtended = right.fullResultColumnSelection(rightSelection, 2, fixture.rowCount, true);
+    t.deepEqual(leftExtended, rightExtended);
+    t.deepEqual(leftExtended, fixture.extendedSelection);
+  });
+
+  await ctx.case(caseDef(
+    'result-table-header-aria-and-row-parity',
+    'result table header accessibility and absolute row striping',
+    'deterministic',
+    'PASS',
+    'Both products exposed the same sort state, indicator, accessible label, and absolute display-row-based parity classes.'
+  ), t => {
+    for (const direction of [undefined, 'asc', 'desc']) {
+      const sorted = direction !== undefined;
+      t.equal(left.resultTableAriaSort(sorted, direction), right.resultTableAriaSort(sorted, direction));
+      t.equal(left.resultTableSortIndicator(sorted, direction), right.resultTableSortIndicator(sorted, direction));
+    }
+    const leftLabel = left.resultTableHeaderAriaLabel('price', 1, 3, true, 'desc');
+    const rightLabel = right.resultTableHeaderAriaLabel('price', 1, 3, true, 'desc');
+    t.equal(leftLabel, rightLabel);
+    t.equal(leftLabel, fixture.ariaLabel);
+    const leftClasses = [0, 1, 100, 101].map(left.absoluteDisplayRowClass);
+    const rightClasses = [0, 1, 100, 101].map(right.absoluteDisplayRowClass);
+    t.deepEqual(leftClasses, rightClasses);
+    t.deepEqual(leftClasses, fixture.rowClasses);
+  });
+
+  await ctx.case(caseDef(
+    'result-table-source-ordinal-widths',
+    'source-ordinal width persistence through reorder, hide/show, and rename',
+    'deterministic',
+    'PASS',
+    'SQLTools retained its positional width module while both products shared the same runtime column move; widths remained attached to immutable source ordinals.'
+  ), t => {
+    t.ok(reference.gridWidths && typeof reference.gridWidths.sourceColumnPositions === 'function');
+    const sourceSchema = ['a', 'b', 'c', 'd'];
+    const leftOrder = left.moveResultColumn(sourceSchema, 2, 0);
+    const rightOrder = right.moveResultColumn(sourceSchema, 2, 0);
+    t.deepEqual(leftOrder, ['c', 'a', 'b', 'd']);
+    t.deepEqual(leftOrder, rightOrder);
+    const positions = reference.gridWidths.sourceColumnPositions(sourceSchema, rightOrder);
+    const standalonePositions = left.resultColumnSourceOrdinals(sourceSchema, leftOrder);
+    t.deepEqual(positions, [2, 0, 1, 3]);
+    t.deepEqual(standalonePositions, positions);
+    const widths = { 0: 111, 2: 333 };
+    t.deepEqual(
+      positions.map(position => reference.gridWidths.resolvedPositionalColumnWidth(
+        position,
+        160,
+        widths,
+        false,
+        {}
+      )),
+      [333, 111, 160, 160]
+    );
+    const hiddenColumns = ['c', 'a', 'd'];
+    const hiddenPositions = reference.gridWidths.sourceColumnPositions(
+      sourceSchema,
+      hiddenColumns
+    );
+    t.deepEqual(hiddenPositions, [2, 0, 3]);
+    t.deepEqual(left.resultColumnSourceOrdinals(sourceSchema, hiddenColumns), hiddenPositions);
+    const shownPositions = reference.gridWidths.sourceColumnPositions(sourceSchema, rightOrder);
+    t.deepEqual(shownPositions, positions);
+    t.deepEqual(left.resultColumnSourceOrdinals(sourceSchema, rightOrder), shownPositions);
+    t.deepEqual(
+      reference.gridWidths.sourceColumnPositions(
+        ['renamed-a', 'renamed-b', 'renamed-c', 'renamed-d'],
+        ['renamed-a', 'renamed-b', 'renamed-c', 'renamed-d']
+      ),
+      [0, 1, 2, 3],
+      'a same-position renamed schema must retain positional width ownership'
+    );
+    t.deepEqual(
+      left.resultColumnSourceOrdinals(
+        ['renamed-a', 'renamed-b', 'renamed-c', 'renamed-d'],
+        ['renamed-a', 'renamed-b', 'renamed-c', 'renamed-d']
+      ),
+      [0, 1, 2, 3]
+    );
+    const duplicateSource = ['a', 'a', 'b'];
+    const duplicateVisible = ['a', 'b', 'a'];
+    t.deepEqual(
+      left.resultColumnSourceOrdinals(duplicateSource, duplicateVisible),
+      reference.gridWidths.sourceColumnPositions(duplicateSource, duplicateVisible)
+    );
+    for (const position of positions) {
+      t.equal(
+        left.resolvedResultColumnWidth(position, 160, widths, false, {}),
+        reference.gridWidths.resolvedPositionalColumnWidth(
+          position,
+          160,
+          widths,
+          false,
+          {}
+        )
+      );
+    }
+    t.equal(
+      left.resolvedResultColumnWidth(1, 160, {}, true, { 1: 222 }),
+      reference.gridWidths.resolvedPositionalColumnWidth(1, 160, {}, true, { 1: 222 })
+    );
   });
 }
 
@@ -704,9 +1010,8 @@ async function liveQCases(ctx) {
       id: 'live-q-multiline-script-grouping',
       area: 'live direct-q multiline script grouping',
       mode: 'live-q',
-      expectedStatus: 'GAP',
-      rank: 2,
-      action: 'Backport a compatible script-grouping adapter to the SQLTools driver without changing its UI/session ownership.',
+      expectedStatus: 'DIFFERENT_BY_DESIGN',
+      rationale: 'Standalone owns client-side complete-source grouping while SQLTools retains its legacy raw namespace wrapper. Changing that SQLTools core behavior is outside KX result-view parity.',
       detail: 'The standalone compatibility grouper succeeds without .Q.ld; the pinned reference raw value wrapper raises a genuine q error for the same multiline source.',
     }, async t => {
       await leftClient.query('system "d .standaloneParityScript";system "d ."');
@@ -796,25 +1101,24 @@ async function boundaryCases(ctx) {
     t.match(storeSource, /context\.secrets\.(?:get|store|delete)/);
   });
 
-  await ctx.case({
-    id: 'standalone-extension-host-automation',
-    area: 'standalone Extension Host automation',
-    mode: 'boundary',
-    expectedStatus: 'GAP',
-    rank: 1,
-    action: 'Add a standalone Extension Host suite for activation, KX connection tree/form/SecretStorage, commands, result-panel protocol, cancellation, and settings without importing SQLTools.',
-    detail: 'Reference has test/e2e; standalone has deterministic host-free tests but no test/e2e directory or Extension Host workflow.',
-  }, t => {
-    t.equal(fs.existsSync(path.join(standalone.root, 'test', 'e2e')), false);
+  await ctx.case(caseDef(
+    'standalone-extension-host-automation',
+    'independent Extension Host automation',
+    'boundary',
+    'PASS',
+    'Standalone owns a real VS Code Extension Host acceptance harness and reference retains its independent SQLTools webview E2E harness.'
+  ), t => {
+    t.equal(fs.existsSync(path.join(standalone.root, 'test', 'extension-host', 'index.js')), true);
+    t.equal(standalone.packageJson.scripts['test:extension-host'], 'npm run compile && node scripts/run-extension-host-test.js');
     t.equal(fs.existsSync(path.join(reference.root, 'test', 'e2e', 'run.js')), true);
   });
 
   await ctx.case({
     id: 'extension-host-visual-manual',
-    area: 'VS Code Extension Host and visual/manual UX',
+    area: 'interactive visual/manual UX',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'Neither code nor code-insiders is installed, so this fixture cannot exercise Extension Host or visual behavior.',
+    rationale: 'Automated Extension Host behavior is covered above, but neither code nor code-insiders is on PATH for interactive visual inspection of styling, cursors, and drag feedback.',
   }, t => {
     t.equal(commandOnPath('code'), false);
     t.equal(commandOnPath('code-insiders'), false);

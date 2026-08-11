@@ -411,6 +411,19 @@ export function filterColumnarPanelResult(result: ColumnarPanelResult, visibleCo
   });
 }
 
+export function filterColumnarPanelResultBySourceOrdinals(
+  result: ColumnarPanelResult,
+  sourceColumnOrdinals: readonly number[]
+): ColumnarPanelResult {
+  const sourceColumnIndexes = sourceColumnOrdinals
+    .map(ordinal => Math.floor(Number(ordinal)))
+    .filter(ordinal => Number.isSafeInteger(ordinal) && ordinal >= 0 && ordinal < result.columns.length);
+  const filteredColumns = sourceColumnIndexes.map(ordinal => result.columns[ordinal]);
+  return createColumnarPanelResult(filteredColumns, result.rowCount, (rowIndex, columnIndex) =>
+    result.cellValue(rowIndex, sourceColumnIndexes[columnIndex])
+  );
+}
+
 export function applyColumnarRowOrder(result: ColumnarPanelResult, rowOrder: number[] | undefined): ColumnarPanelResult {
   if (!rowOrder) {
     return result;
@@ -749,33 +762,15 @@ function compareNonEmptyCellText(left: string, right: string): number {
   const leftNumber = numericSortValue(left);
   const rightNumber = numericSortValue(right);
   if (leftNumber !== null && rightNumber !== null) {
-    if (leftNumber < rightNumber) {
-      return -1;
-    }
-    if (leftNumber > rightNumber) {
-      return 1;
-    }
-    return 0;
+    return leftNumber < rightNumber ? -1 : leftNumber > rightNumber ? 1 : 0;
   }
 
-  if (left < right) {
-    return -1;
-  }
-  if (left > right) {
-    return 1;
-  }
-  return 0;
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 function booleanSortValue(value: string): number | null {
   const normalized = value.trim().toLocaleLowerCase();
-  if (normalized === 'false') {
-    return 0;
-  }
-  if (normalized === 'true') {
-    return 1;
-  }
-  return null;
+  return normalized === 'false' ? 0 : normalized === 'true' ? 1 : null;
 }
 
 function numericSortValue(value: string): number | null {
@@ -783,7 +778,6 @@ function numericSortValue(value: string): number | null {
   if (!/^[+-]?(?:(?:\d+\.?\d*)|(?:\.\d+))(?:[eE][+-]?\d+)?$/.test(normalized)) {
     return null;
   }
-
   const number = Number(normalized);
   return Number.isFinite(number) ? number : null;
 }

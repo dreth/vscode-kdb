@@ -501,10 +501,10 @@
 </li>
 
           <li class="md-nav__item">
-  <a href="#portable-snapshot-limits" class="md-nav__link">
+  <a href="#portable-preview-and-full-results" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Portable snapshot limits
+        Portable preview and full results
 
     </span>
   </a>
@@ -906,10 +906,10 @@
 </li>
 
           <li class="md-nav__item">
-  <a href="#portable-snapshot-limits" class="md-nav__link">
+  <a href="#portable-preview-and-full-results" class="md-nav__link">
     <span class="md-ellipsis">
 
-        Portable snapshot limits
+        Portable preview and full results
 
     </span>
   </a>
@@ -1049,7 +1049,7 @@
 <p>A successful Direct IPC result from the default mixed runner or optional controller has two representations:</p>
 <ol>
 <li>an extension-host live result backed by the decoded q value; and</li>
-<li>a safe bounded <code>application/vnd.kx.result+json</code> version 1 snapshot plus <code>text/plain</code> fallback stored in notebook output.</li>
+<li>a strict first-party <code>application/vnd.kx.result+json</code> version 2 payload with fresh output identity, <code>preview</code> or <code>full</code> persistence mode, and a bounded <code>text/plain</code> fallback stored in notebook output.</li>
 </ol>
 <p>While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. q general null/no-value responses produced by assignments, declarations, and calls such as <code>hopen</code>, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.</p>
 <p>The renderer is a compact adaptation of the standard KX Results interaction model:</p>
@@ -1060,7 +1060,8 @@
 <li>selection copy appears only after selecting cells, in a compact <strong>Tools</strong> menu with one format selector and one Copy action; and</li>
 <li>no inert Reset Size, default disabled match-navigation, duplicate Copy TSV/CSV, or placeholder controls are shown.</li>
 </ul>
-<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Three-state sort, drag selection, Shift-range selection, and keyboard navigation remain available. A selected rectangle of at most 20,000 cells can be copied through the owning extension-host record, including selected rows outside the currently loaded virtual slice. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Column hide/reorder and full export remain panel features. <strong>KX Results</strong> hands the same live value to the full panel.</p>
+<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Header click cycles source/ascending/descending order, movement of at least 5 CSS pixels reorders without sorting, <code>Ctrl</code>/<code>Cmd</code>+click or <code>Ctrl</code>/<code>Cmd</code>+Space selects a column, <code>Enter</code>/<code>Space</code> sorts, and <code>Alt</code>+Left/Right reorders. Accessible labels and <code>aria-sort</code> expose the current state. Column order stays local to the logical output and valid schema, including live refresh and full/preview rerender, and never leaks when VS Code reuses a renderer item ID for another output.</p>
+<p>Drag/Shift/keyboard body selection remains available. A selected rectangle of at most 20,000 cells can be copied through the owning extension-host record, including selected rows and more than 128 selected columns outside the currently loaded virtual slice; source column ordinals preserve reordered copy. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Odd absolute display rows use theme-aware subtle striping, with selection/search/loading precedence and forced-color safety. Column hide and full export remain panel features. <strong>KX Results</strong> hands the same live value to the full panel.</p>
 <p>Inline charts use the same real capability model as the panel:</p>
 <table>
 <thead>
@@ -1088,7 +1089,7 @@
 </tr>
 </tbody>
 </table>
-<p>The notebook-only visible Point cap is removed. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and chart sampling defaults still bound work, and compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed. Legend-hidden series remain hidden through zoom, Reset zoom/double-click, explicit rerender, resize, renderer settings messages, and compatible configuration updates. Zoom refinement remains available after opening the value in the full KX Results panel; the notebook renderer does not advertise a Refine action it cannot perform.</p>
+<p>The notebook-only visible Point cap is removed. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and chart sampling defaults still bound work, and compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed; live zoom, pan, and reset input stays disabled until that explicit render completes. Plain drag zooms X; <code>Shift</code>+drag, Pan left/right, or Left/Right pans X by 20% of the visible span; Home and Reset restore the immutable full range. For the same absolute X range, settled pan uses the exact unchanged zoom range-loading/resampling decision. Saved charts rebuild from immutable stored rows. Late replies cannot overwrite a reset or newer range, Y remains automatic for visible X, and legend-hidden series survive compatible refreshes.</p>
 <p><code>vscode-kdb.results.*</code> is the common durable settings source for live notebook results and the standard panel. Supported density/sizing, array formatting, qText and value-display strategies, elapsed-time display, and chart changes use a validated renderer/extension message path. A supported setting changed from a live notebook result updates the same global VS Code configuration used by other live q cells and open KX panels.</p>
 <h3 id="exact-live-lifetime">Exact live lifetime</h3>
 <p>The live registry exists only in memory for the current extension-host session:</p>
@@ -1100,8 +1101,8 @@
 <li>deactivation clears the registry; and</li>
 <li>a maximum of 512 records is retained, with the oldest evicted first.</li>
 </ul>
-<p>The opaque ID persisted beside the snapshot is not an IPC handle and cannot recreate a result. If a record is absent because the notebook was reopened, the extension host ended, the cell was rerun, the notebook closed, or the cap evicted it, the renderer falls back to the saved bounded snapshot.</p>
-<h3 id="portable-snapshot-limits">Portable snapshot limits</h3>
+<p>The opaque ID persisted beside the MIME payload is not an IPC handle and cannot recreate a result. If a record is absent because the notebook was reopened, the extension host ended, the cell was rerun, the notebook closed, or the cap evicted it, the renderer uses only rows actually stored in that payload: a bounded preview or every row of an explicitly preserved full v2 result.</p>
+<h3 id="portable-preview-and-full-results">Portable preview and full results</h3>
 <table>
 <thead>
 <tr>
@@ -1122,18 +1123,14 @@
 <td><code>16384</code>-<code>10000000</code></td>
 </tr>
 <tr>
-<td>Portable columns</td>
-<td>n/a</td>
-<td>At most <code>256</code></td>
-</tr>
-<tr>
-<td>Portable cell text</td>
-<td>n/a</td>
-<td>At most <code>32768</code> characters</td>
+<td><code>vscode-kdb.notebook.preserveFullResultByDefault</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
 </tr>
 </tbody>
 </table>
-<p>First-party direct output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and <code>text/plain</code>. At the default, tables with 20 rows or fewer persist every row; larger tables persist a 20-row preview with headers/schema and an explicit omitted-row notice. The current live session value remains full and virtualized in KX Results, but the <code>.ipynb</code> does not own it. Direct output does not add <code>text/html</code> or a persisted chart specification. The separate Python helper can add escaped <code>text/html</code> and an optional persisted chart specification. Neither route stores credentials, passwords, tokens, connection objects, recoverable IPC handles, or the unbounded live result. Omitted rows cannot be recovered from a saved or reopened <code>.ipynb</code>.</p>
+<p>Preview mode is the default. <code>maxOutputRows</code> and <code>maxOutputBytes</code> control only preview persistence. The per-output <strong>Preserve full result</strong> checkbox is enabled only when a current first-party live result or an already-persisted v2 full payload can supply complete data. Checking it directly stores every exactly representable row, column, and cell without preview row/byte ceilings. If exact representation is technically impossible, KX reports an ordinary failure and does not label a preview as full. Unchecking rewrites the output to the current configured preview.</p>
+<p><code>vscode-kdb.notebook.preserveFullResultByDefault</code> checks full persistence for new Direct IPC output and defaults to <code>false</code>. Full v2 output survives ordinary <code>.ipynb</code> JSON save/reload. Legacy/Python v1 output remains accepted unchanged and displays an honest disabled checkbox. Reopened truncated previews cannot recover omitted rows without rerunning q. Direct output excludes extension-managed connection credentials, session objects, and IPC handles; user-returned q values remain eligible for exact persistence. Direct output does not add <code>text/html</code> or a persisted chart specification; the separate Python helper can add escaped <code>text/html</code> and an optional chart specification.</p>
 <p>The saved-result renderer provides the same compact table/Tools/Chart model, stable two-axis scrolling, range selection copy, explicit truncation notices, and all capability-valid chart selectors over the stored rows. Direct saved-output chart choices are transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
 <p><code>vscode-kdb.notebook.presentation</code> accepts:</p>
 <ul>
@@ -1141,7 +1138,7 @@
 <li><code>panel</code>; or</li>
 <li><code>both</code>.</li>
 </ul>
-<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell and expose a concise KX Results action: live values open in the full panel while their record exists; expired/reopened output opens only the bounded rows stored in the notebook. No mode or handoff reruns q or recovers omitted rows.</p>
+<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell and expose a concise KX Results action: live values open in the full panel while their record exists; expired/reopened output opens only rows actually stored in the notebook, whether a bounded preview or an explicitly preserved full v2 payload. No mode or handoff reruns q or recovers omitted preview rows.</p>
 <h2 id="separate-python-q-helper-route">Separate Python <code>%%q</code> helper route</h2>
 <p>Use <code>python/kx_notebook</code> only when q must run through an evaluator owned by the selected Python/IPython kernel. This is distinct from mixed mode's <strong>Run q Cell (KX)</strong>: the helper remains inside Python, requires <code>%%q</code>, and does not share q variables, namespace state, or session identity with direct KX execution by implication.</p>
 <p>The helper bundles no q runtime, PyKX binary, credential, IPC connection, or remote bridge. Install it into the same Python environment selected as the notebook kernel:</p>

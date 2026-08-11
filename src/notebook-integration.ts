@@ -12,8 +12,11 @@ import {
 } from './notebook-cell-preparation';
 import {
   KX_NOTEBOOK_MIME,
-  MAX_NOTEBOOK_BYTE_LIMIT,
+  NotebookV2CreationResult,
   PortableKxResult,
+  createPortableKxPreviewFromV2Full,
+  createPortableKxResultV2,
+  createPortableKxTextResultV2,
   portableCellValue,
   validatePortableKxResult,
 } from './notebook-contract';
@@ -30,18 +33,25 @@ import {
 import {
   NotebookLiveChartMessage,
   NotebookLiveCopyMessage,
+  NotebookLiveMessageIdentity,
   NotebookLiveResultMessage,
   NotebookLiveSearchMessage,
   NotebookLiveSliceMessage,
+  NotebookOutputPersistenceMessage,
   NotebookRendererMessage,
   MAX_NOTEBOOK_LIVE_COLUMNS,
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
   notebookRendererSettingsMessage,
+  parseNotebookLiveResultReference,
+  parseNotebookOutputReferenceFromMetadata,
+  parseNotebookPortableOutputBinding,
   parseNotebookRendererMessage,
 } from './notebook-message';
 import {
   NotebookSettings,
   hasNotebookQMarker,
   safeNotebookByteLimit,
+  safeNotebookPreserveFullResultByDefault,
   safeNotebookPresentation,
   safeNotebookRowLimit,
 } from './notebook-settings';
@@ -52,7 +62,10 @@ import {
   safeConnectionName,
   withNotebookQTarget,
 } from './notebook-q-target';
-import type { DirectQCellRunResult } from './notebook-controller';
+import {
+  DirectQCellRunResult,
+  notebookOutputItems,
+} from './notebook-controller';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
 export const SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
@@ -70,8 +83,13 @@ const NOTEBOOK_DEFAULT_LANGUAGE_CONTEXT = 'vscode-kdb.notebookDefaultLanguageAva
 const NOTEBOOK_RESULT_CONTEXT = 'vscode-kdb.notebookResultAvailable';
 const NOTEBOOK_DIRECT_CONTROLLER_CONTEXT =
   'vscode-kdb.notebookDirectQControllerSelected';
-const MAX_NOTEBOOK_SCAN_CELLS = 10_000;
-const MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL = 2_000;
+
+interface RendererOutputBindingEpoch {
+  renderGeneration: number;
+  liveId?: string;
+  latestPersistenceRequestId: number;
+  rejectedReason?: string;
+}
 
 export interface DirectQNotebookRunner {
   readonly onDidChangeState: vscode.Event<void>;
@@ -94,6 +112,10 @@ export class NotebookIntegration implements vscode.Disposable {
   private readonly context: vscode.ExtensionContext;
   private readonly disposables: vscode.Disposable[] = [];
   private readonly messaging: vscode.NotebookRendererMessaging;
+  private readonly rendererOutputBindings = new WeakMap<
+    vscode.NotebookEditor,
+    Map<string, RendererOutputBindingEpoch>
+  >();
   private readonly directRunner: DirectQNotebookRunner | undefined;
   private readonly statusBarChanged = new vscode.EventEmitter<void>();
   private readonly cellLanguageProvider = new NotebookCellLanguageProvider<vscode.TextDocument>(
@@ -165,6 +187,16 @@ export class NotebookIntegration implements vscode.Disposable {
           this.updateContexts();
         })]
         : []),
+      ...(this.options.liveResults
+        ? [this.options.liveResults.onDidInvalidate(event => {
+          void this.messaging.postMessage({
+            type: 'liveResultInvalidated',
+            liveId: event.id,
+            reason: event.reason,
+            message: liveInvalidationMessage(event.reason),
+          });
+        })]
+        : []),
       this.statusBarChanged
     );
     this.updateContexts();
@@ -189,11 +221,34 @@ export class NotebookIntegration implements vscode.Disposable {
       return;
     }
     if (message.type === 'ready') {
+      this.rendererOutputBindings.delete(event.editor);
       await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
       return;
     }
+    if (message.type === 'bindOutput') {
+      this.bindRendererOutput(event.editor, message);
+      return;
+    }
+    if (message.type === 'unbindOutput') {
+      const bindings = this.rendererOutputBindings.get(event.editor);
+      const current = bindings?.get(message.outputId);
+      if (current && current.renderGeneration === message.renderGeneration &&
+        current.liveId === message.liveId) {
+        bindings?.delete(message.outputId);
+      }
+      return;
+    }
     if (message.type === 'openPreview') {
-      const payload = matchingNotebookOutput(event.editor.notebook, message.payload);
+      if (message.payload.version === 2 &&
+        !this.isCurrentRendererOutput(event.editor, message)) {
+        return;
+      }
+      const payload = message.payload.version === 2
+        ? uniquelyBoundNotebookOutput(
+          event.editor.notebook,
+          message.outputId
+        )?.payload
+        : matchingLegacyNotebookOutput(event.editor.notebook, message.payload);
       if (!payload) {
         throw new Error('The requested preview is not present in the current notebook.');
       }
@@ -210,16 +265,67 @@ export class NotebookIntegration implements vscode.Disposable {
     const notebookUri = event.editor.notebook.uri.toString();
     const resultSettings = sharedKxResultSettings();
     const displayOptions = liveNotebookDisplayOptions(resultSettings);
+    if (message.type === 'setOutputPersistence') {
+      if (!this.claimRendererPersistenceRequest(event.editor, message)) {
+        return;
+      }
+      const response = await this.setOutputPersistence(
+        event.editor,
+        message,
+        liveResults,
+        displayOptions,
+        () => this.isCurrentRendererPersistenceRequest(event.editor, message)
+      );
+      await this.messaging.postMessage(response, event.editor);
+      return;
+    }
+    if (!this.isCurrentRendererOutput(event.editor, message)) {
+      return;
+    }
+    const rejectedReason = this.rendererOutputBindings
+      .get(event.editor)?.get(message.outputId)?.rejectedReason;
+    if (rejectedReason) {
+      await this.postUnavailableLiveRequest(event.editor, message, rejectedReason);
+      return;
+    }
+    let bound: BoundNotebookOutput | undefined;
+    try {
+      bound = uniquelyBoundNotebookOutput(event.editor.notebook, message.outputId);
+    } catch (error) {
+      await this.postUnavailableLiveRequest(event.editor, message, safeHostError(error));
+      return;
+    }
+    if (!bound || bound.liveId !== message.liveId) {
+      await this.postUnavailableLiveRequest(
+        event.editor,
+        message,
+        'The live result is no longer bound to this notebook output.'
+      );
+      return;
+    }
+    const liveResultMatchesCell = !!liveResults?.hasForOutput(
+      message.liveId,
+      notebookUri,
+      bound.cell.document.uri.toString(),
+      message.outputId
+    );
     if (message.type === 'requestLiveResult') {
       await this.messaging.postMessage(
         liveResultMessage(
-          liveResults,
+          liveResultMatchesCell ? liveResults : undefined,
           notebookUri,
-          message.liveId,
-          message.requestId,
+          message,
           displayOptions
         ),
         event.editor
+      );
+      return;
+    }
+    if (!liveResultMatchesCell) {
+      await this.postUnavailableLiveRequest(
+        event.editor,
+        message,
+        'The complete live result is no longer available. Use the saved notebook output or rerun the cell.'
       );
       return;
     }
@@ -263,14 +369,6 @@ export class NotebookIntegration implements vscode.Disposable {
     if (message.type === 'copyLiveRange') {
       let response: NotebookLiveCopyMessage;
       try {
-        const sortColumn = message.sortColumn && message.sortDirection
-          ? liveSourceColumnMap(
-            liveResults,
-            notebookUri,
-            message.liveId,
-            displayOptions
-          ).get(message.sortColumn)
-          : undefined;
         const text = liveResults?.copyText(
           message.liveId,
           notebookUri,
@@ -279,12 +377,13 @@ export class NotebookIntegration implements vscode.Disposable {
             endRow: message.endRow,
             startColumn: message.startColumn,
             endColumn: message.endColumn,
+            columnOrdinals: message.columnOrdinals,
             format: message.format,
             includeHeaders: message.includeHeaders,
             includeRowIndex: message.includeRowIndex,
-            ...(sortColumn && message.sortDirection
+            ...(message.sortOrdinal !== undefined && message.sortDirection
               ? {
-                sortColumn,
+                sortOrdinal: message.sortOrdinal,
                 sortDirection: message.sortDirection,
               }
               : {}),
@@ -297,15 +396,13 @@ export class NotebookIntegration implements vscode.Disposable {
         await vscode.env.clipboard.writeText(text);
         response = {
           type: 'liveCopy',
-          liveId: message.liveId,
-          requestId: message.requestId,
+          ...liveMessageIdentity(message),
           ok: true,
         };
       } catch (error) {
         response = {
           type: 'liveCopy',
-          liveId: message.liveId,
-          requestId: message.requestId,
+          ...liveMessageIdentity(message),
           ok: false,
           message: safeHostError(error),
         };
@@ -316,6 +413,380 @@ export class NotebookIntegration implements vscode.Disposable {
     if (message.type === 'openLiveResult') {
       this.openLiveResult(liveResults, notebookUri, message.liveId, displayOptions);
     }
+  }
+
+  private async postUnavailableLiveRequest(
+    editor: vscode.NotebookEditor,
+    message: Exclude<NotebookRendererMessage, { type: 'ready' | 'bindOutput' | 'unbindOutput' |
+      'openPreview' | 'updateResultSetting' | 'setOutputPersistence' }>,
+    detail: string
+  ): Promise<void> {
+    const notebookUri = editor.notebook.uri.toString();
+    const displayOptions = liveNotebookDisplayOptions(sharedKxResultSettings());
+    if (message.type === 'requestLiveResult') {
+      await this.messaging.postMessage({
+        ...liveResultMessage(undefined, notebookUri, message, displayOptions),
+        message: boundedHostText(detail, 4_096),
+      }, editor);
+    } else if (message.type === 'requestLiveSlice') {
+      await this.messaging.postMessage(
+        unavailableLiveSliceMessage(message, detail),
+        editor
+      );
+    } else if (message.type === 'searchLiveResult') {
+      await this.messaging.postMessage(
+        unavailableLiveSearchMessage(message, detail),
+        editor
+      );
+    } else if (message.type === 'requestLiveChart') {
+      await this.messaging.postMessage({
+        type: 'liveChart',
+        ...liveMessageIdentity(message),
+        error: detail,
+      }, editor);
+    } else if (message.type === 'copyLiveRange') {
+      await this.messaging.postMessage({
+        type: 'liveCopy',
+        ...liveMessageIdentity(message),
+        ok: false,
+        message: detail,
+      }, editor);
+    } else if (message.type === 'openLiveResult') {
+      void vscode.window.showWarningMessage(detail);
+    }
+  }
+
+  private bindRendererOutput(
+    editor: vscode.NotebookEditor,
+    message: Extract<NotebookRendererMessage, { type: 'bindOutput' }>
+  ): void {
+    let bindings = this.rendererOutputBindings.get(editor);
+    if (!bindings) {
+      bindings = new Map<string, RendererOutputBindingEpoch>();
+      this.rendererOutputBindings.set(editor, bindings);
+    }
+    const current = bindings.get(message.outputId);
+    if (current && current.renderGeneration >= message.renderGeneration) {
+      return;
+    }
+    const reject = (reason: string): void => {
+      bindings!.set(message.outputId, {
+        renderGeneration: message.renderGeneration,
+        ...(message.liveId ? { liveId: message.liveId } : {}),
+        latestPersistenceRequestId: 0,
+        rejectedReason: reason,
+      });
+    };
+    let located: BoundNotebookOutput | undefined;
+    try {
+      located = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
+    } catch (error) {
+      reject(safeHostError(error));
+      return;
+    }
+    if (!located || located.payload.version !== 2 ||
+      located.liveId !== message.liveId) {
+      reject('The renderer output identity is no longer uniquely bound in this notebook.');
+      return;
+    }
+    const notebookUri = editor.notebook.uri.toString();
+    if (located.liveId && this.options.liveResults?.has(located.liveId, notebookUri) &&
+      !this.options.liveResults.hasForOutput(
+        located.liveId,
+        notebookUri,
+        located.cell.document.uri.toString(),
+        message.outputId
+      )) {
+      reject('The live result belongs to a different notebook output.');
+      return;
+    }
+    bindings.set(message.outputId, {
+      renderGeneration: message.renderGeneration,
+      ...(message.liveId ? { liveId: message.liveId } : {}),
+      latestPersistenceRequestId: 0,
+    });
+  }
+
+  private isCurrentRendererOutput(
+    editor: vscode.NotebookEditor,
+    identity: { outputId: string; renderGeneration: number; liveId?: string }
+  ): boolean {
+    const current = this.rendererOutputBindings.get(editor)?.get(identity.outputId);
+    return !!current && current.renderGeneration === identity.renderGeneration &&
+      (identity.liveId === undefined || current.liveId === identity.liveId);
+  }
+
+  private claimRendererPersistenceRequest(
+    editor: vscode.NotebookEditor,
+    identity: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>
+  ): boolean {
+    const current = this.rendererOutputBindings.get(editor)?.get(identity.outputId);
+    if (!current || current.renderGeneration !== identity.renderGeneration ||
+      (identity.liveId !== undefined && current.liveId !== identity.liveId) ||
+      identity.requestId <= current.latestPersistenceRequestId) {
+      return false;
+    }
+    current.latestPersistenceRequestId = identity.requestId;
+    return true;
+  }
+
+  private isCurrentRendererPersistenceRequest(
+    editor: vscode.NotebookEditor,
+    identity: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>
+  ): boolean {
+    const current = this.rendererOutputBindings.get(editor)?.get(identity.outputId);
+    return !!current && current.renderGeneration === identity.renderGeneration &&
+      current.latestPersistenceRequestId === identity.requestId &&
+      (identity.liveId === undefined || current.liveId === identity.liveId);
+  }
+
+  private async setOutputPersistence(
+    editor: vscode.NotebookEditor,
+    message: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>,
+    liveResults: LiveNotebookResultStore | undefined,
+    displayOptions: LiveNotebookDisplayOptions,
+    isCurrentRequest: () => boolean
+  ): Promise<NotebookOutputPersistenceMessage> {
+    const key = `${editor.notebook.uri.toString()}\0${message.outputId}`;
+    return withNotebookOutputMutation(key, () => this.setOutputPersistenceUnlocked(
+      editor,
+      message,
+      liveResults,
+      displayOptions,
+      isCurrentRequest
+    ));
+  }
+
+  private async setOutputPersistenceUnlocked(
+    editor: vscode.NotebookEditor,
+    message: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>,
+    liveResults: LiveNotebookResultStore | undefined,
+    displayOptions: LiveNotebookDisplayOptions,
+    isCurrentRequest: () => boolean
+  ): Promise<NotebookOutputPersistenceMessage> {
+    const identity = {
+      outputId: message.outputId,
+      renderGeneration: message.renderGeneration,
+      requestId: message.requestId,
+    };
+    const unavailable = (detail: string): NotebookOutputPersistenceMessage => ({
+      type: 'outputPersistence',
+      ...identity,
+      mode: 'preview',
+      enabled: false,
+      checked: false,
+      message: detail,
+    });
+    if (!isCurrentRequest()) {
+      return unavailable('A newer renderer request replaced this persistence action.');
+    }
+    let located: BoundNotebookOutput;
+    try {
+      const candidate = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
+      if (!candidate || candidate.payload.version !== 2 ||
+        candidate.payload.outputId !== message.outputId) {
+        return unavailable(
+          'Full-result persistence is available only for a current first-party v2 output.'
+        );
+      }
+      located = candidate;
+    } catch (error) {
+      return unavailable(safeHostError(error));
+    }
+    const currentPersistenceState = (detail: string): NotebookOutputPersistenceMessage => {
+      try {
+        const current = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
+        if (!current || current.payload.version !== 2 ||
+          current.payload.outputId !== message.outputId) {
+          return unavailable(detail);
+        }
+        return {
+          ...persistenceStateMessage(
+            identity,
+            current,
+            liveResults,
+            editor.notebook.uri.toString()
+          ),
+          message: detail,
+        };
+      } catch (error) {
+        return unavailable(`${detail} ${safeHostError(error)}`);
+      }
+    };
+
+    const settings = notebookSettings();
+    if (message.mode === 'preview') {
+      if (located.payload.persistence?.mode !== 'full') {
+        return persistenceStateMessage(
+          identity,
+          located,
+          liveResults,
+          editor.notebook.uri.toString()
+        );
+      }
+      const preview = createPortableKxPreviewFromV2Full(
+        located.payload,
+        settings.rowLimit,
+        settings.byteLimit
+      );
+      if (!preview.ok) {
+        return {
+          ...persistenceStateMessage(
+            identity,
+            located,
+            liveResults,
+            editor.notebook.uri.toString()
+          ),
+          message: preview.error,
+        };
+      }
+      if (!isCurrentRequest()) {
+        return unavailable('A newer renderer request replaced this persistence action.');
+      }
+      const writeResult = await replaceBoundNotebookOutput(
+        editor.notebook,
+        located,
+        preview.value,
+        settings.byteLimit,
+        liveResults
+      );
+      return writeResult === 'applied'
+        ? {
+          type: 'outputPersistence',
+          ...identity,
+          mode: 'preview',
+          enabled: boundOutputHasLiveResult(
+            editor.notebook,
+            message.outputId,
+            liveResults
+          ),
+          checked: false,
+        }
+        : currentPersistenceState(
+          writeResult === 'conflict-unresolved'
+            ? 'The notebook kept changing while the preview was saved. Final output ownership could not be proven; inspect the cell before retrying.'
+            : 'The notebook changed before the preview could be saved. The newer notebook state was kept.'
+        );
+    }
+
+    if (located.payload.persistence?.mode === 'full') {
+      return persistenceStateMessage(
+        identity,
+        located,
+        liveResults,
+        editor.notebook.uri.toString()
+      );
+    }
+    if (!message.liveId || located.liveId !== message.liveId ||
+      !liveResults?.hasForOutput(
+        message.liveId,
+        editor.notebook.uri.toString(),
+        located.cell.document.uri.toString(),
+        message.outputId
+      )) {
+      return unavailable(
+        'The complete live result is no longer available. Rerun the q cell to preserve it.'
+      );
+    }
+    let full: NotebookV2CreationResult;
+    try {
+      const view = liveResults.view(
+        message.liveId,
+        editor.notebook.uri.toString(),
+        displayOptions
+      );
+      if (!view) {
+        return unavailable(
+          'The complete live result is no longer available. Rerun the q cell to preserve it.'
+        );
+      }
+      const portablePanel = liveResults.portablePanel(
+        message.liveId,
+        editor.notebook.uri.toString(),
+        displayOptions
+      );
+      if (!portablePanel) {
+        return {
+          type: 'outputPersistence',
+          ...identity,
+          mode: 'preview',
+          enabled: true,
+          checked: false,
+          message: 'Full persistence failed because the q result cannot be represented exactly.',
+        };
+      }
+      full = portableFullResultFromLiveView(
+        view,
+        portablePanel,
+        located.payload,
+        message.outputId,
+        settings
+      );
+    } catch {
+      return {
+        type: 'outputPersistence',
+        ...identity,
+        mode: 'preview',
+        enabled: true,
+        checked: false,
+        message: 'Full persistence failed while converting the q result exactly.',
+      };
+    }
+    if (!full.ok) {
+      return {
+        type: 'outputPersistence',
+        ...identity,
+        mode: 'preview',
+        enabled: true,
+        checked: false,
+        message: full.error,
+      };
+    }
+    if (!isCurrentRequest()) {
+      return unavailable('A newer renderer request replaced this persistence action.');
+    }
+
+    let fresh: BoundNotebookOutput | undefined;
+    try {
+      fresh = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
+    } catch (error) {
+      return unavailable(safeHostError(error));
+    }
+    if (!fresh || fresh.payload.persistence?.mode !== 'preview' ||
+      fresh.liveId !== message.liveId ||
+      !liveResults.hasForOutput(
+        message.liveId,
+        editor.notebook.uri.toString(),
+        fresh.cell.document.uri.toString(),
+        message.outputId
+      )) {
+      return unavailable(
+        'The notebook changed before the full result could be saved. The newer notebook state was kept.'
+      );
+    }
+    if (!isCurrentRequest()) {
+      return unavailable('A newer renderer request replaced this persistence action.');
+    }
+    const writeResult = await replaceBoundNotebookOutput(
+      editor.notebook,
+      fresh,
+      full.value,
+      settings.byteLimit,
+      liveResults
+    );
+    return writeResult === 'applied'
+      ? {
+        type: 'outputPersistence',
+        ...identity,
+        mode: 'full',
+        enabled: true,
+        checked: true,
+      }
+      : currentPersistenceState(
+        writeResult === 'conflict-unresolved'
+          ? 'The notebook kept changing while the full result was saved. Final output ownership could not be proven; inspect the cell before retrying.'
+          : 'The notebook changed before the full result could be saved. The newer notebook state was kept.'
+      );
   }
 
   private async runQCellWithKx(commandCell?: vscode.NotebookCell): Promise<void> {
@@ -336,9 +807,15 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return;
     }
-    const cell = commandCell?.notebook === editor.notebook
-      ? commandCell
+    const cell = commandCell
+      ? currentNotebookCell(editor.notebook, commandCell)
       : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    if (commandCell && !cell) {
+      void vscode.window.showWarningMessage(
+        'The q cell that opened this KX action is no longer in the active notebook. Select the current cell and retry.'
+      );
+      return;
+    }
     if (!cell || !isQCell(cell)) {
       void vscode.window.showWarningMessage(
         'Run q Cell (KX) applies only to a q-language code cell in the active Jupyter notebook.'
@@ -362,7 +839,7 @@ export class NotebookIntegration implements vscode.Disposable {
       );
     } else if (result === 'stale') {
       void vscode.window.showWarningMessage(
-        'The q cell or its output changed while KX was running, so Run q Cell (KX) did not overwrite it.'
+        'The q cell or its output changed while KX was running. Final output ownership could not be proven; inspect the cell before retrying.'
       );
     } else if (result === 'write-failed') {
       void vscode.window.showErrorMessage(
@@ -393,9 +870,15 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return undefined;
     }
-    const cell = commandCell?.notebook === editor.notebook
-      ? commandCell
+    const cell = commandCell
+      ? currentNotebookCell(editor.notebook, commandCell)
       : activeTextNotebookCell(editor) ?? selectedCell(editor);
+    if (commandCell && !cell) {
+      void vscode.window.showWarningMessage(
+        'The q cell that opened this KX action is no longer in the active notebook. Select the current cell and retry.'
+      );
+      return undefined;
+    }
     if (!cell || !isQCell(cell)) {
       void vscode.window.showWarningMessage(
         'Choose q Target applies only to a q-language code cell in the active Jupyter notebook.'
@@ -949,6 +1432,9 @@ export function notebookSettings(): NotebookSettings {
     presentation: safeNotebookPresentation(configuration.get('presentation')),
     rowLimit: safeNotebookRowLimit(configuration.get('maxOutputRows')),
     byteLimit: safeNotebookByteLimit(configuration.get('maxOutputBytes')),
+    preserveFullResultByDefault: safeNotebookPreserveFullResultByDefault(
+      configuration.get('preserveFullResultByDefault')
+    ),
   };
 }
 
@@ -973,6 +1459,19 @@ function activeTextNotebookCell(editor: vscode.NotebookEditor): vscode.NotebookC
     }
   }
   return undefined;
+}
+
+function currentNotebookCell(
+  notebook: vscode.NotebookDocument,
+  supplied: vscode.NotebookCell
+): vscode.NotebookCell | undefined {
+  if (supplied.notebook !== notebook || notebook.isClosed) {
+    return undefined;
+  }
+  const cells = notebook.getCells();
+  return cells.find(cell => cell === supplied) ?? cells.find(
+    cell => cell.document.uri.toString() === supplied.document.uri.toString()
+  );
 }
 
 function qCellResources(editor: vscode.NotebookEditor | undefined): string[] {
@@ -1025,16 +1524,46 @@ function firstPortableOutput(cell: vscode.NotebookCell): PortableKxResult | unde
   return portableOutputs(cell)[0];
 }
 
+interface BoundNotebookOutput {
+  cell: vscode.NotebookCell;
+  cellIndex: number;
+  cellDocumentVersion: number;
+  notebookVersion: number;
+  output: vscode.NotebookCellOutput;
+  outputIndex: number;
+  payload: PortableKxResult;
+  liveId?: string;
+}
+
+type BoundNotebookOutputWriteResult = 'applied' | 'stale' | 'conflict-unresolved';
+
+const notebookOutputMutationQueues = new Map<string, Promise<void>>();
+
+async function withNotebookOutputMutation<T>(
+  key: string,
+  action: () => Promise<T>
+): Promise<T> {
+  const previous = notebookOutputMutationQueues.get(key) || Promise.resolve();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const queued = previous.catch(() => undefined).then(() => gate);
+  notebookOutputMutationQueues.set(key, queued);
+  await previous.catch(() => undefined);
+  try {
+    return await action();
+  } finally {
+    release();
+    if (notebookOutputMutationQueues.get(key) === queued) {
+      notebookOutputMutationQueues.delete(key);
+    }
+  }
+}
+
 function portableOutputs(cell: vscode.NotebookCell): PortableKxResult[] {
   const payloads: PortableKxResult[] = [];
-  let scannedItems = 0;
   for (const output of cell.outputs) {
     for (const item of output.items) {
-      scannedItems += 1;
-      if (scannedItems > MAX_NOTEBOOK_OUTPUT_ITEMS_PER_CELL) {
-        return payloads;
-      }
-      if (item.mime !== KX_NOTEBOOK_MIME || item.data.byteLength > MAX_NOTEBOOK_BYTE_LIMIT) {
+      if (item.mime !== KX_NOTEBOOK_MIME) {
         continue;
       }
       try {
@@ -1050,13 +1579,12 @@ function portableOutputs(cell: vscode.NotebookCell): PortableKxResult[] {
   return payloads;
 }
 
-function matchingNotebookOutput(
+function matchingLegacyNotebookOutput(
   notebook: vscode.NotebookDocument,
   requested: PortableKxResult
 ): PortableKxResult | undefined {
   const canonical = JSON.stringify(requested);
-  const cellCount = Math.min(notebook.cellCount, MAX_NOTEBOOK_SCAN_CELLS);
-  for (let index = 0; index < cellCount; index++) {
+  for (let index = 0; index < notebook.cellCount; index++) {
     for (const payload of portableOutputs(notebook.cellAt(index))) {
       if (JSON.stringify(payload) === canonical) {
         return payload;
@@ -1064,6 +1592,627 @@ function matchingNotebookOutput(
     }
   }
   return undefined;
+}
+
+function uniquelyBoundNotebookOutput(
+  notebook: vscode.NotebookDocument,
+  outputId: string
+): BoundNotebookOutput | undefined {
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(outputId)) {
+    return undefined;
+  }
+  const matches: BoundNotebookOutput[] = [];
+  for (let cellIndex = 0; cellIndex < notebook.cellCount; cellIndex++) {
+    const cell = notebook.cellAt(cellIndex);
+    for (let outputIndex = 0; outputIndex < cell.outputs.length; outputIndex++) {
+      const output = cell.outputs[outputIndex];
+      const outer = parseNotebookOutputReferenceFromMetadata(output.metadata);
+      if (outer?.id !== outputId) {
+        continue;
+      }
+      const items = output.items.filter(item => item.mime === KX_NOTEBOOK_MIME);
+      if (items.length !== 1) {
+        throw new Error('The requested KX output must contain exactly one portable result item.');
+      }
+      let payload: PortableKxResult | undefined;
+      try {
+        const validation = validatePortableKxResult(
+          JSON.parse(new TextDecoder().decode(items[0].data))
+        );
+        if (validation.ok && validation.value.version === 2) {
+          payload = validation.value;
+        }
+      } catch {
+        // Report malformed matching output as unavailable below.
+      }
+      if (!payload) {
+        continue;
+      }
+      if (payload.outputId !== outputId) {
+        throw new Error('The requested KX output has inconsistent inner and outer identity.');
+      }
+      const live = parseNotebookLiveResultReference(
+        output.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
+      );
+      matches.push({
+        cell,
+        cellIndex,
+        cellDocumentVersion: cell.document.version,
+        notebookVersion: notebook.version,
+        output,
+        outputIndex,
+        payload,
+        ...(live ? { liveId: live.id } : {}),
+      });
+    }
+  }
+  if (matches.length > 1) {
+    throw new Error('The requested KX output identity is duplicated in this notebook.');
+  }
+  return matches[0];
+}
+
+function portableFullResultFromLiveView(
+  view: NonNullable<ReturnType<LiveNotebookResultStore['view']>>,
+  portablePanel: NonNullable<ReturnType<LiveNotebookResultStore['portablePanel']>>,
+  current: PortableKxResult,
+  outputId: string,
+  settings: NotebookSettings
+): NotebookV2CreationResult {
+  const persistedQSource = current.provenance.qSource;
+  if (portablePanel.mode === 'text') {
+    return createPortableKxTextResultV2({
+      text: portablePanel.text,
+      rowLimit: settings.rowLimit,
+      byteLimit: settings.byteLimit,
+      label: view.connectionName,
+      elapsedMs: view.elapsedMs,
+      ...(persistedQSource === undefined ? {} : { qSource: persistedQSource }),
+      marker: 'direct-ipc',
+    }, { outputId, persistenceMode: 'full' });
+  }
+  return createPortableKxResultV2({
+    columns: portablePanel.result.columns.slice(),
+    rows: [],
+    cellValue: (rowIndex, columnIndex) => portablePanel.result.cellValue(rowIndex, columnIndex),
+    rowCount: portablePanel.result.rowCount,
+    rowLimit: settings.rowLimit,
+    byteLimit: settings.byteLimit,
+    label: view.connectionName,
+    elapsedMs: view.elapsedMs,
+    ...(persistedQSource === undefined ? {} : { qSource: persistedQSource }),
+    marker: 'direct-ipc',
+    ...(current.kind === 'table' && current.chart ? { chart: current.chart } : {}),
+  }, { outputId, persistenceMode: 'full' });
+}
+
+function persistenceStateMessage(
+  identity: { outputId: string; renderGeneration: number; requestId: number },
+  located: BoundNotebookOutput,
+  liveResults: LiveNotebookResultStore | undefined,
+  notebookUri: string
+): NotebookOutputPersistenceMessage {
+  const checked = located.payload.persistence?.mode === 'full';
+  return {
+    type: 'outputPersistence',
+    ...identity,
+    mode: checked ? 'full' : 'preview',
+    enabled: checked || !!(located.liveId && liveResults?.hasForOutput(
+      located.liveId,
+      notebookUri,
+      located.cell.document.uri.toString(),
+      identity.outputId
+    )),
+    checked,
+  };
+}
+
+function boundOutputHasLiveResult(
+  notebook: vscode.NotebookDocument,
+  outputId: string,
+  liveResults: LiveNotebookResultStore | undefined
+): boolean {
+  try {
+    const current = uniquelyBoundNotebookOutput(notebook, outputId);
+    return !!(current?.liveId && liveResults?.hasForOutput(
+      current.liveId,
+      notebook.uri.toString(),
+      current.cell.document.uri.toString(),
+      outputId
+    ));
+  } catch {
+    return false;
+  }
+}
+
+async function replaceBoundNotebookOutput(
+  notebook: vscode.NotebookDocument,
+  located: BoundNotebookOutput,
+  portable: PortableKxResult,
+  byteLimit: number,
+  liveResults: LiveNotebookResultStore | undefined
+): Promise<BoundNotebookOutputWriteResult> {
+  let current: BoundNotebookOutput | undefined;
+  try {
+    current = uniquelyBoundNotebookOutput(notebook, located.payload.outputId || '');
+  } catch {
+    return 'stale';
+  }
+  if (!current || current.cellIndex !== located.cellIndex ||
+    current.outputIndex !== located.outputIndex ||
+    notebook.version !== located.notebookVersion ||
+    current.cell.document.version !== located.cellDocumentVersion ||
+    current.output !== located.output ||
+    JSON.stringify(current.payload) !== JSON.stringify(located.payload)) {
+    return 'stale';
+  }
+  const replacementOutput = new vscode.NotebookCellOutput(
+    notebookOutputItems(portable, byteLimit),
+    { ...current.output.metadata }
+  );
+  const replacement = new vscode.NotebookCellData(
+    current.cell.kind,
+    current.cell.document.getText(),
+    current.cell.document.languageId
+  );
+  replacement.metadata = { ...current.cell.metadata };
+  replacement.outputs = current.cell.outputs.map((output, index) =>
+    index === current!.outputIndex ? replacementOutput : output
+  );
+  replacement.executionSummary = current.cell.executionSummary;
+
+  const notebookUri = notebook.uri.toString();
+  const previousCellUri = current.cell.document.uri.toString();
+  const currentLiveRecord = current.liveId && liveResults?.has(current.liveId, notebookUri)
+    ? current.liveId
+    : undefined;
+  if (currentLiveRecord && !liveResults?.hasForOutput(
+    currentLiveRecord,
+    notebookUri,
+    previousCellUri,
+    located.payload.outputId || ''
+  )) {
+    return 'stale';
+  }
+  const movingLiveId = currentLiveRecord
+    ? liveResults?.beginCellMove(currentLiveRecord, notebookUri, previousCellUri)
+      ? currentLiveRecord
+      : undefined
+    : undefined;
+  if (currentLiveRecord && !movingLiveId) {
+    return 'stale';
+  }
+  let moveCompleted = false;
+  let competingCell: vscode.NotebookCellData | undefined;
+  let competingRemoval = false;
+  let structuralConflict = false;
+  let competingSnapshotUnavailable = false;
+  let expectedReconciliationCell: vscode.NotebookCellData | undefined;
+  let expectedReconciliationRemoval = false;
+  let reconciliationActive = false;
+  const expectedPortableItem = replacementOutput.items.find(item =>
+    item.mime === KX_NOTEBOOK_MIME
+  );
+
+  const resolveCommittedOutput = (): BoundNotebookOutput | undefined => {
+    const candidateCell = current!.cellIndex < notebook.cellCount
+      ? notebook.cellAt(current!.cellIndex)
+      : undefined;
+    const candidateOutput = candidateCell?.outputs[current!.outputIndex];
+    const candidateBinding = candidateOutput
+      ? parseNotebookPortableOutputBinding(candidateOutput.metadata, candidateOutput.items)
+      : undefined;
+    const candidatePortableItem = candidateOutput?.items.find(item =>
+      item.mime === KX_NOTEBOOK_MIME
+    );
+    if (!candidateCell || !candidateOutput || !candidateBinding ||
+      candidateBinding.id !== portable.outputId || !expectedPortableItem ||
+      !candidatePortableItem ||
+      !boundNotebookCellMatchesData(
+        candidateCell,
+        replacement,
+        notebook,
+        current!.cellIndex
+      ) ||
+      !sameNotebookOutputBytes(candidatePortableItem.data, expectedPortableItem.data)) {
+      return undefined;
+    }
+    const candidateLive = parseNotebookLiveResultReference(
+      candidateOutput.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
+    );
+    return {
+      cell: candidateCell,
+      cellIndex: current!.cellIndex,
+      cellDocumentVersion: candidateCell.document.version,
+      notebookVersion: notebook.version,
+      output: candidateOutput,
+      outputIndex: current!.outputIndex,
+      payload: portable,
+      ...(candidateLive ? { liveId: candidateLive.id } : {}),
+    };
+  };
+
+  const resolveUniquelyCommittedOutput = (): BoundNotebookOutput | undefined => {
+    const local = resolveCommittedOutput();
+    if (!local) {
+      return undefined;
+    }
+    try {
+      const unique = uniquelyBoundNotebookOutput(notebook, portable.outputId || '');
+      return unique && unique.cell === local.cell && unique.output === local.output
+        ? local
+        : undefined;
+    } catch {
+      return undefined;
+    }
+  };
+
+  let resolveChanged: (() => void) | undefined;
+  const changed = new Promise<void>(resolve => { resolveChanged = resolve; });
+  const subscription = vscode.workspace.onDidChangeNotebookDocument(event => {
+    if (event.notebook !== notebook) {
+      return;
+    }
+    const observe = (candidate: vscode.NotebookCell | undefined): boolean => {
+      const committed = resolveCommittedOutput();
+      if (committed && candidate === committed.cell) {
+        resolveChanged?.();
+        return true;
+      }
+      return false;
+    };
+    const captureStaleIndex = (): void => {
+      structuralConflict = true;
+      const candidate = current!.cellIndex < notebook.cellCount
+        ? notebook.cellAt(current!.cellIndex)
+        : undefined;
+      const captured = candidate
+        ? boundNotebookCellDataSnapshot(candidate) ??
+          referencedBoundNotebookCellDataSnapshot(candidate)
+        : undefined;
+      competingCell = captured;
+      competingRemoval = !candidate;
+      if (candidate && !captured) {
+        competingSnapshotUnavailable = true;
+      }
+    };
+    for (const change of event.cellChanges) {
+      if (change.cell.index === current!.cellIndex ||
+        change.cell.document.uri.toString() === previousCellUri) {
+        const expectedReconciliation = !!expectedReconciliationCell &&
+          boundNotebookCellMatchesData(
+            change.cell,
+            expectedReconciliationCell,
+            notebook,
+            current!.cellIndex
+          );
+        const ownCommit = !reconciliationActive && !expectedReconciliation && observe(change.cell);
+        if (!expectedReconciliation && !ownCommit &&
+          (change.cell.index === current!.cellIndex || !structuralConflict)) {
+          const captured = boundNotebookCellDataSnapshot(change.cell) ??
+            referencedBoundNotebookCellDataSnapshot(change.cell);
+          competingCell = captured;
+          competingRemoval = false;
+          if (!captured) {
+            competingSnapshotUnavailable = true;
+          }
+        }
+      }
+    }
+    for (const change of event.contentChanges) {
+      const removedTarget = change.removedCells.some(cell =>
+        cell.document.uri.toString() === previousCellUri
+      );
+      const relativeIndex = current!.cellIndex - change.range.start;
+      const affectsStaleIndex = change.range.start <= current!.cellIndex &&
+        (change.range.end > current!.cellIndex ||
+          change.addedCells.length !== change.removedCells.length);
+      const shiftsOrReplacesTarget = affectsStaleIndex ||
+        (!structuralConflict && removedTarget);
+      if (!shiftsOrReplacesTarget &&
+        (relativeIndex < 0 || relativeIndex >= change.addedCells.length)) {
+        continue;
+      }
+      const candidate = relativeIndex >= 0 && relativeIndex < change.addedCells.length
+        ? change.addedCells[relativeIndex]
+        : undefined;
+      const currentAtTarget = current!.cellIndex < notebook.cellCount
+        ? notebook.cellAt(current!.cellIndex)
+        : undefined;
+      const expectedReconciliation = expectedReconciliationRemoval
+        ? !currentAtTarget
+        : !!expectedReconciliationCell && !!currentAtTarget && boundNotebookCellMatchesData(
+          currentAtTarget,
+          expectedReconciliationCell,
+          notebook,
+          current!.cellIndex
+        );
+      const ownCommit = !reconciliationActive && !expectedReconciliation &&
+        observe(currentAtTarget ?? candidate);
+      if (!expectedReconciliation && !ownCommit && shiftsOrReplacesTarget) {
+        // Preserve the cell currently at the stale index. This is the only
+        // notebook state our index-based edit can overwrite after an
+        // insertion/deletion shifts the originally bound output.
+        captureStaleIndex();
+      }
+    }
+  });
+  try {
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(notebook.uri, [
+      vscode.NotebookEdit.replaceCells(
+        new vscode.NotebookRange(current.cellIndex, current.cellIndex + 1),
+        [replacement]
+      ),
+    ]);
+    let applied = false;
+    try {
+      applied = await vscode.workspace.applyEdit(edit);
+    } catch {
+      return 'stale';
+    }
+    if (!applied || notebook.isClosed) {
+      return 'stale';
+    }
+    let committed = resolveCommittedOutput();
+    if (!committed) {
+      await waitForNotebookChange(changed);
+      committed = resolveCommittedOutput();
+    }
+    if (!committed) {
+      return 'stale';
+    }
+    if (competingSnapshotUnavailable) {
+      return 'conflict-unresolved';
+    }
+    if (competingCell || competingRemoval) {
+      const desiredCell = competingCell;
+      const desiredRemoval = competingRemoval;
+      expectedReconciliationCell = desiredCell;
+      expectedReconciliationRemoval = desiredRemoval;
+      reconciliationActive = true;
+      const restored = await reconcileBoundNotebookCell(
+        notebook,
+        current.cellIndex,
+        desiredCell,
+        desiredRemoval
+      );
+      expectedReconciliationCell = undefined;
+      expectedReconciliationRemoval = false;
+      reconciliationActive = false;
+      const conflictUnresolved = !restored;
+      if (conflictUnresolved && movingLiveId) {
+        liveResults?.cancelCellMove(
+          movingLiveId,
+          notebookUri,
+          previousCellUri,
+          true
+        );
+      }
+      return conflictUnresolved ? 'conflict-unresolved' : 'stale';
+    }
+    committed = resolveUniquelyCommittedOutput();
+    if (!committed) {
+      if (movingLiveId) {
+        liveResults?.cancelCellMove(
+          movingLiveId,
+          notebookUri,
+          previousCellUri,
+          true
+        );
+      }
+      return 'conflict-unresolved';
+    }
+    if (movingLiveId) {
+      moveCompleted = !!liveResults?.completeCellMove(
+        movingLiveId,
+        notebookUri,
+        previousCellUri,
+        committed.cell.document.uri.toString()
+      );
+      if (!moveCompleted) {
+        liveResults?.cancelCellMove(
+          movingLiveId,
+          notebookUri,
+          previousCellUri,
+          true
+        );
+        return 'conflict-unresolved';
+      }
+      // Complete only after the edit has been re-resolved, then prove that the
+      // same exact binding still owns the current notebook state.
+      const final = resolveUniquelyCommittedOutput();
+      if (!final || final.output !== committed.output ||
+        final.cell.document.uri.toString() !== committed.cell.document.uri.toString()) {
+        liveResults?.remove(movingLiveId, notebookUri);
+        return 'conflict-unresolved';
+      }
+    }
+    return 'applied';
+  } finally {
+    subscription.dispose();
+    if (movingLiveId && !moveCompleted) {
+      const owners = boundNotebookBindingOwners(
+        notebook,
+        movingLiveId,
+        current!.payload.outputId || ''
+      );
+      if (owners.length === 1 &&
+        owners[0].document.uri.toString() !== previousCellUri) {
+        moveCompleted = !!liveResults?.completeCellMove(
+          movingLiveId,
+          notebookUri,
+          previousCellUri,
+          owners[0].document.uri.toString()
+        );
+        if (!moveCompleted) {
+          liveResults?.cancelCellMove(
+            movingLiveId,
+            notebookUri,
+            previousCellUri,
+            true
+          );
+        }
+      } else {
+        liveResults?.cancelCellMove(
+          movingLiveId,
+          notebookUri,
+          previousCellUri,
+          owners.length !== 1
+        );
+      }
+    }
+  }
+}
+
+function sameNotebookOutputBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.byteLength !== right.byteLength) {
+    return false;
+  }
+  for (let index = 0; index < left.byteLength; index++) {
+    if (left[index] !== right[index]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function boundNotebookCellDataSnapshot(
+  cell: vscode.NotebookCell
+): vscode.NotebookCellData | undefined {
+  return referencedBoundNotebookCellDataSnapshot(cell);
+}
+
+function referencedBoundNotebookCellDataSnapshot(
+  cell: vscode.NotebookCell
+): vscode.NotebookCellData | undefined {
+  try {
+    const data = new vscode.NotebookCellData(
+      cell.kind,
+      cell.document.getText(),
+      cell.document.languageId
+    );
+    // Retain the immutable public-API snapshot for the one affected cell.
+    data.metadata = cell.metadata;
+    data.outputs = cell.outputs as vscode.NotebookCellOutput[];
+    data.executionSummary = cell.executionSummary
+      ? {
+        executionOrder: cell.executionSummary.executionOrder,
+        success: cell.executionSummary.success,
+        ...(cell.executionSummary.timing
+          ? { timing: { ...cell.executionSummary.timing } }
+          : {}),
+      }
+      : undefined;
+    return data;
+  } catch {
+    return undefined;
+  }
+}
+
+function boundNotebookBindingOwners(
+  notebook: vscode.NotebookDocument,
+  liveId: string,
+  outputId: string
+): vscode.NotebookCell[] {
+  const owners: vscode.NotebookCell[] = [];
+  for (const cell of notebook.getCells()) {
+    for (const output of cell.outputs) {
+      const live = parseNotebookLiveResultReference(
+        output.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
+      );
+      const outer = parseNotebookOutputReferenceFromMetadata(output.metadata);
+      if (live?.id !== liveId || outer?.id !== outputId) {
+        continue;
+      }
+      const portable = parseNotebookPortableOutputBinding(output.metadata, output.items);
+      if (portable?.id === outputId) {
+        owners.push(cell);
+      }
+    }
+  }
+  return owners;
+}
+
+function boundNotebookCellMatchesData(
+  cell: vscode.NotebookCell,
+  data: vscode.NotebookCellData,
+  notebook: vscode.NotebookDocument,
+  index: number
+): boolean {
+  const cellMetadata = integrationJsonKey(cell.metadata);
+  const expectedMetadata = integrationJsonKey(data.metadata);
+  const cellSummary = integrationJsonKey(cell.executionSummary);
+  const expectedSummary = integrationJsonKey(data.executionSummary);
+  if (cellMetadata === undefined || expectedMetadata === undefined ||
+    cellSummary === undefined || expectedSummary === undefined ||
+    cell.notebook !== notebook || cell.index !== index ||
+    cell.kind !== data.kind || cell.document.languageId !== data.languageId ||
+    cell.document.getText() !== data.value ||
+    cellMetadata !== expectedMetadata || cellSummary !== expectedSummary) {
+    return false;
+  }
+  const expectedOutputs = data.outputs || [];
+  if (cell.outputs.length !== expectedOutputs.length) {
+    return false;
+  }
+  return cell.outputs.every((output, outputIndex) => {
+    const expected = expectedOutputs[outputIndex];
+    const outputMetadata = integrationJsonKey(output.metadata);
+    const expectedOutputMetadata = integrationJsonKey(expected.metadata);
+    return outputMetadata !== undefined && expectedOutputMetadata !== undefined &&
+      outputMetadata === expectedOutputMetadata &&
+      output.items.length === expected.items.length &&
+      output.items.every((item, itemIndex) => {
+        const expectedItem = expected.items[itemIndex];
+        return item.mime === expectedItem.mime &&
+          sameNotebookOutputBytes(item.data, expectedItem.data);
+      });
+  });
+}
+
+function integrationJsonKey(value: unknown): string | undefined {
+  try {
+    return value === undefined ? 'undefined' : JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+async function reconcileBoundNotebookCell(
+  notebook: vscode.NotebookDocument,
+  index: number,
+  competingCell: vscode.NotebookCellData | undefined,
+  competingRemoval: boolean
+): Promise<boolean> {
+  if (notebook.isClosed || (!competingCell && !competingRemoval)) {
+    return false;
+  }
+  const edit = new vscode.WorkspaceEdit();
+  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(
+    new vscode.NotebookRange(index, index + 1),
+    competingCell ? [competingCell] : []
+  )]);
+  try {
+    return await vscode.workspace.applyEdit(edit);
+  } catch {
+    // The mutation reports failure; never spin or overwrite another later edit.
+    return false;
+  }
+}
+
+async function waitForNotebookChange(event: Promise<void>): Promise<void> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    await Promise.race([
+      event,
+      new Promise<void>(resolve => { timer = setTimeout(resolve, 250); }),
+    ]);
+  } finally {
+    if (timer) {
+      clearTimeout(timer);
+    }
+  }
 }
 
 export function liveNotebookDisplayOptions(
@@ -1081,18 +2230,17 @@ export function liveNotebookDisplayOptions(
 export function liveResultMessage(
   liveResults: LiveNotebookResultStore | undefined,
   notebookUri: string,
-  liveId: string,
-  requestId: number,
+  identity: NotebookLiveMessageIdentity,
   displayOptions: LiveNotebookDisplayOptions
 ): NotebookLiveResultMessage {
+  const { liveId } = identity;
   let view: ReturnType<LiveNotebookResultStore['view']>;
   try {
     view = liveResults?.view(liveId, notebookUri, displayOptions);
   } catch {
     return {
       type: 'liveResult',
-      liveId,
-      requestId,
+      ...liveMessageIdentity(identity),
       available: false,
       message: 'Result unavailable.',
     };
@@ -1100,8 +2248,7 @@ export function liveResultMessage(
   if (!view) {
     return {
       type: 'liveResult',
-      liveId,
-      requestId,
+      ...liveMessageIdentity(identity),
       available: false,
       message: 'Result unavailable.',
     };
@@ -1127,8 +2274,7 @@ export function liveResultMessage(
   }
   return {
     type: 'liveResult',
-    liveId,
-    requestId,
+    ...liveMessageIdentity(identity),
     available: true,
     mode: view.mode,
     kind: boundedHostText(view.kind, 128),
@@ -1141,7 +2287,6 @@ export function liveResultMessage(
       ? { text: boundedHostText(view.text || '', 1_048_576) }
       : {}),
     metadata: {
-      query: boundedHostText(view.query, 16_384),
       connectionName: boundedHostText(view.connectionName, 512),
       elapsedMs: view.elapsedMs,
       messages,
@@ -1156,14 +2301,6 @@ export function liveSliceMessage(
   displayOptions: LiveNotebookDisplayOptions
 ): NotebookLiveSliceMessage {
   try {
-    const sortColumn = message.sortColumn && message.sortDirection
-      ? liveSourceColumnMap(
-        liveResults,
-        notebookUri,
-        message.liveId,
-        displayOptions
-      ).get(message.sortColumn)
-      : undefined;
     const slice = liveResults?.slice(
       message.liveId,
       notebookUri,
@@ -1172,9 +2309,10 @@ export function liveSliceMessage(
         endRow: message.endRow,
         startColumn: message.startColumn,
         endColumn: message.endColumn,
-        ...(sortColumn && message.sortDirection
+        columnOrdinals: message.columnOrdinals,
+        ...(message.sortOrdinal !== undefined && message.sortDirection
           ? {
-            sortColumn,
+            sortOrdinal: message.sortOrdinal,
             sortDirection: message.sortDirection,
           }
           : {}),
@@ -1182,35 +2320,40 @@ export function liveSliceMessage(
       displayOptions
     );
     if (!slice) {
-      return unavailableLiveSlice(message.liveId, message.requestId);
+      return unavailableLiveSlice(message);
     }
     return {
       type: 'liveSlice',
-      liveId: message.liveId,
-      requestId: message.requestId,
+      ...liveMessageIdentity(message),
       ...slice,
     };
   } catch (error) {
-    return unavailableLiveSlice(message.liveId, message.requestId, safeHostError(error));
+    return unavailableLiveSlice(message, safeHostError(error));
   }
 }
 
 function unavailableLiveSlice(
-  liveId: string,
-  requestId: number,
+  identity: NotebookLiveMessageIdentity,
   detail = 'Result unavailable.'
 ): NotebookLiveSliceMessage {
   return {
     type: 'liveSlice',
-    liveId,
-    requestId,
+    ...liveMessageIdentity(identity),
     startRow: 0,
     endRow: -1,
     startColumn: 0,
     endColumn: -1,
+    columnOrdinals: [],
     cells: [],
     error: detail,
   };
+}
+
+function unavailableLiveSliceMessage(
+  identity: NotebookLiveMessageIdentity,
+  detail: string
+): NotebookLiveSliceMessage {
+  return unavailableLiveSlice(identity, detail);
 }
 
 export function liveSearchMessage(
@@ -1220,49 +2363,38 @@ export function liveSearchMessage(
   displayOptions: LiveNotebookDisplayOptions
 ): NotebookLiveSearchMessage {
   try {
-    const sortColumn = message.sortColumn && message.sortDirection
-      ? liveSourceColumnMap(
-        liveResults,
-        notebookUri,
-        message.liveId,
-        displayOptions
-      ).get(message.sortColumn)
-      : undefined;
     const result = liveResults?.search(
       message.liveId,
       notebookUri,
       message.query,
       displayOptions,
-      sortColumn && message.sortDirection
+      message.sortOrdinal !== undefined && message.sortDirection
         ? {
-          sortColumn,
+          sortOrdinal: message.sortOrdinal,
           sortDirection: message.sortDirection,
         }
         : undefined
     );
     if (!result) {
-      return unavailableLiveSearch(message.liveId, message.requestId);
+      return unavailableLiveSearch(message);
     }
     return {
       type: 'liveSearch',
-      liveId: message.liveId,
-      requestId: message.requestId,
+      ...liveMessageIdentity(message),
       ...result,
     };
   } catch (error) {
-    return unavailableLiveSearch(message.liveId, message.requestId, safeHostError(error));
+    return unavailableLiveSearch(message, safeHostError(error));
   }
 }
 
 function unavailableLiveSearch(
-  liveId: string,
-  requestId: number,
+  identity: NotebookLiveMessageIdentity,
   detail = 'Result unavailable.'
 ): NotebookLiveSearchMessage {
   return {
     type: 'liveSearch',
-    liveId,
-    requestId,
+    ...liveMessageIdentity(identity),
     matches: [],
     totalScanned: 0,
     scannedCells: 0,
@@ -1270,6 +2402,13 @@ function unavailableLiveSearch(
     partial: false,
     error: detail,
   };
+}
+
+function unavailableLiveSearchMessage(
+  identity: NotebookLiveMessageIdentity,
+  detail: string
+): NotebookLiveSearchMessage {
+  return unavailableLiveSearch(identity, detail);
 }
 
 export function liveChartMessage(
@@ -1330,21 +2469,22 @@ export function liveChartMessage(
         closeColumn: sourceCloseColumn,
         maxPoints: message.maxPoints,
         maxSourceRows: resultSettings.chartMaxSourceRows,
+        ...(message.xMin !== undefined && message.xMax !== undefined
+          ? { xMin: message.xMin, xMax: message.xMax }
+          : {}),
       },
       displayOptions
     );
     if (!chart) {
       return {
         type: 'liveChart',
-        liveId: message.liveId,
-        requestId: message.requestId,
+        ...liveMessageIdentity(message),
         error: 'Result unavailable.',
       };
     }
     return {
       type: 'liveChart',
-      liveId: message.liveId,
-      requestId: message.requestId,
+      ...liveMessageIdentity(message),
       data: {
         chartType: message.chartType,
         xColumn: displayBySource.get(chart.xColumn) || message.xColumn,
@@ -1414,8 +2554,7 @@ export function liveChartMessage(
   } catch (error) {
     return {
       type: 'liveChart',
-      liveId: message.liveId,
-      requestId: message.requestId,
+      ...liveMessageIdentity(message),
       error: safeHostError(error),
     };
   }
@@ -1457,7 +2596,33 @@ function liveSourceColumnMap(
   return new Map(displayColumns.map((display, index) => [display, rawColumns[index]]));
 }
 
+function liveMessageIdentity(identity: NotebookLiveMessageIdentity): NotebookLiveMessageIdentity {
+  return {
+    outputId: identity.outputId,
+    liveId: identity.liveId,
+    renderGeneration: identity.renderGeneration,
+    requestId: identity.requestId,
+  };
+}
+
 function safeHostError(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error);
   return boundedHostText(message || 'Live KX notebook operation failed.', 4_096);
+}
+
+function liveInvalidationMessage(reason: string): string {
+  switch (reason) {
+    case 'evicted':
+      return 'The complete live result was evicted from the bounded session cache. The saved notebook output remains available.';
+    case 'duplicate-output':
+      return 'The live result identity appeared more than once, so the session binding was invalidated for safety.';
+    case 'notebook-closed':
+      return 'The notebook was closed, so its session-only complete result was released.';
+    case 'replaced':
+      return 'A newer result replaced this session-only complete result.';
+    case 'output-unbound':
+      return 'The notebook output changed or moved without this live binding. The saved output remains available.';
+    default:
+      return 'The session-only complete result is no longer available. The saved notebook output remains available.';
+  }
 }
