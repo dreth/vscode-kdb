@@ -47,16 +47,6 @@ REQUIRED_MEMBERS = {
     "extension/out/notebook-controller.js",
     "extension/out/notebook-live-results.js",
     "extension/renderer/kx-notebook-renderer.js",
-    "extension/python/kx_notebook/LICENSE",
-    "extension/python/kx_notebook/README.md",
-    "extension/python/kx_notebook/pyproject.toml",
-    "extension/python/kx_notebook/src/kx_notebook/__init__.py",
-    "extension/python/kx_notebook/src/kx_notebook/contract.py",
-    "extension/python/kx_notebook/src/kx_notebook/display.py",
-    "extension/python/kx_notebook/src/kx_notebook/fallback.py",
-    "extension/python/kx_notebook/src/kx_notebook/magic.py",
-    "extension/python/kx_notebook/src/kx_notebook/pykx.py",
-    "extension/python/kx_notebook/src/kx_notebook/testing.py",
     "extension/syntaxes/q.tmLanguage.json",
 }
 
@@ -71,7 +61,6 @@ ALLOWED_EXTENSION_ROOTS = {
     "icons",
     "syntaxes",
     "node_modules",
-    "python",
     "renderer",
 }
 
@@ -153,7 +142,6 @@ FORBIDDEN_ARCHIVE_SUFFIXES = {
 
 RUNTIME_CODE_PREFIXES = (
     "extension/out/",
-    "extension/python/kx_notebook/src/",
     "extension/renderer/",
     "extension/syntaxes/",
 )
@@ -370,8 +358,6 @@ def validate_vsix_path_policy(name: str) -> None:
 
     folded_parts = [part.casefold() for part in parts]
     forbidden = sorted(set(folded_parts) & FORBIDDEN_COMPONENTS)
-    if lowered.startswith("extension/python/kx_notebook/src/kx_notebook/"):
-        forbidden = [component for component in forbidden if component != "src"]
     if forbidden:
         raise AuditError(f"VSIX: forbidden path component {forbidden[0]!r}: {name!r}")
 

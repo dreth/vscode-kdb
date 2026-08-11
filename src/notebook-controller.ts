@@ -17,7 +17,10 @@ import {
   LiveNotebookResultRegistration,
   LiveNotebookResultStore,
 } from './notebook-live-results';
-import { NOTEBOOK_LIVE_RESULT_METADATA_KEY } from './notebook-message';
+import {
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
+  NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
+} from './notebook-message';
 import { NotebookQTargetProfile } from './notebook-q-target';
 import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
 
@@ -25,6 +28,8 @@ export const KX_Q_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.q-notebook-controller';
 export const KX_Q_NOTEBOOK_TYPE = 'jupyter-notebook';
 export const KX_Q_NOTEBOOK_CONTROLLER_LABEL = 'KX q (Direct IPC)';
 export const KX_NOTEBOOK_LIVE_METADATA_KEY = NOTEBOOK_LIVE_RESULT_METADATA_KEY;
+export const KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY =
+  NOTEBOOK_OUTPUT_BINDING_METADATA_KEY;
 export const ENABLE_DIRECT_NOTEBOOK_CONTROLLER_SETTING =
   'vscode-kdb.notebook.enableDirectController';
 
@@ -33,12 +38,27 @@ const CANCELED_AFTER_ISSUE_SUFFIX =
 
 export type DirectQCellRunResult =
   | 'executed'
+  | 'canceled'
   | 'busy'
   | 'not-q'
   | 'unsupported-notebook'
   | 'stale'
   | 'write-failed'
   | 'unavailable';
+
+export type DirectQCellRunOptions =
+  | {
+      source?: undefined;
+      runLabel?: string;
+    }
+  | {
+      source: string;
+      sourceCellSnapshot: {
+        source: string;
+        languageId: string;
+      };
+      runLabel?: string;
+    };
 
 type CellOutputReplacement =
   | vscode.NotebookCellOutput
@@ -61,6 +81,7 @@ interface MixedCellSnapshot {
   cellUri: string;
   source: string;
   languageId: string;
+  sourceOverrideAuthorized: boolean;
   outputs: readonly vscode.NotebookCellOutput[];
   executionSummary: string;
 }
@@ -163,7 +184,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
 
   public async runCell(
     cell: vscode.NotebookCell,
-    connectionId: string
+    connectionId: string,
+    options: DirectQCellRunOptions = {}
   ): Promise<DirectQCellRunResult> {
     if (this.disposed) {
       return 'unavailable';
@@ -171,7 +193,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
     if (cell.notebook.notebookType !== KX_Q_NOTEBOOK_TYPE) {
       return 'unsupported-notebook';
     }
-    if (cell.kind !== vscode.NotebookCellKind.Code || cell.document.languageId !== 'q') {
+    if (options.source !== undefined &&
+      (cell.document.getText() !== options.sourceCellSnapshot.source ||
+        cell.document.languageId !== options.sourceCellSnapshot.languageId)) {
+      return 'stale';
+    }
+    if (cell.kind !== vscode.NotebookCellKind.Code ||
+      (cell.document.languageId !== 'q' && options.source === undefined)) {
       return 'not-q';
     }
     const executionKey = cellExecutionKey(cell.notebook, cell);
@@ -180,7 +208,11 @@ export class KxQNotebookRunner implements vscode.Disposable {
     }
     this.activeExecutions.add(executionKey);
     try {
-      return await this.runMixedCell(cell, this.bridge.connectionById(connectionId));
+      return await this.runMixedCell(
+        cell,
+        this.bridge.connectionById(connectionId),
+        options
+      );
     } finally {
       this.activeExecutions.delete(executionKey);
     }
@@ -268,9 +300,10 @@ export class KxQNotebookRunner implements vscode.Disposable {
 
   private async runMixedCell(
     cell: vscode.NotebookCell,
-    connection: KxConnection | undefined
+    connection: KxConnection | undefined,
+    options: DirectQCellRunOptions = {}
   ): Promise<DirectQCellRunResult> {
-    const snapshot = mixedCellSnapshot(cell);
+    const snapshot = mixedCellSnapshot(cell, options.source !== undefined);
     const abortController = new AbortController();
     return vscode.window.withProgress(
       {
@@ -285,19 +318,20 @@ export class KxQNotebookRunner implements vscode.Disposable {
           const prepared = await this.prepareCellResult(
             cell,
             cell.notebook,
-            'Run q Cell (KX)',
+            options.runLabel || 'Run q Cell (KX)',
             token,
             abortController.signal,
             connection,
-            'notebook'
+            'notebook',
+            options.source
           );
           if (prepared.canceled === 'before-issue') {
-            return 'executed';
+            return 'canceled';
           }
           const cancellationPrepared = prepared.canceled === 'after-issue';
           if (!cancellationPrepared &&
             (token.isCancellationRequested || abortController.signal.aborted)) {
-            return 'executed';
+            return 'canceled';
           }
           const current = matchingMixedCell(snapshot);
           if (!current) {
@@ -320,7 +354,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
             if (liveResultId) {
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
             }
-            return 'executed';
+            return 'canceled';
           }
           if (written.status !== 'executed' || !written.cell) {
             if (liveResultId) {
@@ -347,7 +381,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
               return 'write-failed';
             }
           }
-          return 'executed';
+          return cancellationPrepared ? 'canceled' : 'executed';
         } catch {
           if (liveResultId) {
             this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
@@ -589,7 +623,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
     token: Pick<vscode.CancellationToken, 'isCancellationRequested'>,
     signal: AbortSignal,
     connection: KxConnection | undefined,
-    targetKind: 'active' | 'notebook'
+    targetKind: 'active' | 'notebook',
+    sourceOverride?: string
   ): Promise<PreparedCellResult> {
     let issued = false;
     const canceledOutput = (): PreparedCellResult => ({
@@ -616,11 +651,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
           ),
         };
       }
-      const source = cell.document.getText();
+      const source = sourceOverride === undefined
+        ? cell.document.getText()
+        : sourceOverride;
       if (!source.trim()) {
         return { success: true, output: [] };
       }
-      if (hasNotebookQMarker(source)) {
+      if (sourceOverride === undefined && hasNotebookQMarker(source)) {
         return {
           success: false,
           output: errorOutput(
@@ -768,7 +805,10 @@ export function directQResultOutputItems(
       marker: 'direct-ipc',
     })
     : createPortableKxResult({
-      columns: panel.result.columns.slice(),
+      columns: panel.result.columns.map((name, index) => ({
+        name,
+        type: panel.result.columnTypes?.[index] || 'mixed',
+      })),
       rows: [],
       cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
       rowCount: panel.result.rowCount,
@@ -805,6 +845,10 @@ export function liveResultOutputMetadata(id: string): { [key: string]: unknown }
     throw new Error('Live KX notebook result identifier is invalid.');
   }
   return {
+    [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+      version: 1,
+      id,
+    },
     [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
       version: 1,
       id,
@@ -853,12 +897,16 @@ function cellExecutionKey(
   return `${notebook.uri.toString()}\0${cell.document.uri.toString()}`;
 }
 
-function mixedCellSnapshot(cell: vscode.NotebookCell): MixedCellSnapshot {
+function mixedCellSnapshot(
+  cell: vscode.NotebookCell,
+  sourceOverrideAuthorized: boolean
+): MixedCellSnapshot {
   return {
     notebook: cell.notebook,
     cellUri: cell.document.uri.toString(),
     source: cell.document.getText(),
     languageId: cell.document.languageId,
+    sourceOverrideAuthorized,
     outputs: [...cell.outputs],
     executionSummary: executionSummaryKey(cell.executionSummary),
   };
@@ -882,7 +930,7 @@ function mixedCellMatchesSnapshot(
     cell.kind === vscode.NotebookCellKind.Code &&
     cell.document.uri.toString() === snapshot.cellUri &&
     cell.document.languageId === snapshot.languageId &&
-    cell.document.languageId === 'q' &&
+    (cell.document.languageId === 'q' || snapshot.sourceOverrideAuthorized) &&
     cell.document.getText() === snapshot.source &&
     cell.outputs.length === snapshot.outputs.length &&
     cell.outputs.every((output, index) => output === snapshot.outputs[index]) &&

@@ -35,7 +35,10 @@ npm test
 npm run test:notebook-python
 npm run test:notebook-cross
 npm run test:extension-host
+npm run test:notebook-results-visual
 ```
+
+The 0.2.9 chart repair treats each distinct valid completed live zoom as a source-resampling request after a 450 ms debounce in both KX Results and live notebook output. Notebook requests stay clamped to the original full X domain across successive narrower refinements; initial/full-domain renders, duplicate scale notifications, dirty charts, and pending requests do not auto-request. Manual **Refine zoom** remains immediate.
 
 For a release candidate, require the live IPC check instead of allowing it to skip:
 
@@ -48,16 +51,16 @@ Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.2.8.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.9.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.8.vsix")
-with ZipFile("vscode-kdb-0.2.8-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.9.vsix")
+with ZipFile("vscode-kdb-0.2.9-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.8.vsix vscode-kdb-0.2.8-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.9.vsix vscode-kdb-0.2.9-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.

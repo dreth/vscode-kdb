@@ -2,104 +2,104 @@
 <!doctype html>
 <html lang="en" class="no-js">
   <head>
-
+    
       <meta charset="utf-8">
       <meta name="viewport" content="width=device-width,initial-scale=1">
-
+      
         <meta name="description" content="Standalone q IPC, execution, results, charting, and diagnostics documentation for KX for VS Code.">
-
-
-
-
+      
+      
+      
+      
         <link rel="prev" href="../running-q/">
-
-
+      
+      
         <link rel="next" href="../results-viewer/">
-
-
-
-
-
+      
+      
+        
+      
+      
       <link rel="icon" href="../assets/images/favicon.png">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
-
-
-
+    
+    
+      
         <title>Jupyter Notebooks - KX for VS Code</title>
-
-
-
+      
+    
+    
       <link rel="stylesheet" href="../assets/stylesheets/main.484c7ddc.min.css">
-
-
+      
+        
         <link rel="stylesheet" href="../assets/stylesheets/palette.ab4e12ef.min.css">
+      
+      
 
 
-
-
-
-
-
-
-
-
-
-
+    
+    
+      
+    
+    
+      
+        
+        
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
         <link rel="stylesheet" href="https://fonts.googleapis.com/css?family=Roboto:300,300i,400,400i,700,700i%7CRoboto+Mono:400,400i,700,700i&display=fallback">
         <style>:root{--md-text-font:"Roboto";--md-code-font:"Roboto Mono"}</style>
-
-
-
+      
+    
+    
     <script>__md_scope=new URL("..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    
+      
 
-
-
-
-
+    
+    
   </head>
-
-
-
-
-
-
-
-
-
+  
+  
+    
+    
+      
+    
+    
+    
+    
     <body dir="ltr" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="lime">
-
-
+  
+    
     <input class="md-toggle" data-md-toggle="drawer" type="checkbox" id="__drawer" autocomplete="off">
     <input class="md-toggle" data-md-toggle="search" type="checkbox" id="__search" autocomplete="off">
     <label class="md-overlay" for="__drawer"></label>
     <div data-md-component="skip">
-
-
+      
+        
         <a href="#jupyteripython-notebooks" class="md-skip">
           Skip to content
         </a>
-
+      
     </div>
     <div data-md-component="announce">
-
+      
     </div>
+    
+    
+      
 
-
-
-
-
+  
 
 <header class="md-header md-header--shadow" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
     <a href=".." title="KX for VS Code" class="md-header__button md-logo" aria-label="KX for VS Code" data-md-component="logo">
-
-
+      
+  
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
-
+      
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M3 6h18v2H3zm0 5h18v2H3zm0 5h18v2H3z"/></svg>
     </label>
     <div class="md-header__title" data-md-component="header-title">
@@ -111,49 +111,49 @@
         </div>
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
-
+            
               Jupyter Notebooks
-
+            
           </span>
         </div>
       </div>
     </div>
-
-
+    
+      
         <form class="md-header__option" data-md-component="palette">
-
-
-
-
+  
+    
+    
+    
     <input class="md-option" data-md-color-media="" data-md-color-scheme="default" data-md-color-primary="black" data-md-color-accent="lime"  aria-label="Switch to dark mode"  type="radio" name="__palette" id="__palette_0">
-
+    
       <label class="md-header__button md-icon" title="Switch to dark mode" for="__palette_1" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="m17.75 4.09-2.53 1.94.91 3.06-2.63-1.81-2.63 1.81.91-3.06-2.53-1.94L12.44 4l1.06-3 1.06 3zm3.5 6.91-1.64 1.25.59 1.98-1.7-1.17-1.7 1.17.59-1.98L15.75 11l2.06-.05L18.5 9l.69 1.95zm-2.28 4.95c.83-.08 1.72 1.1 1.19 1.85-.32.45-.66.87-1.08 1.27C15.17 23 8.84 23 4.94 19.07c-3.91-3.9-3.91-10.24 0-14.14.4-.4.82-.76 1.27-1.08.75-.53 1.93.36 1.85 1.19-.27 2.86.69 5.83 2.89 8.02a9.96 9.96 0 0 0 8.02 2.89m-1.64 2.02a12.08 12.08 0 0 1-7.8-3.47c-2.17-2.19-3.33-5-3.49-7.82-2.81 3.14-2.7 7.96.31 10.98 3.02 3.01 7.84 3.12 10.98.31"/></svg>
       </label>
-
-
-
-
-
+    
+  
+    
+    
+    
     <input class="md-option" data-md-color-media="" data-md-color-scheme="slate" data-md-color-primary="black" data-md-color-accent="lime"  aria-label="Switch to light mode"  type="radio" name="__palette" id="__palette_1">
-
+    
       <label class="md-header__button md-icon" title="Switch to light mode" for="__palette_0" hidden>
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 7a5 5 0 0 1 5 5 5 5 0 0 1-5 5 5 5 0 0 1-5-5 5 5 0 0 1 5-5m0 2a3 3 0 0 0-3 3 3 3 0 0 0 3 3 3 3 0 0 0 3-3 3 3 0 0 0-3-3m0-7 2.39 3.42C13.65 5.15 12.84 5 12 5s-1.65.15-2.39.42zM3.34 7l4.16-.35A7.2 7.2 0 0 0 5.94 8.5c-.44.74-.69 1.5-.83 2.29zm.02 10 1.76-3.77a7.131 7.131 0 0 0 2.38 4.14zM20.65 7l-1.77 3.79a7.02 7.02 0 0 0-2.38-4.15zm-.01 10-4.14.36c.59-.51 1.12-1.14 1.54-1.86.42-.73.69-1.5.83-2.29zM12 22l-2.41-3.44c.74.27 1.55.44 2.41.44.82 0 1.63-.17 2.37-.44z"/></svg>
       </label>
-
-
+    
+  
 </form>
-
-
-
+      
+    
+    
       <script>var palette=__md_get("__palette");if(palette&&palette.color){if("(prefers-color-scheme)"===palette.color.media){var media=matchMedia("(prefers-color-scheme: light)"),input=document.querySelector(media.matches?"[data-md-color-media='(prefers-color-scheme: light)']":"[data-md-color-media='(prefers-color-scheme: dark)']");palette.color.media=input.getAttribute("data-md-color-media"),palette.color.scheme=input.getAttribute("data-md-color-scheme"),palette.color.primary=input.getAttribute("data-md-color-primary"),palette.color.accent=input.getAttribute("data-md-color-accent")}for(var[key,value]of Object.entries(palette.color))document.body.setAttribute("data-md-color-"+key,value)}</script>
-
-
-
-
-
+    
+    
+    
+      
+      
         <label class="md-header__button md-icon" for="__search">
-
+          
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
         </label>
         <div class="md-search" data-md-component="search" role="dialog">
@@ -162,21 +162,21 @@
     <form class="md-search__form" name="search">
       <input type="text" class="md-search__input" name="query" aria-label="Search" placeholder="Search" autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" data-md-component="search-query" required>
       <label class="md-search__icon md-icon" for="__search">
-
+        
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M9.5 3A6.5 6.5 0 0 1 16 9.5c0 1.61-.59 3.09-1.56 4.23l.27.27h.79l5 5-1.5 1.5-5-5v-.79l-.27-.27A6.52 6.52 0 0 1 9.5 16 6.5 6.5 0 0 1 3 9.5 6.5 6.5 0 0 1 9.5 3m0 2C7 5 5 7 5 9.5S7 14 9.5 14 14 12 14 9.5 12 5 9.5 5"/></svg>
-
+        
         <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M20 11v2H8l5.5 5.5-1.42 1.42L4.16 12l7.92-7.92L13.5 5.5 8 11z"/></svg>
       </label>
       <nav class="md-search__options" aria-label="Search">
-
+        
         <button type="reset" class="md-search__icon md-icon" title="Clear" aria-label="Clear" tabindex="-1">
-
+          
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M19 6.41 17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>
         </button>
       </nav>
-
+      
         <div class="md-search__suggest" data-md-component="search-suggest"></div>
-
+      
     </form>
     <div class="md-search__output">
       <div class="md-search__scrollwrap" tabindex="0" data-md-scrollfix>
@@ -190,13 +190,13 @@
     </div>
   </div>
 </div>
-
-
-
+      
+    
+    
       <div class="md-header__source">
         <a href="https://github.com/dreth/vscode-kdb" title="Go to repository" class="md-source" data-md-component="source">
   <div class="md-source__icon md-icon">
-
+    
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
   </div>
   <div class="md-source__repository">
@@ -204,45 +204,45 @@
   </div>
 </a>
       </div>
-
+    
   </nav>
-
+  
 </header>
-
+    
     <div class="md-container" data-md-component="container">
-
-
-
-
-
-
+      
+      
+        
+          
+        
+      
       <main class="md-main" data-md-component="main">
         <div class="md-main__inner md-grid">
-
-
-
+          
+            
+              
               <div class="md-sidebar md-sidebar--primary" data-md-component="sidebar" data-md-type="navigation" >
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
-
+                    
 
 
 
 <nav class="md-nav md-nav--primary" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
     <a href=".." title="KX for VS Code" class="md-nav__button md-logo" aria-label="KX for VS Code" data-md-component="logo">
-
-
+      
+  
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M12 8a3 3 0 0 0 3-3 3 3 0 0 0-3-3 3 3 0 0 0-3 3 3 3 0 0 0 3 3m0 3.54C9.64 9.35 6.5 8 3 8v11c3.5 0 6.64 1.35 9 3.54 2.36-2.19 5.5-3.54 9-3.54V8c-3.5 0-6.64 1.35-9 3.54"/></svg>
 
     </a>
     KX for VS Code
   </label>
-
+  
     <div class="md-nav__source">
       <a href="https://github.com/dreth/vscode-kdb" title="Go to repository" class="md-source" data-md-component="source">
   <div class="md-source__icon md-icon">
-
+    
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 448 512"><!--! Font Awesome Free 7.1.0 by @fontawesome - https://fontawesome.com License - https://fontawesome.com/license/free (Icons: CC BY 4.0, Fonts: SIL OFL 1.1, Code: MIT License) Copyright 2025 Fonticons, Inc.--><path d="M439.6 236.1 244 40.5c-5.4-5.5-12.8-8.5-20.4-8.5s-15 3-20.4 8.4L162.5 81l51.5 51.5c27.1-9.1 52.7 16.8 43.4 43.7l49.7 49.7c34.2-11.8 61.2 31 35.5 56.7-26.5 26.5-70.2-2.9-56-37.3L240.3 199v121.9c25.3 12.5 22.3 41.8 9.1 55-6.4 6.4-15.2 10.1-24.3 10.1s-17.8-3.6-24.3-10.1c-17.6-17.6-11.1-46.9 11.2-56v-123c-20.8-8.5-24.6-30.7-18.6-45L142.6 101 8.5 235.1C3 240.6 0 247.9 0 255.5s3 15 8.5 20.4l195.6 195.7c5.4 5.4 12.7 8.4 20.4 8.4s15-3 20.4-8.4l194.7-194.7c5.4-5.4 8.4-12.8 8.4-20.4s-3-15-8.4-20.4"/></svg>
   </div>
   <div class="md-source__repository">
@@ -250,734 +250,756 @@
   </div>
 </a>
     </div>
-
+  
   <ul class="md-nav__list" data-md-scrollfix>
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href=".." class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Overview
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../installation/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Installation
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../connections/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Connections & SecretStorage
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../running-q/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Running q
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+    
+  
+  
+  
     <li class="md-nav__item md-nav__item--active">
-
+      
       <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-
-
-
-
-
+      
+      
+        
+      
+      
         <label class="md-nav__link md-nav__link--active" for="__toc">
-
-
-
+          
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Jupyter Notebooks
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
           <span class="md-nav__icon md-icon"></span>
         </label>
-
+      
       <a href="./" class="md-nav__link md-nav__link--active">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Jupyter Notebooks
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
-
-
+      
+        
 
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-
-
-
-
-
-
+  
+  
+  
+    
+  
+  
     <label class="md-nav__title" for="__toc">
       <span class="md-nav__icon md-icon"></span>
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-
+      
         <li class="md-nav__item">
   <a href="#default-python-first-mixed-workflow" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Default Python-first mixed workflow
-
+      
     </span>
   </a>
-
+  
     <nav class="md-nav" aria-label="Default Python-first mixed workflow">
       <ul class="md-nav__list">
-
+        
           <li class="md-nav__item">
-  <a href="#focused-q-cell-shortcut" class="md-nav__link">
+  <a href="#focused-q-cell-shortcuts" class="md-nav__link">
     <span class="md-ellipsis">
-
-        Focused q-cell shortcut
-
+      
+        Focused q-cell shortcuts
+      
     </span>
   </a>
-
+  
 </li>
-
+        
       </ul>
     </nav>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#optional-q-only-direct-ipc-controller" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Optional q-only Direct IPC controller
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#active-connection-and-shared-q-session" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Active connection and shared q session
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#live-kx-result-and-saved-snapshot" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Live KX result and saved snapshot
-
+      
     </span>
   </a>
-
+  
     <nav class="md-nav" aria-label="Live KX result and saved snapshot">
       <ul class="md-nav__list">
-
+        
           <li class="md-nav__item">
   <a href="#exact-live-lifetime" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Exact live lifetime
-
+      
     </span>
   </a>
-
+  
 </li>
-
+        
           <li class="md-nav__item">
   <a href="#portable-snapshot-limits" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Portable snapshot limits
-
+      
     </span>
   </a>
-
+  
 </li>
-
+        
       </ul>
     </nav>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#separate-python-q-helper-route" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Separate Python %%q helper route
-
+      
     </span>
   </a>
-
+  
     <nav class="md-nav" aria-label="Separate Python %%q helper route">
       <ul class="md-nav__list">
-
+        
           <li class="md-nav__item">
   <a href="#prepare-and-run-through-python" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Prepare and run through Python
-
+      
     </span>
   </a>
-
+  
 </li>
-
+        
       </ul>
     </nav>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#cell-metadata" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Cell metadata
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
+        <li class="md-nav__item">
+  <a href="#evidence-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evidence boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
-
+  
 </nav>
-
+      
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../results-viewer/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Results Viewer
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../charting/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Charting
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../copy-export/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Copy & Export
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../settings/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Settings
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../performance/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Performance & Large Results
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../local-data-server/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Local Data Server
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../troubleshooting/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Troubleshooting
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../architecture/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Architecture
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
-
-
-
-
-
-
+    
+      
+      
+  
+  
+  
+  
     <li class="md-nav__item">
       <a href="../feedback/" class="md-nav__link">
-
-
-
+        
+  
+  
   <span class="md-ellipsis">
-
-
+    
+  
     Feedback
+  
 
-
-
+    
   </span>
-
-
+  
+  
 
       </a>
     </li>
+  
 
-
-
+    
   </ul>
 </nav>
                   </div>
                 </div>
               </div>
-
-
-
+            
+            
+              
               <div class="md-sidebar md-sidebar--secondary" data-md-component="sidebar" data-md-type="toc" >
                 <div class="md-sidebar__scrollwrap">
                   <div class="md-sidebar__inner">
-
+                    
 
 <nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-
-
-
-
-
-
+  
+  
+  
+    
+  
+  
     <label class="md-nav__title" for="__toc">
       <span class="md-nav__icon md-icon"></span>
       Table of contents
     </label>
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-
+      
         <li class="md-nav__item">
   <a href="#default-python-first-mixed-workflow" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Default Python-first mixed workflow
-
+      
     </span>
   </a>
-
+  
     <nav class="md-nav" aria-label="Default Python-first mixed workflow">
       <ul class="md-nav__list">
-
+        
           <li class="md-nav__item">
-  <a href="#focused-q-cell-shortcut" class="md-nav__link">
+  <a href="#focused-q-cell-shortcuts" class="md-nav__link">
     <span class="md-ellipsis">
-
-        Focused q-cell shortcut
-
+      
+        Focused q-cell shortcuts
+      
     </span>
   </a>
-
+  
 </li>
-
+        
       </ul>
     </nav>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#optional-q-only-direct-ipc-controller" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Optional q-only Direct IPC controller
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#active-connection-and-shared-q-session" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Active connection and shared q session
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#live-kx-result-and-saved-snapshot" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Live KX result and saved snapshot
-
+      
     </span>
   </a>
-
+  
     <nav class="md-nav" aria-label="Live KX result and saved snapshot">
       <ul class="md-nav__list">
-
+        
           <li class="md-nav__item">
   <a href="#exact-live-lifetime" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Exact live lifetime
-
+      
     </span>
   </a>
-
+  
 </li>
-
+        
           <li class="md-nav__item">
   <a href="#portable-snapshot-limits" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Portable snapshot limits
-
+      
     </span>
   </a>
-
+  
 </li>
-
+        
       </ul>
     </nav>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#separate-python-q-helper-route" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Separate Python %%q helper route
-
+      
     </span>
   </a>
-
+  
     <nav class="md-nav" aria-label="Separate Python %%q helper route">
       <ul class="md-nav__list">
-
+        
           <li class="md-nav__item">
   <a href="#prepare-and-run-through-python" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Prepare and run through Python
-
+      
     </span>
   </a>
-
+  
 </li>
-
+        
       </ul>
     </nav>
-
+  
 </li>
-
+      
         <li class="md-nav__item">
   <a href="#cell-metadata" class="md-nav__link">
     <span class="md-ellipsis">
-
+      
         Cell metadata
-
+      
     </span>
   </a>
-
+  
 </li>
-
+      
+        <li class="md-nav__item">
+  <a href="#evidence-boundary" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Evidence boundary
+      
+    </span>
+  </a>
+  
+</li>
+      
     </ul>
-
+  
 </nav>
                   </div>
                 </div>
               </div>
-
-
-
+            
+          
+          
             <div class="md-content" data-md-component="content">
-
+              
               <article class="md-content__inner md-typeset">
+                
+                  
 
 
-
-
-
-
+  
+  
 
 
 <h1 id="jupyteripython-notebooks">Jupyter/IPython Notebooks</h1>
@@ -996,7 +1018,7 @@
 </tr>
 <tr>
 <td>Python selected + q cell</td>
-<td><strong>Run q Cell (KX)</strong> / <code>Ctrl+Enter</code></td>
+<td><strong>Run q Cell (KX)</strong> / <code>Ctrl</code> or <code>Cmd</code>+<code>Enter</code> / <code>Shift+Enter</code> / <code>Alt+Enter</code></td>
 </tr>
 <tr>
 <td>Optional KX q selected + q cell</td>
@@ -1011,15 +1033,21 @@
 <ol>
 <li>Click the leading <strong>Make q Cell (KX)</strong> action. It changes the complete code cell's language to q without changing the selected Python kernel.</li>
 <li>Use the visible notebook-level <code>q default</code> item or <strong>KX: Choose Notebook q Target</strong> to select one saved KX profile.</li>
-<li>Use the leading <strong>Run q Cell (KX)</strong> play action or focused-cell <code>Ctrl+Enter</code> / <code>Cmd+Enter</code>.</li>
+<li>Use the leading <strong>Run q Cell (KX)</strong> play action, or use focused-cell <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> to run and stay, <code>Shift+Enter</code> to run and move next, or <code>Alt+Enter</code> (<code>Option+Enter</code> on macOS) to run and insert below.</li>
 <li>Read the route from status: <code>KX: &lt;profile&gt; · Ctrl+Enter</code> (<code>Cmd+Enter</code> on macOS).</li>
 </ol>
 <p>The action sends the complete cell source through the selected notebook target's direct KX session. It does not require <code>%%q</code>, select the KX controller, or mutate the Python controller. <strong>KX: Restore Notebook Cell Language</strong> restores the notebook's declared default language.</p>
 <p>Only safe <code>{id, name}</code> profile identity/display metadata is saved in the <code>.ipynb</code>; host, port, namespace, username, password, credentials, and connection objects are excluded. Every run resolves that stable ID against current <code>ConnectionStore</code> data. If the same profile is edited from port <code>5005</code> to <code>5000</code>, the next run uses <code>5000</code>; the connection manager disconnects a client whose runtime endpoint is stale and reconnects as needed. A rename still resolves by ID. Changing the globally active profile does not override the notebook target.</p>
 <p>The globally active profile is offered first as a labelled convenience, never used as an invisible fallback. An unselected, removed, or otherwise missing target shows <strong>Select connection</strong> and prompts for explicit selection, so mixed q never routes to list order or another profile by accident.</p>
 <p>Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. <strong>Run q Cell (KX)</strong> leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.</p>
-<h3 id="focused-q-cell-shortcut">Focused q-cell shortcut</h3>
-<p>While the q cell editor itself has text focus, the contributed default <code>Ctrl+Enter</code> on Windows/Linux or <code>Cmd+Enter</code> on macOS invokes <strong>Run q Cell (KX)</strong>. The public manifest guard requires all of:</p>
+<h3 id="focused-q-cell-shortcuts">Focused q-cell shortcuts</h3>
+<p>While the q cell editor itself has text focus, KX preserves the normal notebook meanings:</p>
+<ul>
+<li><code>Ctrl+Enter</code> on Windows/Linux or <code>Cmd+Enter</code> on macOS runs the complete q cell and stays;</li>
+<li><code>Shift+Enter</code> runs it and moves to the next cell; and</li>
+<li><code>Alt+Enter</code> (<code>Option+Enter</code> on macOS) runs it and inserts a code cell below.</li>
+</ul>
+<p>Move/insert occurs only after the Direct IPC runner returns an executed result. A canceled, busy, stale, or failed run leaves the cell position unchanged. Every public manifest guard requires all of:</p>
 <ul>
 <li>notebook cell editor and editor text focus;</li>
 <li>notebook type <code>jupyter-notebook</code>;</li>
@@ -1028,7 +1056,7 @@
 <li>resource scheme <code>vscode-notebook-cell</code>; and</li>
 <li>the optional <strong>KX q (Direct IPC)</strong> controller not selected.</li>
 </ul>
-<p>It cannot match Python, Markdown, an ordinary source editor, output focus, or a cell container without editor focus. In those other focus states VS Code's normal notebook shortcut remains in charge; use the visible KX action for q execution. Extension default bindings outrank the built-in notebook rule when this exact guard matches, while later user/keymap rules can still override any default shortcut. If <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> was customized, use the toolbar/context/Command Palette action or inspect <strong>Developer: Toggle Keyboard Shortcuts Troubleshooting</strong>. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.</p>
+<p>They cannot match Python, Markdown, an ordinary source editor, output focus, or a cell container without editor focus. In those other focus states VS Code's normal notebook shortcuts remain in charge; use the visible KX action for q execution. Extension default bindings outrank the built-in notebook rules when these exact guards match, while later user/keymap rules can still override any default shortcut. If a shortcut was customized, use the toolbar/context/Command Palette action or inspect <strong>Developer: Toggle Keyboard Shortcuts Troubleshooting</strong>. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.</p>
 <h2 id="optional-q-only-direct-ipc-controller">Optional q-only Direct IPC controller</h2>
 <p>Set the application-scoped <code>vscode-kdb.notebook.enableDirectController</code> setting to <code>true</code> only when a q-only native-controller workflow is wanted. KX then registers:</p>
 <ul>
@@ -1051,16 +1079,11 @@
 <li>an extension-host live result backed by the decoded q value; and</li>
 <li>a safe bounded <code>application/vnd.kx.result+json</code> version 1 snapshot plus <code>text/plain</code> fallback stored in notebook output.</li>
 </ol>
-<p>While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. q general null/no-value responses produced by assignments, declarations, and calls such as <code>hopen</code>, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.</p>
-<p>The renderer is a compact adaptation of the standard KX Results interaction model:</p>
-<ul>
-<li>the one-line header uses <strong>KX Results</strong> and <strong>Settings</strong>;</li>
-<li>table controls use Search, match status, and Chart;</li>
-<li>Search <code>Enter</code> / <code>Shift+Enter</code> navigate next/previous matches without separate buttons;</li>
-<li>selection copy appears only after selecting cells, in a compact <strong>Tools</strong> menu with one format selector and one Copy action; and</li>
-<li>no inert Reset Size, default disabled match-navigation, duplicate Copy TSV/CSV, or placeholder controls are shown.</li>
-</ul>
-<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Three-state sort, drag selection, Shift-range selection, and keyboard navigation remain available. A selected rectangle of at most 20,000 cells can be copied through the owning extension-host record, including selected rows outside the currently loaded virtual slice. Inline search stops after 1,000 matches, 2,000,000 cells, or about 1.5 seconds. Inline sort declines results with 250,000 or more rows. Column hide/reorder and full export remain panel features. <strong>KX Results</strong> hands the same live value to the full panel.</p>
+<p>While the live record exists, the notebook renderer uses the same first-party KX result model and display policies as the standard KX Results panel. A newly completed mixed-runner edit binds its replacement cell/output back to the staged live record, so the first render can immediately page, export, chart, and hand off the full value instead of falling through to <strong>Saved preview</strong>. The optional selected KX controller binds its native output through the same live registry. q general null/no-value responses produced by assignments, declarations, and calls such as <code>hopen</code>, plus generic empty values, render as compact qText. A genuine typed zero-row q table stays a table and retains its schema.</p>
+<p>The renderer and standard panel consume one KX Results UI contract for toolbar labels, formats, chart families, settings definitions, state summaries, focus behavior, and theme tokens. A live table exposes <strong>Output:</strong>, CSV/XLSX/TSV/JSON/NDJSON/HTML/Markdown, <strong>Headers</strong>, <strong>Row #</strong>, <strong>Copy</strong>, <strong>Export</strong>, <strong>Chart</strong>, <strong>Columns</strong>, and <strong>Settings</strong>. XLSX is export-only. With no selected rectangle, Copy or Export uses every visible column in its current order; otherwise it uses the selected range. The toolbar wraps or overflows at narrow cell widths without removing working actions.</p>
+<p>Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Three-state sort, bounded Search with explicit <strong>Prev</strong>/<strong>Next</strong>, drag selection, Shift-range selection, and keyboard navigation remain available. Columns can be shown, hidden, reset, moved, and resized; drag a header edge to set one positional width or double-click it to reset that position. Live slice, search, sort, copy, export, and chart requests honor the visible order. Inline clipboard work is capped at 20,000 cells. File export is performed by the extension host and uses the shared copy/export confirmation threshold.</p>
+<p>Notebook and panel grids share one sparse map of persistent zero-based original/source-position widths plus the <strong>Auto-fit columns</strong> checkbox and <strong>Whole result</strong>/<strong>Visible rows</strong> scope. The map is not limited by the notebook transport's bounded live-column count, and legacy array-shaped state is normalized on read. Hide/reorder operations do not retarget source slots. Whole-result fitting is the stable default: a live record measures all rows in its full in-memory result, including off-screen array/list values, while a saved preview can measure only its persisted rows. Visible-row mode adapts to the current virtual slice/page. Unchecking auto-fit runs no automatic measurement. Manual widths override auto-fit; <strong>Reset column widths</strong>, <strong>Cell width</strong>, and density preset changes clear every positional override consistently.</p>
+<p>The full panel retains interactions tied to its editor-sized host: the draggable table/chart splitter, running-query controls, and the local data server. Those host-specific controls do not justify a different notebook toolbar or data/display model. <strong>Open in KX Results</strong> hands the same decoded live value to that exact panel without rerunning q.</p>
 <p>Inline charts use the same real capability model as the panel:</p>
 <table>
 <thead>
@@ -1088,8 +1111,10 @@
 </tr>
 </tbody>
 </table>
-<p>The notebook-only visible Point cap is removed. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and chart sampling defaults still bound work, and compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed. Legend-hidden series remain hidden through zoom, Reset zoom/double-click, explicit rerender, resize, renderer settings messages, and compatible configuration updates. Zoom refinement remains available after opening the value in the full KX Results panel; the notebook renderer does not advertise a Refine action it cannot perform.</p>
-<p><code>vscode-kdb.results.*</code> is the common durable settings source for live notebook results and the standard panel. Supported density/sizing, array formatting, qText and value-display strategies, elapsed-time display, and chart changes use a validated renderer/extension message path. A supported setting changed from a live notebook result updates the same global VS Code configuration used by other live q cells and open KX panels.</p>
+<p>Decoded q numeric types (<code>byte</code>, <code>short</code>, <code>int</code>, <code>long</code>, <code>real</code>, <code>float</code>) are valid Y/OHLC values. q <code>timestamp</code>, <code>month</code>, <code>date</code>, <code>datetime</code>, <code>timespan</code>, <code>minute</code>, <code>second</code>, and <code>time</code> columns are temporal X choices for every chart family above and are not offered as numeric Y/OHLC fields. Saved portable schema uses the same classification.</p>
+<p>The notebook does not expose a redundant Point cap control. Shared <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> and chart sampling defaults still bound work, and live inline chart requests have a hard 10,000-point safety ceiling. Compact status text reports sampling or validation. Configuration changes leave the old rendered chart visible until <strong>Render</strong> is pressed. The chart stays below the table. Multi-series charts keep a visible color-keyed legend; its pointer and <strong>Enter</strong>/<strong>Space</strong> buttons expose accurate pressed/hidden state, and the Y-series selector repeats the same swatches beside selected and available names. The selector stays contained and scrollable at narrow widths. Axis labels/ticks remain readable while gridlines stay secondary because both use VS Code theme tokens rather than fixed light/dark colors. Legend-hidden series remain hidden through zoom, Reset zoom/double-click, explicit rerender, resize, renderer settings messages, and compatible configuration updates.</p>
+<p>Every distinct completed live-handle zoom, including a second zoom nested inside a refined response, requests its absolute range from the retained full source after the debounce. Identical scale notifications are deduplicated, while programmatic reconstruction/settings/resize/hide-show scales do not recursively request data. A refined range keeps every eligible row through 7,000 (including below 3,000 without upsampling) and reduces larger ranges to about 7,000. <strong>Reset zoom</strong> invalidates stale replies and restores the original full sample/domain without another request. <strong>Export PNG</strong> uses the extension save dialog.</p>
+<p><code>vscode-kdb.results.*</code> is the common durable settings source for notebook output and the standard panel. Supported density/sizing, positional column widths, auto-fit controls, copy/export threshold, array formatting, qText and value-display strategies, elapsed-time display, and chart precision/source/sampling changes use a validated renderer/extension message path. A supported setting or manual width changed inline updates the same global VS Code configuration used by other KX notebook outputs and open KX panels, and survives VS Code restart. Stored font size <code>0</code> still means the VS Code default and remains numeric in messages/configuration; notebook Settings shows it as <strong>Auto</strong>. The overlay is constrained and scrollable within the result, has a visible <strong>Close</strong> action, closes with <strong>Escape</strong>, and returns keyboard focus to its summary. Selection, visible-column order, sort, search, result height, chart configuration, legend-hidden state, and zoom remain transient per-output UI state.</p>
 <h3 id="exact-live-lifetime">Exact live lifetime</h3>
 <p>The live registry exists only in memory for the current extension-host session:</p>
 <ul>
@@ -1100,7 +1125,7 @@
 <li>deactivation clears the registry; and</li>
 <li>a maximum of 512 records is retained, with the oldest evicted first.</li>
 </ul>
-<p>The opaque ID persisted beside the snapshot is not an IPC handle and cannot recreate a result. If a record is absent because the notebook was reopened, the extension host ended, the cell was rerun, the notebook closed, or the cap evicted it, the renderer falls back to the saved bounded snapshot.</p>
+<p>The opaque live ID persisted beside the snapshot is not an IPC handle and cannot recreate a result. Output metadata also carries an opaque binding ID so extension-host actions can target the exact cell output; direct output may reuse the live ID as that targeting value. It contains no result or connection data and grants no reopened live access. If a record is absent because the notebook was reopened, the extension host ended, the cell was rerun, the notebook closed, or the cap evicted it, the renderer falls back to the saved bounded snapshot.</p>
 <h3 id="portable-snapshot-limits">Portable snapshot limits</h3>
 <table>
 <thead>
@@ -1133,57 +1158,43 @@
 </tr>
 </tbody>
 </table>
-<p>First-party direct output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and <code>text/plain</code>. At the default, tables with 20 rows or fewer persist every row; larger tables persist a 20-row preview with headers/schema and an explicit omitted-row notice. The current live session value remains full and virtualized in KX Results, but the <code>.ipynb</code> does not own it. Direct output does not add <code>text/html</code> or a persisted chart specification. The separate Python helper can add escaped <code>text/html</code> and an optional persisted chart specification. Neither route stores credentials, passwords, tokens, connection objects, recoverable IPC handles, or the unbounded live result. Omitted rows cannot be recovered from a saved or reopened <code>.ipynb</code>.</p>
-<p>The saved-result renderer provides the same compact table/Tools/Chart model, stable two-axis scrolling, range selection copy, explicit truncation notices, and all capability-valid chart selectors over the stored rows. Direct saved-output chart choices are transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
+<p>First-party direct output contains typed bounded rows, schema, total and preview counts, truncation reasons, safe provenance, and <code>text/plain</code>. At the default, tables with 20 rows or fewer persist every row; larger tables persist a 20-row preview with headers/schema and an explicit omitted-row notice. The current live session value remains full and virtualized in KX Results, but the <code>.ipynb</code> does not own it. Direct output does not add <code>text/html</code> or a persisted chart specification. The separate Python companion can add escaped <code>text/html</code> and an optional persisted chart specification. Neither route stores credentials, passwords, authentication tokens, connection objects, recoverable IPC handles, or the unbounded live result; the first-party output-binding ID described above is opaque targeting metadata, not an authentication or data-recovery token. The companion does not emit that extension binding. Omitted rows cannot be recovered from a saved or reopened <code>.ipynb</code>.</p>
+<p>The saved-result renderer keeps the same table hierarchy, shared output formats, visible-column controls, positional resizing/auto-fit behavior, range behavior, explicit truncation notices, and capability-valid chart workflow, but every data action is limited to persisted rows. It identifies itself as <strong>Saved preview</strong>, reports stored versus total rows, and offers <strong>Open saved preview</strong> and <strong>Rerun cell</strong> when no live handle exists. Opening, copying, exporting, or charting that preview never claims or reconstructs omitted rows. Whole-result auto-fit and saved-preview zoom operate only within stored data; saved zoom cannot request refinement outside it. Direct saved-output chart choices remain transient and do not write a chart specification. A compatible chart specification emitted by the Python helper remains persisted. Python-helper HTML/PDF export uses its escaped, network-free static fallback and does not preserve arbitrary interactive controls.</p>
 <p><code>vscode-kdb.notebook.presentation</code> accepts:</p>
 <ul>
 <li><code>inline</code> (default);</li>
 <li><code>panel</code>; or</li>
 <li><code>both</code>.</li>
 </ul>
-<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell and expose a concise KX Results action: live values open in the full panel while their record exists; expired/reopened output opens only the bounded rows stored in the notebook. No mode or handoff reruns q or recovers omitted rows.</p>
+<p>These automatic modes apply to Python-helper output. First-party KX direct results always remain inline beneath the cell. A live value opens in the full panel while its record exists. Expired/reopened output can open only the bounded rows stored in the notebook; <strong>Rerun cell</strong> is an explicit new execution, not recovery of the old live value.</p>
 <h2 id="separate-python-q-helper-route">Separate Python <code>%%q</code> helper route</h2>
-<p>Use <code>python/kx_notebook</code> only when q must run through an evaluator owned by the selected Python/IPython kernel. This is distinct from mixed mode's <strong>Run q Cell (KX)</strong>: the helper remains inside Python, requires <code>%%q</code>, and does not share q variables, namespace state, or session identity with direct KX execution by implication.</p>
-<p>The helper bundles no q runtime, PyKX binary, credential, IPC connection, or remote bridge. Install it into the same Python environment selected as the notebook kernel:</p>
+<p>Use the released <code>kx-notebook==0.1.0</code> companion only when q should run through the selected Python/IPython kernel. Its distribution name is <code>kx-notebook</code>; its import and IPython extension name is <code>kx_notebook</code>. This is distinct from mixed mode's <strong>Run q Cell (KX)</strong>: the companion remains inside Python, requires <code>%%q</code>, and does not share q variables, namespace state, session identity, live-result records, or output-binding metadata with extension-managed Direct IPC.</p>
+<p>Python 3.9 through 3.13 is supported. Install the exact release into the same environment selected as the notebook kernel:</p>
 <div class="highlight"><pre><span></span><code>uv<span class="w"> </span>venv<span class="w"> </span>/tmp/vscode-kdb-kx-notebook
 uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </span>--python<span class="w"> </span>/tmp/vscode-kdb-kx-notebook/bin/python<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--editable<span class="w"> </span>./python/kx_notebook
+<span class="w">  </span><span class="s1">&#39;kx-notebook==0.1.0&#39;</span>
 </code></pre></div>
-<p>The VSIX includes the source package under <code>python/kx_notebook</code>, but the extension never modifies a kernel environment automatically.</p>
-<p>Configure one synchronous evaluator inside the Python kernel:</p>
-<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">kx_notebook</span><span class="w"> </span><span class="kn">import</span> <span class="n">configure_evaluator</span>
-
-<span class="k">def</span><span class="w"> </span><span class="nf">evaluate_in_my_existing_session</span><span class="p">(</span><span class="n">source</span><span class="p">:</span> <span class="nb">str</span><span class="p">):</span>
-    <span class="k">return</span> <span class="n">my_existing_q_session</span><span class="p">(</span><span class="n">source</span><span class="p">)</span>
-
-<span class="n">configure_evaluator</span><span class="p">(</span>
-    <span class="n">evaluate_in_my_existing_session</span><span class="p">,</span>
-    <span class="n">label</span><span class="o">=</span><span class="s2">&quot;existing kernel q session&quot;</span><span class="p">,</span>
-<span class="p">)</span>
-<span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
+<p>The package is not bundled in the VSIX, and the extension never installs or modifies a kernel environment automatically. q itself is not bundled.</p>
+<p>Direct q IPC is built in. Start the q process separately, then load and connect from Python cells:</p>
+<div class="highlight"><pre><span></span><code><span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
+<span class="o">%</span><span class="n">kx</span> <span class="n">connect</span> <span class="n">localhost</span><span class="p">:</span><span class="mi">5000</span>
 </code></pre></div>
-<p>The callback receives the q body exactly and owns execution. If PyKX is already installed, licensed, and configured in that kernel, the optional explicit adapter is:</p>
-<div class="highlight"><pre><span></span><code><span class="kn">from</span><span class="w"> </span><span class="nn">kx_notebook.pykx</span><span class="w"> </span><span class="kn">import</span> <span class="n">configure_pykx</span>
-
-<span class="n">configure_pykx</span><span class="p">()</span>
-<span class="o">%</span><span class="n">load_ext</span> <span class="n">kx_notebook</span>
-</code></pre></div>
-<p>The adapter uses that kernel's existing <code>pykx.q</code> object. It never installs PyKX or borrows the extension's Direct IPC client.</p>
+<p>The connection and its q state belong to the Python process, not KX for VS Code. Named companion profiles are selected explicitly with <code>%kx use PROFILE</code> or <code>%%q --profile PROFILE</code>; profiles may store endpoint and credential-lookup metadata, but not secret values.</p>
+<p>Three alternatives to the default direct evaluator are explicit and opt-in:</p>
+<ul>
+<li>a synchronous application callback configured with <code>kx_notebook.configure_evaluator</code>;</li>
+<li><code>kx_notebook.evaluators.PyKXEvaluator</code>, with PyKX separately installed, configured, licensed, and selected; or</li>
+<li><code>kx_notebook.evaluators.BrokerEvaluator</code>, supplied a loopback broker URL and bearer token at runtime.</li>
+</ul>
+<p>The package does not discover or borrow the extension's connection, does not bundle PyKX or a broker, and does not persist a broker token.</p>
 <h3 id="prepare-and-run-through-python">Prepare and run through Python</h3>
-<p>With a Python controller selected:</p>
-<ol>
-<li>Use <strong>KX: Tag Notebook Cell as q</strong> while editing to set q highlighting and add a durable marker.</li>
-<li>Keep the leading marker:</li>
-</ol>
+<p>Leave the cell's language as Python and use normal Jupyter Run:</p>
 <div class="highlight"><pre><span></span><code><span class="o">%%</span><span class="n">q</span><span class="w"> </span><span class="o">--</span><span class="ow">max</span><span class="o">-</span><span class="n">rows</span><span class="w"> </span><span class="il">20</span><span class="w"> </span><span class="o">--</span><span class="ow">max</span><span class="o">-</span><span class="n">bytes</span><span class="w"> </span><span class="il">1000000</span>
 <span class="ow">select</span><span class="w"> </span><span class="ow">from</span><span class="w"> </span><span class="n">trade</span><span class="w"> </span><span class="nb">where</span><span class="w"> </span><span class="n">date</span><span class="o">=.</span><span class="n">z.D</span>
 </code></pre></div>
-<ol>
-<li>Use <strong>KX: Restore Notebook Cell Language</strong> so the Python controller accepts the cell while the marker remains.</li>
-<li>Use normal Run; IPython invokes the registered magic.</li>
-</ol>
-<p>The contextual <strong>Prepare this q cell for the active Python kernel</strong> action adds the marker and KX metadata without executing. Tag/Prepare actions are hidden while the direct controller is selected to avoid presenting the Python route as a direct-controller requirement.</p>
-<p>The helper emits the same bounded version 1 MIME contract plus escaped <code>text/html</code> and <code>text/plain</code> fallbacks. Its marker limits bound persisted output, not server-side q execution. The helper never opens a connection and never receives a Direct IPC live-result identity. A user callback may independently target the same external q process, but that is user-owned configuration—not extension-managed state sharing.</p>
+<p><code>%%q</code> is IPython syntax, so a companion cell stays Python-language even though its body is q. A durable extension Direct IPC cell instead stays q-language and uses <strong>Run q Cell (KX)</strong>. Do not switch the same cell back and forth between the routes. The extension's Tag/Prepare editing aids are not required by <code>kx-notebook</code> 0.1.0 and do not turn an extension Direct IPC cell into companion execution.</p>
+<p>The released <code>kx-notebook==0.1.0</code> companion emits the same bounded version 1 MIME contract plus escaped <code>text/html</code> and <code>text/plain</code> fallbacks. Its marker limits bound persisted output, not server-side q execution. It receives no extension live-result identity or output binding, even if its independently configured evaluator targets the same external q process. The extension cannot reconstruct rows omitted from that MIME bundle or turn it into the helper's original live session.</p>
+<p>When more than the bounded helper preview is needed, choose <strong>Run %%q live with KX</strong> on that output (or <strong>KX: Run %%q Preview Live via Direct IPC</strong>). KX resolves or asks for an extension-owned notebook target, shows that target in a modal confirmation, strips only the leading <code>%%q</code> directive/options, and submits the remaining q body through the existing first-party complete-cell Direct IPC runner. This is a new execution and session route: it does not call Jupyter Run, reuse the Python evaluator/session, or silently choose a connection. The cell remains Python-language and the selected Python kernel does not change. The replacement result is first-party and live/full while its new extension-host record exists.</p>
 <p>When a helper evaluator returns <code>EvaluationResult(..., chart=Chart(...))</code>, <code>Chart.type</code> accepts <code>line</code>, <code>scatter</code>, <code>step</code>, <code>bar</code>, <code>box</code>, or <code>candlestick</code>. Line/scatter/step/bar may use <code>group_by_column</code>. Candlestick requires <code>y_columns=()</code> plus distinct <code>open_column</code>, <code>high_column</code>, <code>low_column</code>, and <code>close_column</code> fields. The interactive renderer supports all six; the static HTML fallback draws only ungrouped line/scatter/step/bar and clearly reports grouped, box, or candlestick selections as interactive-only.</p>
 <h2 id="cell-metadata">Cell metadata</h2>
 <p>VS Code's built-in Jupyter serializer can persist a non-default q cell as:</p>
@@ -1195,7 +1206,12 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 <span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </code></pre></div>
-<p>That serializer-owned field is separate from the helper's nested <code>metadata.vscode-kdb</code> marker/limit object. Tagging merges its metadata without deleting unrelated fields and preserves an existing leading <code>%%q</code> marker.</p>
+<p>That serializer-owned field is separate from the extension's optional nested <code>metadata.vscode-kdb</code> marker/limit object. Direct IPC q cells rely on the serializer-owned q language plus extension target metadata. A released-companion cell remains Python-language and persists <code>%%q</code> in its source; <code>kx-notebook</code> 0.1.0 does not require the extension tag metadata.</p>
+<h2 id="evidence-boundary">Evidence boundary</h2>
+<p>Focused pure/provider tests cover default non-registration and opt-in controller registration/disposal, mixed action/toolbar/context/keybinding guards, q language assignment without a controller switch, current stable-ID target routing after same-profile endpoint edits and active changes, missing-target prompts, namespace/session continuity, complete-cell dispatch, Python-cell isolation, race/error/cancellation handling, live result lifetime, bounded snapshots, shared settings messages, companion-route separation, and bans on private Jupyter/SQLTools runtime coupling. <code>npm run test:notebook-cross</code> separately installs exactly <code>kx-notebook==0.1.0</code>, verifies <code>import kx_notebook</code>, and validates the released package's emitted version-1 MIME payload with the TypeScript contract.</p>
+<p>The scoped real Extension Host smoke uses isolated VS Code user data and the actual <code>ConnectionStore</code> to add two application/global profiles, set active selection, edit the same targeted ID from port <code>5005</code> to <code>5000</code>, confirm both profiles remain, resolve the notebook target to current port <code>5000</code>, verify the optional controller is not registered by default, and clean up its settings, secrets, and global state. It also verifies actual q-language and KX metadata persistence through save, close, and reopen, then restores the notebook default. That smoke remains non-visual and does not automate the connection webview, top-right kernel selector, toolbar/status layout, or target QuickPick.</p>
+<p><code>npm run test:notebook-results-visual</code> is the narrower real UI check for this result surface. It starts q, runs a deterministic gallery in an isolated VS Code Extension Host under Xvfb, and keeps the existing set of 12 validated screenshots. They cover light/dark tables and charts, visible and hidden color-keyed legends, readable dark axes, selector swatches and narrow containment, <strong>Auto</strong> font-size and scrollable Settings, opt-in qText readability, tracked-file save/close/reopen preview behavior, live-full state, and all six chart families. Renderer automation also exercises live range selection/search, column and settings menus, saved range selection/search, chart rendering, pointer and keyboard legend toggling, drag zoom, Settings Close/Escape/focus return, settings-rerender persistence, and Reset zoom. Native clipboard ownership, save dialogs, panel handoff, and rerun replacement remain protocol/runtime evidence rather than screenshot claims.</p>
+<p>That acceptance scope is local Linux VS Code Extension Host/Xvfb with the installed q binary reached over loopback. Remote and devcontainer acceptance were not run. The Docker daemon is unavailable on this host, which is a hard blocker for Docker-backed remote/devcontainer coverage.</p>
 
 
 
@@ -1208,54 +1224,54 @@ uv<span class="w"> </span>pip<span class="w"> </span>install<span class="w"> </s
 
 
 
-
+                
               </article>
             </div>
-
-
+          
+          
 <script>var target=document.getElementById(location.hash.slice(1));target&&target.name&&(target.checked=target.name.startsWith("__tabbed_"))</script>
         </div>
-
+        
           <button type="button" class="md-top md-icon" data-md-component="top" hidden>
-
+  
   <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M13 20h-2V8l-5.5 5.5-1.42-1.42L12 4.16l7.92 7.92-1.42 1.42L13 8z"/></svg>
   Back to top
 </button>
-
+        
       </main>
-
+      
         <footer class="md-footer">
-
+  
   <div class="md-footer-meta md-typeset">
     <div class="md-footer-meta__inner md-grid">
       <div class="md-copyright">
-
-
+  
+  
     Made with
     <a href="https://squidfunk.github.io/mkdocs-material/" target="_blank" rel="noopener">
       Material for MkDocs
     </a>
-
+  
 </div>
-
+      
     </div>
   </div>
 </footer>
-
+      
     </div>
     <div class="md-dialog" data-md-component="dialog">
       <div class="md-dialog__inner md-typeset"></div>
     </div>
-
-
-
-
-
+    
+    
+    
+      
+      
       <script id="__config" type="application/json">{"annotate": null, "base": "..", "features": ["navigation.instant", "navigation.sections", "navigation.top", "search.highlight", "search.suggest", "toc.follow", "content.code.copy"], "search": "../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
-
-
+    
+    
       <script src="../assets/javascripts/bundle.79ae519e.min.js"></script>
-
-
+      
+    
   </body>
 </html>

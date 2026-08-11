@@ -32,3 +32,31 @@ export function chartSeriesVisible(
 export function chartLegendToggleKey(key: string): boolean {
   return key === 'Enter' || key === ' ' || key === 'Spacebar';
 }
+
+export interface ChartSeriesColorSource {
+  columnName: string;
+  sourceColumnName?: string;
+}
+
+export function chartSeriesColorIndexes(
+  columnName: string,
+  availableColumns: readonly string[],
+  renderedSeries: readonly ChartSeriesColorSource[] | null | undefined,
+  paletteSize: number
+): number[] {
+  const size = Number.isSafeInteger(paletteSize) && paletteSize > 0
+    ? paletteSize
+    : 1;
+  const matches = (renderedSeries || [])
+    .map((series, index) => ({
+      index: index % size,
+      column: series.sourceColumnName || series.columnName,
+    }))
+    .filter(series => series.column === columnName)
+    .map(series => series.index);
+  if (matches.length > 0) {
+    return [...new Set(matches)];
+  }
+  const availableIndex = availableColumns.indexOf(columnName);
+  return [Math.max(0, availableIndex) % size];
+}
