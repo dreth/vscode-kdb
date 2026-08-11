@@ -3,8 +3,8 @@
 
 const assert = require('assert');
 const cp = require('child_process');
+const crypto = require('crypto');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -16,6 +16,7 @@ const VALID_STATUSES = new Set(['PASS', 'DIFFERENT_BY_DESIGN', 'GAP', 'NOT_TESTA
 const { buildMachineSummary, buildSummary } = require('../test/parity/summary');
 const {
   assertGitStatusUnchanged,
+  assertReferenceDirtyState,
   gitStatusSnapshot,
 } = require('../test/parity/process');
 
@@ -45,7 +46,6 @@ async function main() {
 
   const standalone = inspectRepository(ROOT, 'vscode-kdb');
   const reference = inspectRepository(referenceRoot, 'kdb-sqltools');
-  const verificationMode = options.worktree ? 'worktree' : 'pinned-clean';
   assertRevision(reference.commit, expectedReferenceRevision, 'reference');
   if (process.env.VSCODE_KDB_PARITY_REVISION) {
     assertRevision(standalone.commit, process.env.VSCODE_KDB_PARITY_REVISION, 'standalone');
@@ -53,184 +53,112 @@ async function main() {
   assertPackageLockVersion(ROOT, standalone.packageJson.version, 'standalone');
   assertPackageLockVersion(referenceRoot, reference.packageJson.version, 'reference');
 
-  const repositoryBaselines = repositoryPairSnapshot(ROOT, referenceRoot);
-  assertVerificationMode(verificationMode, repositoryBaselines);
+  const referenceStatusBefore = referenceStatusSnapshot(referenceRoot);
+  assertAllowedReferenceStatus(referenceStatusBefore.raw);
+  const standaloneStatus = gitCapture(ROOT, ['status', '--porcelain=v1', '--untracked-files=all']);
   const qVersionText = qVersion(qPath);
 
-  printBaseline({
-    standalone,
-    reference,
-    repositoryBaselines,
-    verificationMode,
+  printBaseline({ standalone, reference, referenceStatusBefore, standaloneStatus, qPath, qVersionText });
+  assertStrictStandaloneState(standaloneStatus, options.failOnKnownGap);
+
+  runDependencyCheck(ROOT, 'standalone dependencies');
+  runDependencyCheck(referenceRoot, 'reference dependencies');
+  assertReferenceSnapshotUnchanged(referenceStatusBefore, referenceStatusSnapshot(referenceRoot));
+
+  await runCheckedCommand({
+    name: 'standalone compile',
+    command: npmCommand(),
+    args: ['run', 'compile'],
+    cwd: ROOT,
+    display: 'npm run compile',
+  });
+  await runReferenceCommand({
+    name: 'reference compile',
+    command: npmCommand(),
+    args: ['run', 'compile'],
+    cwd: referenceRoot,
+    display: 'npm run compile',
+  }, referenceStatusBefore);
+
+  await runCheckedCommand({
+    name: 'parity runner self-tests',
+    command: process.execPath,
+    args: ['test/parity/self-test.js'],
+    cwd: ROOT,
+    display: 'node test/parity/self-test.js',
+  });
+  await runCheckedCommand({
+    name: 'standalone focused suite',
+    command: process.execPath,
+    args: ['test/run.js'],
+    cwd: ROOT,
+    display: 'node test/run.js',
+  });
+  await runCheckedCommand({
+    name: 'standalone required live-q suite',
+    command: process.execPath,
+    args: ['test/live/run.js'],
+    cwd: ROOT,
+    env: {
+      ...process.env,
+      VSCODE_KDB_LIVE_REQUIRED: '1',
+      VSCODE_KDB_Q_BIN: qPath,
+    },
+    display: `VSCODE_KDB_LIVE_REQUIRED=1 VSCODE_KDB_Q_BIN=${shellDisplay(qPath)} node test/live/run.js`,
+  });
+  await runReferenceCommand({
+    name: 'reference focused suite',
+    command: process.execPath,
+    args: ['test/run.js'],
+    cwd: referenceRoot,
+    display: 'node test/run.js',
+  }, referenceStatusBefore);
+  await runReferenceCommand({
+    name: 'reference required live-q suite',
+    command: process.execPath,
+    args: ['test/live/run.js'],
+    cwd: referenceRoot,
+    env: {
+      ...process.env,
+      KDB_Q_BIN: qPath,
+      KDB_SQLTOOLS_LIVE_REQUIRED: '1',
+    },
+    display: `KDB_Q_BIN=${shellDisplay(qPath)} KDB_SQLTOOLS_LIVE_REQUIRED=1 node test/live/run.js`,
+  }, referenceStatusBefore);
+
+  const { loadParityAdapters } = require('../test/parity/loaders');
+  const fixtures = require('../test/parity/fixtures');
+  const canonical = require('../test/parity/canonical');
+  const { runParitySuite } = require('../test/parity/suite');
+  const adapters = loadParityAdapters({ standaloneRoot: ROOT, referenceRoot });
+  const execution = createCaseExecution();
+
+  await runParitySuite({
+    ...execution.context,
+    standalone: adapters.standalone,
+    reference: adapters.reference,
+    fixtures,
+    canonical,
     qPath,
-    qVersionText,
+    roots: { standalone: ROOT, reference: referenceRoot },
+    liveFixturePath: path.join(ROOT, 'test', 'parity', 'fixture.q'),
   });
 
-  let isolated;
-  try {
-    runDependencyCheck(ROOT, 'standalone dependencies');
-    runDependencyCheck(referenceRoot, 'reference dependencies');
+  const referenceStatusAfter = referenceStatusSnapshot(referenceRoot);
+  assertReferenceSnapshotUnchanged(referenceStatusBefore, referenceStatusAfter);
+  const summary = buildSummary(execution.outcomes, execution.assertionCount());
+  const machineSummary = buildMachineSummary({
+    standaloneCommit: standalone.commit,
+    referenceCommit: reference.commit,
+    summary,
+  });
+  process.stdout.write(`PARITY_RESULT_JSON=${JSON.stringify(machineSummary)}\n`);
 
-    isolated = createIsolatedBuildRoots(ROOT, referenceRoot);
-    await runCheckedCommand({
-      name: 'standalone isolated compile',
-      command: process.execPath,
-      args: [
-        path.join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
-        '-p',
-        path.join(ROOT, 'tsconfig.json'),
-        '--outDir',
-        isolated.standaloneOutRoot,
-      ],
-      cwd: ROOT,
-      display: `tsc -p tsconfig.json --outDir ${shellDisplay(isolated.standaloneOutRoot)}`,
-    });
-    await runCheckedCommand({
-      name: 'reference isolated compile',
-      command: process.execPath,
-      args: [
-        path.join(referenceRoot, 'node_modules', 'typescript', 'bin', 'tsc'),
-        '-p',
-        path.join(referenceRoot, 'tsconfig.json'),
-        '--outDir',
-        isolated.referenceOutRoot,
-      ],
-      cwd: referenceRoot,
-      display: `tsc -p tsconfig.json --outDir ${shellDisplay(isolated.referenceOutRoot)}`,
-    });
-    await runCheckedCommand({
-      name: 'standalone isolated renderer typecheck',
-      command: process.execPath,
-      args: [
-        path.join(ROOT, 'node_modules', 'typescript', 'bin', 'tsc'),
-        '-p',
-        path.join(ROOT, 'renderer', 'tsconfig.json'),
-        '--noEmit',
-      ],
-      cwd: ROOT,
-      display: 'tsc -p renderer/tsconfig.json --noEmit',
-    });
-    await runCheckedCommand({
-      name: 'standalone isolated renderer bundle',
-      command: path.join(ROOT, 'node_modules', 'esbuild', 'bin', 'esbuild'),
-      args: [
-        path.join(ROOT, 'renderer', 'index.ts'),
-        '--bundle',
-        '--format=esm',
-        '--platform=browser',
-        '--target=es2022',
-        '--loader:.css=text',
-        `--outfile=${isolated.standaloneRendererBundle}`,
-        '--minify',
-        '--legal-comments=none',
-      ],
-      cwd: ROOT,
-      display: `esbuild renderer/index.ts --bundle --outfile=${shellDisplay(isolated.standaloneRendererBundle)}`,
-    });
-
-    await runCheckedCommand({
-      name: 'parity runner self-tests',
-      command: process.execPath,
-      args: ['test/parity/self-test.js'],
-      cwd: ROOT,
-      display: 'node test/parity/self-test.js',
-    });
-    await runCheckedCommand({
-      name: 'standalone focused suite from isolated output',
-      command: process.execPath,
-      args: ['test/run.js'],
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        VSCODE_KDB_TEST_OUT_ROOT: isolated.standaloneOutRoot,
-        VSCODE_KDB_TEST_RENDERER_BUNDLE: isolated.standaloneRendererBundle,
-      },
-      display: `VSCODE_KDB_TEST_OUT_ROOT=${shellDisplay(isolated.standaloneOutRoot)} VSCODE_KDB_TEST_RENDERER_BUNDLE=${shellDisplay(isolated.standaloneRendererBundle)} node test/run.js`,
-    });
-    await runCheckedCommand({
-      name: 'standalone required live-q suite from isolated output',
-      command: process.execPath,
-      args: ['test/live/run.js'],
-      cwd: ROOT,
-      env: {
-        ...process.env,
-        VSCODE_KDB_TEST_OUT_ROOT: isolated.standaloneOutRoot,
-        VSCODE_KDB_LIVE_REQUIRED: '1',
-        VSCODE_KDB_Q_BIN: qPath,
-      },
-      display: `VSCODE_KDB_TEST_OUT_ROOT=${shellDisplay(isolated.standaloneOutRoot)} VSCODE_KDB_LIVE_REQUIRED=1 VSCODE_KDB_Q_BIN=${shellDisplay(qPath)} node test/live/run.js`,
-    });
-    await runCheckedCommand({
-      name: 'reference focused suite from isolated output',
-      command: process.execPath,
-      args: ['test/run.js'],
-      cwd: referenceRoot,
-      env: {
-        ...process.env,
-        KDB_SQLTOOLS_TEST_OUT_ROOT: isolated.referenceOutRoot,
-      },
-      display: `KDB_SQLTOOLS_TEST_OUT_ROOT=${shellDisplay(isolated.referenceOutRoot)} node test/run.js`,
-    });
-    await runCheckedCommand({
-      name: 'reference required live-q suite from isolated output',
-      command: process.execPath,
-      args: ['test/live/run.js'],
-      cwd: referenceRoot,
-      env: {
-        ...process.env,
-        KDB_SQLTOOLS_TEST_OUT_ROOT: isolated.referenceOutRoot,
-        KDB_Q_BIN: qPath,
-        KDB_SQLTOOLS_LIVE_REQUIRED: '1',
-      },
-      display: `KDB_SQLTOOLS_TEST_OUT_ROOT=${shellDisplay(isolated.referenceOutRoot)} KDB_Q_BIN=${shellDisplay(qPath)} KDB_SQLTOOLS_LIVE_REQUIRED=1 node test/live/run.js`,
-    });
-
-    const { loadParityAdapters } = require('../test/parity/loaders');
-    const fixtures = require('../test/parity/fixtures');
-    const canonical = require('../test/parity/canonical');
-    const { runParitySuite } = require('../test/parity/suite');
-    const adapters = loadParityAdapters({
-      standaloneRoot: ROOT,
-      referenceRoot,
-      standaloneOutRoot: isolated.standaloneOutRoot,
-      referenceOutRoot: isolated.referenceOutRoot,
-    });
-    const execution = createCaseExecution();
-
-    await runParitySuite({
-      ...execution.context,
-      standalone: adapters.standalone,
-      reference: adapters.reference,
-      fixtures,
-      canonical,
-      qPath,
-      roots: { standalone: ROOT, reference: referenceRoot },
-      liveFixturePath: path.join(ROOT, 'test', 'parity', 'fixture.q'),
-    });
-
-    const summary = buildSummary(execution.outcomes, execution.assertionCount());
-    const machineSummary = buildMachineSummary({
-      standaloneCommit: standalone.commit,
-      referenceCommit: reference.commit,
-      summary,
-    });
-    process.stdout.write(`PARITY_RESULT_JSON=${JSON.stringify(machineSummary)}\n`);
-
-    if (summary.unexpectedCount > 0) {
-      process.exitCode = 1;
-    } else if (options.failOnKnownGap && summary.byStatus.GAP > 0) {
-      process.stderr.write(`Strict parity mode found ${summary.byStatus.GAP} known GAP case(s).\n`);
-      process.exitCode = 2;
-    }
-  } finally {
-    if (isolated) {
-      fs.rmSync(isolated.tempRoot, { recursive: true, force: true });
-    }
-    assertRepositoryPairUnchanged(
-      repositoryBaselines,
-      repositoryPairSnapshot(ROOT, referenceRoot),
-      'final parity verification'
-    );
+  if (summary.unexpectedCount > 0) {
+    process.exitCode = 1;
+  } else if (options.failOnKnownGap && summary.byStatus.GAP > 0) {
+    process.stderr.write(`Strict parity mode found ${summary.byStatus.GAP} known GAP case(s).\n`);
+    process.exitCode = 2;
   }
 }
 
@@ -356,77 +284,34 @@ function assertRevision(actual, expected, label) {
   }
 }
 
-function repositoryPairSnapshot(standaloneRoot, referenceRoot) {
-  return Object.freeze({
-    standalone: gitStatusSnapshot(standaloneRoot),
-    reference: gitStatusSnapshot(referenceRoot),
-  });
+function referenceStatusSnapshot(root) {
+  const raw = gitCaptureBuffer(root, ['status', '--porcelain=v1', '-z', '--untracked-files=all']);
+  const robust = gitStatusSnapshot(root);
+  assertReferenceDirtyState(robust);
+  return {
+    raw,
+    entries: raw.toString('utf8').split('\0').filter(Boolean),
+    hash: robust.hash,
+    porcelainHash: crypto.createHash('sha256').update(raw).digest('hex'),
+    robust,
+  };
 }
 
-function assertVerificationMode(mode, snapshots) {
-  if (mode === 'worktree') {
-    return;
-  }
-  if (mode !== 'pinned-clean') {
-    throw new Error(`Unsupported parity verification mode: ${mode}`);
-  }
-  const dirty = Object.entries(snapshots)
-    .filter(([, snapshot]) => snapshot.entries.length > 0)
-    .map(([label, snapshot]) =>
-      `${label}: ${snapshot.entries.map(entry => `${entry.status} ${entry.path}`).join(', ')}`
-    );
-  if (dirty.length > 0) {
-    throw new Error(
-      'Pinned-clean parity requires clean standalone and reference worktrees. ' +
-      'Use --worktree to attest explicit dirty content without weakening this gate.\n' +
-      dirty.join('\n')
-    );
-  }
-}
-
-function assertRepositoryPairUnchanged(before, after, label) {
-  const errors = [];
-  for (const repository of ['standalone', 'reference']) {
-    try {
-      assertGitStatusUnchanged(
-        before[repository],
-        after[repository],
-        `${label} ${repository} repository`
-      );
-    } catch (error) {
-      errors.push(error);
+function assertAllowedReferenceStatus(raw) {
+  const entries = raw.toString('utf8').split('\0').filter(Boolean);
+  for (const entry of entries) {
+    const indexStatus = entry[0];
+    const worktreeStatus = entry[1];
+    const file = entry.slice(3);
+    if (indexStatus !== ' ' || worktreeStatus !== 'M' || !file.startsWith('docs/')) {
+      throw new Error(`Reference dirty state is not the approved unstaged docs/** drift: ${JSON.stringify(entry)}`);
     }
   }
-  if (errors.length === 1) {
-    throw errors[0];
-  }
-  if (errors.length > 1) {
-    throw new AggregateError(errors, `${label} changed both guarded repositories`);
-  }
 }
 
-function createIsolatedBuildRoots(standaloneRoot, referenceRoot) {
-  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'vscode-kdb-cross-parity-'));
-  const standaloneParent = path.join(tempRoot, 'standalone');
-  const referenceParent = path.join(tempRoot, 'reference');
-  const standaloneOutRoot = path.join(standaloneParent, 'out');
-  const referenceOutRoot = path.join(referenceParent, 'out');
-  const standaloneRendererBundle = path.join(
-    standaloneParent,
-    'renderer',
-    'kx-notebook-renderer.js'
-  );
-  fs.mkdirSync(standaloneOutRoot, { recursive: true });
-  fs.mkdirSync(referenceOutRoot, { recursive: true });
-  fs.mkdirSync(path.dirname(standaloneRendererBundle), { recursive: true });
-  fs.symlinkSync(path.join(standaloneRoot, 'node_modules'), path.join(standaloneParent, 'node_modules'), 'dir');
-  fs.symlinkSync(path.join(referenceRoot, 'node_modules'), path.join(referenceParent, 'node_modules'), 'dir');
-  return Object.freeze({
-    tempRoot,
-    standaloneOutRoot,
-    referenceOutRoot,
-    standaloneRendererBundle,
-  });
+function assertReferenceSnapshotUnchanged(before, after) {
+  assertAllowedReferenceStatus(after.raw);
+  assertGitStatusUnchanged(before.robust, after.robust, 'reference repository');
 }
 
 function runDependencyCheck(cwd, name) {
@@ -453,6 +338,41 @@ function runDependencyCheck(cwd, name) {
     exitCode: 0,
     outcome: 'installed dependency tree satisfied package metadata',
   };
+}
+
+async function runReferenceCommand(spec, baseline) {
+  let result;
+  let commandError;
+  try {
+    result = await runCheckedCommand(spec);
+  } catch (error) {
+    commandError = error;
+  }
+
+  let statusError;
+  try {
+    const after = referenceStatusSnapshot(spec.cwd);
+    assertReferenceSnapshotUnchanged(baseline, after);
+  } catch (error) {
+    statusError = error;
+  }
+
+  if (statusError && commandError) {
+    const combined = new AggregateError(
+      [commandError, statusError],
+      `${spec.name} failed and the reference repository state changed`
+    );
+    combined.commandError = commandError;
+    combined.statusError = statusError;
+    throw combined;
+  }
+  if (statusError) {
+    throw statusError;
+  }
+  if (commandError) {
+    throw commandError;
+  }
+  return result;
 }
 
 function runCheckedCommand(spec) {
@@ -527,18 +447,11 @@ function qVersion(qPath) {
 }
 
 function parseArgs(args) {
-  const options = {
-    failOnKnownGap: process.env.PARITY_STRICT_GAPS === '1',
-    worktree: process.env.VSCODE_KDB_PARITY_MODE === 'worktree',
-    help: false,
-  };
+  const options = { failOnKnownGap: process.env.PARITY_STRICT_GAPS === '1', help: false };
   for (const arg of args) {
     switch (arg) {
       case '--fail-on-known-gap':
         options.failOnKnownGap = true;
-        break;
-      case '--worktree':
-        options.worktree = true;
         break;
       case '--help':
       case '-h':
@@ -558,23 +471,19 @@ function printHelp() {
     `  KDB_SQLTOOLS_PARITY_REVISION  expected reference commit (default ${DEFAULT_REFERENCE_REVISION})\n` +
     `  VSCODE_KDB_PARITY_REVISION    optional expected standalone commit\n` +
     `  VSCODE_KDB_Q_BIN              q executable (default ${DEFAULT_Q_PATH})\n` +
-    `  VSCODE_KDB_PARITY_MODE        worktree to verify an explicit dirty tree\n` +
     `  PARITY_STRICT_GAPS=1          fail with exit 2 for registered GAP cases\n\n` +
     `Options:\n` +
-    `  --worktree           permit dirty trees while guarding them against changes\n` +
     `  --fail-on-known-gap  exit 2 when registered GAP cases remain\n\n` +
-    `Default pinned-clean mode fails closed on either dirty worktree. Compiled output is isolated under /tmp.\n` +
-    `Progress goes to stderr; stdout contains one PARITY_RESULT_JSON line.\n`);
+    `A run writes no files. Progress goes to stderr; stdout contains one PARITY_RESULT_JSON line.\n`);
 }
 
 function printBaseline(values) {
   process.stderr.write(`Cross-extension parity preflight\n` +
-    `  mode:       ${values.verificationMode}\n` +
     `  standalone: ${values.standalone.commit} (${values.standalone.packageJson.name}@${values.standalone.packageJson.version})\n` +
     `  reference:  ${values.reference.commit} (${values.reference.packageJson.name}@${values.reference.packageJson.version})\n` +
     `  q runtime:  ${values.qPath} (${values.qVersionText})\n` +
-    `  standalone state: ${values.repositoryBaselines.standalone.hash} (${values.repositoryBaselines.standalone.entries.length} dirty entries)\n` +
-    `  reference state:  ${values.repositoryBaselines.reference.hash} (${values.repositoryBaselines.reference.entries.length} dirty entries)\n`);
+    `  standalone tracked state: ${dirtyDisclaimer(values.standaloneStatus, 'standalone')}\n` +
+    `  reference tracked state: ${values.referenceStatusBefore.entries.length} pre-existing unstaged docs/** modifications; SHA-256 ${values.referenceStatusBefore.hash}\n`);
 }
 
 function gitCapture(cwd, args) {
@@ -613,6 +522,23 @@ function realExecutable(value, label) {
   return fs.realpathSync(resolved);
 }
 
+function dirtyDisclaimer(status, label) {
+  if (!status) {
+    return 'clean tracked worktree';
+  }
+  const count = status.split(/\r?\n/).filter(Boolean).length;
+  return `${count} tracked/untracked non-ignored entries present while testing ${label}; exact commit plus working-tree state was printed`;
+}
+
+function assertStrictStandaloneState(status, strict) {
+  if (strict && String(status || '').trim()) {
+    throw new Error(
+      'Strict parity mode requires a clean standalone tracked/untracked worktree. ' +
+      'Use the default mode while changing the repository.'
+    );
+  }
+}
+
 function withoutUndefined(value) {
   return Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined && item !== false));
 }
@@ -634,10 +560,8 @@ function shellDisplay(value) {
 }
 
 module.exports = {
-  assertRepositoryPairUnchanged,
-  assertVerificationMode,
-  createIsolatedBuildRoots,
-  parseArgs,
-  repositoryPairSnapshot,
+  assertStrictStandaloneState,
+  referenceStatusSnapshot,
   runCheckedCommand,
+  runReferenceCommand,
 };

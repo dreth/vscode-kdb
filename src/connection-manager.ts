@@ -182,16 +182,9 @@ export class ConnectionManager implements vscode.Disposable {
     connection: KxConnection,
     script: string,
     onIssued?: () => void,
-    signal?: AbortSignal,
-    shouldIssue?: () => boolean
+    signal?: AbortSignal
   ): Promise<QValue> {
-    return this.executePrepared(
-      connection,
-      qScriptInNamespace(script, connection.database),
-      onIssued,
-      signal,
-      shouldIssue
-    );
+    return this.executePrepared(connection, qScriptInNamespace(script, connection.database), onIssued, signal);
   }
 
   public async executeInConfiguredNamespace(
@@ -212,12 +205,11 @@ export class ConnectionManager implements vscode.Disposable {
     connection: KxConnection,
     query: string,
     onIssued?: () => void,
-    signal?: AbortSignal,
-    shouldIssue?: () => boolean
+    signal?: AbortSignal
   ): Promise<QValue> {
     const client = await this.connect(connection, signal);
     try {
-      return await client.query(query, onIssued, signal, shouldIssue);
+      return await client.query(query, onIssued, signal);
     } catch (error) {
       if (!(error instanceof KdbQError) && !(error instanceof KdbQueryCanceledError)) {
         const shouldCancel = this.clients.get(connection.id) === client;

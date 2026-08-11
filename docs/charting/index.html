@@ -881,17 +881,17 @@
 <li>distinct Open, High, Low, and Close fields for candlestick.</li>
 </ul>
 <p>Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until <strong>Render</strong> is pressed. The chart stays below the table and adds no chart height while hidden.</p>
-<p>There is no notebook-only visible Point cap. Live requests still honor common <code>vscode-kdb.results.*</code> source/sampling settings and safe built-in limits; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, legend toggles, crosshair selection, plain-drag X zoom, <code>Shift</code>+drag X pan, focusable Pan left/right controls, Left/Right keyboard pan, and Home/Reset.</p>
+<p>There is no notebook-only visible Point cap. Live requests still honor common <code>vscode-kdb.results.*</code> source/sampling settings and safe built-in limits; compact status text reports validation, sampling, and warnings. The bundled local uPlot implementation provides theme-aware background/grid/axes, legend toggles, crosshair selection, drag zoom, and Reset zoom.</p>
 <p>The separate Python helper can persist a supported chart specification using eligible bounded rows. First-party direct output does not write a chart specification to saved notebook output.</p>
 <p>On the Python-helper route, the emitted chart specification is notebook data. Renderer control changes and zoom are session state and do not silently rewrite the <code>.ipynb</code>; re-emit the helper result with the desired <code>kx_notebook.Chart</code> specification to persist a changed selection. Its escaped <code>text/html</code> fallback renders a network-free static SVG from the emitted specification. Direct IPC output from the mixed runner or optional controller has no HTML fallback or persisted chart specification. HTML/PDF export is static and does not preserve uPlot controls, tooltips, or zoom.</p>
-<p>Once a direct result's bound live record is absent, notebook charting uses only rows owned by the MIME payload: bounded rows for preview mode or every stored row for an explicitly preserved full v2 result. Opening a preview in the full KX Results panel does not restore missing data.</p>
+<p>Once a direct result's bound live record is absent, notebook charting uses only the bounded rows saved in the MIME payload. Opening that snapshot in the full KX Results panel does not restore missing data.</p>
 <h2 id="open-and-render">Open and render</h2>
 <ol>
 <li>Run q into a KX result panel.</li>
 <li>Press the top-level <strong>Chart</strong> button.</li>
 <li>Select a chart type and eligible columns.</li>
 <li>Press <strong>Render</strong>.</li>
-<li>Use the tooltip/crosshair, legend toggles, plain-drag X zoom, <code>Shift</code>+drag or the Pan controls for X pan, <strong>Refine view</strong>, or <strong>Reset zoom</strong>.</li>
+<li>Use the tooltip/crosshair, legend toggles, drag zoom, <strong>Refine zoom</strong>, or <strong>Reset zoom</strong>.</li>
 <li>After rendering, use <strong>Export PNG</strong> to save the chart canvas.</li>
 </ol>
 <p>Changing controls does not silently rerender the existing chart. The panel marks settings as changed until <strong>Render</strong> is pressed. Compatible chart selections are remembered for that result shape.</p>
@@ -954,20 +954,18 @@
 <li>cursor/crosshair values and OHLC-aware tooltips;</li>
 <li>readable numeric and temporal axes;</li>
 <li>legend series toggling;</li>
-<li>plain-drag X zoom;</li>
-<li><code>Shift</code>+drag X pan, focusable Pan left/right buttons, Left/Right keyboard pan, and Home reset;</li>
-<li>automatic and explicit refinement of the current visible X range;</li>
+<li>drag-select zoom;</li>
+<li>automatic and explicit refinement of the current zoom range;</li>
 <li>reset to the original x domain;</li>
 <li>a draggable chart/table splitter; and</li>
 <li>PNG export of the rendered canvas, including custom bars, boxes, and candles.</li>
 </ul>
-<p>The first full render captures an immutable original X-domain and retains the extension-side full source. Zoom and pan feed one settled-viewport coordinator. For an identical absolute X range, pan completion runs the exact same unchanged range-loading/resampling decision as zoom; when that decision requests retained-source data, the existing chart-family sampler and caps are used. Pan moves 20% of the visible span and clamps to the immutable full range, stale replies cannot replace a newer range or reset, and Y remains automatic for visible X. Programmatic scale changes do not recursively request another range. The same lifecycle applies to live notebook charts, while saved notebook charts rebuild from their immutable stored payload.</p>
-<p>Manual zoom, pan, refinement, resize/rerender, and reduced samples never replace the immutable baseline. <strong>Reset zoom</strong>, Home, or double-click restores the original numeric or temporal domain and sample, invalidates pending requests, returns Y to automatic scaling, and clears selection, tooltip, and settled-range timer/state. Series hidden from the legend remain hidden through these refreshes. The button state uses a small deterministic floating-point tolerance.</p>
+<p>The first full render captures an immutable original X-domain and retains the original full sample. Manual drag zoom, auto-refinement, explicit <strong>Refine zoom</strong>, resize/rerender, and refined samples do not replace them. <strong>Reset zoom</strong> restores that original numeric or temporal domain and original sample, returns Y to automatic scaling, clears selection and tooltip state, and clears pending auto-refinement timer/state. Series hidden from the legend remain hidden through zoom, refinement, Reset zoom/double-click, rerender, resize, and settings/configuration refresh. The button state is derived from the current scale with a small deterministic floating-point tolerance.</p>
 <p>Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step retain sampled gaps for missing/non-finite Y values; other generic types skip them where appropriate.</p>
 <p>Generic series use min/max-aware reduction, bars keep aligned x clusters, boxes use bounded x buckets, and candlesticks use OHLC-aware aggregation. Grouping retains at most 12 categories and 36 generated group/Y series. Status text reports source rows, eligible rows, sampled points, the algorithm, and warnings.</p>
 <h2 id="limits-and-settings">Limits and settings</h2>
 <p>The default chart source limit is 2,000,000 rows. Sources above <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> are rejected before scanning. Raising the limit can block the extension host; prefer a q-side limit or the <a href="../local-data-server/">Local Data Server</a> for larger analysis.</p>
-<p>The full-view sample target is bounded by plot width and a built-in 12,000-point ceiling. Zoom-range refinement defaults to a 3,000-point trigger and a 7,000-point maximum; pan uses that same decision and does not define a second sampling policy. Configure numeric label precision and refinement using the <a href="../settings/#charting">chart settings</a>.</p>
+<p>The full-view sample target is bounded by plot width and a built-in 12,000-point ceiling. Zoom refinement defaults to a 3,000-point trigger and a 7,000-point maximum. Configure numeric label precision and refinement using the <a href="../settings/#charting">chart settings</a>.</p>
 <p>The built-in chart intentionally does not attempt to embed a full external analytics environment. Use tokenized local data endpoints for Python, pandas, Plotly, or another separately managed toolchain.</p>
 
 
