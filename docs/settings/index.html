@@ -968,18 +968,25 @@
 <td><code>vscode-kdb.notebook.maxOutputRows</code></td>
 <td><code>20</code></td>
 <td>Integer <code>1</code>-<code>10000</code></td>
-<td>Maximum rows persisted in a new Direct IPC mixed-runner/optional-controller snapshot or newly tagged Python <code>%%q</code> marker. Tables at or below the bound persist fully; larger tables retain schema/headers, the bounded preview, total count, and truncation notice.</td>
+<td>Maximum rows in a new Direct IPC preview or newly tagged Python <code>%%q</code> marker. It never limits the transient live result or an explicitly preserved full v2 result.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputBytes</code></td>
 <td><code>1000000</code></td>
 <td>Integer <code>16384</code>-<code>10000000</code></td>
-<td>Maximum portable MIME bytes for new direct snapshots and newly tagged Python-helper output.</td>
+<td>Maximum serialized portable MIME bytes for Direct IPC preview output and newly tagged Python-helper output. It does not limit an explicitly preserved full v2 rich result; the direct <code>text/plain</code> fallback remains bounded.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.notebook.preserveFullResultByDefault</code></td>
+<td><code>false</code></td>
+<td>Boolean</td>
+<td>Check <strong>Preserve full result</strong> for each new first-party Direct IPC output. Full mode directly stores every exactly representable row, column, and cell without preview row/byte limits. An ordinary technical failure is reported if exact representation is impossible. Extension-managed connection credentials, session objects, and IPC handles remain excluded.</td>
 </tr>
 </tbody>
 </table>
 <p><strong>KX: Tag Notebook Cell as q</strong> first sets actual q language mode, then persists the current row/byte values in one durable <code>%%q</code> marker and nested <code>vscode-kdb</code> metadata. It preserves an existing marker, cell code, and unrelated metadata. A q-language cell without the marker exposes <strong>Prepare this q cell for the active Python kernel</strong>, which performs only the marker/metadata preparation.</p>
-<p>These are output-serialization limits, not server-side q limits. The portable contract also caps schemas at 256 columns and cell text at 32,768 characters. The payload excludes credentials, passwords, tokens, connection objects, recoverable IPC handles, and unbounded data. A direct result's full value is transient extension-host state only: bound to the notebook/current-cell URI (and rebound after a mixed output edit), removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened output is the snapshot and cannot recover omitted data.</p>
+<p>These are preview output-serialization limits, not server-side q limits. New Direct IPC output uses strict portable v2 with a fresh output ID and <code>preview</code>/<code>full</code> mode; legacy/Python v1 remains accepted unchanged. A per-output <strong>Preserve full result</strong> checkbox directly enables exact full mode while the matching live result exists, and persisted full v2 output can be unchecked back to a preview after reopening. Exact technical failures are reported without substituting a preview under the full label.</p>
+<p>Portable output excludes extension-managed connection credentials, session objects, and IPC handles. User-returned q values remain eligible for exact persistence. A preview's omitted rows remain only in transient extension-host state: the live record is bound to notebook/current-cell URI, atomically moved across supported output rewrites, removed on rerun, cell removal, notebook close, or deactivation, and capped at 512 oldest-first records. Reopened preview output cannot recover omitted data; persisted full v2 output owns its complete portable rows.</p>
 <p>Mixed <strong>Run q Cell (KX)</strong> and the optional direct controller reject a leading <code>%%q</code>; they run ordinary complete-cell q. Mixed cells use the notebook's explicit current target, while the q-only controller uses the active session only if explicitly enabled and selected. The mixed action does not switch the Python controller. While the q cell editor itself has text focus, its guarded <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> shortcut runs the KX action; Python, Markdown, cell-container, and output focus keep normal notebook behavior.</p>
 <p>The optional Python <code>%%q</code> helper is a distinct Python-kernel-owned evaluator route: keep its marker, restore the notebook default/Python language, and use normal Run. It does not share the direct KX q session by implication.</p>
 <p><code>inline</code> is the default Python-helper experience. For helper output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Direct output remains inline so its live viewer is available; use its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom state persist only for that rendered result in the current notebook session. The visible notebook-only point-cap preference is removed. Supported density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails use the same durable <code>vscode-kdb.results.*</code> configuration as the panel; Settings messages broadcast updates to open results.</p>
@@ -1298,12 +1305,12 @@
 <tr>
 <td><code>vscode-kdb.results.viewer.chartZoomMinSampledPoints</code></td>
 <td><code>3000</code></td>
-<td>Minimum visible sampled points before eligible settled zooms auto-refine; minimum <code>1</code>.</td>
+<td>Minimum visible sampled points before an eligible settled zoom or pan requests retained-source resampling; minimum <code>1</code>.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.results.viewer.chartZoomMaxSampledPoints</code></td>
 <td><code>7000</code></td>
-<td>Maximum refined sample size; clamped to at least the minimum setting.</td>
+<td>Maximum settled-range sample size; clamped to at least the minimum setting.</td>
 </tr>
 </tbody>
 </table>

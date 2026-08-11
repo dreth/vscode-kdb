@@ -13,6 +13,7 @@ export interface NotebookSettings {
   presentation: NotebookPresentation;
   rowLimit: number;
   byteLimit: number;
+  preserveFullResultByDefault: boolean;
 }
 
 export function safeNotebookPresentation(value: unknown): NotebookPresentation {
@@ -35,6 +36,10 @@ export function safeNotebookByteLimit(value: unknown): number {
     MIN_NOTEBOOK_BYTE_LIMIT,
     MAX_NOTEBOOK_BYTE_LIMIT
   );
+}
+
+export function safeNotebookPreserveFullResultByDefault(value: unknown): boolean {
+  return value === true;
 }
 
 export function hasNotebookQMarker(source: string): boolean {

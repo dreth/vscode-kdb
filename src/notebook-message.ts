@@ -1,7 +1,12 @@
-import { PortableKxResult, validatePortableKxResult } from './notebook-contract';
+import {
+  KX_NOTEBOOK_MIME,
+  PortableKxResult,
+  validatePortableKxResult,
+} from './notebook-contract';
 import { NotebookSettings } from './notebook-settings';
 
 export const NOTEBOOK_LIVE_RESULT_METADATA_KEY = 'vscode-kdb.liveResult';
+export const NOTEBOOK_OUTPUT_METADATA_KEY = 'vscode-kdb.output';
 export const MIN_NOTEBOOK_LIVE_ID_CHARS = 32;
 export const MAX_NOTEBOOK_LIVE_ID_CHARS = 128;
 export const MAX_NOTEBOOK_LIVE_REQUEST_ID = 0x7fffffff;
@@ -49,33 +54,45 @@ export interface NotebookLiveResultReference {
   id: string;
 }
 
+export interface NotebookOutputReference {
+  version: 1;
+  id: string;
+}
+
+export interface NotebookOutputMessageIdentity {
+  outputId: string;
+  renderGeneration: number;
+  requestId: number;
+}
+
+export interface NotebookLiveMessageIdentity extends NotebookOutputMessageIdentity {
+  liveId: string;
+}
+
 export type NotebookRendererMessage =
   | { type: 'ready' }
-  | { type: 'openPreview'; payload: PortableKxResult }
-  | { type: 'requestLiveResult'; liveId: string; requestId: number }
-  | {
+  | ({ type: 'bindOutput'; liveId?: string } & NotebookOutputMessageIdentity)
+  | ({ type: 'unbindOutput'; liveId?: string } & NotebookOutputMessageIdentity)
+  | ({ type: 'openPreview'; payload: PortableKxResult } & NotebookOutputMessageIdentity)
+  | ({ type: 'requestLiveResult' } & NotebookLiveMessageIdentity)
+  | ({
     type: 'requestLiveSlice';
-    liveId: string;
-    requestId: number;
     startRow: number;
     endRow: number;
     startColumn: number;
     endColumn: number;
-    sortColumn?: string;
+    columnOrdinals: number[];
+    sortOrdinal?: number;
     sortDirection?: NotebookLiveSortDirection;
-  }
-  | {
+  } & NotebookLiveMessageIdentity)
+  | ({
     type: 'searchLiveResult';
-    liveId: string;
-    requestId: number;
     query: string;
-    sortColumn?: string;
+    sortOrdinal?: number;
     sortDirection?: NotebookLiveSortDirection;
-  }
-  | {
+  } & NotebookLiveMessageIdentity)
+  | ({
     type: 'requestLiveChart';
-    liveId: string;
-    requestId: number;
     chartType: NotebookLiveChartType;
     xColumn: string;
     yColumns: string[];
@@ -85,22 +102,28 @@ export type NotebookRendererMessage =
     lowColumn?: string;
     closeColumn?: string;
     maxPoints: number;
-  }
-  | {
+    xMin?: number;
+    xMax?: number;
+  } & NotebookLiveMessageIdentity)
+  | ({
     type: 'copyLiveRange';
-    liveId: string;
-    requestId: number;
     startRow: number;
     endRow: number;
     startColumn: number;
     endColumn: number;
+    columnOrdinals: number[];
     format: 'tsv' | 'csv';
     includeHeaders: boolean;
     includeRowIndex: boolean;
-    sortColumn?: string;
+    sortOrdinal?: number;
     sortDirection?: NotebookLiveSortDirection;
-  }
-  | { type: 'openLiveResult'; liveId: string }
+  } & NotebookLiveMessageIdentity)
+  | ({ type: 'openLiveResult' } & NotebookLiveMessageIdentity)
+  | ({
+    type: 'setOutputPersistence';
+    mode: 'preview' | 'full';
+    liveId?: string;
+  } & NotebookOutputMessageIdentity)
   | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean };
 
 export interface NotebookRendererSettingsMessage extends NotebookSettings {
@@ -119,6 +142,7 @@ export interface NotebookSharedKxResultSettings {
   elapsedTimeDisplay: 'auto' | 'milliseconds';
   chartDecimalPlaces: number;
   chartMaxSourceRows: number;
+  chartZoomMinSampledPoints: number;
   chartZoomMaxSampledPoints: number;
   qTextSyntaxHighlighting: boolean;
   qTextDisplayFormatting: boolean;
@@ -130,16 +154,13 @@ export interface NotebookSharedKxResultSettings {
 }
 
 export interface NotebookLiveResultMetadata {
-  query?: string;
   connectionName?: string;
   elapsedMs?: number;
   messages?: string[];
 }
 
-export interface NotebookLiveResultMessage {
+export interface NotebookLiveResultMessage extends NotebookLiveMessageIdentity {
   type: 'liveResult';
-  liveId: string;
-  requestId: number;
   available: boolean;
   mode?: 'table' | 'text';
   kind?: string;
@@ -153,22 +174,19 @@ export interface NotebookLiveResultMessage {
   message?: string;
 }
 
-export interface NotebookLiveSliceMessage {
+export interface NotebookLiveSliceMessage extends NotebookLiveMessageIdentity {
   type: 'liveSlice';
-  liveId: string;
-  requestId: number;
   startRow: number;
   endRow: number;
   startColumn: number;
   endColumn: number;
+  columnOrdinals: number[];
   cells: string[][];
   error?: string;
 }
 
-export interface NotebookLiveSearchMessage {
+export interface NotebookLiveSearchMessage extends NotebookLiveMessageIdentity {
   type: 'liveSearch';
-  liveId: string;
-  requestId: number;
   matches: number[];
   totalScanned: number;
   scannedCells: number;
@@ -232,20 +250,38 @@ export interface NotebookLiveChartData {
   warnings?: string[];
 }
 
-export interface NotebookLiveChartMessage {
+export interface NotebookLiveChartMessage extends NotebookLiveMessageIdentity {
   type: 'liveChart';
-  liveId: string;
-  requestId: number;
   data?: NotebookLiveChartData;
   error?: string;
 }
 
-export interface NotebookLiveCopyMessage {
+export interface NotebookLiveCopyMessage extends NotebookLiveMessageIdentity {
   type: 'liveCopy';
-  liveId: string;
-  requestId: number;
   ok: boolean;
   message?: string;
+}
+
+export interface NotebookOutputPersistenceMessage extends NotebookOutputMessageIdentity {
+  type: 'outputPersistence';
+  mode: 'preview' | 'full';
+  enabled: boolean;
+  checked: boolean;
+  message?: string;
+}
+
+export interface NotebookLiveInvalidatedMessage {
+  type: 'liveResultInvalidated';
+  liveId: string;
+  reason:
+    | 'removed'
+    | 'replaced'
+    | 'evicted'
+    | 'output-unbound'
+    | 'duplicate-output'
+    | 'notebook-closed'
+    | 'cleared';
+  message: string;
 }
 
 export type NotebookRendererHostMessage =
@@ -254,7 +290,9 @@ export type NotebookRendererHostMessage =
   | NotebookLiveSliceMessage
   | NotebookLiveSearchMessage
   | NotebookLiveChartMessage
-  | NotebookLiveCopyMessage;
+  | NotebookLiveCopyMessage
+  | NotebookOutputPersistenceMessage
+  | NotebookLiveInvalidatedMessage;
 
 export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMessage | undefined {
   if (!isRecord(raw) || typeof raw.type !== 'string') {
@@ -263,17 +301,46 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
   if (raw.type === 'ready') {
     return Object.keys(raw).length === 1 ? { type: 'ready' } : undefined;
   }
+  if (raw.type === 'bindOutput' || raw.type === 'unbindOutput') {
+    return hasOnlyKeys(raw, [
+      'type',
+      'outputId',
+      'liveId',
+      'renderGeneration',
+      'requestId',
+    ]) && validOutputIdentity(raw) &&
+      (raw.liveId === undefined || validLiveId(raw.liveId))
+      ? {
+        type: raw.type,
+        ...outputIdentity(raw),
+        ...(typeof raw.liveId === 'string' ? { liveId: raw.liveId } : {}),
+      }
+      : undefined;
+  }
   if (raw.type === 'openPreview') {
-    if (!hasOnlyKeys(raw, ['type', 'payload'])) {
+    if (!hasOnlyKeys(raw, [
+      'type',
+      'payload',
+      'outputId',
+      'renderGeneration',
+      'requestId',
+    ]) || !validOutputIdentity(raw)) {
       return undefined;
     }
     const validation = validatePortableKxResult(raw.payload);
-    return validation.ok ? { type: 'openPreview', payload: validation.value } : undefined;
+    return validation.ok
+      ? { type: 'openPreview', payload: validation.value, ...outputIdentity(raw) }
+      : undefined;
   }
   if (raw.type === 'requestLiveResult') {
-    return hasOnlyKeys(raw, ['type', 'liveId', 'requestId']) &&
-      validLiveId(raw.liveId) && validRequestId(raw.requestId)
-      ? { type: raw.type, liveId: raw.liveId, requestId: raw.requestId }
+    return hasOnlyKeys(raw, [
+      'type',
+      'outputId',
+      'liveId',
+      'renderGeneration',
+      'requestId',
+    ]) && validLiveIdentity(raw)
+      ? { type: raw.type, ...liveIdentity(raw) }
       : undefined;
   }
   if (raw.type === 'requestLiveSlice') {
@@ -289,8 +356,33 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
     return parseLiveCopyRequest(raw);
   }
   if (raw.type === 'openLiveResult') {
-    return hasOnlyKeys(raw, ['type', 'liveId']) && validLiveId(raw.liveId)
-      ? { type: raw.type, liveId: raw.liveId }
+    return hasOnlyKeys(raw, [
+      'type',
+      'outputId',
+      'liveId',
+      'renderGeneration',
+      'requestId',
+    ]) && validLiveIdentity(raw)
+      ? { type: raw.type, ...liveIdentity(raw) }
+      : undefined;
+  }
+  if (raw.type === 'setOutputPersistence') {
+    return hasOnlyKeys(raw, [
+      'type',
+      'outputId',
+      'liveId',
+      'renderGeneration',
+      'requestId',
+      'mode',
+    ]) && validOutputIdentity(raw) &&
+      (raw.liveId === undefined || validLiveId(raw.liveId)) &&
+      (raw.mode === 'preview' || raw.mode === 'full')
+      ? {
+        type: raw.type,
+        ...outputIdentity(raw),
+        ...(typeof raw.liveId === 'string' ? { liveId: raw.liveId } : {}),
+        mode: raw.mode,
+      }
       : undefined;
   }
   if (raw.type === 'updateResultSetting') {
@@ -321,6 +413,30 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   if (raw.type === 'liveCopy') {
     return parseLiveCopyMessage(raw);
   }
+  if (raw.type === 'outputPersistence') {
+    return parseOutputPersistenceMessage(raw);
+  }
+  if (raw.type === 'liveResultInvalidated') {
+    const reasons = new Set([
+      'removed',
+      'replaced',
+      'evicted',
+      'output-unbound',
+      'duplicate-output',
+      'notebook-closed',
+      'cleared',
+    ]);
+    return hasOnlyKeys(raw, ['type', 'liveId', 'reason', 'message']) &&
+      validLiveId(raw.liveId) && typeof raw.reason === 'string' &&
+      reasons.has(raw.reason) && validBoundedText(raw.message, 4_096)
+      ? {
+        type: 'liveResultInvalidated',
+        liveId: raw.liveId,
+        reason: raw.reason as NotebookLiveInvalidatedMessage['reason'],
+        message: raw.message,
+      }
+      : undefined;
+  }
   return undefined;
 }
 
@@ -338,20 +454,96 @@ export function parseNotebookLiveResultReference(raw: unknown): NotebookLiveResu
     : undefined;
 }
 
+export function parseNotebookOutputReference(raw: unknown): NotebookOutputReference | undefined {
+  return isRecord(raw) && hasOnlyKeys(raw, ['version', 'id']) &&
+    raw.version === 1 && validLiveId(raw.id)
+    ? { version: 1, id: raw.id }
+    : undefined;
+}
+
+/**
+ * VS Code's built-in ipynb serializer persists custom output metadata from the
+ * nested `metadata` object. Accept the legacy/immediate top-level location and
+ * that serialized location, but reject malformed or conflicting duplicates.
+ */
+export function parseNotebookOutputReferenceFromMetadata(
+  raw: unknown
+): NotebookOutputReference | undefined {
+  if (!isRecord(raw)) {
+    return undefined;
+  }
+  const hasDirect = Object.prototype.hasOwnProperty.call(raw, NOTEBOOK_OUTPUT_METADATA_KEY);
+  const nestedMetadata = isRecord(raw.metadata) ? raw.metadata : undefined;
+  const hasNested = !!nestedMetadata &&
+    Object.prototype.hasOwnProperty.call(nestedMetadata, NOTEBOOK_OUTPUT_METADATA_KEY);
+  const direct = parseNotebookOutputReference(raw[NOTEBOOK_OUTPUT_METADATA_KEY]);
+  const nested = parseNotebookOutputReference(
+    nestedMetadata?.[NOTEBOOK_OUTPUT_METADATA_KEY]
+  );
+  if ((hasDirect && !direct) || (hasNested && !nested) ||
+    (direct && nested && direct.id !== nested.id)) {
+    return undefined;
+  }
+  return direct ?? nested;
+}
+
+/**
+ * Proves that outer notebook-output metadata is backed by exactly one valid
+ * first-party v2 MIME item carrying the same durable output identity.
+ * Session-only live metadata is never sufficient by itself.
+ */
+export function parseNotebookPortableOutputBinding(
+  metadata: unknown,
+  items: readonly { mime: string; data: Uint8Array }[]
+): NotebookOutputReference | undefined {
+  const outer = parseNotebookOutputReferenceFromMetadata(metadata);
+  if (!outer || !Array.isArray(items)) {
+    return undefined;
+  }
+  let portableItem: { mime: string; data: Uint8Array } | undefined;
+  for (const item of items) {
+    if (!item || item.mime !== KX_NOTEBOOK_MIME) {
+      continue;
+    }
+    if (portableItem || !(item.data instanceof Uint8Array)) {
+      return undefined;
+    }
+    portableItem = item;
+  }
+  if (!portableItem) {
+    return undefined;
+  }
+  try {
+    const validation = validatePortableKxResult(
+      JSON.parse(new TextDecoder().decode(portableItem.data))
+    );
+    return validation.ok && validation.value.version === 2 &&
+      validation.value.outputId === outer.id
+      ? outer
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'startRow',
     'endRow',
     'startColumn',
     'endColumn',
-    'sortColumn',
+    'columnOrdinals',
+    'sortOrdinal',
     'sortDirection',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validLiveIdentity(raw) ||
     !nonNegativeSafeInteger(raw.startRow) || !nonNegativeSafeInteger(raw.endRow) ||
-    !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn)) {
+    !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn) ||
+    !validColumnOrdinals(raw.columnOrdinals)) {
     return undefined;
   }
   const startRow = raw.startRow;
@@ -362,18 +554,19 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
   const columnCount = endColumn - startColumn + 1;
   if (rowCount < 1 || rowCount > MAX_NOTEBOOK_LIVE_SLICE_ROWS ||
     columnCount < 1 || columnCount > MAX_NOTEBOOK_LIVE_SLICE_COLUMNS ||
+    raw.columnOrdinals.length !== columnCount ||
     rowCount * columnCount > MAX_NOTEBOOK_LIVE_SLICE_CELLS ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   return {
     type: 'requestLiveSlice',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     startRow,
     endRow,
     startColumn,
     endColumn,
+    columnOrdinals: raw.columnOrdinals.slice(),
     ...sortFields(raw),
   };
 }
@@ -381,20 +574,21 @@ function parseLiveSliceRequest(raw: Record<string, unknown>): NotebookRendererMe
 function parseLiveSearchRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'query',
-    'sortColumn',
+    'sortOrdinal',
     'sortDirection',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validLiveIdentity(raw) ||
     typeof raw.query !== 'string' || raw.query.length > MAX_NOTEBOOK_LIVE_SEARCH_CHARS ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   return {
     type: 'searchLiveResult',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     query: raw.query,
     ...sortFields(raw),
   };
@@ -403,7 +597,9 @@ function parseLiveSearchRequest(raw: Record<string, unknown>): NotebookRendererM
 function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'chartType',
     'xColumn',
@@ -414,7 +610,9 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
     'lowColumn',
     'closeColumn',
     'maxPoints',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+    'xMin',
+    'xMax',
+  ]) || !validLiveIdentity(raw) ||
     !isLiveChartType(raw.chartType) || !validColumnName(raw.xColumn) ||
     !Array.isArray(raw.yColumns) || raw.yColumns.length > 16 ||
     !raw.yColumns.every(validColumnName) || new Set(raw.yColumns).size !== raw.yColumns.length ||
@@ -424,7 +622,8 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
     !validOptionalColumnName(raw.highColumn) ||
     !validOptionalColumnName(raw.lowColumn) ||
     !validOptionalColumnName(raw.closeColumn) ||
-    !positiveSafeInteger(raw.maxPoints) || raw.maxPoints > MAX_NOTEBOOK_LIVE_CHART_POINTS) {
+    !positiveSafeInteger(raw.maxPoints) || raw.maxPoints > MAX_NOTEBOOK_LIVE_CHART_POINTS ||
+    !validOptionalChartRange(raw.xMin, raw.xMax)) {
     return undefined;
   }
   const groupByColumn = optionalColumnName(raw.groupByColumn);
@@ -447,8 +646,7 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
   }
   return {
     type: 'requestLiveChart',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     chartType: raw.chartType,
     xColumn: raw.xColumn,
     yColumns: raw.yColumns.slice(),
@@ -462,31 +660,39 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
       }
       : {}),
     maxPoints: raw.maxPoints,
+    ...(typeof raw.xMin === 'number' && typeof raw.xMax === 'number'
+      ? { xMin: raw.xMin, xMax: raw.xMax }
+      : {}),
   };
 }
 
 function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'startRow',
     'endRow',
     'startColumn',
     'endColumn',
+    'columnOrdinals',
     'format',
     'includeHeaders',
     'includeRowIndex',
-    'sortColumn',
+    'sortOrdinal',
     'sortDirection',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validLiveIdentity(raw) ||
     !nonNegativeSafeInteger(raw.startRow) || !nonNegativeSafeInteger(raw.endRow) ||
     !nonNegativeSafeInteger(raw.startColumn) || !nonNegativeSafeInteger(raw.endColumn) ||
     raw.endRow < raw.startRow || raw.endColumn < raw.startColumn ||
+    !validColumnOrdinals(raw.columnOrdinals, false, MAX_NOTEBOOK_LIVE_COLUMNS) ||
+    raw.columnOrdinals.length !== raw.endColumn - raw.startColumn + 1 ||
     (raw.format !== 'tsv' && raw.format !== 'csv') ||
     typeof raw.includeHeaders !== 'boolean' ||
     typeof raw.includeRowIndex !== 'boolean' ||
-    !validOptionalSort(raw.sortColumn, raw.sortDirection)) {
+    !validOptionalSort(raw.sortOrdinal, raw.sortDirection)) {
     return undefined;
   }
   const cellCount =
@@ -496,12 +702,12 @@ function parseLiveCopyRequest(raw: Record<string, unknown>): NotebookRendererMes
   }
   return {
     type: 'copyLiveRange',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     startRow: raw.startRow,
     endRow: raw.endRow,
     startColumn: raw.startColumn,
     endColumn: raw.endColumn,
+    columnOrdinals: raw.columnOrdinals.slice(),
     format: raw.format,
     includeHeaders: raw.includeHeaders,
     includeRowIndex: raw.includeRowIndex,
@@ -529,9 +735,10 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
     'presentation',
     'rowLimit',
     'byteLimit',
+    'preserveFullResultByDefault',
     'resultSettings',
   ]) || !isPresentation(raw.presentation) || !positiveSafeInteger(raw.rowLimit) ||
-    !positiveSafeInteger(raw.byteLimit)) {
+    !positiveSafeInteger(raw.byteLimit) || typeof raw.preserveFullResultByDefault !== 'boolean') {
     return undefined;
   }
   const resultSettings = parseSharedResultSettings(raw.resultSettings);
@@ -541,6 +748,7 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
       presentation: raw.presentation,
       rowLimit: raw.rowLimit,
       byteLimit: raw.byteLimit,
+      preserveFullResultByDefault: raw.preserveFullResultByDefault,
       resultSettings,
     }
     : undefined;
@@ -549,7 +757,9 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
 function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResultMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'available',
     'mode',
@@ -562,15 +772,14 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     'text',
     'metadata',
     'message',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validLiveIdentity(raw) ||
     typeof raw.available !== 'boolean' || !validOptionalText(raw.message, 4_096)) {
     return undefined;
   }
   if (!raw.available) {
     return {
       type: 'liveResult',
-      liveId: raw.liveId,
-      requestId: raw.requestId,
+      ...liveIdentity(raw),
       available: false,
       ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
     };
@@ -590,8 +799,7 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
   }
   return {
     type: 'liveResult',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     available: true,
     mode: raw.mode,
     kind: raw.kind,
@@ -615,17 +823,21 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
 function parseLiveSliceMessage(raw: Record<string, unknown>): NotebookLiveSliceMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'startRow',
     'endRow',
     'startColumn',
     'endColumn',
+    'columnOrdinals',
     'cells',
     'error',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validLiveIdentity(raw) ||
     !nonNegativeSafeInteger(raw.startRow) || !integerAtLeast(raw.endRow, -1) ||
     !nonNegativeSafeInteger(raw.startColumn) || !integerAtLeast(raw.endColumn, -1) ||
+    !validColumnOrdinals(raw.columnOrdinals, true) ||
     !Array.isArray(raw.cells) || raw.cells.length > MAX_NOTEBOOK_LIVE_SLICE_ROWS ||
     !validOptionalText(raw.error, 4_096)) {
     return undefined;
@@ -654,18 +866,22 @@ function parseLiveSliceMessage(raw: Record<string, unknown>): NotebookLiveSliceM
     const width = cells[0].length;
     if (!cells.every(row => row.length === width) ||
       raw.endRow !== raw.startRow + cells.length - 1 ||
-      raw.endColumn !== raw.startColumn + width - 1) {
+      raw.endColumn !== raw.startColumn + width - 1 ||
+      raw.columnOrdinals.length !== width) {
       return undefined;
     }
   }
+  if (cells.length === 0 && raw.columnOrdinals.length !== 0) {
+    return undefined;
+  }
   return {
     type: 'liveSlice',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     startRow: raw.startRow,
     endRow: raw.endRow,
     startColumn: raw.startColumn,
     endColumn: raw.endColumn,
+    columnOrdinals: raw.columnOrdinals.slice(),
     cells,
     ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
   };
@@ -674,7 +890,9 @@ function parseLiveSliceMessage(raw: Record<string, unknown>): NotebookLiveSliceM
 function parseLiveSearchMessage(raw: Record<string, unknown>): NotebookLiveSearchMessage | undefined {
   if (!hasOnlyKeys(raw, [
     'type',
+    'outputId',
     'liveId',
+    'renderGeneration',
     'requestId',
     'matches',
     'totalScanned',
@@ -682,7 +900,7 @@ function parseLiveSearchMessage(raw: Record<string, unknown>): NotebookLiveSearc
     'capped',
     'partial',
     'error',
-  ]) || !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  ]) || !validLiveIdentity(raw) ||
     !Array.isArray(raw.matches) || raw.matches.length > MAX_NOTEBOOK_LIVE_SEARCH_MATCHES ||
     !raw.matches.every(nonNegativeSafeInteger) ||
     !nonNegativeSafeInteger(raw.totalScanned) || !nonNegativeSafeInteger(raw.scannedCells) ||
@@ -692,8 +910,7 @@ function parseLiveSearchMessage(raw: Record<string, unknown>): NotebookLiveSearc
   }
   return {
     type: 'liveSearch',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     matches: raw.matches.slice(),
     totalScanned: raw.totalScanned,
     scannedCells: raw.scannedCells,
@@ -704,8 +921,15 @@ function parseLiveSearchMessage(raw: Record<string, unknown>): NotebookLiveSearc
 }
 
 function parseLiveChartMessage(raw: Record<string, unknown>): NotebookLiveChartMessage | undefined {
-  if (!hasOnlyKeys(raw, ['type', 'liveId', 'requestId', 'data', 'error']) ||
-    !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'outputId',
+    'liveId',
+    'renderGeneration',
+    'requestId',
+    'data',
+    'error',
+  ]) || !validLiveIdentity(raw) ||
     !validOptionalText(raw.error, 4_096)) {
     return undefined;
   }
@@ -718,25 +942,58 @@ function parseLiveChartMessage(raw: Record<string, unknown>): NotebookLiveChartM
   }
   return {
     type: 'liveChart',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     ...(data ? { data } : {}),
     ...(typeof raw.error === 'string' ? { error: raw.error } : {}),
   };
 }
 
 function parseLiveCopyMessage(raw: Record<string, unknown>): NotebookLiveCopyMessage | undefined {
-  if (!hasOnlyKeys(raw, ['type', 'liveId', 'requestId', 'ok', 'message']) ||
-    !validLiveId(raw.liveId) || !validRequestId(raw.requestId) ||
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'outputId',
+    'liveId',
+    'renderGeneration',
+    'requestId',
+    'ok',
+    'message',
+  ]) || !validLiveIdentity(raw) ||
     typeof raw.ok !== 'boolean' || !validOptionalText(raw.message, 4_096) ||
     (!raw.ok && typeof raw.message !== 'string')) {
     return undefined;
   }
   return {
     type: 'liveCopy',
-    liveId: raw.liveId,
-    requestId: raw.requestId,
+    ...liveIdentity(raw),
     ok: raw.ok,
+    ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
+  };
+}
+
+function parseOutputPersistenceMessage(
+  raw: Record<string, unknown>
+): NotebookOutputPersistenceMessage | undefined {
+  if (!hasOnlyKeys(raw, [
+    'type',
+    'outputId',
+    'renderGeneration',
+    'requestId',
+    'mode',
+    'enabled',
+    'checked',
+    'message',
+  ]) || !validOutputIdentity(raw) ||
+    (raw.mode !== 'preview' && raw.mode !== 'full') ||
+    typeof raw.enabled !== 'boolean' || typeof raw.checked !== 'boolean' ||
+    !validOptionalText(raw.message, 4_096)) {
+    return undefined;
+  }
+  return {
+    type: 'outputPersistence',
+    ...outputIdentity(raw),
+    mode: raw.mode,
+    enabled: raw.enabled,
+    checked: raw.checked,
     ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
   };
 }
@@ -971,8 +1228,8 @@ function parseLiveCandlesticks(
 }
 
 function parseLiveResultMetadata(raw: unknown): NotebookLiveResultMetadata | undefined {
-  if (!isRecord(raw) || !hasOnlyKeys(raw, ['query', 'connectionName', 'elapsedMs', 'messages']) ||
-    !validOptionalText(raw.query, 16_384) || !validOptionalText(raw.connectionName, 512) ||
+  if (!isRecord(raw) || !hasOnlyKeys(raw, ['connectionName', 'elapsedMs', 'messages']) ||
+    !validOptionalText(raw.connectionName, 512) ||
     (raw.elapsedMs !== undefined && (!finiteNumber(raw.elapsedMs) || raw.elapsedMs < 0)) ||
     (raw.messages !== undefined &&
       (!Array.isArray(raw.messages) || raw.messages.length > 64 ||
@@ -980,7 +1237,6 @@ function parseLiveResultMetadata(raw: unknown): NotebookLiveResultMetadata | und
     return undefined;
   }
   return {
-    ...(typeof raw.query === 'string' ? { query: raw.query } : {}),
     ...(typeof raw.connectionName === 'string' ? { connectionName: raw.connectionName } : {}),
     ...(typeof raw.elapsedMs === 'number' ? { elapsedMs: raw.elapsedMs } : {}),
     ...(Array.isArray(raw.messages) ? { messages: raw.messages.slice() as string[] } : {}),
@@ -999,6 +1255,7 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     'elapsedTimeDisplay',
     'chartDecimalPlaces',
     'chartMaxSourceRows',
+    'chartZoomMinSampledPoints',
     'chartZoomMaxSampledPoints',
     'qTextSyntaxHighlighting',
     'qTextDisplayFormatting',
@@ -1016,7 +1273,9 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     (raw.elapsedTimeDisplay !== 'auto' && raw.elapsedTimeDisplay !== 'milliseconds') ||
     !integerInRange(raw.chartDecimalPlaces, 0, 12) ||
     !positiveSafeInteger(raw.chartMaxSourceRows) ||
+    !positiveSafeInteger(raw.chartZoomMinSampledPoints) ||
     !positiveSafeInteger(raw.chartZoomMaxSampledPoints) ||
+    raw.chartZoomMinSampledPoints > raw.chartZoomMaxSampledPoints ||
     typeof raw.qTextSyntaxHighlighting !== 'boolean' ||
     typeof raw.qTextDisplayFormatting !== 'boolean' ||
     (raw.arrayDisplayFormat !== 'commaSpace' && raw.arrayDisplayFormat !== 'space' &&
@@ -1038,6 +1297,7 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     elapsedTimeDisplay: raw.elapsedTimeDisplay,
     chartDecimalPlaces: raw.chartDecimalPlaces,
     chartMaxSourceRows: raw.chartMaxSourceRows,
+    chartZoomMinSampledPoints: raw.chartZoomMinSampledPoints,
     chartZoomMaxSampledPoints: raw.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: raw.qTextSyntaxHighlighting,
     qTextDisplayFormatting: raw.qTextDisplayFormatting,
@@ -1090,20 +1350,21 @@ function normalizedResultSettingValue(
   }
 }
 
-function validOptionalSort(sortColumn: unknown, sortDirection: unknown): boolean {
-  if (sortColumn === undefined && sortDirection === undefined) {
+function validOptionalSort(sortOrdinal: unknown, sortDirection: unknown): boolean {
+  if (sortOrdinal === undefined && sortDirection === undefined) {
     return true;
   }
-  return validColumnName(sortColumn) && (sortDirection === 'asc' || sortDirection === 'desc');
+  return nonNegativeSafeInteger(sortOrdinal) &&
+    (sortDirection === 'asc' || sortDirection === 'desc');
 }
 
 function sortFields(raw: Record<string, unknown>): {
-  sortColumn?: string;
+  sortOrdinal?: number;
   sortDirection?: NotebookLiveSortDirection;
 } {
-  return typeof raw.sortColumn === 'string' &&
+  return nonNegativeSafeInteger(raw.sortOrdinal) &&
     (raw.sortDirection === 'asc' || raw.sortDirection === 'desc')
-    ? { sortColumn: raw.sortColumn, sortDirection: raw.sortDirection }
+    ? { sortOrdinal: raw.sortOrdinal, sortDirection: raw.sortDirection }
     : {};
 }
 
@@ -1112,6 +1373,48 @@ function validLiveId(value: unknown): value is string {
     value.length >= MIN_NOTEBOOK_LIVE_ID_CHARS &&
     value.length <= MAX_NOTEBOOK_LIVE_ID_CHARS &&
     /^[A-Za-z0-9_-]+$/.test(value);
+}
+
+function validOutputIdentity(raw: Record<string, unknown>): boolean {
+  return validLiveId(raw.outputId) &&
+    validRequestId(raw.renderGeneration) &&
+    validRequestId(raw.requestId);
+}
+
+function validLiveIdentity(raw: Record<string, unknown>): boolean {
+  return validOutputIdentity(raw) && validLiveId(raw.liveId);
+}
+
+function outputIdentity(raw: Record<string, unknown>): NotebookOutputMessageIdentity {
+  return {
+    outputId: raw.outputId as string,
+    renderGeneration: raw.renderGeneration as number,
+    requestId: raw.requestId as number,
+  };
+}
+
+function liveIdentity(raw: Record<string, unknown>): NotebookLiveMessageIdentity {
+  return {
+    ...outputIdentity(raw),
+    liveId: raw.liveId as string,
+  };
+}
+
+function validColumnOrdinals(
+  value: unknown,
+  allowEmpty = false,
+  maximumCount = MAX_NOTEBOOK_LIVE_SLICE_COLUMNS
+): value is number[] {
+  return Array.isArray(value) &&
+    (allowEmpty || value.length > 0) &&
+    value.length <= maximumCount &&
+    value.every(ordinal => integerInRange(ordinal, 0, MAX_NOTEBOOK_LIVE_COLUMNS - 1)) &&
+    new Set(value).size === value.length;
+}
+
+function validOptionalChartRange(xMin: unknown, xMax: unknown): boolean {
+  return (xMin === undefined && xMax === undefined) ||
+    (finiteNumber(xMin) && finiteNumber(xMax) && xMax > xMin);
 }
 
 function validRequestId(value: unknown): value is number {

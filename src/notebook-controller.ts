@@ -1,9 +1,13 @@
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import { connectionEndpoint, KxConnection } from './connection';
 import {
   KX_NOTEBOOK_MIME,
-  createPortableKxResult,
-  createPortableKxTextResult,
+  NotebookPersistenceMode,
+  NotebookV2CreationResult,
+  PortableKxResult,
+  createPortableKxResultV2,
+  createPortableKxTextResultV2,
   notebookResultPlainText,
   validatePortableKxResult,
 } from './notebook-contract';
@@ -11,20 +15,33 @@ import {
   NotebookSettings,
   hasNotebookQMarker,
   safeNotebookByteLimit,
+  safeNotebookPreserveFullResultByDefault,
   safeNotebookRowLimit,
 } from './notebook-settings';
 import {
   LiveNotebookResultRegistration,
   LiveNotebookResultStore,
 } from './notebook-live-results';
-import { NOTEBOOK_LIVE_RESULT_METADATA_KEY } from './notebook-message';
+import {
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
+  NOTEBOOK_OUTPUT_METADATA_KEY,
+  parseNotebookLiveResultReference,
+  parseNotebookOutputReferenceFromMetadata,
+  parseNotebookPortableOutputBinding,
+} from './notebook-message';
 import { NotebookQTargetProfile } from './notebook-q-target';
-import { QResultDisplayOptions, QValue, qValueToColumnarPanel } from './q-ipc';
+import {
+  QResultDisplayOptions,
+  QValue,
+  qValueToColumnarPanel,
+  qValueToLosslessPortablePanel,
+} from './q-ipc';
 
 export const KX_Q_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.q-notebook-controller';
 export const KX_Q_NOTEBOOK_TYPE = 'jupyter-notebook';
 export const KX_Q_NOTEBOOK_CONTROLLER_LABEL = 'KX q (Direct IPC)';
 export const KX_NOTEBOOK_LIVE_METADATA_KEY = NOTEBOOK_LIVE_RESULT_METADATA_KEY;
+export const KX_NOTEBOOK_OUTPUT_METADATA_KEY = NOTEBOOK_OUTPUT_METADATA_KEY;
 export const ENABLE_DIRECT_NOTEBOOK_CONTROLLER_SETTING =
   'vscode-kdb.notebook.enableDirectController';
 
@@ -46,6 +63,7 @@ type CellOutputReplacement =
 
 interface PreparedLiveResult {
   items: vscode.NotebookCellOutputItem[];
+  outputId: string;
   registration: Omit<LiveNotebookResultRegistration, 'cellUri'>;
 }
 
@@ -54,6 +72,7 @@ interface PreparedCellResult {
   output?: CellOutputReplacement;
   live?: PreparedLiveResult;
   canceled?: 'before-issue' | 'after-issue';
+  stale?: boolean;
 }
 
 interface MixedCellSnapshot {
@@ -61,8 +80,18 @@ interface MixedCellSnapshot {
   cellUri: string;
   source: string;
   languageId: string;
-  outputs: readonly vscode.NotebookCellOutput[];
+  outputs: readonly MixedOutputSnapshot[];
   executionSummary: string;
+}
+
+interface MixedOutputSnapshot {
+  readonly output: vscode.NotebookCellOutput;
+  readonly metadata: unknown;
+  readonly items: readonly {
+    readonly item: vscode.NotebookCellOutputItem;
+    readonly data: Uint8Array;
+    readonly mime: string;
+  }[];
 }
 
 interface MixedOutputWriteResult {
@@ -79,7 +108,8 @@ export interface DirectQNotebookBridge {
     connection: KxConnection,
     source: string,
     onIssued: () => void,
-    signal: AbortSignal
+    signal: AbortSignal,
+    shouldIssue?: () => boolean
   ): Promise<QValue>;
   errorMessage(error: unknown, connection?: KxConnection): Promise<string>;
   onDidChangeState(listener: () => void): vscode.Disposable;
@@ -100,7 +130,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
 
   public constructor(
     private readonly bridge: DirectQNotebookBridge,
-    private readonly liveResults: LiveNotebookResultStore
+    private readonly liveResults: LiveNotebookResultStore,
+    private readonly outputIdFactory: () => string = () => crypto.randomBytes(24).toString('hex')
   ) {
     this.stateSubscription = this.bridge.onDidChangeState(() => this.refreshDetails());
     this.configurationSubscription = vscode.workspace.onDidChangeConfiguration(event => {
@@ -168,6 +199,11 @@ export class KxQNotebookRunner implements vscode.Disposable {
     if (this.disposed) {
       return 'unavailable';
     }
+    const currentCell = currentNotebookMember(cell);
+    if (!currentCell) {
+      return 'stale';
+    }
+    cell = currentCell;
     if (cell.notebook.notebookType !== KX_Q_NOTEBOOK_TYPE) {
       return 'unsupported-notebook';
     }
@@ -289,8 +325,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
             token,
             abortController.signal,
             connection,
-            'notebook'
+            'notebook',
+            snapshot.source,
+            () => matchingMixedSourceCell(snapshot) !== undefined
           );
+          if (prepared.stale) {
+            return snapshot.notebook.isClosed ? 'unavailable' : 'stale';
+          }
           if (prepared.canceled === 'before-issue') {
             return 'executed';
           }
@@ -313,6 +354,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
             snapshot,
             current,
             materialized.output,
+            materialized.liveResultId,
+            materialized.outputId,
+            materialized.liveRegistration,
             () => !cancellationPrepared &&
               (token.isCancellationRequested || abortController.signal.aborted)
           );
@@ -327,25 +371,6 @@ export class KxQNotebookRunner implements vscode.Disposable {
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
             }
             return written.status;
-          }
-          if (liveResultId && materialized.liveRegistration) {
-            if (!cellHasLiveResult(written.cell, liveResultId)) {
-              this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
-              return 'stale';
-            }
-            try {
-              this.liveResults.removeCell(
-                snapshot.notebook.uri.toString(),
-                snapshot.cellUri
-              );
-              this.liveResults.rebind(liveResultId, {
-                ...materialized.liveRegistration,
-                cellUri: written.cell.document.uri.toString(),
-              });
-            } catch {
-              this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
-              return 'write-failed';
-            }
           }
           return 'executed';
         } catch {
@@ -365,6 +390,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
     snapshot: MixedCellSnapshot,
     current: vscode.NotebookCell,
     output: CellOutputReplacement,
+    expectedLiveId: string | undefined,
+    expectedOutputId: string | undefined,
+    liveRegistration: LiveNotebookResultRegistration | undefined,
     isCanceled: () => boolean
   ): Promise<MixedOutputWriteResult> {
     if (isCanceled()) {
@@ -386,7 +414,37 @@ export class KxQNotebookRunner implements vscode.Disposable {
     replacement.metadata = { ...current.metadata };
     replacement.outputs = Array.isArray(output) ? [...output] : [output];
 
+    const ownedPriorBindings = freshLiveBindings(current).filter(binding =>
+      this.liveResults.hasForOutput(
+        binding.liveId,
+        snapshot.notebook.uri.toString(),
+        current.document.uri.toString(),
+        binding.outputId
+      )
+    );
+    const priorBinding = ownedPriorBindings.length === 1
+      ? ownedPriorBindings[0]
+      : undefined;
+    const protectedPriorLiveId = priorBinding?.liveId;
+    if (protectedPriorLiveId && !this.liveResults.beginCellMove(
+      protectedPriorLiveId,
+      snapshot.notebook.uri.toString(),
+      current.document.uri.toString()
+    )) {
+      return { status: 'stale' };
+    }
+
     let eventCell: vscode.NotebookCell | undefined;
+    let ownOutputObserved = false;
+    let stagedCommitted = false;
+    let stagedCommitFailed = false;
+    let competingCell: vscode.NotebookCellData | undefined;
+    let competingRemoval = false;
+    let structuralConflict = false;
+    let expectedReconciliationCell: vscode.NotebookCellData | undefined;
+    let expectedReconciliationRemoval = false;
+    let reconciliationActive = false;
+    let reconciliationExhausted = false;
     let resolveReplacement: (() => void) | undefined;
     const replacementEvent = new Promise<void>(resolve => {
       resolveReplacement = resolve;
@@ -395,20 +453,108 @@ export class KxQNotebookRunner implements vscode.Disposable {
       if (event.notebook !== snapshot.notebook) {
         return;
       }
+      const accept = (candidate: vscode.NotebookCell | undefined): boolean => {
+        if (committedMixedCellMatches(
+          candidate,
+          snapshot,
+          index,
+          expectedLiveId,
+          expectedOutputId,
+          replacement
+        )) {
+          ownOutputObserved = true;
+          eventCell = candidate;
+          if (expectedLiveId && liveRegistration && !stagedCommitted &&
+            !stagedCommitFailed && !competingCell && !competingRemoval &&
+            cellHasLiveResult(candidate, expectedLiveId)) {
+            try {
+              // Commit in the notebook-change callback. Renderer messages may be
+              // delivered before applyEdit resolves, so deferring this binding
+              // would create a real, user-visible "Result unavailable" race.
+              this.liveResults.commitStaged(expectedLiveId, {
+                ...liveRegistration,
+                cellUri: candidate.document.uri.toString(),
+              }, snapshot.cellUri);
+              stagedCommitted = true;
+            } catch {
+              stagedCommitFailed = true;
+            }
+          }
+          resolveReplacement?.();
+          return true;
+        }
+        return false;
+      };
       for (const change of event.contentChanges) {
-        if (change.range.start !== index ||
-          !change.removedCells.some(removed =>
-            removed.document.uri.toString() === snapshot.cellUri)) {
+        const removedTarget = change.removedCells.some(removed =>
+          removed.document.uri.toString() === snapshot.cellUri
+        );
+        const affectsStaleIndex = change.range.start <= index &&
+          (change.range.end > index ||
+            change.addedCells.length !== change.removedCells.length);
+        const shiftsOrReplacesTarget = affectsStaleIndex ||
+          (!structuralConflict && removedTarget);
+        if (!shiftsOrReplacesTarget) {
           continue;
         }
-        const added = change.addedCells.find(candidate =>
-          candidate.kind === vscode.NotebookCellKind.Code &&
-          candidate.document.languageId === snapshot.languageId &&
-          candidate.document.getText() === snapshot.source
-        );
-        if (added) {
-          eventCell = added;
-          resolveReplacement?.();
+        const relativeIndex = index - change.range.start;
+        const added = relativeIndex >= 0
+          ? change.addedCells[relativeIndex]
+          : undefined;
+        const currentAtTarget = notebookCellAt(snapshot.notebook, index);
+        const expectedReconciliation = expectedReconciliationRemoval
+          ? !currentAtTarget
+          : !!expectedReconciliationCell && !!currentAtTarget && notebookCellMatchesData(
+            currentAtTarget,
+            expectedReconciliationCell,
+            snapshot.notebook,
+            index
+          );
+        const ownCommit = !reconciliationActive && !expectedReconciliation &&
+          accept(currentAtTarget ?? added);
+        if (!expectedReconciliation && !ownCommit && shiftsOrReplacesTarget) {
+          // WorkspaceEdit has no public notebook-version CAS. If another
+          // structural edit shifts the target, our already-created edit can
+          // overwrite the cell now occupying the stale index. Preserve that
+          // exact cell (or the absence of one) so it can be restored if our
+          // edit is observed as the final writer.
+          structuralConflict = true;
+          const currentAtStaleIndex = notebookCellAt(snapshot.notebook, index);
+          const captured = currentAtStaleIndex
+            ? notebookCellDataSnapshot(currentAtStaleIndex) ??
+              referencedNotebookCellDataSnapshot(currentAtStaleIndex)
+            : undefined;
+          competingCell = captured;
+          competingRemoval = !currentAtStaleIndex;
+          if (currentAtStaleIndex && !captured) {
+            reconciliationExhausted = true;
+          }
+        }
+      }
+      for (const change of event.cellChanges) {
+        if (change.cell.index !== index &&
+          change.cell.document.uri.toString() !== snapshot.cellUri) {
+          continue;
+        }
+        const expectedReconciliation = !!expectedReconciliationCell &&
+          notebookCellMatchesData(
+            change.cell,
+            expectedReconciliationCell,
+            snapshot.notebook,
+            index
+          );
+        const ownCommit = !reconciliationActive && !expectedReconciliation && accept(change.cell);
+        if (!expectedReconciliation && !ownCommit &&
+          (change.cell.index === index ||
+            (!structuralConflict &&
+              change.cell.document.uri.toString() === snapshot.cellUri))) {
+          const captured = notebookCellDataSnapshot(change.cell) ??
+            referencedNotebookCellDataSnapshot(change.cell);
+          competingCell = captured;
+          competingRemoval = false;
+          if (!captured) {
+            reconciliationExhausted = true;
+          }
         }
       }
     });
@@ -448,25 +594,152 @@ export class KxQNotebookRunner implements vscode.Disposable {
       if (snapshot.notebook.isClosed) {
         return { status: 'unavailable' };
       }
-
-      let written = eventCell ?? notebookCellAt(snapshot.notebook, index);
-      if (!written || written.document.uri.toString() === snapshot.cellUri) {
-        await waitForNotebookReplacement(replacementEvent);
-        written = eventCell ?? notebookCellAt(snapshot.notebook, index);
+      if (reconciliationExhausted) {
+        return { status: 'stale' };
       }
-      if (!written ||
-        written.document.uri.toString() === snapshot.cellUri ||
-        written.notebook !== snapshot.notebook ||
-        written.kind !== vscode.NotebookCellKind.Code ||
-        written.document.languageId !== snapshot.languageId ||
-        written.document.getText() !== snapshot.source) {
+
+      let written = notebookCellAt(snapshot.notebook, index) ?? eventCell;
+      if (!ownOutputObserved) {
+        acceptCommittedMixedCell(
+          written,
+          snapshot,
+          index,
+          expectedLiveId,
+          expectedOutputId,
+          replacement,
+          candidate => {
+            ownOutputObserved = true;
+            eventCell = candidate;
+            if (expectedLiveId && liveRegistration && !stagedCommitted &&
+              !stagedCommitFailed && !competingCell && !competingRemoval &&
+              cellHasLiveResult(candidate, expectedLiveId)) {
+              try {
+                this.liveResults.commitStaged(expectedLiveId, {
+                  ...liveRegistration,
+                  cellUri: candidate.document.uri.toString(),
+                }, snapshot.cellUri);
+                stagedCommitted = true;
+              } catch {
+                stagedCommitFailed = true;
+              }
+            }
+          }
+        );
+      }
+      if (!committedMixedCellMatches(
+        written,
+        snapshot,
+        index,
+        expectedLiveId,
+        expectedOutputId,
+        replacement
+      )) {
+        await waitForNotebookReplacement(replacementEvent);
+        written = notebookCellAt(snapshot.notebook, index) ?? eventCell;
+      }
+      if ((competingCell || competingRemoval) && committedMixedCellMatches(
+        written,
+        snapshot,
+        index,
+        expectedLiveId,
+        expectedOutputId,
+        replacement
+      )) {
+        const desiredCell = competingCell;
+        const desiredRemoval = competingRemoval;
+        expectedReconciliationCell = desiredCell;
+        expectedReconciliationRemoval = desiredRemoval;
+        reconciliationActive = true;
+        const applied = await reconcileCompetingMixedCell(
+          snapshot.notebook,
+          index,
+          desiredCell,
+          desiredRemoval
+        );
+        expectedReconciliationCell = undefined;
+        expectedReconciliationRemoval = false;
+        reconciliationActive = false;
+        if (!applied) {
+          reconciliationExhausted = true;
+        }
+        return { status: snapshot.notebook.isClosed ? 'unavailable' : 'stale' };
+      }
+      if (!committedMixedCellMatches(
+        written,
+        snapshot,
+        index,
+        expectedLiveId,
+        expectedOutputId,
+        replacement
+      )) {
         return {
-          status: snapshot.notebook.isClosed ? 'unavailable' : 'write-failed',
+          status: snapshot.notebook.isClosed ? 'unavailable' : 'stale',
         };
+      }
+      if (expectedLiveId && liveRegistration) {
+        if (!cellHasLiveResult(written, expectedLiveId)) {
+          return { status: 'stale' };
+        }
+        if (stagedCommitFailed) {
+          return { status: 'write-failed' };
+        }
+        if (!stagedCommitted) {
+          try {
+            this.liveResults.commitStaged(expectedLiveId, {
+              ...liveRegistration,
+              cellUri: written.document.uri.toString(),
+            }, snapshot.cellUri);
+            stagedCommitted = true;
+          } catch {
+            return { status: 'write-failed' };
+          }
+        }
       }
       return { status: 'executed', cell: written };
     } finally {
       eventSubscription.dispose();
+      if (protectedPriorLiveId && priorBinding && this.liveResults.has(
+        protectedPriorLiveId,
+        snapshot.notebook.uri.toString()
+      )) {
+        if (reconciliationExhausted) {
+          this.liveResults.cancelCellMove(
+            protectedPriorLiveId,
+            snapshot.notebook.uri.toString(),
+            current.document.uri.toString(),
+            true
+          );
+        } else {
+          const owners = freshBindingOwners(
+            snapshot.notebook,
+            priorBinding.liveId,
+            priorBinding.outputId
+          );
+          if (owners.length === 1 &&
+            owners[0].document.uri.toString() !== current.document.uri.toString()) {
+            if (!this.liveResults.completeCellMove(
+              protectedPriorLiveId,
+              snapshot.notebook.uri.toString(),
+              current.document.uri.toString(),
+              owners[0].document.uri.toString()
+            )) {
+              this.liveResults.cancelCellMove(
+                protectedPriorLiveId,
+                snapshot.notebook.uri.toString(),
+                current.document.uri.toString(),
+                true
+              );
+            }
+          } else {
+            this.liveResults.cancelCellMove(
+              protectedPriorLiveId,
+              snapshot.notebook.uri.toString(),
+              current.document.uri.toString(),
+              owners.length !== 1
+            );
+          }
+        }
+      }
     }
   }
 
@@ -511,6 +784,15 @@ export class KxQNotebookRunner implements vscode.Disposable {
     let liveResultId: string | undefined;
     const abortController = new AbortController();
     const cancellation = execution.token.onCancellationRequested(() => abortController.abort());
+    const source = cell.document.getText();
+    const cellUri = cell.document.uri.toString();
+    const languageId = cell.document.languageId;
+    const isStillCurrent = (): boolean => !notebook.isClosed &&
+      notebook.getCells().some(current => current === cell &&
+        current.notebook === notebook &&
+        current.document.uri.toString() === cellUri &&
+        current.document.languageId === languageId &&
+        current.document.getText() === source);
     const end = (): void => {
       if (ended) {
         return;
@@ -531,6 +813,10 @@ export class KxQNotebookRunner implements vscode.Disposable {
       execution.start(Date.now());
       this.liveResults.removeCell(notebook.uri.toString(), cell.document.uri.toString());
       await execution.clearOutput();
+      if (!isStillCurrent()) {
+        success = undefined;
+        return;
+      }
       if (execution.token.isCancellationRequested) {
         success = undefined;
         return;
@@ -555,8 +841,19 @@ export class KxQNotebookRunner implements vscode.Disposable {
         execution.token,
         abortController.signal,
         this.bridge.activeConnection(),
-        'active'
+        'active',
+        source,
+        isStillCurrent
       );
+      if (execution.token.isCancellationRequested || abortController.signal.aborted) {
+        success = undefined;
+        await execution.replaceOutput(
+          prepared.live
+            ? textOutput(`${KX_Q_NOTEBOOK_CONTROLLER_LABEL} ${CANCELED_AFTER_ISSUE_SUFFIX}`)
+            : (prepared.output ?? [])
+        );
+        return;
+      }
       const materialized = this.materializeCellResult(
         prepared,
         cell.document.uri.toString()
@@ -589,7 +886,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
     token: Pick<vscode.CancellationToken, 'isCancellationRequested'>,
     signal: AbortSignal,
     connection: KxConnection | undefined,
-    targetKind: 'active' | 'notebook'
+    targetKind: 'active' | 'notebook',
+    sourceOverride?: string,
+    isStillCurrent?: () => boolean
   ): Promise<PreparedCellResult> {
     let issued = false;
     const canceledOutput = (): PreparedCellResult => ({
@@ -602,6 +901,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
     try {
       if (token.isCancellationRequested || signal.aborted) {
         return canceledOutput();
+      }
+      if (isStillCurrent && !isStillCurrent()) {
+        return { success: undefined, output: [], stale: true };
       }
       this.refreshDetails();
       if (!connection) {
@@ -616,7 +918,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
           ),
         };
       }
-      const source = cell.document.getText();
+      const source = sourceOverride ?? cell.document.getText();
       if (!source.trim()) {
         return { success: true, output: [] };
       }
@@ -629,6 +931,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
           ),
         };
       }
+      // This is deliberately adjacent to executeScript. withProgress and
+      // connection resolution may yield, and a stale mixed-controller cell
+      // must never dispatch its old q source merely because the write is later
+      // rejected.
+      if (isStillCurrent && !isStillCurrent()) {
+        return { success: undefined, output: [], stale: true };
+      }
       const startedAt = Date.now();
       const value = await this.bridge.executeScript(
         connection,
@@ -636,24 +945,30 @@ export class KxQNotebookRunner implements vscode.Disposable {
         () => {
           issued = true;
         },
-        signal
+        signal,
+        isStillCurrent
       );
       if (token.isCancellationRequested || signal.aborted) {
         return canceledOutput();
       }
       const elapsedMs = Date.now() - startedAt;
+      const settings = directNotebookSettings();
+      const outputId = this.uniqueOutputId();
       return {
         success: true,
         live: {
-          items: directQResultOutputItems(
+          items: await this.directQResultOutputItems(
             value,
-            directNotebookSettings(),
+            settings,
             directQResultDisplayOptions(),
             connection,
-            elapsedMs
+            elapsedMs,
+            outputId
           ),
+          outputId,
           registration: {
             notebookUri: notebook.uri.toString(),
+            outputId,
             query: source,
             connectionName: `${connection.name} • Direct IPC • ${connection.database}`,
             elapsedMs,
@@ -664,6 +979,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
     } catch (error) {
       if (token.isCancellationRequested || signal.aborted) {
         return canceledOutput();
+      }
+      if (!issued && isStillCurrent && !isStillCurrent()) {
+        return { success: undefined, output: [], stale: true };
       }
       const detail = await this.safeErrorMessage(error, connection);
       const context = connection
@@ -686,6 +1004,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
   ): {
       output: CellOutputReplacement;
       liveResultId?: string;
+      outputId?: string;
       liveRegistration?: LiveNotebookResultRegistration;
     } {
     if (!prepared.live) {
@@ -701,11 +1020,56 @@ export class KxQNotebookRunner implements vscode.Disposable {
     return {
       output: new vscode.NotebookCellOutput(
         prepared.live.items,
-        liveResultOutputMetadata(liveResultId)
+        liveResultOutputMetadata(liveResultId, prepared.live.outputId)
       ),
       liveResultId,
+      outputId: prepared.live.outputId,
       liveRegistration: registration,
     };
+  }
+
+  private uniqueOutputId(): string {
+    for (let attempt = 0; attempt < 16; attempt++) {
+      const candidate = String(this.outputIdFactory());
+      if (/^[A-Za-z0-9_-]{32,128}$/.test(candidate)) {
+        return candidate;
+      }
+    }
+    throw new Error('Could not allocate a safe notebook output identifier.');
+  }
+
+  private async directQResultOutputItems(
+    value: QValue,
+    settings: NotebookSettings,
+    displayOptions: QResultDisplayOptions,
+    connection: KxConnection,
+    elapsedMs: number,
+    outputId: string
+  ): Promise<vscode.NotebookCellOutputItem[]> {
+    if (!settings.preserveFullResultByDefault) {
+      return directQResultOutputItems(
+        value,
+        settings,
+        displayOptions,
+        connection,
+        elapsedMs,
+        outputId,
+        'preview'
+      );
+    }
+    const full = directQPortableResult(
+      value,
+      settings,
+      displayOptions,
+      connection,
+      elapsedMs,
+      outputId,
+      'full'
+    );
+    if (!full.ok) {
+      throw new Error(`Full notebook persistence failed: ${full.error}`);
+    }
+    return notebookOutputItems(full.value, settings.byteLimit);
   }
 
   private async safeErrorMessage(error: unknown, connection?: KxConnection): Promise<string> {
@@ -728,6 +1092,9 @@ export function directNotebookSettings(): NotebookSettings {
     presentation: 'inline',
     rowLimit: safeNotebookRowLimit(configuration.get('maxOutputRows')),
     byteLimit: safeNotebookByteLimit(configuration.get('maxOutputBytes')),
+    preserveFullResultByDefault: safeNotebookPreserveFullResultByDefault(
+      configuration.get('preserveFullResultByDefault')
+    ),
   };
 }
 
@@ -756,18 +1123,55 @@ export function directQResultOutputItems(
   settings: NotebookSettings,
   displayOptions: QResultDisplayOptions,
   connection: KxConnection,
-  elapsedMs: number
+  elapsedMs: number,
+  outputId = crypto.randomBytes(24).toString('hex'),
+  persistenceMode: NotebookPersistenceMode = 'preview'
 ): vscode.NotebookCellOutputItem[] {
-  const panel = qValueToColumnarPanel(value, displayOptions);
-  const portable = panel.mode === 'text'
-    ? createPortableKxTextResult({
+  const created = directQPortableResult(
+    value,
+    settings,
+    displayOptions,
+    connection,
+    elapsedMs,
+    outputId,
+    persistenceMode
+  );
+  if (!created.ok) {
+    throw new Error(created.error);
+  }
+  return notebookOutputItems(created.value, settings.byteLimit);
+}
+
+export function directQPortableResult(
+  value: QValue,
+  settings: NotebookSettings,
+  displayOptions: QResultDisplayOptions,
+  connection: KxConnection,
+  elapsedMs: number,
+  outputId: string,
+  persistenceMode: NotebookPersistenceMode
+): NotebookV2CreationResult {
+  const panel = persistenceMode === 'full'
+    ? qValueToLosslessPortablePanel(value, displayOptions)
+    : qValueToColumnarPanel(value, displayOptions);
+  if (!panel) {
+    return {
+      ok: false,
+      error: 'The complete q result cannot be converted to portable output without losing values.',
+      rowCount: 0,
+      columnCount: 0,
+    };
+  }
+  return panel.mode === 'text'
+    ? createPortableKxTextResultV2({
       text: panel.text,
+      rowLimit: settings.rowLimit,
       byteLimit: settings.byteLimit,
       label: `${connection.name} • Direct IPC • ${connection.database}`,
       elapsedMs,
       marker: 'direct-ipc',
-    })
-    : createPortableKxResult({
+    }, { outputId, persistenceMode })
+    : createPortableKxResultV2({
       columns: panel.result.columns.slice(),
       rows: [],
       cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
@@ -777,13 +1181,19 @@ export function directQResultOutputItems(
       label: `${connection.name} • Direct IPC • ${connection.database}`,
       elapsedMs,
       marker: 'direct-ipc',
-    });
+    }, { outputId, persistenceMode });
+}
+
+export function notebookOutputItems(
+  portable: PortableKxResult,
+  byteLimit: number
+): vscode.NotebookCellOutputItem[] {
   const validation = validatePortableKxResult(portable);
   if (!validation.ok) {
     throw new Error(`Portable KX notebook result validation failed: ${validation.error}`);
   }
   const payload = validation.value;
-  const plainText = boundedNotebookText(notebookResultPlainText(payload), settings.byteLimit);
+  const plainText = boundedNotebookText(notebookResultPlainText(payload), byteLimit);
   return [
     vscode.NotebookCellOutputItem.json(payload, KX_NOTEBOOK_MIME),
     vscode.NotebookCellOutputItem.text(plainText, 'text/plain'),
@@ -800,14 +1210,29 @@ export function directQResultDisplayOptions(): QResultDisplayOptions {
   };
 }
 
-export function liveResultOutputMetadata(id: string): { [key: string]: unknown } {
-  if (!/^[A-Za-z0-9_-]{32,128}$/.test(id)) {
+export function liveResultOutputMetadata(
+  liveId: string,
+  outputId: string
+): { [key: string]: unknown } {
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(liveId)) {
     throw new Error('Live KX notebook result identifier is invalid.');
+  }
+  if (!/^[A-Za-z0-9_-]{32,128}$/.test(outputId)) {
+    throw new Error('KX notebook output identifier is invalid.');
   }
   return {
     [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
       version: 1,
-      id,
+      id: liveId,
+    },
+    // The built-in ipynb serializer persists only this nested Jupyter output
+    // metadata object. The session-only live identity deliberately stays
+    // outside it and therefore disappears on save/reopen.
+    metadata: {
+      [KX_NOTEBOOK_OUTPUT_METADATA_KEY]: {
+        version: 1,
+        id: outputId,
+      },
     },
   };
 }
@@ -853,13 +1278,31 @@ function cellExecutionKey(
   return `${notebook.uri.toString()}\0${cell.document.uri.toString()}`;
 }
 
+function currentNotebookMember(cell: vscode.NotebookCell): vscode.NotebookCell | undefined {
+  const notebook = cell.notebook;
+  if (!notebook || notebook.isClosed) {
+    return undefined;
+  }
+  const cells = notebook.getCells();
+  const exact = cells.find(candidate => candidate === cell);
+  if (exact) {
+    return exact;
+  }
+  const uri = cell.document.uri.toString();
+  return cells.find(candidate => candidate.document.uri.toString() === uri);
+}
+
 function mixedCellSnapshot(cell: vscode.NotebookCell): MixedCellSnapshot {
   return {
     notebook: cell.notebook,
     cellUri: cell.document.uri.toString(),
     source: cell.document.getText(),
     languageId: cell.document.languageId,
-    outputs: [...cell.outputs],
+    outputs: cell.outputs.map(output => ({
+      output,
+      metadata: output.metadata,
+      items: output.items.map(item => ({ item, data: item.data, mime: item.mime })),
+    })),
     executionSummary: executionSummaryKey(cell.executionSummary),
   };
 }
@@ -874,7 +1317,17 @@ function matchingMixedCell(snapshot: MixedCellSnapshot): vscode.NotebookCell | u
   return current && mixedCellMatchesSnapshot(current, snapshot) ? current : undefined;
 }
 
-function mixedCellMatchesSnapshot(
+function matchingMixedSourceCell(snapshot: MixedCellSnapshot): vscode.NotebookCell | undefined {
+  if (snapshot.notebook.isClosed) {
+    return undefined;
+  }
+  const current = snapshot.notebook.getCells().find(
+    candidate => candidate.document.uri.toString() === snapshot.cellUri
+  );
+  return current && mixedCellSourceMatchesSnapshot(current, snapshot) ? current : undefined;
+}
+
+function mixedCellSourceMatchesSnapshot(
   cell: vscode.NotebookCell,
   snapshot: MixedCellSnapshot
 ): boolean {
@@ -883,16 +1336,175 @@ function mixedCellMatchesSnapshot(
     cell.document.uri.toString() === snapshot.cellUri &&
     cell.document.languageId === snapshot.languageId &&
     cell.document.languageId === 'q' &&
-    cell.document.getText() === snapshot.source &&
-    cell.outputs.length === snapshot.outputs.length &&
-    cell.outputs.every((output, index) => output === snapshot.outputs[index]) &&
+    cell.document.getText() === snapshot.source;
+}
+
+function mixedCellMatchesSnapshot(
+  cell: vscode.NotebookCell,
+  snapshot: MixedCellSnapshot
+): boolean {
+  return mixedCellSourceMatchesSnapshot(cell, snapshot) &&
+    mixedOutputsMatchSnapshot(cell.outputs, snapshot.outputs) &&
     executionSummaryKey(cell.executionSummary) === snapshot.executionSummary;
+}
+
+function mixedOutputsMatchSnapshot(
+  outputs: readonly vscode.NotebookCellOutput[],
+  snapshot: readonly MixedOutputSnapshot[]
+): boolean {
+  return outputs.length === snapshot.length && outputs.every((output, outputIndex) => {
+    const expected = snapshot[outputIndex];
+    return output === expected.output && output.metadata === expected.metadata &&
+      output.items.length === expected.items.length &&
+      output.items.every((item, itemIndex) => {
+        const expectedItem = expected.items[itemIndex];
+        return item === expectedItem.item && item.data === expectedItem.data &&
+          item.mime === expectedItem.mime;
+      });
+  });
+}
+
+function notebookCellDataSnapshot(
+  cell: vscode.NotebookCell
+): vscode.NotebookCellData | undefined {
+  return referencedNotebookCellDataSnapshot(cell);
+}
+
+function referencedNotebookCellDataSnapshot(
+  cell: vscode.NotebookCell
+): vscode.NotebookCellData | undefined {
+  try {
+    const data = new vscode.NotebookCellData(
+      cell.kind,
+      cell.document.getText(),
+      cell.document.languageId
+    );
+    // Public NotebookCell values and outputs are immutable snapshots. Retain
+    // their references so conflict compensation is limited to the affected cell.
+    data.metadata = cell.metadata;
+    data.outputs = cell.outputs as vscode.NotebookCellOutput[];
+    data.executionSummary = cell.executionSummary
+      ? {
+        executionOrder: cell.executionSummary.executionOrder,
+        success: cell.executionSummary.success,
+        ...(cell.executionSummary.timing
+          ? { timing: { ...cell.executionSummary.timing } }
+          : {}),
+      }
+      : undefined;
+    return data;
+  } catch {
+    return undefined;
+  }
+}
+
+function acceptCommittedMixedCell(
+  cell: vscode.NotebookCell | undefined,
+  snapshot: MixedCellSnapshot,
+  index: number,
+  expectedLiveId: string | undefined,
+  expectedOutputId: string | undefined,
+  expectedCell: vscode.NotebookCellData,
+  accept: (cell: vscode.NotebookCell) => void
+): void {
+  if (committedMixedCellMatches(
+    cell,
+    snapshot,
+    index,
+    expectedLiveId,
+    expectedOutputId,
+    expectedCell
+  )) {
+    accept(cell);
+  }
+}
+
+async function reconcileCompetingMixedCell(
+  notebook: vscode.NotebookDocument,
+  index: number,
+  competingCell: vscode.NotebookCellData | undefined,
+  competingRemoval: boolean
+): Promise<boolean> {
+  if (notebook.isClosed || (!competingCell && !competingRemoval)) {
+    return false;
+  }
+  const edit = new vscode.WorkspaceEdit();
+  edit.set(notebook.uri, [vscode.NotebookEdit.replaceCells(
+    new vscode.NotebookRange(index, index + 1),
+    competingCell ? [competingCell] : []
+  )]);
+  try {
+    return await vscode.workspace.applyEdit(edit);
+  } catch {
+    return false;
+  }
+}
+
+function notebookCellMatchesData(
+  cell: vscode.NotebookCell,
+  data: vscode.NotebookCellData,
+  notebook: vscode.NotebookDocument,
+  index: number
+): boolean {
+  const cellMetadata = jsonValueKey(cell.metadata);
+  const dataMetadata = jsonValueKey(data.metadata);
+  return cellMetadata !== undefined && dataMetadata !== undefined &&
+    cell.notebook === notebook && cell.index === index &&
+    cell.kind === data.kind &&
+    cell.document.languageId === data.languageId &&
+    cell.document.getText() === data.value &&
+    cellMetadata === dataMetadata &&
+    notebookOutputsEqual(cell.outputs, data.outputs || []) &&
+    executionSummaryKey(cell.executionSummary) === executionSummaryKey(data.executionSummary);
+}
+
+function jsonValueKey(value: unknown): string | undefined {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function notebookOutputsEqual(
+  left: readonly vscode.NotebookCellOutput[],
+  right: readonly vscode.NotebookCellOutput[]
+): boolean {
+  return left.length === right.length && left.every((output, outputIndex) => {
+    const expected = right[outputIndex];
+    return !!expected && jsonValueKey(output.metadata) === jsonValueKey(expected.metadata) &&
+      output.items.length === expected.items.length &&
+      output.items.every((item, itemIndex) => {
+        const expectedItem = expected.items[itemIndex];
+        if (!expectedItem || item.mime !== expectedItem.mime ||
+          item.data.byteLength !== expectedItem.data.byteLength) {
+          return false;
+        }
+        for (let byte = 0; byte < item.data.byteLength; byte += 1) {
+          if (item.data[byte] !== expectedItem.data[byte]) {
+            return false;
+          }
+        }
+        return true;
+      });
+  });
 }
 
 function executionSummaryKey(
   summary: vscode.NotebookCellExecutionSummary | undefined
 ): string {
   if (!summary) {
+    return '';
+  }
+  const hasExecutionOrder = typeof summary.executionOrder === 'number';
+  const hasSuccess = typeof summary.success === 'boolean';
+  const hasTiming = !!summary.timing &&
+    (typeof summary.timing.startTime === 'number' ||
+      typeof summary.timing.endTime === 'number');
+  // The built-in ipynb serializer exposes execution_count:null as an empty
+  // execution summary object. Treat that as the same cleared state as the
+  // public NotebookCellData `undefined` representation.
+  if (!hasExecutionOrder && !hasSuccess && !hasTiming) {
     return '';
   }
   return JSON.stringify({
@@ -912,6 +1524,79 @@ function notebookCellAt(
   index: number
 ): vscode.NotebookCell | undefined {
   return index >= 0 && index < notebook.cellCount ? notebook.cellAt(index) : undefined;
+}
+
+function committedMixedCellMatches(
+  cell: vscode.NotebookCell | undefined,
+  snapshot: MixedCellSnapshot,
+  index: number,
+  expectedLiveId: string | undefined,
+  expectedOutputId: string | undefined,
+  expectedCell: vscode.NotebookCellData
+): cell is vscode.NotebookCell {
+  if (!cell || !notebookCellMatchesData(cell, expectedCell, snapshot.notebook, index)) {
+    return false;
+  }
+  if (!expectedLiveId && !expectedOutputId) {
+    return true;
+  }
+  if (!expectedLiveId || !expectedOutputId) {
+    return false;
+  }
+  return cell.outputs.some(output => outputHasFreshBinding(
+    output,
+    expectedLiveId,
+    expectedOutputId
+  ));
+}
+
+function outputHasFreshBinding(
+  output: vscode.NotebookCellOutput,
+  liveId: string,
+  outputId: string
+): boolean {
+  const live = parseNotebookLiveResultReference(
+    output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY]
+  );
+  const portable = parseNotebookPortableOutputBinding(output.metadata, output.items);
+  return live?.id === liveId && portable?.id === outputId;
+}
+
+function freshLiveBindings(
+  cell: vscode.NotebookCell
+): Array<{ liveId: string; outputId: string }> {
+  const bindings: Array<{ liveId: string; outputId: string }> = [];
+  for (const output of cell.outputs) {
+    const live = parseNotebookLiveResultReference(
+      output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY]
+    );
+    const portable = parseNotebookOutputReferenceFromMetadata(output.metadata);
+    if (live && portable && outputHasFreshBinding(output, live.id, portable.id)) {
+      bindings.push({ liveId: live.id, outputId: portable.id });
+    }
+  }
+  return bindings;
+}
+
+function freshBindingOwners(
+  notebook: vscode.NotebookDocument,
+  liveId: string,
+  outputId: string
+): vscode.NotebookCell[] {
+  const owners: vscode.NotebookCell[] = [];
+  for (const cell of notebook.getCells()) {
+    for (const output of cell.outputs) {
+      const live = parseNotebookLiveResultReference(
+        output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY]
+      );
+      const portable = parseNotebookOutputReferenceFromMetadata(output.metadata);
+      if (live?.id === liveId && portable?.id === outputId &&
+        outputHasFreshBinding(output, liveId, outputId)) {
+        owners.push(cell);
+      }
+    }
+  }
+  return owners;
 }
 
 async function waitForNotebookReplacement(event: Promise<void>): Promise<void> {

@@ -7,6 +7,9 @@ const net = require('net');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '../..');
+const TEST_OUT_ROOT = process.env.VSCODE_KDB_TEST_OUT_ROOT
+  ? path.resolve(process.env.VSCODE_KDB_TEST_OUT_ROOT)
+  : path.join(ROOT, 'out');
 const FIXTURE = path.join(__dirname, 'fixture.q');
 const { KdbIpcClient, qValueToColumnarPanel } = requireOut('q-ipc');
 const { qScriptInNamespace, queryInNamespace, queryInNamespaceStrict } = requireOut('connection');
@@ -336,7 +339,7 @@ async function runAssertions(port) {
 }
 
 function requireOut(moduleName) {
-  for (const candidate of [path.join(ROOT, 'out', moduleName), path.join(ROOT, 'out', 'src', moduleName)]) {
+  for (const candidate of [path.join(TEST_OUT_ROOT, moduleName), path.join(TEST_OUT_ROOT, 'src', moduleName)]) {
     try {
       return require(candidate);
     } catch (error) {
