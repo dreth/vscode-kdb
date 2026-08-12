@@ -46,9 +46,9 @@ export class ConnectionCommands {
       vscode.commands.registerCommand('vscode-kdb.addConnection', () => this.add()),
       vscode.commands.registerCommand('vscode-kdb.editConnection', argument => this.edit(argument)),
       vscode.commands.registerCommand('vscode-kdb.removeConnection', argument => this.remove(argument)),
-      vscode.commands.registerCommand('vscode-kdb.setActiveConnection', argument => this.setActive(argument)),
-      vscode.commands.registerCommand('vscode-kdb.selectQueryConnection', () => this.setActive()),
-      vscode.commands.registerCommand('vscode-kdb.connect', argument => this.connect(argument)),
+      vscode.commands.registerCommand('vscode-kdb.setActiveConnection', argument => this.activate(argument)),
+      vscode.commands.registerCommand('vscode-kdb.selectQueryConnection', () => this.activate(undefined, true)),
+      vscode.commands.registerCommand('vscode-kdb.connect', argument => this.activate(argument)),
       vscode.commands.registerCommand('vscode-kdb.disconnect', argument => this.disconnect(argument)),
       vscode.commands.registerCommand('vscode-kdb.testConnection', argument => this.test(argument)),
       vscode.commands.registerCommand(
@@ -82,56 +82,78 @@ export class ConnectionCommands {
     }
   }
 
-  public async setActive(argument?: unknown): Promise<KxConnection | undefined> {
-    const connection = await this.pickConnection('KX: Select Query Connection', argument);
+  public async activate(
+    argument?: unknown,
+    forcePicker = false
+  ): Promise<KxConnection | undefined> {
+    const connection = await this.pickConnection(
+      'KX: Activate Connection',
+      forcePicker ? undefined : argument
+    );
     if (!connection) {
       return undefined;
     }
+    const previousActiveId = this.store.activeConnectionId();
+    let previousDisconnectError: Error | undefined;
     try {
-      await this.store.setActiveConnection(connection.id);
+      await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Activating ${connection.name} (${connectionEndpoint(connection)})`,
+        cancellable: false,
+      }, async () => {
+        // Switching is transactional: keep the previous route and transport intact
+        // until the candidate transport has opened successfully.
+        await this.manager.connect(connection);
+        try {
+          await this.store.setActiveConnection(connection.id);
+        } catch (error) {
+          if (previousActiveId !== connection.id) {
+            await this.manager.disconnect(connection.id).catch(() => undefined);
+          }
+          throw error;
+        }
+        if (previousActiveId && previousActiveId !== connection.id) {
+          try {
+            await this.manager.disconnect(previousActiveId);
+          } catch (error) {
+            previousDisconnectError = error instanceof Error ? error : new Error(String(error));
+          }
+        }
+      });
       this.tree.refresh();
-      vscode.window.showInformationMessage(`Active KX connection: ${connection.name}.`);
+      const cleanup = previousDisconnectError
+        ? ` Previous transport cleanup reported: ${previousDisconnectError.message}`
+        : '';
+      vscode.window.showInformationMessage(
+        `Active KX connection: ${connection.name} (${connectionEndpoint(connection)}).${cleanup}`
+      );
       return connection;
     } catch (error) {
-      this.showFailure(`Set active connection "${connection.name}"`, error);
+      this.tree.refresh();
+      this.showFailure(`Activate connection "${connection.name}"`, error);
       return undefined;
     }
   }
 
   public async connect(argument?: unknown): Promise<void> {
-    const connection = await this.pickConnection('Connect which KX connection?', argument);
-    if (!connection) {
-      return;
-    }
-    try {
-      await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: `Connecting to ${connection.name} (${connectionEndpoint(connection)})`,
-        cancellable: false,
-      }, () => this.manager.connect(connection));
-      if (!this.store.activeConnectionId()) {
-        await this.store.setActiveConnection(connection.id);
-      }
-      this.tree.refresh();
-      vscode.window.showInformationMessage(
-        `Connected to "${connection.name}" at ${connectionEndpoint(connection)}.`
-      );
-    } catch (error) {
-      this.showFailure(`Connect to "${connection.name}" at ${connectionEndpoint(connection)}`, error);
-    }
+    await this.activate(argument);
   }
 
   public async disconnect(argument?: unknown): Promise<void> {
-    const connection = await this.pickConnection('Disconnect which KX connection?', argument);
+    const connection = await this.activeConnectionFromArgument(argument);
     if (!connection) {
       return;
     }
     try {
+      await this.store.setActiveConnection(undefined);
       await this.manager.disconnect(connection.id);
       this.tree.refresh();
-      vscode.window.showInformationMessage(`Disconnected "${connection.name}".`);
+      vscode.window.showInformationMessage(
+        `Deactivated and disconnected "${connection.name}". No KX connection is active.`
+      );
     } catch (error) {
-      this.showFailure(`Disconnect "${connection.name}" at ${connectionEndpoint(connection)}`, error);
+      this.tree.refresh();
+      this.showFailure(`Deactivate connection "${connection.name}"`, error);
     }
   }
 
@@ -416,7 +438,8 @@ export class ConnectionCommands {
           typeof this.store.connectionScope === 'function'
             ? this.store.connectionScope(current.id) || { kind: 'global' }
             : { kind: 'global' }
-        )} settings now supply this stable ID; its saved password was retained.`
+        )} settings now supply this stable ID; its saved password was retained. ` +
+        'No KX connection is active.'
       : `Deleted KX connection "${current.name}".`;
     if (disconnectError) {
       vscode.window.showWarningMessage(
@@ -455,8 +478,8 @@ export class ConnectionCommands {
           : undefined,
       ].filter(Boolean).join(' • '),
       detail: [
-        connection.id === activeId ? 'Active' : undefined,
-        this.manager.isConnected(connection.id) ? 'Connected' : 'Disconnected',
+        connection.id === activeId ? 'Active routing target' : undefined,
+        this.manager.isConnected(connection.id) ? 'Transport open' : 'Transport closed',
       ].filter(Boolean).join(' • '),
       connection,
     }));
@@ -466,6 +489,22 @@ export class ConnectionCommands {
       ignoreFocusOut: true,
     });
     return picked && picked.connection;
+  }
+
+  private async activeConnectionFromArgument(argument: unknown): Promise<KxConnection | undefined> {
+    const active = this.store.activeConnection();
+    if (!active) {
+      vscode.window.showWarningMessage('No KX connection is active.');
+      return undefined;
+    }
+    const requested = this.connectionFromArgument(argument);
+    if (requested && requested.id !== active.id) {
+      vscode.window.showWarningMessage(
+        `Only the active KX connection can be deactivated. "${requested.name}" is not active.`
+      );
+      return undefined;
+    }
+    return active;
   }
 
   private connectionFromArgument(argument: unknown): KxConnection | undefined {

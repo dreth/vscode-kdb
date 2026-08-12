@@ -17,15 +17,15 @@ Keep the normal Python Jupyter controller selected. Python cells continue to use
 For each intended q cell:
 
 1. Click the leading **Make q Cell (KX)** action. It changes the complete code cell's language to q without changing the selected Python kernel.
-2. Use the visible notebook-level `q default` item or **KX: Choose Notebook q Target** to select one saved KX profile.
+2. Use the visible notebook-level **Active** item or **KX: Activate q Connection** to star one saved KX profile globally.
 3. Use the leading **Run q Cell (KX)** play action, or use focused-cell `Ctrl+Enter` / `Cmd+Enter` to run and stay, `Shift+Enter` to run and move next, or `Alt+Enter` (`Option+Enter` on macOS) to run and insert below.
 4. Read the route from status: `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS).
 
-The action sends the complete cell source through the selected notebook target's direct KX session. It does not require `%%q`, select the KX controller, or mutate the Python controller. **KX: Restore Notebook Cell Language** restores the notebook's declared default language.
+The action sends the complete cell source through the starred active connection's direct KX session. It does not require `%%q`, select the KX controller, or mutate the Python controller. **KX: Restore Notebook Cell Language** restores the notebook's declared default language.
 
-Only safe `{id, name}` profile identity/display metadata is saved in the `.ipynb`; host, port, namespace, username, password, credentials, and connection objects are excluded. Every run resolves that stable ID against current `ConnectionStore` data. If the same profile is edited from port `5005` to `5000`, the next run uses `5000`; the connection manager disconnects a client whose runtime endpoint is stale and reconnects as needed. A rename still resolves by ID. Changing the globally active profile does not override the notebook target.
+Legacy `.ipynb` target `{id, name}` metadata remains safe to read but is ignored for routing. Every run uses only the current starred active profile from `ConnectionStore`; host, port, namespace, username, password, credentials, and connection objects are never copied into notebook metadata. KX does not implicitly dirty a notebook merely to remove legacy target metadata.
 
-The globally active profile is offered first as a labelled convenience, never used as an invisible fallback. An unselected, removed, or otherwise missing target shows **Select connection** and prompts for explicit selection, so mixed q never routes to list order or another profile by accident.
+With no active profile the status shows **Activate connection** and prompts for explicit activation. Mixed q never routes to list order or a connected non-active profile.
 
 Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. **Run q Cell (KX)** leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.
 
@@ -63,7 +63,7 @@ Turning the setting off disposes the controller. A notebook that previously save
 
 ## Active connection and shared q session
 
-Mixed cells use the notebook's explicit q target. The optional q-only controller uses the active profile only while it is enabled and selected. Both Direct IPC routes reuse the profile-keyed `ConnectionManager` client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells that choose the same target.
+Mixed cells and the optional q-only controller use the active profile only. Both Direct IPC routes reuse its profile-keyed `ConnectionManager` client and q process/session; they do not open a connection per cell. Assignments, q variables, process configuration, and namespace state remain visible across q cells while that profile remains active.
 
 Every direct q cell uses the same complete-source path as **Run q Script**. The extension groups physical q lines on the client, including indentation continuations, comments, top-level system commands, and q's bare-`\` trailing-script-comment convention, then evaluates the groups in order through ordinary q `value`. It saves the process's current namespace, enters the profile's configured namespace, and restores the saved namespace after success or q error. A source system command retains normal q semantics and can affect later groups within that run; the outer wrapper still restores the pre-run namespace afterward.
 

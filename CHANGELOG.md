@@ -2,6 +2,12 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## 0.2.15 - 2026-08-12
+
+- Unified editor queries, direct notebooks, Server Explorer, previews, reruns, and reconnect/default routing behind zero or one starred **Active** profile. Connected non-active profiles are never selected and removing or deactivating the active profile leaves no route.
+- Made activation transactional: KX opens the candidate transport before switching the star, retains the previous active route and transport if opening fails, and disconnects the previous transport only after the switch succeeds.
+- Replaced competing Connect/Select/Notebook Target language with **Active/Activate** while continuing to report transport health honestly as open or closed. Legacy notebook target metadata is ignored without implicit destructive notebook edits.
+
 ## 0.2.14 - 2026-08-11
 
 - Unified chart viewport handling across the KX Results panel and notebook output. Plain drag zooms X; `Shift`+drag, Pan left/right, Left/Right, and Home provide clamped X-only pan/reset. Pan completion now uses the exact unchanged zoom range-loading/resampling decision for the same absolute X range, with stale-reply/reset protection and automatic visible-range Y for all six chart families.

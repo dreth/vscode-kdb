@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.14",
+  "version": "0.2.15",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -95,8 +95,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.14.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.14.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.15.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.15.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -161,22 +161,22 @@
       },
       {
         "command": "vscode-kdb.setActiveConnection",
-        "title": "KX: Set Active Connection",
+        "title": "KX: Activate Connection",
         "icon": "$(star-full)"
       },
       {
         "command": "vscode-kdb.selectQueryConnection",
-        "title": "KX: Select Query Connection",
+        "title": "KX: Activate Connection...",
         "icon": "$(server-process)"
       },
       {
         "command": "vscode-kdb.connect",
-        "title": "KX: Connect",
+        "title": "KX: Activate Connection",
         "icon": "$(debug-start)"
       },
       {
         "command": "vscode-kdb.disconnect",
-        "title": "KX: Disconnect",
+        "title": "KX: Deactivate Connection",
         "icon": "$(debug-disconnect)"
       },
       {
@@ -313,8 +313,8 @@
       },
       {
         "command": "vscode-kdb.selectNotebookQTarget",
-        "title": "KX: Choose Notebook q Target",
-        "icon": "$(server-process)",
+        "title": "KX: Activate q Connection",
+        "icon": "$(star-full)",
         "enablement": "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {

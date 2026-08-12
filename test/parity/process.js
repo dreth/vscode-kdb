@@ -6,7 +6,7 @@ const fs = require('fs');
 const path = require('path');
 
 const DEFAULT_REFERENCE_ROOT = '/opt/data/home/projects/kdb-sqltools';
-const EXPECTED_REFERENCE_COMMIT = 'fe3d0ff58f9634111746a1565d55249ac7a13cc7';
+const EXPECTED_REFERENCE_COMMIT = 'b1e77c361cff685384bedfdc948078b2a597b9e3';
 const DEFAULT_Q_BINARY = '/opt/data/home/.kx/bin/q';
 const REFERENCE_ROOT_ENV = 'KDB_SQLTOOLS_PARITY_ROOT';
 const Q_BINARY_ENVS = Object.freeze(['VSCODE_KDB_Q_BIN', 'KDB_Q_BIN']);

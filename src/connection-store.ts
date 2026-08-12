@@ -460,8 +460,7 @@ export class ConnectionStore {
       const updatedOwnerConnections = ownerConnections.filter(connection => connection.id !== id);
       const updatedState = this.stateAfterScopeUpdate(owner, updatedOwnerConnections);
       const removeSecret = !updatedState.connections.some(connection => connection.id === id);
-      const removedActiveConnection = this.activeConnectionId() === id &&
-        !updatedState.connections.some(connection => connection.id === id);
+      const removedActiveConnection = this.activeConnectionId() === id;
       const previousActiveId = this.activeConnectionIdSnapshot;
       const previousPassword = removeSecret ? await this.password(id) : undefined;
       let secretAttempted = false;

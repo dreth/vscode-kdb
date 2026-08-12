@@ -114,16 +114,7 @@ async function exerciseConnectionStore(testApi) {
     assert.strictEqual(await testApi.hasPassword(profiles[0].id), true);
     assert.strictEqual(await testApi.hasPassword(profiles[1].id), true);
 
-    const selected = await vscode.commands.executeCommand(
-      SET_ACTIVE_CONNECTION_COMMAND,
-      profiles[1].id
-    );
-    assert(selected, 'selecting the second profile should return that profile');
-    assert.strictEqual(
-      selected.id,
-      profiles[1].id,
-      'active selection must honor the requested profile ID, not list order'
-    );
+    await testApi.setActiveConnection(profiles[1].id);
     assert.strictEqual(testApi.activeConnectionId(), profiles[1].id);
 
     const expected = testApi.connection(profiles[1].id);
@@ -166,19 +157,16 @@ async function exerciseConnectionStore(testApi) {
       'notebook target metadata must contain only stable safe identity fields'
     );
     const resolved = testApi.resolveNotebookTarget(targetMetadata);
-    assert(resolved, 'the saved notebook target ID must resolve through the current store');
+    assert(resolved, 'the active profile must resolve through the current store');
     assert.strictEqual(resolved.id, edited.id);
     assert.strictEqual(resolved.port, 5000);
 
-    await vscode.commands.executeCommand(
-      SET_ACTIVE_CONNECTION_COMMAND,
-      profiles[0].id
-    );
+    await testApi.setActiveConnection(profiles[0].id);
     assert.strictEqual(testApi.activeConnectionId(), profiles[0].id);
     assert.strictEqual(
-      testApi.resolveNotebookTarget(targetMetadata).port,
-      5000,
-      'changing the global active profile must not override an explicit notebook target ID'
+      testApi.resolveNotebookTarget(targetMetadata).id,
+      profiles[0].id,
+      'legacy notebook target metadata must not override the globally starred active profile'
     );
     assert.strictEqual(testApi.resolveNotebookTarget({
       metadata: {
@@ -187,7 +175,7 @@ async function exerciseConnectionStore(testApi) {
           qTarget: { id: 'e2e-removed-profile', name: 'Removed profile' },
         },
       },
-    }), undefined, 'a missing notebook target must not fall back to the active or first profile');
+    }).id, profiles[0].id, 'unknown legacy notebook target metadata must still route only to the active profile');
 
     assert.strictEqual(
       vscode.workspace.getConfiguration('vscode-kdb').get(CONNECTIONS_SETTING).length,
@@ -583,6 +571,12 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
   let preservedForFreshHost = false;
   try {
     await testApi.addConnection(profile);
+    await testApi.setActiveConnection(profile.id);
+    assert.strictEqual(
+      testApi.activeConnectionId(),
+      profile.id,
+      'mixed-q execution must explicitly star its sole routing target'
+    );
     await notebookConfiguration.update(
       'maxOutputRows',
       20,
@@ -624,7 +618,7 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
         language_info: { name: 'python' },
         'vscode-kdb': {
           version: 1,
-          qTarget: { id: profile.id, name: profile.name },
+          qTarget: { id: 'ignored-legacy-target', name: 'Ignored legacy target' },
         },
       },
       nbformat: 4,
@@ -1082,10 +1076,15 @@ async function run() {
       'KX Extension Host reopen assertions passed: fresh-process .ipynb load, persisted-only output identity, native Chromium input, sort/null order, resize, bar-chart viewport races, and owned AX grid semantics.'
     );
   } else {
+    console.log('KX Extension Host phase: connection store');
     await exerciseConnectionStore(testApi);
+    console.log('KX Extension Host phase: direct controller lifecycle');
     await exerciseDirectControllerLifecycle(testApi);
+    console.log('KX Extension Host phase: notebook cell language');
     await exerciseNotebookCellLanguageCommands();
+    console.log('KX Extension Host phase: durable mixed notebook');
     await exerciseDurableMixedNotebook();
+    console.log('KX Extension Host phase: repeated mixed q');
     await exerciseRepeatedIdenticalMixedQ(testApi);
     console.log(
       'KX Extension Host save assertions passed: activation/store lifecycle, active query connection selection, q language commands, durable mixed-notebook reopen, stale-race protection, repeated mixed-q identities, and actual .ipynb save/tab close.'

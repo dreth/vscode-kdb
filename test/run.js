@@ -4974,14 +4974,27 @@ async function testConnectionsTreeProvider() {
       : undefined,
     activeConnection: () => connections.find(connection => connection.id === activeId),
     async setActiveConnection(id) {
-      assert.ok(connections.some(connection => connection.id === id));
+      assert.ok(id === undefined || connections.some(connection => connection.id === id));
       activeId = id;
     },
   };
   const managerState = new harness.vscode.EventEmitter();
+  const connectedIds = new Set([connections[1].id]);
+  const failingIds = new Set();
   const manager = {
     onDidChangeState: managerState.event,
-    isConnected: id => id === connections[1].id,
+    isConnected: id => connectedIds.has(id),
+    async connect(connection) {
+      if (failingIds.has(connection.id)) {
+        throw new Error(`cannot open ${connection.id}`);
+      }
+      connectedIds.add(connection.id);
+      managerState.fire();
+    },
+    async disconnect(id) {
+      connectedIds.delete(id);
+      managerState.fire();
+    },
   };
   const provider = new ConnectionsTreeProvider(store, manager);
   let refreshes = 0;
@@ -4993,15 +5006,15 @@ async function testConnectionsTreeProvider() {
     connections[0].id,
     connections[1].id,
   ], 'each saved profile must render as a stable, distinct tree item');
-  assert.match(items[0].description, /^ACTIVE • disconnected/);
+  assert.match(items[0].description, /^ACTIVE • transport closed/);
   assert.strictEqual(items[0].iconPath.id, 'star-full');
   assert.match(items[0].accessibilityInformation.label, /active/);
   assert.match(String(items[0].tooltip), /ACTIVE/);
-  assert.strictEqual(items[1].description, 'connected • two.example.test:5002 • .two');
+  assert.strictEqual(items[1].description, 'transport open • two.example.test:5002 • .two');
   assert.strictEqual(items[1].contextValue, 'vscode-kdb.connection.connected.inactive');
   assert.deepStrictEqual(items[1].command, {
     command: 'vscode-kdb.setActiveConnection',
-    title: 'Set Active Connection',
+    title: 'Activate Connection',
     arguments: [items[1]],
   });
 
@@ -5019,7 +5032,7 @@ async function testConnectionsTreeProvider() {
   assert.match(harness.information.at(-1), /Active KX connection: Connection two/);
   assert.ok(refreshes > 0);
   items = provider.getChildren();
-  assert.match(items[1].description, /^ACTIVE • connected/);
+  assert.match(items[1].description, /^ACTIVE • transport open/);
 
   harness.setQuickPickSelectionId(connections[0].id);
   await harness.registeredCommands.get('vscode-kdb.setActiveConnection')();
@@ -5039,9 +5052,24 @@ async function testConnectionsTreeProvider() {
   );
   assert.strictEqual(
     harness.quickPicks.at(-1).options.title,
-    'KX: Select Query Connection'
+    'KX: Activate Connection'
   );
   assert.strictEqual(activeId, connections[1].id);
+  failingIds.add(connections[0].id);
+  const failedSwitch = await commands.activate(connections[0]);
+  assert.strictEqual(failedSwitch, undefined);
+  assert.strictEqual(
+    activeId,
+    connections[1].id,
+    'failed activation must transactionally preserve the previous active route'
+  );
+  assert.deepStrictEqual(
+    [...connectedIds],
+    [connections[1].id],
+    'failed activation must preserve the previous transport and leave no candidate transport'
+  );
+  assert.match(harness.errors.at(-1), /Activate connection "Connection one" failed: cannot open/);
+  failingIds.clear();
   const reusedAfterPaletteSwitch = await new QueryConnectionSelectionSession().resolve(
     store.activeConnection(),
     store.connections(),
@@ -5103,10 +5131,10 @@ async function testQueryConnectionSelectionPolicy() {
   assert.strictEqual(firstUse, profiles[0]);
   assert.strictEqual(
     firstUsePromptCount,
-    0,
-    'a first-ever sole profile must auto-select without opening the picker'
+    1,
+    'a sole non-active profile must require explicit activation instead of silent fallback'
   );
-  assert.strictEqual(firstUseActivationCount, 1);
+  assert.strictEqual(firstUseActivationCount, 0);
 
   const invalidatedSession = new QueryConnectionSelectionSession();
   let invalidatedPromptCount = 0;
@@ -8077,10 +8105,28 @@ async function testConnectionManagerLifecycle() {
     await integratedRunner.runCell(firstIntegratedCell, integratedTarget.id),
     'executed'
   );
+  assert.strictEqual(
+    createdClients.length,
+    clientsBeforeIntegratedRun,
+    'a legacy notebook target ID must not execute when it is not the active profile'
+  );
+  assert.strictEqual(integratedStore.activeConnectionId(), integratedActive.id);
+
+  await integratedStore.setActiveConnection(integratedTarget.id);
+  const activatedIntegratedCell = integratedRuntime.cell({
+    languageId: 'q',
+    source: 'activatedTargetRun[]',
+    uri: 'vscode-notebook-cell:///integrated-target-edit/activated',
+  });
+  activatedIntegratedCell.notebook = integratedNotebook;
+  assert.strictEqual(
+    await integratedRunner.runCell(activatedIntegratedCell, integratedTarget.id),
+    'executed'
+  );
   assert.strictEqual(createdClients.length, clientsBeforeIntegratedRun + 1);
   const integratedStaleClient = createdClients.at(-1);
   assert.strictEqual(integratedStaleClient.options.port, 5005);
-  assert.strictEqual(integratedStore.activeConnectionId(), integratedActive.id);
+  assert.strictEqual(integratedStore.activeConnectionId(), integratedTarget.id);
 
   const integratedCurrentTarget = { ...integratedTarget, port: 5000 };
   await integratedStore.update(
@@ -8108,8 +8154,8 @@ async function testConnectionManagerLifecycle() {
   );
   assert.strictEqual(
     integratedStore.activeConnectionId(),
-    integratedActive.id,
-    'a different active/global profile must not replace the explicit notebook target'
+    integratedTarget.id,
+    'the active profile remains the sole notebook route after endpoint edits'
   );
   integratedRunner.dispose();
   await integratedManager.disconnectAll();
@@ -14575,6 +14621,8 @@ async function testDirectQNotebookController() {
     );
     assert.deepStrictEqual(pythonSibling.outputs, [pythonSiblingOutput]);
   };
+  bridge.connection = secondConnection;
+  bridge.fireState();
   assert.strictEqual(
     await directController.runCell(mixedCell, secondConnection.id),
     'executed'
@@ -14649,6 +14697,8 @@ async function testDirectQNotebookController() {
     port: 5000,
   };
   bridge.connectionList = [connection, editedSecondConnection];
+  bridge.connection = editedSecondConnection;
+  bridge.fireState();
   bridge.executeImpl = async (target, source, onIssued) => {
     assert.strictEqual(target, editedSecondConnection);
     assert.strictEqual(source, 'editedTargetPort[]');
@@ -14672,10 +14722,12 @@ async function testDirectQNotebookController() {
   );
   assert.strictEqual(
     bridge.connection,
-    connection,
-    'changing the active/global profile must not override the explicit notebook target ID'
+    editedSecondConnection,
+    'the current active profile must remain the sole notebook target after endpoint edits'
   );
   bridge.connectionList = [connection];
+  bridge.connection = connection;
+  bridge.fireState();
 
   const untouchedPythonOutput = { owner: 'python-controller' };
   const mixedPythonCell = runtime.cell({
@@ -14854,8 +14906,8 @@ async function testDirectQNotebookController() {
   assert.strictEqual(bridge.calls.length, callsBeforeNoConnection);
   const noConnectionError = notebookErrorText(runtime.outputFor(noConnectionReplacement));
   assert.match(noConnectionError, /Run q Cell \(KX\)/);
-  assert.match(noConnectionError, /no available saved notebook q target/i);
-  assert.match(noConnectionError, /Choose a KX target/i);
+  assert.match(noConnectionError, /no active KX direct IPC connection/i);
+  assert.match(noConnectionError, /Activate a KX connection/i);
 
   bridge.connection = connection;
   bridge.connectionList = [connection];
@@ -15592,6 +15644,20 @@ async function testMixedQNotebookCommandIntegration() {
       return nextRunResult;
     },
   };
+  runtime.commands.set('vscode-kdb.connect', async connectionId => {
+    const selected = profiles.find(profile => profile.id === connectionId);
+    if (!selected) {
+      return undefined;
+    }
+    profiles.forEach(profile => {
+      profile.active = profile.id === connectionId;
+      if (profile.active) {
+        profile.connected = true;
+      }
+    });
+    stateChanged.fire();
+    return { ...selected };
+  });
   const integration = new NotebookIntegration({}, { directController });
   const command = runtime.commands.get(RUN_Q_NOTEBOOK_CELL_COMMAND);
   const commandAndSelectBelow = runtime.commands.get(
@@ -15621,8 +15687,8 @@ async function testMixedQNotebookCommandIntegration() {
   assert.deepStrictEqual(qRunStatus.command.arguments, [qCell]);
   assert.match(qRunStatus.tooltip, /complete q cell/i);
   assert.match(qRunStatus.tooltip, /kernel selected at the top right/i);
-  assert.strictEqual(qTargetStatus.text, '$(server-process) q default: Connection one');
-  assert.match(qTargetStatus.tooltip, /active KX profile/i);
+  assert.strictEqual(qTargetStatus.text, '$(star-full) Active: Connection one');
+  assert.match(qTargetStatus.tooltip, /active KX connection/i);
   const visibleStatusText = qStatuses
     .map(item => `${item.text}\n${item.tooltip}\n${item.accessibilityInformation?.label}`)
     .join('\n');
@@ -15694,19 +15760,13 @@ async function testMixedQNotebookCommandIntegration() {
 
   runtime.setQuickPickSelectionId('profile-two');
   const chooseTarget = runtime.commands.get(SELECT_NOTEBOOK_Q_TARGET_COMMAND);
+  const metadataBeforeActivation = JSON.stringify(notebook.metadata);
   await chooseTarget(qCell);
   assert.strictEqual(
-    notebook.metadata.metadata['vscode-kdb'].qTarget.id,
-    'profile-two'
+    JSON.stringify(notebook.metadata),
+    metadataBeforeActivation,
+    'activating a connection must not rewrite notebook metadata'
   );
-  assert.deepStrictEqual(
-    notebook.metadata.metadata['vscode-kdb'].qTarget,
-    { id: 'profile-two', name: 'Connection two' }
-  );
-  const persistedMetadataText = JSON.stringify(notebook.metadata);
-  assert.ok(!persistedMetadataText.includes('host'));
-  assert.ok(!persistedMetadataText.includes('username'));
-  assert.ok(!persistedMetadataText.toLocaleLowerCase().includes('password'));
   assert.match(runtime.information.at(-1), /Python remains the selected notebook kernel/i);
   const secondTargetStatuses = provider.provideCellStatusBarItems(qCell);
   assert.strictEqual(
@@ -15755,67 +15815,56 @@ async function testMixedQNotebookCommandIntegration() {
     id: 'removed-profile',
     name: 'Removed profile',
   };
-  const missingStatuses = provider.provideCellStatusBarItems(qCell);
+  const legacyMetadataStatuses = provider.provideCellStatusBarItems(qCell);
   assert.strictEqual(
-    missingStatuses[0].text,
-    `$(play) KX: Select connection · ${notebookRunShortcutLabel()}`
+    legacyMetadataStatuses[0].text,
+    `$(play) KX: Connection two · ${notebookRunShortcutLabel()}`
   );
-  assert.match(missingStatuses[0].tooltip, /Removed profile/);
-  assert.match(missingStatuses[0].tooltip, /unavailable/i);
-  runtime.setQuickPickSelectionId('profile-one');
+  assert.ok(
+    !legacyMetadataStatuses
+      .map(item => `${item.text}\n${item.tooltip}`)
+      .join('\n')
+      .includes('Removed profile'),
+    'legacy per-notebook target metadata must not override or leak into the active route UI'
+  );
   await command(qCell);
-  assert.strictEqual(runCalls.at(-1).connectionId, 'profile-one');
   assert.strictEqual(
-    notebook.metadata.metadata['vscode-kdb'].qTarget.id,
-    'profile-one',
-    'a missing saved target must require and persist an explicit replacement'
+    runCalls.at(-1).connectionId,
+    'profile-two',
+    'legacy per-notebook target metadata must not override the starred active connection'
   );
 
-  delete notebook.metadata.metadata['vscode-kdb'].qTarget;
-  runtime.setQuickPickSelectionId('profile-two');
-  runtime.setApplyEditResult(false);
-  const informationBeforeFailedTargetSave = runtime.information.length;
-  await chooseTarget(qCell);
-  runtime.setApplyEditResult(true);
-  assert.strictEqual(runtime.information.length, informationBeforeFailedTargetSave);
-  assert.match(runtime.errors.at(-1), /Could not save "Connection two"/);
+  profiles.forEach(profile => {
+    profile.active = false;
+  });
+  stateChanged.fire();
   assert.strictEqual(
-    Object.prototype.hasOwnProperty.call(
-      notebook.metadata.metadata['vscode-kdb'],
-      'qTarget'
-    ),
-    false,
-    'failed notebook metadata edits must not fake target selection success'
+    provider.provideCellStatusBarItems(qCell)[0].text,
+    `$(play) KX: Activate connection · ${notebookRunShortcutLabel()}`
   );
-
   runtime.setQuickPickSelectionId(null);
   const runsBeforeUnselectedCancel = runCalls.length;
   await command(qCell);
   assert.strictEqual(
     runCalls.length,
     runsBeforeUnselectedCancel,
-    'an unselected notebook target must never silently execute on the active/list-first profile'
-  );
-  assert.strictEqual(
-    Object.prototype.hasOwnProperty.call(
-      notebook.metadata.metadata['vscode-kdb'],
-      'qTarget'
-    ),
-    false
+    'no active connection plus picker cancellation must never silently execute on a saved profile'
   );
   const unselectedPicker = runtime.quickPickCalls.at(-1);
   assert.strictEqual(
     unselectedPicker.items[0].profile.id,
     'profile-one',
-    'the active profile may be offered first only as an explicit picker convenience'
+    'saved profiles remain available for explicit activation'
   );
-  assert.match(unselectedPicker.options.placeHolder, /saved profile/i);
+  assert.match(unselectedPicker.options.placeHolder, /Activate the profile/i);
 
+  profiles[0].active = true;
+  stateChanged.fire();
   const removedProfiles = profiles.splice(0, profiles.length);
   const noProfileStatuses = provider.provideCellStatusBarItems(qCell);
   assert.strictEqual(
     noProfileStatuses[0].text,
-    `$(play) KX: Select connection · ${notebookRunShortcutLabel()}`
+    `$(play) KX: Activate connection · ${notebookRunShortcutLabel()}`
   );
   assert.match(noProfileStatuses[0].tooltip, /No saved KX profiles/i);
   profiles.push(...removedProfiles);
@@ -17185,10 +17234,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.14');
+  assert.strictEqual(manifest.version, '0.2.15');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.14');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.14');
+  assert.strictEqual(packageLock.version, '0.2.15');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.15');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -17213,10 +17262,9 @@ function testManifestAndSources() {
     'KX: Add Connection',
     'KX: Edit Connection',
     'KX: Remove Connection',
-    'KX: Set Active Connection',
-    'KX: Select Query Connection',
-    'KX: Connect',
-    'KX: Disconnect',
+    'KX: Activate Connection',
+    'KX: Activate Connection...',
+    'KX: Deactivate Connection',
     'KX: Test Connection',
     'KX: Import SQLTools KDB Connections',
     'KX: Refresh Server Explorer',
@@ -17236,7 +17284,7 @@ function testManifestAndSources() {
     'Run q Cell (KX)',
     'Run q Cell and Select Below (KX)',
     'Run q Cell and Insert Below (KX)',
-    'KX: Choose Notebook q Target',
+    'KX: Activate q Connection',
     'KX: Run %%q Preview Live via Direct IPC',
     'KX: Open Saved Notebook Preview in Results Panel',
   ].forEach(title => assert.ok(commandTitles.has(title), `missing command contribution: ${title}`));
@@ -17281,7 +17329,7 @@ function testManifestAndSources() {
     commandPalette.some(item =>
       item.command === 'vscode-kdb.selectQueryConnection' && item.when === 'false'),
     false,
-    'Select Query Connection must remain visible in the Command Palette'
+    'Activate Connection must remain visible in the Command Palette'
   );
   const keybindings = ((manifest.contributes || {}).keybindings) || [];
   assertKeybinding(keybindings, commandByTitle['KX: Run Selection / Current Line'], 'ctrl+enter', 'cmd+enter');
@@ -17448,8 +17496,8 @@ function testManifestAndSources() {
   });
   assert.deepStrictEqual(commandById['vscode-kdb.selectNotebookQTarget'], {
     command: 'vscode-kdb.selectNotebookQTarget',
-    title: 'KX: Choose Notebook q Target',
-    icon: '$(server-process)',
+    title: 'KX: Activate q Connection',
+    icon: '$(star-full)',
     enablement: "notebookType == 'jupyter-notebook' && !vscode-kdb.notebookDirectQControllerSelected",
   });
   assert.ok(
@@ -18065,7 +18113,13 @@ function testManifestAndSources() {
     'private async runQCellWithKx',
     'private async runNotebookPreviewLive'
   );
-  assert.match(mixedRunnerSource, /resolveNotebookQTarget\(/);
+  assert.match(mixedRunnerSource, /activeNotebookQProfile\(runner\.connectionProfiles\(\)\)/);
+  assert.match(mixedRunnerSource, /this\.selectNotebookQTarget\(cell, editor\)/);
+  assert.doesNotMatch(
+    mixedRunnerSource,
+    /resolveNotebookQTarget|qTarget/,
+    'legacy per-notebook q target metadata must not compete with the starred active connection'
+  );
   assert.match(mixedRunnerSource, /runner\.runCell\(cell, target\.id\)/);
   assert.ok(
     !/setTextDocumentLanguage|applyEdit|%%q|selectKernel|notebook\.selectKernel/.test(mixedRunnerSource),
@@ -18217,8 +18271,13 @@ function testManifestAndSources() {
   assert.match(activeRunSource, /if \(!active && !connections\.length\)[\s\S]*?return undefined;/);
   assert.match(
     activeRunSource,
-    /queryConnectionSelectionSession\.resolve\([\s\S]*?active,[\s\S]*?connections,[\s\S]*?store\.hasRememberedActiveConnection\(\),[\s\S]*?chooseConnection:[\s\S]*?'vscode-kdb\.selectQueryConnection'[\s\S]*?setActiveConnection\(connection\.id\)/,
-    'normal execution must reuse the shared query selector and persist only the active profile'
+    /queryConnectionSelectionSession\.resolve\([\s\S]*?active,[\s\S]*?connections,[\s\S]*?store\.hasRememberedActiveConnection\(\),[\s\S]*?chooseConnection:[\s\S]*?'vscode-kdb\.selectQueryConnection'/,
+    'normal execution must reuse the shared query selector and transactional activation command'
+  );
+  assert.doesNotMatch(
+    activeRunSource,
+    /setActiveConnection\(/,
+    'normal execution must not bypass transactional connection activation'
   );
   const historyRerunSource = sourceSection(historySource, 'private async rerun(', 'private async copy(');
   assert.match(historyRerunSource, /await runQuery\(entry\)/);

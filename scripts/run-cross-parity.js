@@ -9,7 +9,7 @@ const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..');
 const DEFAULT_REFERENCE_ROOT = '/opt/data/home/projects/kdb-sqltools';
-const DEFAULT_REFERENCE_REVISION = 'fe3d0ff58f9634111746a1565d55249ac7a13cc7';
+const DEFAULT_REFERENCE_REVISION = 'b1e77c361cff685384bedfdc948078b2a597b9e3';
 const DEFAULT_Q_PATH = '/opt/data/home/.kx/bin/q';
 const VALID_STATUSES = new Set(['PASS', 'DIFFERENT_BY_DESIGN', 'GAP', 'NOT_TESTABLE_HERE']);
 

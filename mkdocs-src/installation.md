@@ -62,10 +62,10 @@ The imported legacy connection timeout applies only to KX connect/handshake. Que
 1. Keep the normal Python Jupyter controller selected.
 2. Leave Python cells as Python and run them normally.
 3. Click the leading **Make q Cell (KX)** action on the intended code cell. This changes the whole cell's language without changing the selected Python kernel.
-4. Choose the visible notebook-level `q default` target or **KX: Choose Notebook q Target**, then select one saved KX profile.
+4. Choose the visible notebook-level **Active** item or **KX: Activate q Connection**, then activate and star one saved KX profile.
 5. Use the leading **Run q Cell (KX)** play action, `Ctrl+Enter` / `Cmd+Enter` to run and stay, `Shift+Enter` to run and move next, or `Alt+Enter` (`Option+Enter` on macOS) to run and insert below.
 
-The KX action executes the complete q source through that explicit target without switching the Python controller. A target persists only safe stable profile ID/name metadata in the `.ipynb`. Every run resolves current store data: editing the same profile to a new host/port uses the new endpoint and recycles a stale client as needed; changing the active profile does not override it. A missing or removed target asks for a replacement instead of using list order. q assignments continue through the selected profile's KX q process across q cells that share the target. Python variables and KX q variables remain separate.
+The KX action executes the complete q source through the globally starred active connection without switching the Python controller. Every run resolves current store data: editing the active profile to a new host/port uses the new endpoint and recycles a stale client as needed. Legacy per-notebook target metadata is ignored, a connected non-active profile is never a fallback, and a missing active profile asks for explicit activation instead of using list order. q assignments continue through the active profile's KX q process. Python variables and KX q variables remain separate.
 
 When the q cell editor itself has text focus, the contributed defaults preserve notebook semantics: `Ctrl+Enter` / `Cmd+Enter` runs and stays, `Shift+Enter` runs and moves next, and `Alt+Enter` / `Option+Enter` runs and inserts below. Move/insert happens only after a successful executed result. The bindings are limited to q code-cell editor focus and are disabled when the KX direct controller is selected. Python, Markdown, cell-container, and output focus keep their normal notebook shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if a shortcut was customized.
 
@@ -83,9 +83,9 @@ Turning the setting off disposes the controller, so a previously saved KX select
 
 | Command | Use |
 | --- | --- |
-| **Run q Cell (KX)** | Execute the complete q-language cell through the notebook's explicit KX target while another notebook controller remains selected. |
+| **Run q Cell (KX)** | Execute the complete q-language cell through the globally starred active KX connection while another notebook controller remains selected. |
 | **Make q Cell (KX)** | Apply q language/highlighting to a complete code cell without changing the selected kernel. |
-| **KX: Choose Notebook q Target** | Select the saved KX profile used by mixed q cells in this notebook. |
+| **KX: Activate q Connection** | Activate and star the global KX connection used by mixed q cells and editor Direct IPC. |
 | **KX: Restore Notebook Cell Language** | Restore selected code cells to the notebook default, normally Python. |
 | **KX: Tag Notebook Cell as q** | Legacy editing aid that adds q language, a `%%q` marker, and output limits; the released companion's normal route instead keeps a Python cell Python. |
 | **Prepare this q cell for the active Python kernel** | Add legacy marker/metadata without executing; not required by `kx-notebook==0.1.0`. |

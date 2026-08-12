@@ -49,7 +49,7 @@ export class ConnectionTreeItem extends vscode.TreeItem {
     this.contextValue = `vscode-kdb.connection.${state}.${activity}`;
     this.description = [
       active ? 'ACTIVE' : undefined,
-      connected ? 'connected' : 'disconnected',
+      connected ? 'transport open' : 'transport closed',
       connectionEndpoint(connection),
       connection.database,
       scopeLabel,
@@ -59,7 +59,7 @@ export class ConnectionTreeItem extends vscode.TreeItem {
       connected ? new vscode.ThemeColor('testing.iconPassed') : undefined
     );
     this.accessibilityInformation = {
-      label: `${connection.name}, ${active ? 'active, ' : ''}${connected ? 'connected' : 'disconnected'}`,
+      label: `${connection.name}, ${active ? 'active routing target, ' : ''}${connected ? 'transport open' : 'transport closed'}`,
     };
     this.tooltip = new vscode.MarkdownString([
       `**${escapeMarkdown(connection.name)}**`,
@@ -71,11 +71,11 @@ export class ConnectionTreeItem extends vscode.TreeItem {
       `User: ${connection.username ? `\`${escapeMarkdown(connection.username)}\`` : '_anonymous_'}`,
       '',
       ...(scopeLabel ? [`Settings: ${escapeMarkdown(scopeLabel)}`, ''] : []),
-      `State: ${active ? '**ACTIVE**; ' : ''}${connected ? 'connected' : 'disconnected'}`,
+      `State: ${active ? '**ACTIVE routing target**; ' : ''}${connected ? 'transport open' : 'transport closed'}`,
     ].join('\n'));
     this.command = {
       command: 'vscode-kdb.setActiveConnection',
-      title: 'Set Active Connection',
+      title: 'Activate Connection',
       arguments: [this],
     };
   }

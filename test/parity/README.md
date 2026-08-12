@@ -16,7 +16,7 @@ the protected checkout.
 Defaults:
 
 - reference checkout: `/opt/data/home/projects/kdb-sqltools`
-- required reference commit: `fe3d0ff58f9634111746a1565d55249ac7a13cc7`
+- required reference commit: `b1e77c361cff685384bedfdc948078b2a597b9e3` (`v0.3.21`)
 - required q executable: `/opt/data/home/.kx/bin/q`
 
 Overrides are explicit:
