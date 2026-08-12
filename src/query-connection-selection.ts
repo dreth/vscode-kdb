@@ -2,7 +2,6 @@ import { KxConnection } from './connection';
 
 export interface QueryConnectionSelectionActions {
   chooseConnection(): Promise<KxConnection | undefined>;
-  activateConnection(connection: KxConnection): Promise<void>;
 }
 
 export class QueryConnectionSelectionSession {
@@ -11,7 +10,7 @@ export class QueryConnectionSelectionSession {
   public async resolve(
     activeConnection: KxConnection | undefined,
     connections: readonly KxConnection[],
-    hasRememberedTarget: boolean,
+    _hasRememberedTarget: boolean,
     actions: QueryConnectionSelectionActions
   ): Promise<KxConnection | undefined> {
     if (activeConnection) {
@@ -20,12 +19,7 @@ export class QueryConnectionSelectionSession {
     if (!connections.length) {
       return undefined;
     }
-    if (connections.length > 1 || hasRememberedTarget) {
-      return this.select(actions);
-    }
-    const connection = connections[0];
-    await actions.activateConnection(connection);
-    return connection;
+    return this.select(actions);
   }
 
   private async select(

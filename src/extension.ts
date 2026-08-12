@@ -26,7 +26,6 @@ import {
   LiveNotebookSlice,
   LiveNotebookSliceRequest,
 } from './notebook-live-results';
-import { resolveNotebookQTarget } from './notebook-q-target';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import {
   QCellValue,
@@ -251,15 +250,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       setActiveConnection: (id: string | undefined) =>
         store.setActiveConnection(id),
       hasPassword: (id: string) => store.hasPassword(id),
-      resolveNotebookTarget: (metadata: unknown) => {
-        const resolution = resolveNotebookQTarget(
-          metadata,
-          notebookRunner.connectionProfiles()
-        );
-        return resolution.kind === 'resolved'
-          ? safeConnection(store.connection(resolution.profile.id))
-          : undefined;
-      },
+      resolveNotebookTarget: (_metadata: unknown) => safeConnection(store.activeConnection()),
       isDirectControllerRegistered: () =>
         notebookRunner.isDirectControllerRegistered(),
       queueNotebookTable: (
@@ -663,10 +654,6 @@ async function activeConnectionForRun(
       chooseConnection: async () => vscode.commands.executeCommand<KxConnection | undefined>(
         'vscode-kdb.selectQueryConnection'
       ),
-      activateConnection: async connection => {
-        await store.setActiveConnection(connection.id);
-        await vscode.commands.executeCommand('vscode-kdb.refreshConnections');
-      },
     }
   );
 }

@@ -223,9 +223,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
     }
     this.activeExecutions.add(executionKey);
     try {
+      const activeConnection = this.bridge.activeConnection();
+      const connection = activeConnection && activeConnection.id === connectionId
+        ? activeConnection
+        : undefined;
       return await this.runMixedCell(
         cell,
-        this.bridge.connectionById(connectionId),
+        connection,
         options
       );
     } finally {
@@ -686,8 +690,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
           success: false,
           output: errorOutput(
             targetKind === 'notebook'
-              ? `${runLabel} has no available saved notebook q target. Choose a KX target for ` +
-                'this notebook, then retry the cell.'
+              ? `${runLabel} has no active KX direct IPC connection. Activate a KX connection, ` +
+                'then retry the cell.'
               : `${runLabel} has no active KX direct IPC connection. Add or select a KX connection ` +
                 'in the KX Connections view, optionally test it, then retry the cell.'
           ),

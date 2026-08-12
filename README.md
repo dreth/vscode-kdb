@@ -17,14 +17,14 @@ q -p 127.0.0.1:5000
 1. Install KX for VS Code and open the KX activity-bar view.
 2. In KX Connections, select `Add Connection`.
 3. Enter a unique name, host `localhost`, port `5000`, and namespace `.`.
-4. Select `Test Connection`, save the profile, set it active, and connect. Queries can also connect a saved profile on demand.
+4. Select `Test Connection`, save the profile, then choose `Activate Connection`. Activation opens its transport and marks it with the sole star.
 5. Open a `.q` file containing `til 5`, then press `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS.
 
 Install [`DanielAlonso.vscode-kdb` from the Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=DanielAlonso.vscode-kdb), or run `ext install DanielAlonso.vscode-kdb` from VS Code Quick Open. For a local build, run `npm ci` followed by `npm run package`, then use `Extensions: Install from VSIX...`.
 
 ## Run q from an editor
 
-Queries use the active connection.
+Queries use only the starred active connection. A connected non-active profile is never selected. If no profile is active, KX asks you to activate one; it does not silently fall back.
 
 | Command | Windows/Linux | macOS | What runs |
 | --- | --- | --- | --- |
@@ -40,7 +40,7 @@ Cancel stops the extension waiting for a result. It does not reliably interrupt 
 
 ## Connections
 
-Connection profiles are managed in the KX Connections view. A profile contains a name, direct host and port, q namespace, optional username, and optional timeout overrides. `.` is the root namespace. The active profile is marked in the view and can be changed with `KX: Set Active Connection`.
+Connection profiles are managed in the KX Connections view. A profile contains a name, direct host and port, q namespace, optional username, and optional timeout overrides. `.` is the root namespace. Zero or one profile is starred **Active**, and that profile is the sole route for editor queries, direct notebooks, Server Explorer, result reruns, and previews. `KX: Activate Connection` opens the candidate transport before switching the star; a failed switch leaves the prior active route and transport unchanged. Deactivating or removing the active profile leaves no active route rather than choosing another saved or connected profile.
 
 Safe profile metadata is stored in the application-scoped `vscode-kdb.connections` user setting. Passwords are stored separately under connection-specific keys in VS Code SecretStorage and are not written back to settings or shown when a profile is edited. Removing a profile also removes its stored password.
 
@@ -70,11 +70,11 @@ See [Results viewer](mkdocs-src/results-viewer.md), [copy and export](mkdocs-src
 The default notebook workflow keeps the Python Jupyter kernel selected:
 
 1. Select `Make q Cell (KX)` on the intended code cell.
-2. Choose a saved profile with `KX: Choose Notebook q Target`.
+2. Choose `Activate q Connection (KX)` and activate a saved profile.
 3. Run the cell with `Run q Cell (KX)`, or use `Ctrl+Enter` / `Cmd+Enter` while the q cell editor has text focus.
 4. Run Python cells with the normal Jupyter actions.
 
-KX stores only the selected profile's stable ID and display name in the notebook, not its endpoint or credentials. Direct q cells sharing a profile reuse that profile's q session. The KX action writes the completed output as an undoable notebook edit, so the notebook becomes dirty until saved. It will not overwrite a cell that changed while q was running.
+Direct q cells use only the globally active KX profile and reuse its q session. Legacy notebook-level target ID/name metadata is ignored safely and does not override the star; KX does not implicitly edit notebooks merely to remove it. The KX action writes completed output as an undoable notebook edit, so the notebook becomes dirty until saved. It will not overwrite a cell that changed while q was running.
 
 First-party Direct IPC notebook output uses a strict portable v2 payload plus a transient live result. Preview mode defaults to 20 rows and obeys the 1,000,000-byte preview budget. While the live record exists, KX Results can open the full decoded value and the per-output **Preserve full result** checkbox directly stores every exactly representable row, column, and cell. Full persistence ignores preview row/byte limits; if exact representation is technically impossible, KX reports an ordinary failure instead of calling a preview full. Reopened full v2 output stays complete and can be unchecked back to a preview; reopened truncated previews and legacy/Python v1 output cannot recover omitted rows. Set `vscode-kdb.notebook.preserveFullResultByDefault` to check full persistence for new Direct IPC output by default. Extension-managed connection credentials, session objects, and IPC handles are never written into notebook output.
 

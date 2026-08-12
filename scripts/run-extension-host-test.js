@@ -30,7 +30,7 @@ const VSCODE_LIBRARY_PATH = process.env.VSCODE_KDB_E2E_LIBS ||
     fs.statSync(DEFAULT_LIBRARY_PATH, { throwIfNoEntry: false })?.isDirectory()
     ? DEFAULT_LIBRARY_PATH
     : undefined);
-const TEST_TIMEOUT_MS = 150_000;
+const TEST_TIMEOUT_MS = Number(process.env.VSCODE_KDB_E2E_TIMEOUT_MS || 150_000);
 
 let xvfbProcess;
 let vscodeProcess;

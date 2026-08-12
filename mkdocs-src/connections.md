@@ -2,7 +2,7 @@
 
 KX for VS Code owns its direct q IPC connections. They appear in the **KX Connections** sidebar and are independent of SQLTools.
 
-Every valid distinct profile is shown immediately after a resolved save, even if VS Code's effective configuration snapshot propagates later. The active profile has a star and uppercase `ACTIVE` label. Click a connection item, use its inline/context **Set Active Connection** action, or run **KX: Set Active Connection** from the Command Palette. Removing the active profile leaves no active selection; KX never silently promotes the first remaining row. Rejected settings or secret writes stay in the form, also produce a visible VS Code error, and refresh the tree without reporting success. Passwordless profiles do not depend on SecretStorage; profiles with passwords retain transactional SecretStorage safety.
+Every valid distinct profile is shown immediately after a resolved save, even if VS Code's effective configuration snapshot propagates later. Exactly one profile may be starred as `ACTIVE`, and that star is the sole execution target for editor queries, notebooks, Server Explorer, Query History reruns, and the local data server. Click a connection item, use its inline/context **Activate Connection** action, or run **KX: Activate Connection...** from the Command Palette. Activation opens the candidate transport before moving the star; if it fails, the previous active route remains unchanged. **Deactivate Connection** or removing the active profile leaves no active selection, and KX never silently promotes or routes through another connected profile. Transport health remains visible as status, not a competing selection. Rejected settings or secret writes stay in the form, also produce a visible VS Code error, and refresh the tree without reporting success. Passwordless profiles do not depend on SecretStorage; profiles with passwords retain transactional SecretStorage safety.
 
 ## Settings scopes and precedence
 
@@ -92,9 +92,8 @@ Use the sidebar toolbar, item context menus, or Command Palette for normal conne
 - **KX: Add Connection**
 - **KX: Edit Connection**
 - **KX: Remove Connection**
-- **KX: Set Active Connection**
-- **KX: Connect**
-- **KX: Disconnect**
+- **KX: Activate Connection...**
+- **KX: Deactivate Connection**
 - **KX: Test Connection**
 - **KX: Refresh Connections**
 
@@ -144,9 +143,11 @@ All global values and profile overrides accept only integers from `0` through `2
 
 Both the form button and the saved-profile **KX: Test Connection** command use temporary connections and a deliberately minimal safe response request; neither keeps the test socket as the active client.
 
-The Python-first mixed notebook runner uses this same connection manager without registering a KX kernel candidate. It routes complete q cells through the notebook's explicitly selected profile and configured namespace, so q cells sharing that target preserve one q session's assignments and state. A saved disconnected target may connect on demand only after an explicit **Run q Cell (KX)** gesture. No per-cell or per-notebook connection is created.
+Zero or one saved profile is starred **Active**. It is the sole routing source for editor queries, direct notebooks, Server Explorer, previews, reruns, and reconnect/default paths; an already-open transport on any non-active profile is never selected. **KX: Activate Connection** first opens the candidate transport, then switches the star and closes the previous transport. If opening fails, the previous active route and transport remain unchanged. Deactivating or removing the active profile leaves no active route and never silently falls through to another profile.
 
-Mixed-notebook **Run q Cell (KX)** persists only safe profile ID/name and resolves that stable ID against current store data on every run. Editing the same profile's host or port therefore routes the next run to the new endpoint; the manager disconnects/reconnects a stale runtime client as needed. Active/global profile changes do not override the notebook target. An unselected, missing, or removed target prompts explicitly and never falls through to the first or active profile.
+The Python-first mixed notebook runner uses this same connection manager without registering a KX kernel candidate. It routes complete q cells through the active profile and configured namespace, so q cells preserve that profile's q session assignments and state. No per-cell or per-notebook connection is created.
+
+Legacy mixed-notebook target ID/name metadata is retained for compatibility but ignored for routing. It cannot override the active profile, and KX does not make an implicit notebook edit merely to remove it. With no active profile, the notebook route prompts for explicit activation and never falls through to list order or a merely connected profile.
 
 The optional **KX q (Direct IPC)** controller uses the active profile only when `vscode-kdb.notebook.enableDirectController` is enabled and the controller is selected. It is disabled and unregistered by default, so KX is absent from the kernel candidates while mixed Make/Target/Run remains available. The separately installed `kx-notebook==0.1.0` / `%%q` companion is also separate: its built-in direct IPC connection, profiles, callback, optional PyKX, or loopback broker belong to that Python process and never borrow this extension's profiles, client, live record, or output binding. A first-party direct notebook result can open its live value in KX Results only while its bound extension-host record exists; saved/reopened output transfers only the bounded snapshot and cannot recover omitted rows.
 

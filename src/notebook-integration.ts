@@ -81,10 +81,7 @@ import {
 } from './notebook-settings';
 import {
   NotebookQTargetProfile,
-  NotebookQTargetResolution,
-  resolveNotebookQTarget,
   safeConnectionName,
-  withNotebookQTarget,
 } from './notebook-q-target';
 import {
   notebookOutputItems,
@@ -1069,13 +1066,8 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return 'not-q';
     }
-    const resolution = resolveNotebookQTarget(
-      editor.notebook.metadata,
-      runner.connectionProfiles()
-    );
-    const target = resolution.kind === 'resolved'
-      ? resolution.profile
-      : await this.selectNotebookQTarget(cell, resolution, editor);
+    const target = activeNotebookQProfile(runner.connectionProfiles()) ??
+      await this.selectNotebookQTarget(cell, editor);
     if (!target) {
       return 'canceled';
     }
@@ -1150,18 +1142,13 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return 'unavailable';
     }
-    const resolution = resolveNotebookQTarget(
-      editor.notebook.metadata,
-      runner.connectionProfiles()
-    );
-    const target = resolution.kind === 'resolved'
-      ? resolution.profile
-      : await this.selectNotebookQTarget(cell, resolution, editor, true);
+    const target = activeNotebookQProfile(runner.connectionProfiles()) ??
+      await this.selectNotebookQTarget(cell, editor, true);
     if (!target) {
       return 'canceled';
     }
     const confirmation = await vscode.window.showWarningMessage(
-      `Run this %%q body again as a new KX Direct IPC execution on "${target.name}"? ` +
+      `Run this %%q body again as a new KX Direct IPC execution on active connection "${target.name}"? ` +
       'This does not reuse the Python kx_notebook evaluator or its session, and the selected notebook kernel will not change.',
       { modal: true },
       'Run via Direct IPC'
@@ -1176,7 +1163,7 @@ export class NotebookIntegration implements vscode.Disposable {
     });
     if (result === 'executed') {
       void vscode.window.showInformationMessage(
-        `New KX Direct IPC execution finished on "${target.name}". ` +
+        `New KX Direct IPC execution finished on active connection "${target.name}". ` +
         'A successful result is live while its extension-host record exists; the selected notebook kernel was not changed.'
       );
     }
@@ -1212,18 +1199,17 @@ export class NotebookIntegration implements vscode.Disposable {
 
   private async selectNotebookQTarget(
     commandCell?: vscode.NotebookCell,
-    knownResolution?: NotebookQTargetResolution,
     commandEditor?: vscode.NotebookEditor,
     allowMagicCell = false
   ): Promise<NotebookQTargetProfile | undefined> {
     const editor = commandEditor ??
-      activeJupyterNotebookEditor('choosing a KX target for q cells');
+      activeJupyterNotebookEditor('activating a KX connection for q cells');
     if (!editor) {
       return undefined;
     }
     if (this.directControllerSelected(editor.notebook)) {
       void vscode.window.showInformationMessage(
-        'KX q (Direct IPC) is selected. Its normal Run action uses the active profile from KX Connections.'
+        'KX q (Direct IPC) is selected. Its normal Run action already uses the active profile from KX Connections.'
       );
       return undefined;
     }
@@ -1233,14 +1219,14 @@ export class NotebookIntegration implements vscode.Disposable {
     if (!cell || (!isQCell(cell) &&
       !(allowMagicCell && notebookQSourceFromMagic(cell.document.getText()) !== undefined))) {
       void vscode.window.showWarningMessage(
-        'Choose q Target applies only to a q-language code cell in the active Jupyter notebook.'
+        'Activate q Connection applies only to a q-language code cell in the active Jupyter notebook.'
       );
       return undefined;
     }
     const runner = this.directRunner;
     if (!runner) {
       void vscode.window.showErrorMessage(
-        'KX target selection is unavailable because the direct IPC runner did not start.'
+        'KX connection activation is unavailable because the direct IPC runner did not start.'
       );
       return undefined;
     }
@@ -1258,74 +1244,53 @@ export class NotebookIntegration implements vscode.Disposable {
       profiles = runner.connectionProfiles();
       if (profiles.length === 0) {
         void vscode.window.showWarningMessage(
-          'No KX connection was saved. Add a valid profile, then choose the notebook q target.'
+          'No KX connection was saved. Add a valid profile, then activate it for q execution.'
         );
         return undefined;
       }
     }
 
-    const resolution = knownResolution ??
-      resolveNotebookQTarget(editor.notebook.metadata, profiles);
-    const currentId = resolution.kind === 'resolved'
-      ? resolution.profile.id
-      : resolution.kind === 'missing'
-        ? resolution.reference.id
-        : undefined;
-    const missingName = resolution.kind === 'missing'
-      ? resolution.reference.name
-      : undefined;
     const picks = [...profiles]
       .sort((left, right) =>
-        Number(right.id === currentId) - Number(left.id === currentId) ||
         Number(right.active) - Number(left.active) ||
         left.name.localeCompare(right.name))
       .map(profile => ({
         label: profile.name,
         description: [
-          profile.id === currentId ? 'Notebook q target' : undefined,
-          profile.active ? 'Active KX profile' : undefined,
-        ].filter(Boolean).join(' · '),
+          profile.active ? 'Active KX connection' : undefined,
+        ].filter(Boolean).join(' · ') || undefined,
         detail: profile.connected
-          ? 'Connected direct q session'
-          : 'Direct q session connects on first run',
+          ? 'Transport open'
+          : 'Transport opens during activation or first run',
         profile,
       }));
     const picked = await vscode.window.showQuickPick(picks, {
-      title: 'KX: Choose Notebook q Target',
-      placeHolder: missingName
-        ? `Saved target "${missingName}" is unavailable; choose a replacement`
-        : 'Choose the saved profile used by Run q Cell (KX)',
+      title: 'KX: Activate q Connection',
+      placeHolder: 'Activate the profile used by editor, notebook, explorer, and preview routes',
       ignoreFocusOut: true,
     });
     if (!picked) {
       return undefined;
     }
-    const updatedMetadata = withNotebookQTarget(
-      editor.notebook.metadata,
-      picked.profile
+    const activated = await vscode.commands.executeCommand<unknown>(
+      'vscode-kdb.connect',
+      picked.profile.id
     );
-    const edit = new vscode.WorkspaceEdit();
-    edit.set(editor.notebook.uri, [
-      vscode.NotebookEdit.updateNotebookMetadata(updatedMetadata),
-    ]);
-    let applied = false;
-    try {
-      applied = await vscode.workspace.applyEdit(edit);
-    } catch {
-      // The actionable error below is safe for closed/read-only notebooks.
-    }
-    if (!applied) {
-      void vscode.window.showErrorMessage(
-        `Could not save "${picked.profile.name}" as this notebook’s q target. ` +
-        'Make the notebook writable and try again.'
-      );
+    profiles = runner.connectionProfiles();
+    const active = activeNotebookQProfile(profiles);
+    if (!active || active.id !== picked.profile.id) {
+      if (!activated) {
+        void vscode.window.showWarningMessage(
+          `KX connection "${picked.profile.name}" was not activated.`
+        );
+      }
       return undefined;
     }
     this.updateContexts();
     void vscode.window.showInformationMessage(
-      `Notebook q target: ${picked.profile.name}. Python remains the selected notebook kernel.`
+      `Active KX connection: ${active.name}. Python remains the selected notebook kernel.`
     );
-    return picked.profile;
+    return active;
   }
 
   private rendererSettingsMessage() {
@@ -1707,9 +1672,8 @@ export class NotebookIntegration implements vscode.Disposable {
       return undefined;
     }
     const profiles = this.directRunner?.connectionProfiles() ?? [];
-    const resolution = resolveNotebookQTarget(cell.notebook.metadata, profiles);
-    const profile = resolution.kind === 'resolved' ? resolution.profile : undefined;
-    const route = safeConnectionName(profile?.name) || 'Select connection';
+    const profile = activeNotebookQProfile(profiles);
+    const route = safeConnectionName(profile?.name) || 'Activate connection';
     const shortcut = notebookRunShortcutLabel();
     const runItem = new vscode.NotebookCellStatusBarItem(
       `$(play) KX: ${route} · ${shortcut}`,
@@ -1721,45 +1685,41 @@ export class NotebookIntegration implements vscode.Disposable {
       arguments: [cell],
     };
     runItem.tooltip = profile
-      ? `Run the complete q cell through notebook q target "${route}". ` +
+      ? `Run the complete q cell through active KX connection "${route}". ` +
         'Normal notebook Run still follows the kernel selected at the top right.'
       : profiles.length === 0
-        ? 'No saved KX profiles are available. Click to add or select a connection before running this complete q cell.'
-      : resolution.kind === 'missing'
-        ? `Saved notebook q target "${resolution.reference.name}" is unavailable. ` +
-          'Click to choose a replacement before running this complete q cell.'
-        : 'Click to choose a saved KX profile, then run the complete q cell. ' +
+        ? 'No saved KX profiles are available. Click to add or activate a connection before running this complete q cell.'
+      : 'Click to activate a KX profile, then run the complete q cell. ' +
           'Normal notebook Run still follows the kernel selected at the top right.';
     runItem.accessibilityInformation = {
       label: profile
-        ? `KX connection ${route}; Run q Cell with KX; ${shortcut}`
-        : `Select KX connection; Run q Cell with KX; ${shortcut}`,
+        ? `Active KX connection ${route}; Run q Cell with KX; ${shortcut}`
+        : `Activate KX connection; Run q Cell with KX; ${shortcut}`,
     };
     runItem.priority = 101;
 
     const targetItem = new vscode.NotebookCellStatusBarItem(
-      `$(server-process) q default: ${route}`,
+      profile
+        ? `$(star-full) Active: ${route}`
+        : '$(star-empty) Activate q connection',
       vscode.NotebookCellStatusBarAlignment.Right
     );
     targetItem.command = {
       command: SELECT_NOTEBOOK_Q_TARGET_COMMAND,
-      title: 'Choose Notebook q Target (KX)',
+      title: 'Activate q Connection (KX)',
       arguments: [cell],
     };
     targetItem.tooltip = profile
-      ? `Notebook q default: "${route}"${profile.active ? ' (active KX profile)' : ''}. ` +
-        'Click to choose another saved profile without changing the Python kernel.'
+      ? `Active KX connection "${route}" is the routing source for editor, notebook, Server Explorer, and preview routes. ` +
+        `${profile.connected ? 'Transport is open.' : 'Transport opens on activation or first run.'} ` +
+        'Click to activate another profile without changing the Python kernel.'
       : profiles.length === 0
-        ? 'No saved KX profiles are available. Click to add a connection, then choose the notebook q default.'
-      : resolution.kind === 'missing'
-        ? `Notebook q default "${resolution.reference.name}" no longer resolves. ` +
-          'Choose another saved KX profile.'
-        : 'Choose the notebook-level default KX profile for q cells. ' +
-          'Only its safe profile ID and display name are saved in the notebook.';
+        ? 'No saved KX profiles are available. Click to add a connection, then activate it.'
+      : 'No KX connection is active. Click to activate the profile used by all KX q routes.';
     targetItem.accessibilityInformation = {
       label: profile
-        ? `Notebook q default ${route}; choose another KX profile`
-        : 'Select notebook q default KX profile',
+        ? `Active KX connection ${route}; activate another KX profile`
+        : 'Activate KX profile for q execution',
     };
     targetItem.priority = 100;
     return [runItem, targetItem];
@@ -1829,6 +1789,12 @@ export function notebookRunShortcutLabel(
   platform: NodeJS.Platform = process.platform
 ): 'Cmd+Enter' | 'Ctrl+Enter' {
   return platform === 'darwin' ? 'Cmd+Enter' : 'Ctrl+Enter';
+}
+
+function activeNotebookQProfile(
+  profiles: readonly NotebookQTargetProfile[]
+): NotebookQTargetProfile | undefined {
+  return profiles.find(profile => profile.active);
 }
 
 function selectedCells(

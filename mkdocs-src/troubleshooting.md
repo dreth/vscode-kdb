@@ -110,7 +110,7 @@ Starting a new test, saving, canceling, or closing the form cancels the previous
 
 ## Cancel did not stop server work
 
-Panel/progress cancellation is local to the result wait. q computation or side effects already sent can continue, and other queued panel work is not canceled. Use **KX: Disconnect** to close that client's transport and fail its outstanding queue, while remembering that server-side interruption is still best-effort.
+Panel/progress cancellation is local to the result wait. q computation or side effects already sent can continue, and other queued panel work is not canceled. Use **KX: Deactivate Connection** to clear the star, close that client's transport, and fail its outstanding queue, while remembering that server-side interruption is still best-effort.
 
 ## Huge result is slow
 
@@ -163,7 +163,7 @@ If `ModuleNotFoundError` persists, inspect `sys.executable` in the notebook and 
 
 ## KX q is missing from the notebook kernel/controller selector
 
-That is the expected 0.2.8 default. Keep Python selected and use **Make q Cell (KX)**, choose an explicit notebook q target, then use **Run q Cell (KX)**. KX is intentionally absent from kernel candidates, but VS Code's top-right Jupyter selector itself remains.
+That is the expected default. Keep Python selected and use **Make q Cell (KX)**, activate one globally starred KX connection, then use **Run q Cell (KX)**. KX is intentionally absent from kernel candidates, but VS Code's top-right Jupyter selector itself remains.
 
 For an explicit legacy q-only workflow, set the application-scoped `vscode-kdb.notebook.enableDirectController` setting to `true`. KX then registers **KX q (Direct IPC)** dynamically through the public NotebookController API. Turning the setting off disposes it; a previously saved KX selection cannot be restored while the controller is unregistered.
 
@@ -171,7 +171,7 @@ For an explicit legacy q-only workflow, set the application-scoped `vscode-kdb.n
 
 The mixed-notebook action appears only for an actual q-language code cell while the optional **KX q (Direct IPC)** controller is not selected. Keep Python selected and click the leading **Make q Cell (KX)** action; **Run q Cell (KX)** should replace it immediately. Do not switch the top-right kernel merely to mark the cell q.
 
-The q status must show `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS). If it shows **Select connection**, click the notebook `q default` target and choose a saved profile. A removed target is never replaced from list order or the active profile. Each run resolves the saved stable ID against current store data, so editing that profile from port `5005` to `5000` routes the next run to `5000` and reconnects a stale client as needed. With the optional **KX q (Direct IPC)** controller selected, the mixed actions/status deliberately disappear and normal Run owns q execution.
+The q status must show `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS). If it shows **Activate connection**, click the notebook **Active** item and star a saved profile. Every run uses only that globally active profile; legacy notebook target metadata, list order, and connected non-active profiles cannot override it. Editing the active profile from port `5005` to `5000` routes the next run to `5000` and reconnects a stale client as needed. With the optional **KX q (Direct IPC)** controller selected, the mixed actions/status deliberately disappear and normal Run owns q execution.
 
 After a successful mixed run the notebook becomes dirty because KX commits the finished output as one supported, undoable notebook edit while Python remains selected. This replaces that q cell's internal handle but preserves its source, q language, metadata, and sibling cells. If the q cell or its output changes while the query is running, KX leaves the newer state alone and reports that it did not overwrite it.
 
