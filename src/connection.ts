@@ -4,7 +4,7 @@ export const DEFAULT_HOST = 'localhost';
 export const DEFAULT_PORT = 5000;
 export const DEFAULT_NAMESPACE = '.';
 export const DEFAULT_CONNECTION_TIMEOUT_MS = 30000;
-export const DEFAULT_QUERY_TIMEOUT_MS = 1800000;
+export const DEFAULT_QUERY_TIMEOUT_MS = 3600000;
 export const MAX_TIMEOUT_MS = 2147483647;
 export const MAX_PASSWORD_LENGTH = 65535;
 

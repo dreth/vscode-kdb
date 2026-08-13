@@ -761,18 +761,23 @@ function validateArtifacts() {
     'ordinary-real-runtime-column-sizing',
     'ordinary-real-two-drag-chart-lifecycle',
     'notebook-real-runtime-column-sizing',
+    'logical-row-striping-virtualized-windows',
+    'light-live-row-striping',
     'live-range-selection-search',
     'live-columns-overlay',
     'shared-settings-overlay',
     'live-chart-controls-persistence',
     'light-chart-legend-visible',
     'saved-range-search-chart',
+    'dark-ordinary-row-striping',
+    'dark-live-row-striping',
     'dark-chart-accessibility',
     'saved-all-null-chart-guards',
     'saved-chart-families',
     'saved-qtext-copy-status-a11y',
     'saved-preview-save-close-reopen',
     'narrow-live-saved-layout',
+    'narrow-row-striping',
     'narrow-saved-chart-overlay',
   ];
   if (!Array.isArray(report.interactions) ||
@@ -830,6 +835,64 @@ function validateArtifacts() {
       );
     }
   }
+  const rowWindows = interaction('logical-row-striping-virtualized-windows');
+  if (!validRowStripingSnapshot(rowWindows.ordinary?.before, 4) ||
+      !validRowStripingSnapshot(rowWindows.ordinary?.mapped, 4) ||
+      !validRowStripingSnapshot(rowWindows.ordinary?.after, 3) ||
+      !validRowStripingSnapshot(rowWindows.notebook?.before, 3) ||
+      !validRowStripingSnapshot(rowWindows.notebook?.after, 3) ||
+      !validRowStripingSnapshot(rowWindows.saved?.before, 3) ||
+      !validRowStripingSnapshot(rowWindows.saved?.after, 3) ||
+      rowWindows.ordinary.after.rows[0].displayRow <= 0 ||
+      rowWindows.notebook.after.rows[0].displayRow <= 0 ||
+      rowWindows.saved.before.rows[0].displayRow !== 0 ||
+      rowWindows.saved.after.rows[0].displayRow !== 250 ||
+      JSON.stringify(rowWindows.ordinary.mapped.headers.slice(0, 3)
+        .map(column => [column.displayOrdinal, column.sourceOrdinal])) !==
+        '[[0,1],[1,0],[2,2]]' ||
+      rowWindows.ordinary.mapped.headers.some(column =>
+        column.sourceOrdinal === 4) ||
+      !rowWindows.ordinary.mapped.headers.some(column =>
+        column.sourceOrdinal === 2 && column.sortedHeader) ||
+      !rowWindows.ordinary.mapped.rows.some(row => row.cells.some(column =>
+        column.sourceOrdinal === 2 && column.sortedColumn))) {
+    throw new Error('Visual acceptance report has invalid logical row-striping window evidence.');
+  }
+  for (const [interactionName, themeClass] of [
+    ['light-live-row-striping', 'vscode-light'],
+    ['dark-ordinary-row-striping', 'vscode-dark'],
+    ['dark-live-row-striping', 'vscode-dark'],
+  ]) {
+    const evidence = interaction(interactionName);
+    if (!validRowStripingSnapshot(evidence, 4) ||
+        !String(evidence.themeClasses || '').includes(themeClass)) {
+      throw new Error(`Visual acceptance report has invalid ${interactionName} evidence.`);
+    }
+  }
+  if (!validRowStripingSnapshot(
+    screenshot('light-table.png')?.acceptance,
+    4
+  ) || !validRowStripingSnapshot(
+    screenshot('dark-table.png')?.acceptance,
+    4
+  )) {
+    throw new Error('Light/dark table screenshots lack logical row-striping evidence.');
+  }
+  const narrowStriping = interaction('narrow-row-striping');
+  if (!validRowStripingSnapshot(narrowStriping.saved, 3) ||
+      !validRowStripingSnapshot(narrowStriping.live, 2) ||
+      !(narrowStriping.saved.width > 250 && narrowStriping.saved.width < 560) ||
+      !(narrowStriping.live.width > 250 && narrowStriping.live.width < 560) ||
+      !narrowStriping.saved.headers.some(column =>
+        column.sourceOrdinal === 2 && column.sortedHeader) ||
+      !narrowStriping.saved.rows.some(row => row.cells.some(column =>
+        column.sourceOrdinal === 2 && column.sortedColumn)) ||
+      !validRowStripingSnapshot(
+        screenshot('narrow-table.png')?.acceptance?.saved,
+        3
+      )) {
+    throw new Error('Narrow table screenshot lacks saved/live row-striping evidence.');
+  }
   validateOrdinaryChartLifecycleEvidence(
     interaction('ordinary-real-two-drag-chart-lifecycle')
   );
@@ -843,13 +906,21 @@ function validateArtifacts() {
       live.searchFocus?.statusRole !== 'status' ||
       live.searchFocus?.statusAriaLive !== 'polite' ||
       live.searchFocus?.nextAfterRerender !== 'Next' ||
-      live.searchFocus?.previousAfterRerender !== 'Prev') {
+      live.searchFocus?.previousAfterRerender !== 'Prev' ||
+      !validRowStateDominance(live.dominance)) {
     throw new Error('Visual acceptance report has invalid live selection/search evidence.');
   }
   const columns = interaction('live-columns-overlay');
   if (columns.summary !== 'Columns (3/4)' || columns.columnCount !== '4' ||
       columns.open !== true || columns.focusedControl !== 'Move row right' ||
       columns.firstVisibleHeader !== 'sym' ||
+      !validRowStripingSnapshot(columns.striping, 3) ||
+      JSON.stringify(columns.striping.headers.map(column =>
+        [column.displayOrdinal, column.sourceOrdinal])) !== '[[0,1],[1,2],[2,0]]' ||
+      !columns.striping.headers.some(column =>
+        column.sourceOrdinal === 2 && column.sortedHeader && column.selectedHeader) ||
+      !columns.striping.rows.some(row => row.cells.some(column =>
+        column.sourceOrdinal === 2 && column.sortedColumn && column.selected)) ||
       columns.boundary?.open !== true || columns.boundary?.position !== 3 ||
       columns.boundary?.rightDisabled !== true ||
       columns.boundary?.focusedControl !== 'Move row left' ||
@@ -895,13 +966,44 @@ function validateArtifacts() {
   const liveChart = interaction('live-chart-controls-persistence');
   if (liveChart.beforeDraw.exportPngDisabled !== true ||
       liveChart.beforeDraw.resetDisabled !== true ||
-      liveChart.beforeDraw.refineDisabled !== true ||
+      JSON.stringify(liveChart.beforeDraw.forbiddenControls) !== '[]' ||
+      liveChart.beforeDraw.navigatorExists !== false ||
       liveChart.afterDraw.canvases < 1 ||
       liveChart.afterDraw.exportPngDisabled !== false ||
       liveChart.afterDraw.resetDisabled !== false ||
-      liveChart.afterDraw.refineDisabled !== false ||
+      JSON.stringify(liveChart.afterDraw.forbiddenControls) !== '[]' ||
+      liveChart.afterDraw.navigatorExists !== true ||
+      !validChartNavigatorEvidence(liveChart.afterDraw.navigator) ||
       liveChart.afterDraw.statusRole !== 'status' ||
       liveChart.afterDraw.statusAriaLive !== 'polite' ||
+      !Array.isArray(liveChart.autoRefinements) ||
+      liveChart.autoRefinements.length !== 2 ||
+      liveChart.autoRefinements.some(refinement =>
+        !String(refinement.status || '').startsWith('Selected range')) ||
+      !(liveChart.autoRefinements[1].eligibleRows <
+        liveChart.autoRefinements[0].eligibleRows) ||
+      !validChartNavigatorEvidence(liveChart.navigatorInteractions?.before) ||
+      !validChartNavigatorEvidence(liveChart.navigatorInteractions?.edge) ||
+      !validChartNavigatorEvidence(
+        liveChart.navigatorInteractions?.keyboard?.pending
+      ) ||
+      !validChartNavigatorEvidence(
+        liveChart.navigatorInteractions?.keyboard?.settled
+      ) ||
+      !validChartNavigatorEvidence(liveChart.navigatorInteractions?.home?.settled) ||
+      !(liveChart.navigatorInteractions.edge.end.now <
+        liveChart.navigatorInteractions.before.end.now) ||
+      !(liveChart.navigatorInteractions.edge.eligibleRows > 0 &&
+        liveChart.navigatorInteractions.edge.eligibleRows <
+          liveChart.navigatorInteractions.before.eligibleRows) ||
+      !(liveChart.navigatorInteractions.keyboard.pending.window.now >
+        liveChart.navigatorInteractions.edge.window.now) ||
+      liveChart.navigatorInteractions.home.settled.start.now !== 0 ||
+      liveChart.navigatorInteractions.home.settled.window.now !== 50 ||
+      liveChart.navigatorInteractions.home.settled.end.now !== 100 ||
+      !/trusted CDP end-handle drag.*ArrowRight.*Home/i.test(
+        liveChart.navigatorInteractions?.browserPath || ''
+      ) ||
       liveChart.yPersistence.open !== true ||
       liveChart.yPersistence.focusedSeries !== 'size' ||
       liveChart.hiddenColumns.closeVisible !== true) {
@@ -912,6 +1014,7 @@ function validateArtifacts() {
   const zoomSpan = chart.zoomDomainTicks.maximum - chart.zoomDomainTicks.minimum;
   const resetSpan = chart.resetDomainTicks.maximum - chart.resetDomainTicks.minimum;
   if (chart.selection.selectedCells !== 9 ||
+      !validRowStateDominance(chart.selection.dominance) ||
       chart.legendInteractions?.pointerToggle?.pressed !== 'false' ||
       chart.legendInteractions?.pointerToggle?.off !== true ||
       chart.legendInteractions?.enterToggle?.pressed !== 'true' ||
@@ -937,6 +1040,13 @@ function validateArtifacts() {
       chart.savedGridBroadcastFocus?.selectedCells !== 9 ||
       !(chart.zoomSelectionWidth <= 1) ||
       !(chart.resetSelectionWidth <= 1) ||
+      !validChartNavigatorEvidence(chart.navigatorInteractions?.before) ||
+      !validChartNavigatorEvidence(chart.navigatorInteractions?.after) ||
+      !(chart.navigatorInteractions.after.window.now >
+        chart.navigatorInteractions.before.window.now) ||
+      !/trusted CDP selected-window drag.*local saved-data rebuild/i.test(
+        chart.navigatorInteractions?.browserPath || ''
+      ) ||
       !(zoomSpan < fullSpan) ||
       !(resetSpan >= fullSpan * 0.75)) {
     throw new Error('Visual acceptance report has invalid chart persistence/zoom evidence.');
@@ -1036,6 +1146,14 @@ function validateArtifacts() {
         family.exportPngDisabled !== false ||
         family.pngBytes < 1_000 ||
         family.pngSignature !== '89504e470d0a1a0a' ||
+        JSON.stringify(family.forbiddenControls) !== '[]' ||
+        family.navigator?.exists !== true ||
+        family.navigator?.label !== 'Chart X navigator' ||
+        family.navigator?.overviewPath?.length <= 8 ||
+        JSON.stringify(family.navigator?.roles) !==
+          '["slider","slider","slider"]' ||
+        family.navigator?.values?.some(value =>
+          !Number.isFinite(value) || value < 0 || value > 100) ||
         family.notice)) {
     throw new Error('Visual acceptance report has invalid saved chart-family evidence.');
   }
@@ -1068,6 +1186,9 @@ function validateArtifacts() {
         narrowChart.initial?.chartWidth <= narrowChart.initial?.width) ||
       !['Render', 'Export PNG', 'Reset zoom'].every(label =>
         narrowChart.initial?.controls?.includes(label)) ||
+      narrowChart.initial?.controls?.some(label =>
+        ['Pan left', 'Pan right', 'Refine zoom', 'Refine view'].includes(label)) ||
+      !validChartNavigatorEvidence(narrowChart.initial?.navigator) ||
       narrowChart.overlay?.open !== true ||
       narrowChart.overlay?.optionCount < 2 ||
       narrowChart.overlay?.focusedTag !== 'INPUT' ||
@@ -1129,11 +1250,17 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
   const baseline = chart?.baseline;
   const first = chart?.first;
   const second = chart?.second;
+  const navigator = chart?.navigatorInteractions;
   const reset = chart?.reset;
   if (chart?.fixture?.rowCount !== 20_001 ||
       !sameRange(chart.fixture?.fullRange, fullRange) ||
       !/trusted CDP drag.*uPlot setScale hook.*450ms debounce.*host chartData.*new uPlot reconstruction/i.test(
         chart.browserPath || ''
+      ) ||
+      navigator?.controlsAbsent !== true ||
+      !validChartNavigatorEvidence(navigator?.baseline) ||
+      !/trusted CDP navigator start-edge drag.*selected-window drag.*ArrowLeft.*Home/i.test(
+        navigator?.browserPath || ''
       )) {
     throw new Error(
       'Ordinary chart lifecycle evidence lacks the real browser/host fixture path.'
@@ -1173,8 +1300,7 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
   if (!sameRange(baseline.reconstructedRange, fullRange) ||
       !sameRange(baseline.response.xDomain, fullRange) ||
       baseline.response.eligibleRowCount !== 20_001 ||
-      !(baseline.response.sampledPointCount > 0 &&
-        baseline.response.sampledPointCount < 20_001)) {
+      baseline.response.sampledPointCount !== 7_000) {
     throw new Error('Ordinary chart lifecycle full baseline is invalid.');
   }
   for (const [label, stage, prior] of [
@@ -1196,7 +1322,7 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
           drag.uPlotScaleHookCountBefore) ||
         !sameRange(drag.scaleHook?.range, requestedRange) ||
         drag.scaleHook?.resetDisabled !== false ||
-        drag.scaleHook?.refineDisabled !== false ||
+        drag.scaleHook?.forbiddenControlsPresent !== false ||
         !Number.isFinite(drag.scaleHook?.at) ||
         !sameRange(stage.expectedEligibleDomain, domain) ||
         !sameRange(stage.response.xDomain, domain) ||
@@ -1218,7 +1344,7 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
       sameRange(first.drag.requestedRange, second.drag.requestedRange) ||
       !(first.response.eligibleRowCount < baseline.response.eligibleRowCount) ||
       !(second.response.eligibleRowCount < first.response.eligibleRowCount) ||
-      first.response.sampledPointCount === baseline.response.sampledPointCount ||
+      first.response.sampledPointCount !== 7_000 ||
       !(second.response.sampledPointCount < first.response.sampledPointCount) ||
       second.nestedResponseIntroducedPoint !== true ||
       !(baseline.uPlotBuildCount < first.uPlotBuildCount &&
@@ -1226,6 +1352,57 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
     throw new Error(
       'Ordinary chart lifecycle does not prove two distinct nested drag reconstructions.'
     );
+  }
+  const navigatorStages = [
+    ['edge resize', navigator?.edge, 4, second],
+    ['window pan', navigator?.window, 5, navigator?.edge],
+    ['keyboard resize', navigator?.keyboard, 6, navigator?.window],
+  ];
+  for (const [label, stage, expectedResponseCount, prior] of navigatorStages) {
+    const drag = stage?.drag;
+    const requestedRange = drag?.requestedRange || stage?.requestedRange;
+    const domain = expectedDomain(requestedRange || {});
+    if (stage?.hostChartDataResponseCount !== expectedResponseCount ||
+        stage?.hostChartErrorCount !== 0 ||
+        stage?.currentMatchesHostResponse !== true ||
+        stage?.fullResponseStoredUnchanged !== true ||
+        !sameRange(stage?.reconstructedRange, requestedRange) ||
+        !sameRange(stage?.expectedEligibleDomain, domain) ||
+        !sameRange(stage?.response?.xDomain, domain) ||
+        stage?.response?.eligibleRowCount !== domain.max - domain.min + 1 ||
+        stage?.response?.sampledPointCount !==
+          Math.min(stage?.response?.eligibleRowCount, 7_000) ||
+        stage?.response?.storedUnchanged !== true ||
+        !validDigest(stage?.response?.digest) ||
+        stage?.response?.digest !== stage?.reconstructedData?.digest ||
+        !(stage?.uPlotBuildCount > prior?.uPlotBuildCount) ||
+        !validChartNavigatorEvidence(stage?.drag?.navigator || stage?.pending)) {
+      throw new Error(`Ordinary chart lifecycle has invalid navigator ${label} evidence.`);
+    }
+    if (drag && (drag.hostChartDataResponseCountBefore !==
+          prior.hostChartDataResponseCount ||
+        drag.hostChartDataResponseCountAfterDragBeforeDebounce !==
+          prior.hostChartDataResponseCount ||
+        !(drag.uPlotScaleHookCountAfter > drag.uPlotScaleHookCountBefore) ||
+        drag.scaleHook?.forbiddenControlsPresent !== false)) {
+      throw new Error(`Ordinary chart navigator ${label} did not use the trusted pointer path.`);
+    }
+  }
+  if (!(navigator.edge.drag.requestedRange.min < second.drag.requestedRange.min) ||
+      Math.abs(navigator.edge.drag.requestedRange.max -
+        second.drag.requestedRange.max) > 1e-6 ||
+      !(navigator.window.drag.requestedRange.min >
+        navigator.edge.drag.requestedRange.min) ||
+      !(navigator.window.drag.requestedRange.max >
+        navigator.edge.drag.requestedRange.max) ||
+      navigator.keyboard.before?.focused !== true ||
+      !(navigator.keyboard.pending?.end?.now <
+        navigator.window.drag?.navigator?.end?.now) ||
+      navigator.home.before?.focused !== true ||
+      navigator.home.after?.start?.now !== 0 ||
+      navigator.home.after?.window?.now !== 50 ||
+      navigator.home.after?.end?.now !== 100) {
+    throw new Error('Ordinary chart navigator range/keyboard/Home semantics are invalid.');
   }
   if (chart.immutableFull?.sourceRowCount !== 20_001 ||
       !sameRange(chart.immutableFull?.range, fullRange) ||
@@ -1237,7 +1414,7 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
       'Ordinary chart lifecycle does not retain an immutable full source/range.'
     );
   }
-  if (reset?.hostChartDataResponseCountBefore !== 3 ||
+  if (reset?.hostChartDataResponseCountBefore !== 6 ||
       reset.hostChartDataResponseCountAfter !==
         reset.hostChartDataResponseCountBefore ||
       !(reset.uPlotBuildCountAfter > reset.uPlotBuildCountBefore) ||
@@ -1253,6 +1430,114 @@ function validateOrdinaryChartLifecycleEvidence(chart) {
       'Ordinary chart Reset did not locally restore the exact full sample without host data I/O.'
     );
   }
+}
+
+function validRowStripingSnapshot(evidence, minimumColumns, minimumRows = 2) {
+  const headers = evidence?.headers;
+  const rowHeaders = evidence?.rowHeaders;
+  const rows = evidence?.rows;
+  if (!Array.isArray(headers) || headers.length < minimumColumns ||
+      new Set(headers.map(header => header.displayOrdinal)).size !== headers.length ||
+      new Set(headers.map(header => header.sourceOrdinal)).size !== headers.length ||
+      headers.some(header =>
+        !Number.isSafeInteger(header.displayOrdinal) || header.displayOrdinal < 0 ||
+        !Number.isSafeInteger(header.sourceOrdinal) || header.sourceOrdinal < 0 ||
+        header.parity !== '' || header.odd || header.even ||
+        typeof header.background !== 'string' || header.background.length === 0)) {
+    return false;
+  }
+  if (!Array.isArray(rowHeaders) || rowHeaders.length < minimumRows ||
+      rowHeaders.some(header =>
+        header.parity !== '' || header.odd || header.even ||
+        typeof header.background !== 'string' || header.background.length === 0)) {
+    return false;
+  }
+  if (!Array.isArray(rows) || rows.length < minimumRows ||
+      new Set(rows.map(row => row.displayRow)).size !== rows.length) {
+    return false;
+  }
+  const headerIdentity = JSON.stringify(headers.map(header =>
+    [header.displayOrdinal, header.sourceOrdinal]));
+  if (rows.some(row =>
+    !Number.isSafeInteger(row.displayRow) || row.displayRow < 0 ||
+    row.parity !== (row.displayRow % 2 === 0 ? 'even' : 'odd') ||
+    row.odd !== (row.parity === 'odd') ||
+    row.even !== (row.parity === 'even') ||
+    !Array.isArray(row.cells) || row.cells.length < minimumColumns ||
+    row.cellCount !== row.cells.length ||
+    row.cells.some(cell =>
+      cell.displayRow !== row.displayRow ||
+      cell.parity !== row.parity ||
+      cell.odd !== row.odd ||
+      cell.even !== row.even ||
+      typeof cell.background !== 'string' || cell.background.length === 0) ||
+    JSON.stringify(row.cells.map(cell =>
+      [cell.displayOrdinal, cell.sourceOrdinal])) !== headerIdentity)) {
+    return false;
+  }
+  const plainCell = row => row?.cells.find(cell =>
+    !cell.selected && !cell.search && !cell.loading && !cell.error &&
+    !cell.sortedHeader && !cell.selectedHeader);
+  const plainEven = plainCell(rows.find(row => row.even));
+  const plainOdd = plainCell(rows.find(row => row.odd));
+  return !!plainEven && !!plainOdd &&
+    plainEven.background !== plainOdd.background;
+}
+
+function validRowStateDominance(evidence) {
+  return evidence?.selected?.exists === true &&
+    evidence.selected.selected === true &&
+    evidence.selected.hovered === true &&
+    evidence?.search?.exists === true &&
+    evidence.search.search === true &&
+    evidence.search.selected === false &&
+    evidence?.active?.exists === true &&
+    evidence.active.active === true &&
+    evidence.active.outlineStyle !== 'none' &&
+    evidence.plainOdd?.parity === 'odd' &&
+    evidence.plainEven?.parity === 'even' &&
+    typeof evidence.selected.background === 'string' &&
+    evidence.selected.background !== evidence.search.background &&
+    evidence.search.background !== evidence.plainOdd?.background &&
+    evidence.plainOdd?.background !== evidence.plainEven?.background;
+}
+
+function validChartNavigatorEvidence(evidence) {
+  if (!evidence || evidence.exists !== true || evidence.hidden === true ||
+      evidence.label !== 'Chart X navigator' || !(evidence.width > 100) ||
+      typeof evidence.overviewPath !== 'string' || evidence.overviewPath.length <= 8 ||
+      (Array.isArray(evidence.forbiddenControls) &&
+        evidence.forbiddenControls.length !== 0)) {
+    return false;
+  }
+  for (const [part, prefix] of [
+    ['window', 'Selected X range '],
+    ['start', 'Selected X start '],
+    ['end', 'Selected X end '],
+  ]) {
+    const slider = evidence[part];
+    if (slider?.exists !== true || slider.role !== 'slider' ||
+        slider.tabIndex !== 0 || slider.orientation !== 'horizontal' ||
+        !Number.isFinite(slider.minimum) || !Number.isFinite(slider.maximum) ||
+        !Number.isFinite(slider.now) || slider.minimum < 0 || slider.maximum > 100 ||
+        slider.minimum > slider.now || slider.now > slider.maximum ||
+        !String(slider.valueText || '').startsWith(prefix) ||
+        !Number.isFinite(slider.left) || slider.left < -1 ||
+        slider.left > evidence.width + 1) {
+      return false;
+    }
+  }
+  const close = (left, right) => Math.abs(left - right) <= 1e-6;
+  const halfSpan = (evidence.end.now - evidence.start.now) / 2;
+  const startGap = evidence.end.now - evidence.start.maximum;
+  const endGap = evidence.end.minimum - evidence.start.now;
+  return evidence.start.now <= evidence.window.now &&
+    evidence.window.now <= evidence.end.now &&
+    close(evidence.window.minimum, halfSpan) &&
+    close(evidence.window.maximum, 100 - halfSpan) &&
+    close(evidence.window.now, evidence.start.now + halfSpan) &&
+    close(evidence.start.minimum, 0) && close(evidence.end.maximum, 100) &&
+    startGap > 0 && close(startGap, endGap);
 }
 
 function validLegendEvidence(evidence, hiddenLabel = '') {

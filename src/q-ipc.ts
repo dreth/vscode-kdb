@@ -4,6 +4,26 @@ import type { KxDiagnosticPhase, KxDiagnosticStatus, KxDiagnostics } from './dia
 import { ColumnarPanelResult, cellValueToText, createColumnarPanelResult } from './kx-results';
 import { endPerfSpan, isPerfTraceEnabled, perfMark, perfSpan } from './perf';
 import type { PerfDetails, PerfSpan } from './perf';
+import {
+  QAtom,
+  QGeneralNullValue,
+  QScalarValue,
+  QTypeName,
+  isQAtom,
+  isQGeneralNull,
+  isQRuntimeValue,
+  isQVector,
+  qAtom,
+  qSpecial,
+  qValueToBoundedLiteral,
+  qValueDescription,
+  qValueToLiteral,
+  qValueToSemanticPrimitive,
+  qVector,
+  qVectorAttribute,
+  qVectorAtomAt,
+  qVectorType,
+} from './q-value';
 
 const HEADER_LENGTH = 8;
 const BIG_ENDIAN = 0;
@@ -18,12 +38,7 @@ const INT_NULL = -2147483648;
 const INT_INFINITY = 2147483647;
 const SHORT_NULL = -32768;
 const SHORT_INFINITY = 32767;
-const Q_EPOCH_DAYS = 10957;
-const MS_PER_DAY = 86400000;
-const NS_PER_DAY = 86400000000000;
 const BIGINT_SHIFT_32 = BigInt(32);
-const MIN_SAFE_BIGINT = BigInt(Number.MIN_SAFE_INTEGER);
-const MAX_SAFE_BIGINT = BigInt(Number.MAX_SAFE_INTEGER);
 
 export type QCellValue = string | number | boolean | null;
 export type QFunctionType = 'lambda' | 'primitive' | 'operator' | 'iterator' | 'projection' | 'composition' | 'function';
@@ -35,9 +50,7 @@ export interface QFunction {
   source?: string;
 }
 
-export interface QGeneralNull {
-  qtype: 'generalNull';
-}
+export type QGeneralNull = QGeneralNullValue;
 
 export interface QTable {
   qtype: 'table';
@@ -70,6 +83,7 @@ export interface QDict {
 export type QDisplayValue = QCellValue;
 export type QValue =
   | QCellValue
+  | QAtom
   | QValue[]
   | QTable
   | QKeyedTable
@@ -85,9 +99,7 @@ export interface QResultDisplayOptions {
   objectDisplayStrategy?: QResultDisplayStrategy | string;
 }
 
-type QNestedDisplayValue = QCellValue | QNestedDisplayValue[] | { [key: string]: QNestedDisplayValue };
-const Q_VECTOR_TYPE = Symbol('qVectorType');
-type QTypedVector = QValue[] & { [Q_VECTOR_TYPE]?: string };
+type QNestedDisplayValue = unknown;
 
 interface NormalizedQResultDisplayOptions {
   functionDisplayStrategy: QResultDisplayStrategy;
@@ -123,6 +135,7 @@ export interface QColumnarPanelResult {
   result: ColumnarPanelResult;
   kind: string;
   rowsMaterialized: boolean;
+  exactPersistenceIssue?: string;
 }
 
 export interface QTextPanelResult {
@@ -130,6 +143,7 @@ export interface QTextPanelResult {
   text: string;
   kind: string;
   rowsMaterialized: boolean;
+  exactPersistenceIssue?: string;
 }
 
 export type QPanelResult = QColumnarPanelResult | QTextPanelResult;
@@ -1200,6 +1214,25 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
     };
   }
 
+  if (isQVector(value)) {
+    if (displayOptions.listDisplayStrategy === 'qText') {
+      return qTextPanelResult(value, 'list');
+    }
+    const result = createColumnarPanelResult(
+      ['value'],
+      1,
+      () => value,
+      [qVectorType(value) || 'mixed']
+    );
+    return {
+      mode: 'grid',
+      cols: result.columns,
+      result,
+      kind: 'list',
+      rowsMaterialized: false,
+    };
+  }
+
   if (Array.isArray(value)) {
     if (displayOptions.listDisplayStrategy === 'qText') {
       return qTextPanelResult(value, 'list');
@@ -1220,7 +1253,7 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
     }
 
     const result = createColumnarPanelResult(['index', 'value'], value.length, (rowIndex, columnIndex) => {
-      return columnIndex === 0 ? rowIndex : normalizePanelCell(value[rowIndex]);
+      return columnIndex === 0 ? rowIndex : normalizePanelCell(vectorValueAt(value, rowIndex));
     });
     return {
       mode: 'grid',
@@ -1258,13 +1291,93 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
 
 /**
  * Builds the same rectangular result shape without replacing nested q values
- * with display-only summaries. Unsupported cells return `undefined`, allowing
- * strict portable-v2 creation to reject the entire full result honestly.
+ * with display-only summaries. Raw cells reach the portable-v2 contract
+ * boundary so it can either encode them exactly or report their real q
+ * type/value in a precise persistence error.
  */
 export function qValueToLosslessPortablePanel(
   value: QValue,
   _options?: QResultDisplayOptions
 ): QPanelResult | undefined {
+  // A tagged vector is one exact q value. Expanding it into index/atom rows
+  // would discard its outer vector identity, singleton `enlist` cardinality,
+  // and any q attribute when the notebook is reopened.
+  if (isQVector(value)) {
+    const columnType = qVectorType(value) || 'mixed';
+    return {
+      mode: 'grid',
+      cols: ['value'],
+      result: createColumnarPanelResult(
+        ['value'],
+        1,
+        () => losslessPortableQCell(value),
+        [columnType]
+      ),
+      kind: 'list',
+      rowsMaterialized: false,
+    };
+  }
+  if (isQAtom(value)) {
+    return {
+      mode: 'grid',
+      cols: ['value'],
+      result: createColumnarPanelResult(['value'], 1, () => value, [value.type]),
+      kind: 'scalar',
+      rowsMaterialized: false,
+    };
+  }
+  // The row-oriented portable table contract preserves keyed-table structure
+  // with explicit key-column ordinals. A vector attribute attached to a whole
+  // table column still cannot be reconstructed from row cells, so fail it
+  // explicitly instead of silently flattening that metadata.
+  if (isQKeyedTable(value)) {
+    const columnData = [
+      ...value.keyTable.columnData,
+      ...value.valueTable.columnData,
+    ];
+    const attributedColumn = columnData.findIndex(column =>
+      isQVector(column) && (qVectorAttribute(column) || 0) !== 0
+    );
+    if (attributedColumn >= 0) {
+      const column = columnData[attributedColumn];
+      const detail = qValueDescription(column) ||
+        `q ${qColumnType(column)} vector with an attribute`;
+      return {
+        ...qValueToColumnarPanel(value),
+        exactPersistenceIssue:
+          `Full notebook persistence cannot exactly encode q keyed table column ` +
+          `${attributedColumn + 1} (${JSON.stringify(value.columns[attributedColumn])}; ` +
+          `${detail}). The portable table schema does not support whole-column q attributes.`,
+      };
+    }
+  }
+  if (isQDict(value)) {
+    return {
+      ...qValueToColumnarPanel(value),
+      exactPersistenceIssue:
+        `Full notebook persistence cannot exactly encode q type dictionary; ` +
+        `value [q dictionary ${value.entries.length} ` +
+        `entr${value.entries.length === 1 ? 'y' : 'ies'}]. ` +
+        'The portable grid form would lose q dictionary identity.',
+    };
+  }
+  if (isQTable(value)) {
+    const attributedColumn = value.columnData.findIndex(column =>
+      isQVector(column) && (qVectorAttribute(column) || 0) !== 0
+    );
+    if (attributedColumn >= 0) {
+      const column = value.columnData[attributedColumn];
+      const detail = qValueDescription(column) ||
+        `q ${qColumnType(column)} vector with an attribute`;
+      return {
+        ...qValueToColumnarPanel(value),
+        exactPersistenceIssue:
+          `Full notebook persistence cannot exactly encode q table column ` +
+          `${attributedColumn + 1} (${JSON.stringify(value.columns[attributedColumn])}; ` +
+          `${detail}). The portable table schema does not support whole-column q attributes.`,
+      };
+    }
+  }
   if (Array.isArray(value) && value.length > 0) {
     const plainRows = losslessPlainObjectListColumns(value);
     if (plainRows.kind === 'plain') {
@@ -1346,7 +1459,8 @@ export function qValueToLosslessPortablePanel(
               columnIndex - value.keyTable.columns.length
             )
         ),
-        value.columnTypes
+        value.columnTypes,
+        sourceColumnOrdinals(value.keyTable.columns.length)
       ),
     };
   }
@@ -1382,7 +1496,7 @@ export function qValueToLosslessPortablePanel(
         value.length,
         (rowIndex, columnIndex) => columnIndex === 0
           ? rowIndex
-          : losslessPortableQCell(value[rowIndex])
+          : losslessPortableQCell(vectorValueAt(value, rowIndex))
       ),
     };
   }
@@ -1399,6 +1513,12 @@ export function qValuePrefersQText(value: QValue): boolean {
   }
   if (isQGeneralNull(value) || value === null) {
     return true;
+  }
+  if (isQAtom(value)) {
+    return qValueToSemanticPrimitive(value) === null;
+  }
+  if (isQVector(value)) {
+    return value.length === 0;
   }
   if (typeof value === 'string' || Array.isArray(value)) {
     return value.length === 0;
@@ -1482,8 +1602,8 @@ function qTextValue(value: QValue, depth: number, options: NormalizedQTextFormat
     return qTextSummary(value, options);
   }
 
-  if (isQGeneralNull(value)) {
-    return qTextTake('::', options);
+  if (isQRuntimeValue(value)) {
+    return qTextRuntimeValue(value, depth, options);
   }
 
   const primitiveText = qTextPrimitive(value);
@@ -1604,8 +1724,8 @@ function qTextDict(value: QDict, depth: number, options: NormalizedQTextFormatOp
 }
 
 function qTextSummary(value: QValue, options: NormalizedQTextFormatOptions): string {
-  if (isQGeneralNull(value)) {
-    return qTextTake('::', options);
+  if (isQRuntimeValue(value)) {
+    return qTextRuntimeValue(value, options.maxDepth, options);
   }
   if (isQFunction(value)) {
     return qTextTake(qFunctionDisplayText(value), options);
@@ -1638,6 +1758,19 @@ function withQTextSeen(value: object, options: NormalizedQTextFormatOptions, ren
   } finally {
     options.seen.delete(value);
   }
+}
+
+function qTextRuntimeValue(
+  value: QValue,
+  depth: number,
+  options: NormalizedQTextFormatOptions
+): string {
+  const bounded = qValueToBoundedLiteral(value, {
+    maxChars: options.remainingChars,
+    maxItems: options.maxItems,
+    maxDepth: Math.max(0, options.maxDepth - depth),
+  });
+  return qTextTake(bounded.text, options);
 }
 
 function qTextObjectKey(value: string): string {
@@ -1714,10 +1847,11 @@ function makeQFunction(functionType: QFunctionType, ipcType: number, source?: st
 }
 
 function qFunctionSourceFromPayload(value: QValue): string | undefined {
-  if (typeof value !== 'string') {
+  const semantic = isQRuntimeValue(value) ? qValueToSemanticPrimitive(value) : value;
+  if (typeof semantic !== 'string') {
     return undefined;
   }
-  const text = value.trim();
+  const text = semantic.trim();
   return text.startsWith('{') && text.endsWith('}') ? text : undefined;
 }
 
@@ -1952,11 +2086,15 @@ class QReader {
   public readObject(): QValue {
     const type = this.readInt8();
     if (type === TYPE_ERROR) {
-      throw new KdbQError(String(this.readSymbolAtom() || 'error'));
+      const error = this.readSymbolValue();
+      throw new KdbQError(typeof error === 'string' && error.length > 0 ? error : 'error');
     }
 
     if (type < 0 && type > -20) {
       return this.readAtom(-type);
+    }
+    if (type < 0) {
+      throw new KdbIpcError(`Unsupported q IPC type ${type}`);
     }
 
     if (type === TYPE_TABLE) {
@@ -1971,37 +2109,47 @@ class QReader {
       return this.readFunction(type);
     }
 
-    this.readUInt8();
+    const attribute = this.readUInt8();
+    if (attribute > 4) {
+      throw new KdbIpcError(`Invalid q IPC vector attribute ${attribute}`);
+    }
     const length = this.readInt32Raw();
     if (length < 0) {
       throw new KdbIpcError(`Invalid q IPC vector length ${length}`);
     }
-    if (type === TYPE_CHAR_VECTOR) {
-      return this.readString(length);
+    const qType = type === 0 ? 'mixed' : qIpcTypeName(type);
+    if (!qType) {
+      throw new KdbIpcError(`Unsupported q IPC type ${type}`);
     }
-
-    const values: QValue[] = [];
+    const values: unknown[] = [];
     for (let i = 0; i < length; i++) {
-      values.push(type === 0 ? this.readObject() : this.readAtom(type));
+      values.push(type === 0 ? this.readObject() : this.readAtomValue(type));
     }
-    const qType = qIpcTypeName(type);
-    if (qType) {
-      Object.defineProperty(values, Q_VECTOR_TYPE, {
-        enumerable: false,
-        configurable: false,
-        writable: false,
-        value: qType,
-      });
-    }
-    return values;
+    return qVector(values, qType, attribute) as unknown as QValue;
   }
 
   private readAtom(type: number): QValue {
+    const qType = qIpcTypeName(type);
+    if (!qType) {
+      throw new KdbIpcError(`Unsupported q IPC type ${type}`);
+    }
+    return qAtom(qType, this.readAtomValue(type));
+  }
+
+  private readAtomValue(type: number): QScalarValue {
     switch (type) {
-      case 1:
-        return this.readInt8() === 1;
+      case 1: {
+        const value = this.readUInt8();
+        if (value === 0) {
+          return false;
+        }
+        if (value === 1) {
+          return true;
+        }
+        throw new KdbIpcError(`Invalid q boolean byte ${value}`);
+      }
       case 2:
-        return this.readGuid();
+        return this.readGuidValue();
       case 4:
         return this.readUInt8();
       case 5:
@@ -2009,31 +2157,33 @@ class QReader {
       case 6:
         return this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
       case 7:
-        return this.readLongAtom();
+        return this.readLongValue();
       case 8:
         return this.nullableFloat(this.readFloatRaw());
       case 9:
         return this.nullableFloat(this.readDoubleRaw());
-      case 10:
-        return String.fromCharCode(this.readUInt8());
+      case 10: {
+        const value = this.readUInt8();
+        return value === 32 ? qSpecial('null') : value;
+      }
       case 11:
-        return this.readSymbolAtom();
+        return this.readSymbolValue();
       case 12:
-        return this.readTimestamp();
+        return this.readLongValue();
       case 13:
-        return this.readMonth();
+        return this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
       case 14:
-        return this.readDate();
+        return this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
       case 15:
-        return this.readDateTime();
+        return this.nullableFloat(this.readDoubleRaw());
       case 16:
-        return this.readTimespan();
+        return this.readLongValue();
       case 17:
-        return this.readMinute();
+        return this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
       case 18:
-        return this.readSecond();
+        return this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
       case 19:
-        return this.readTime();
+        return this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
     }
 
     throw new KdbIpcError(`Unsupported q IPC type ${type}`);
@@ -2062,7 +2212,7 @@ class QReader {
 
   private readFunction(type: number): QValue {
     if (type === 100) {
-      this.readSymbolAtom();
+      this.readSymbolValue();
       const payload = this.readObject();
       return makeQFunction('lambda', type, qFunctionSourceFromPayload(payload));
     }
@@ -2088,59 +2238,7 @@ class QReader {
     return makeQFunction(qFunctionTypeFromIpcType(type), type);
   }
 
-  private readTimestamp(): QValue {
-    const value = this.readLongNumber();
-    return value === null ? null : formatTimestamp(value);
-  }
-
-  private readMonth(): QValue {
-    const value = this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
-    if (value === null || !Number.isFinite(value as number)) {
-      return value;
-    }
-    const raw = value as number;
-    const year = 2000 + Math.floor(raw / 12);
-    const month = ((raw % 12) + 12) % 12;
-    return `${year.toString().padStart(4, '0')}.${(month + 1).toString().padStart(2, '0')}`;
-  }
-
-  private readDate(): QValue {
-    const value = this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
-    if (value === null || !Number.isFinite(value as number)) {
-      return value;
-    }
-    return formatDate(value as number);
-  }
-
-  private readDateTime(): QValue {
-    const value = this.nullableFloat(this.readDoubleRaw());
-    if (value === null || !Number.isFinite(value as number)) {
-      return value;
-    }
-    return formatDateTime(value as number);
-  }
-
-  private readTimespan(): QValue {
-    const value = this.readLongNumber();
-    return value === null ? null : formatDuration(value);
-  }
-
-  private readMinute(): QValue {
-    const value = this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
-    return value === null || !Number.isFinite(value as number) ? value : formatClock((value as number) * 60000, 'minute');
-  }
-
-  private readSecond(): QValue {
-    const value = this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
-    return value === null || !Number.isFinite(value as number) ? value : formatClock((value as number) * 1000, 'second');
-  }
-
-  private readTime(): QValue {
-    const value = this.nullableInt(this.readInt32Raw(), INT_NULL, INT_INFINITY);
-    return value === null || !Number.isFinite(value as number) ? value : formatClock(value as number, 'millisecond');
-  }
-
-  private readGuid(): QValue {
+  private readGuidValue(): QScalarValue {
     const parts: string[] = [];
     for (let i = 0; i < 16; i++) {
       const byte = this.readUInt8();
@@ -2151,80 +2249,69 @@ class QReader {
       parts.push((byte & 15).toString(16));
     }
     const guid = parts.join('');
-    return guid === '00000000-0000-0000-0000-000000000000' ? null : guid;
+    return guid === '00000000-0000-0000-0000-000000000000' ? qSpecial('null') : guid;
   }
 
-  private readSymbolAtom(): QValue {
+  private readSymbolValue(): QScalarValue {
     const end = this.buffer.indexOf(0, this.pos);
     if (end < 0) {
       throw new KdbIpcError('Invalid q symbol: missing terminator');
     }
-    const value = this.buffer.slice(this.pos, end).toString('utf8');
+    const value = this.buffer.slice(this.pos, end).toString('latin1');
     this.pos = end + 1;
-    return value || null;
+    return value || qSpecial('null');
   }
 
-  private readLongAtom(): QValue {
+  private readLongValue(): QScalarValue {
     const parts = this.readLongParts();
     if (parts.low === 0 && parts.high === INT_NULL) {
-      return null;
+      return qSpecial('null');
     }
     if (parts.low === -1 && parts.high === INT_INFINITY) {
-      return Infinity;
+      return qSpecial('positiveInfinity');
     }
     if (parts.low === 1 && parts.high === INT_NULL) {
-      return -Infinity;
+      return qSpecial('negativeInfinity');
     }
 
-    const value = longPartsToBigInt(parts.low, parts.high);
-    return value >= MIN_SAFE_BIGINT && value <= MAX_SAFE_BIGINT ? Number(value) : value.toString();
-  }
-
-  private readLongNumber(): number | null {
-    const parts = this.readLongParts();
-
-    if (parts.low === 0 && parts.high === INT_NULL) {
-      return null;
-    }
-    if (parts.low === -1 && parts.high === INT_INFINITY) {
-      return Infinity;
-    }
-    if (parts.low === 1 && parts.high === INT_NULL) {
-      return -Infinity;
-    }
-
-    return Number(longPartsToBigInt(parts.low, parts.high));
+    return longPartsToBigInt(parts.low, parts.high).toString();
   }
 
   private readLongParts(): { low: number; high: number } {
-    return {
-      low: this.readInt32Raw(),
-      high: this.readInt32Raw(),
-    };
+    if (this.littleEndian) {
+      return {
+        low: this.readInt32Raw(),
+        high: this.readInt32Raw(),
+      };
+    }
+    const high = this.readInt32Raw();
+    return { low: this.readInt32Raw(), high };
   }
 
-  private nullableInt(value: number, nullValue: number, infinityValue: number): QValue {
+  private nullableInt(value: number, nullValue: number, infinityValue: number): QScalarValue {
     if (value === nullValue) {
-      return null;
+      return qSpecial('null');
     }
     if (value === infinityValue) {
-      return Infinity;
+      return qSpecial('positiveInfinity');
     }
     if (value === -infinityValue) {
-      return -Infinity;
+      return qSpecial('negativeInfinity');
     }
     return value;
   }
 
-  private nullableFloat(value: number): QValue {
-    return Number.isNaN(value) ? null : value;
-  }
-
-  private readString(length: number): string {
-    this.ensure(length);
-    const value = this.buffer.slice(this.pos, this.pos + length).toString('utf8');
-    this.pos += length;
-    return value;
+  private nullableFloat(value: number): QScalarValue {
+    if (Number.isNaN(value)) {
+      return qSpecial('null');
+    }
+    if (value === Infinity) {
+      return qSpecial('positiveInfinity');
+    }
+    if (value === -Infinity) {
+      return qSpecial('negativeInfinity');
+    }
+    return Object.is(value, -0) ? qSpecial('negativeZero') : value;
   }
 
   private readInt8(): number {
@@ -2419,18 +2506,26 @@ function qKeyedTableToColumnarPanel(table: QKeyedTable): ColumnarPanelResult {
       }
       return qTablePanelCellValue(table.valueTable, rowIndex, columnIndex - table.keyTable.columns.length);
     },
-    table.columnTypes
+    table.columnTypes,
+    sourceColumnOrdinals(table.keyTable.columns.length)
   );
 }
 
+function sourceColumnOrdinals(columnCount: number): number[] {
+  return Array.from({ length: columnCount }, (_value, index) => index);
+}
+
 function qColumnType(value: QValue): string {
+  if (isQVector(value)) {
+    return qVectorType(value) || 'mixed';
+  }
   if (Array.isArray(value)) {
-    return (value as QTypedVector)[Q_VECTOR_TYPE] || 'mixed';
+    return 'mixed';
   }
   return typeof value === 'string' ? 'char' : 'mixed';
 }
 
-function qIpcTypeName(type: number): string | undefined {
+function qIpcTypeName(type: number): QTypeName | undefined {
   switch (type) {
     case 1: return 'boolean';
     case 2: return 'guid';
@@ -2515,6 +2610,12 @@ function makeQDict(keys: QValue, values: QValue): QDict {
 }
 
 function asList(value: QValue): QValue[] {
+  if (isQVector(value)) {
+    if (qVectorType(value) === 'mixed') {
+      return Array.from(value) as QValue[];
+    }
+    return value.map((_item, index) => qVectorAtomAt(value, index) as QValue);
+  }
   if (Array.isArray(value)) {
     return value;
   }
@@ -2538,6 +2639,9 @@ function vectorValueAt(value: QValue | undefined, index: number): QValue {
   if (value === undefined || value === null) {
     return null;
   }
+  if (isQVector(value)) {
+    return (qVectorAtomAt(value, index) as QValue | undefined) ?? null;
+  }
   if (Array.isArray(value)) {
     return value[index] === undefined ? null : value[index];
   }
@@ -2548,7 +2652,8 @@ function vectorValueAt(value: QValue | undefined, index: number): QValue {
 }
 
 function valueToColumnName(value: QValue): string {
-  const base = normalizeCell(value);
+  const semantic = isQRuntimeValue(value) ? qValueToSemanticPrimitive(value) : undefined;
+  const base = semantic === undefined ? normalizeCell(value) : semantic;
   return base === null ? 'null' : String(base);
 }
 
@@ -2560,6 +2665,13 @@ function normalizePanelPlainObject(value: { [key: string]: QValue }): { [key: st
 }
 
 function normalizeCell(value: QValue): QDisplayValue {
+  if (isQRuntimeValue(value)) {
+    const semantic = qValueToSemanticPrimitive(value);
+    if (semantic === null || typeof semantic === 'string' || typeof semantic === 'number' || typeof semantic === 'boolean') {
+      return semantic;
+    }
+    return qValueToLiteral(value);
+  }
   if (isPrimitiveCell(value)) {
     return value;
   }
@@ -2567,6 +2679,9 @@ function normalizeCell(value: QValue): QDisplayValue {
 }
 
 function normalizePanelCell(value: QValue): unknown {
+  if (isQRuntimeValue(value)) {
+    return value;
+  }
   if (isPrimitiveCell(value)) {
     return value;
   }
@@ -2575,49 +2690,14 @@ function normalizePanelCell(value: QValue): unknown {
 
 function losslessQTextResult(value: QValue): boolean {
   return value === null || isQGeneralNull(value) ||
+    (isQAtom(value) && qValueToSemanticPrimitive(value) === null) ||
+    (isQVector(value) && value.length === 0) ||
     (typeof value === 'string' && value.length === 0) ||
     (Array.isArray(value) && value.length === 0);
 }
 
 function losslessPortableQCell(value: QValue): unknown {
-  return losslessPortableQValue(value, new Set<object>()) ? value : undefined;
-}
-
-function losslessPortableQValue(value: QValue, seen: Set<object>): boolean {
-  if (value === null || typeof value === 'boolean' || typeof value === 'string') {
-    return true;
-  }
-  if (typeof value === 'number') {
-    return Number.isFinite(value) && !Object.is(value, -0);
-  }
-  if (typeof value === 'bigint') {
-    return true;
-  }
-  if (value instanceof Date) {
-    return Number.isFinite(value.getTime());
-  }
-  if (!value || typeof value !== 'object' || seen.has(value as object)) {
-    return false;
-  }
-  seen.add(value as object);
-  try {
-    if (Array.isArray(value)) {
-      return value.every(item => losslessPortableQValue(item, seen));
-    }
-    const prototype = Object.getPrototypeOf(value as object);
-    if (prototype !== Object.prototype && prototype !== null) {
-      return false;
-    }
-    for (const key in value as unknown as Record<string, QValue>) {
-      if (Object.prototype.hasOwnProperty.call(value, key) &&
-          !losslessPortableQValue((value as unknown as Record<string, QValue>)[key], seen)) {
-        return false;
-      }
-    }
-    return true;
-  } finally {
-    seen.delete(value as object);
-  }
+  return value;
 }
 
 type PlainObjectListColumns =
@@ -2652,8 +2732,8 @@ function plainObjectColumns(value: Record<string, QValue>): string[] {
 }
 
 function normalizeNestedValue(value: QValue): QNestedDisplayValue {
-  if (isQGeneralNull(value)) {
-    return '::';
+  if (isQRuntimeValue(value)) {
+    return value;
   }
   if (isQFunction(value)) {
     return qFunctionDisplayText(value);
@@ -2771,10 +2851,6 @@ function isQFunction(value: QValue): value is QFunction {
   return isQTyped(value, 'function');
 }
 
-function isQGeneralNull(value: QValue): value is QGeneralNull {
-  return isQTyped(value, 'generalNull');
-}
-
 function isQTyped(value: QValue, qtype: string): boolean {
   return !!value && typeof value === 'object' && !Array.isArray(value) && (value as { qtype?: string }).qtype === qtype;
 }
@@ -2786,6 +2862,12 @@ function isPlainObject(value: QValue): boolean {
 function qValueKind(value: QValue): string {
   if (isQGeneralNull(value)) {
     return 'no value';
+  }
+  if (isQAtom(value)) {
+    return 'scalar';
+  }
+  if (isQVector(value)) {
+    return 'list';
   }
   if (value === null || typeof value === 'string') {
     return 'scalar';
@@ -2801,60 +2883,6 @@ function qValueKind(value: QValue): string {
 
 function longPartsToBigInt(low: number, high: number): bigint {
   return (BigInt(high) << BIGINT_SHIFT_32) + BigInt(low >>> 0);
-}
-
-function formatTimestamp(nanoseconds: number): string {
-  if (!Number.isFinite(nanoseconds)) {
-    return String(nanoseconds);
-  }
-  return new Date(Date.UTC(2000, 0, 1) + Math.trunc(nanoseconds / 1000000)).toISOString();
-}
-
-function formatDate(days: number): string {
-  return new Date((Q_EPOCH_DAYS + days) * MS_PER_DAY).toISOString().slice(0, 10);
-}
-
-function formatDateTime(days: number): string {
-  return new Date((Q_EPOCH_DAYS + days) * MS_PER_DAY).toISOString();
-}
-
-function formatDuration(nanoseconds: number): string {
-  if (!Number.isFinite(nanoseconds)) {
-    return String(nanoseconds);
-  }
-  const sign = nanoseconds < 0 ? '-' : '';
-  let remaining = Math.abs(Math.trunc(nanoseconds));
-  const days = Math.floor(remaining / NS_PER_DAY);
-  remaining -= days * NS_PER_DAY;
-  const hours = Math.floor(remaining / 3600000000000);
-  remaining -= hours * 3600000000000;
-  const minutes = Math.floor(remaining / 60000000000);
-  remaining -= minutes * 60000000000;
-  const seconds = Math.floor(remaining / 1000000000);
-  const nanos = remaining - seconds * 1000000000;
-  const prefix = days ? `${days}D ` : '';
-  return `${sign}${prefix}${pad2(hours)}:${pad2(minutes)}:${pad2(seconds)}.${Math.trunc(nanos).toString().padStart(9, '0')}`;
-}
-
-function formatClock(milliseconds: number, precision: 'minute' | 'second' | 'millisecond'): string {
-  const hours = Math.floor(milliseconds / 3600000);
-  milliseconds -= hours * 3600000;
-  const minutes = Math.floor(milliseconds / 60000);
-  milliseconds -= minutes * 60000;
-  const seconds = Math.floor(milliseconds / 1000);
-  milliseconds -= seconds * 1000;
-  const base = `${pad2(hours)}:${pad2(minutes)}`;
-  if (precision === 'minute') {
-    return base;
-  }
-  if (precision === 'second') {
-    return `${base}:${pad2(seconds)}`;
-  }
-  return `${base}:${pad2(seconds)}.${Math.trunc(milliseconds).toString().padStart(3, '0')}`;
-}
-
-function pad2(value: number): string {
-  return Math.trunc(value).toString().padStart(2, '0');
 }
 
 function toError(error: unknown): Error {

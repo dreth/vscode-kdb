@@ -12,25 +12,25 @@ tables `.analytics
 
 ## Standalone status
 
-The current workflow is Python-first for notebooks. Keep Python selected, use leading **Make q Cell (KX)** for q language/highlighting, choose one saved profile explicitly, and use **Run q Cell (KX)** for Direct IPC. Every run resolves the current profile by stable ID, so endpoint edits take effect and missing targets never fall through. **KX q (Direct IPC)** is absent from kernel candidates by default; the legacy q-only controller is available only through the default-false `vscode-kdb.notebook.enableDirectController` setting. VS Code's top-right Jupyter selector remains. Connection profiles merge predictably across User, Workspace, and Workspace Folder settings while edits preserve ownership and delayed configuration propagation is reconciled. Complete q cells and editor scripts use client-side grouping and ordinary `value` execution without a q release-date gate.
+The current workflow is Python-first for notebooks. Keep Python selected, use leading **Make q Cell (KX)** for q language/highlighting, activate one saved profile, and use **Run q Cell (KX)** for Direct IPC. Every run resolves the active profile by stable ID, so endpoint edits take effect and missing active routes never fall through. **KX q (Direct IPC)** is absent from kernel candidates by default; this first-class pure-q controller is available through the default-false `vscode-kdb.notebook.enableDirectController` setting. VS Code's top-right Jupyter selector remains. Connection profiles merge predictably across User, Workspace, and Workspace Folder settings while edits preserve ownership and delayed configuration propagation is reconciled. Complete q cells and editor scripts use client-side grouping and ordinary `value` execution without a q release-date gate.
 
 Implemented foundations include:
 
 - multiple direct q IPC profiles managed through one responsive **KX Connection** form, with Folder > Workspace > User stable-ID precedence, explicit scope ownership/moves, delayed-propagation-safe persistence, an active marker/selector, non-syncing VS Code SecretStorage, and a temporary unsaved-value **Test Connection** path;
 - a KX-owned **Import SQLTools KDB Connections** review for exact legacy driver aliases, scoped configuration discovery, safe skip/rename conflicts, explicit one-time password transfer, and no overwrite or sync;
-- optional per-profile connect/handshake and query timeout overrides with independent 30-second and 30-minute global defaults;
+- optional per-profile connect/handshake and query timeout overrides with independent 30-second and 60-minute global defaults;
 - exact current-line execution plus client-grouped multiline, whole-document, and complete-cell q execution through ordinary q `value`, with configured-namespace save/enter/restore;
-- leading **Make q Cell (KX)** / **Run q Cell (KX)** actions, q-cell status, a notebook-level explicit current profile target, and a focused q-cell shortcut for mixed Python notebooks, plus an optional default-off public `NotebookController` for legacy q-only use, with shared complete-cell execution, profile/session/namespace continuity, immediately bound full live results, bounded portable output, and no private Jupyter API;
-- actual q `TextDocument.languageId` editing aids, safe restore-to-notebook-default, honest bounded compatibility with the released `kx-notebook==0.1.0` Python `%%q` route, an explicit confirmed rerun-as-new-Direct-IPC action, and a real VS Code NotebookRenderer for `application/vnd.kx.result+json` v1; direct output stores KX MIME plus `text/plain`, while companion output adds static HTML/text fallbacks;
+- leading **Make q Cell (KX)** / **Run q Cell (KX)** actions, q-cell status, a notebook-level active-profile chooser, and a focused q-cell shortcut for mixed Python notebooks, plus an optional default-off public pure-q `NotebookController`, with shared complete-cell execution, profile/session/namespace continuity, immediately bound full live results, automatic complete portable-v2 persistence for exactly representable new Direct IPC output, bounded historical/Python-helper previews, and no private Jupyter API;
+- actual q `TextDocument.languageId` editing aids, safe restore-to-notebook-default, honest bounded compatibility with the released `kx-notebook==0.1.0` Python `%%q` route, an explicit confirmed rerun-as-new-Direct-IPC action, and a real VS Code NotebookRenderer for `application/vnd.kx.result+json` v1/v2; direct output stores KX MIME plus `text/plain`, while companion output adds static HTML/text fallbacks;
 - a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand `meta`, confirmed bounded table/variable previews, and metadata-only functions/projections;
 - disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;
-- grid and q-text results, correct q no-value/empty classification, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, copy/export, and large-result safeguards;
+- grid and q-text results, correct q no-value/empty classification, selective concise grid-cell text with exact q identity retained for qText/copy/export, stable logical-row striping, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, and large-result safeguards;
 - KX Results-aligned notebook tables with shared toolbar/output formats/settings, stable two-axis scrolling, Search/navigation, visible-column controls, range copy/export, explicit live-versus-saved state, and exact live panel handoff;
-- panel and notebook line/scatter/step/bar/box/candlestick charts with shared q numeric/temporal column classification, temporal X choices, numeric Y/OHLC requirements, original-domain Reset zoom, live refinement, PNG export, and legend-hidden state preserved across refreshes;
+- panel and notebook line/scatter/step/bar/box/candlestick charts with shared q numeric/temporal column classification, temporal X choices, numeric Y/OHLC requirements, a keyboard-accessible full-X overview navigator, exact 7,000-point ordinary-series reduction, automatic settled-range live refinement, original-domain Reset zoom, PNG export, and legend-hidden state preserved across refreshes;
 - an opt-in tokenized loopback data server; and
 - a dedicated `KX` Output channel with opt-in performance tracing.
 
-The extension provides TextMate q syntax highlighting, not a q language server, lint engine, or source formatter. Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote administration, SQLTools UI/session behavior, persisted full-result recovery, and server-side notebook interruption are not included. Live direct results exist only in the current extension-host session; reopened output contains the bounded saved snapshot. See [Architecture](architecture.md) for component and state boundaries.
+The extension provides TextMate q syntax highlighting, not a q language server, lint engine, or source formatter. Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote administration, SQLTools UI/session behavior, recovery of rows omitted from a historical or Python-helper saved preview, and server-side notebook interruption are not included. Live direct results exist only in the current extension-host session; reopened new first-party Direct IPC output contains its automatically persisted complete portable-v2 representation when exact reconstruction is supported, while historical and Python-helper output can remain bounded previews. See [Architecture](architecture.md) for component and state boundaries.
 
 ## Requirements
 
@@ -50,7 +50,7 @@ SQLTools is not required.
 3. Test it, set it active, and connect; a run can also connect on demand.
 4. Open a `.q` file and run the current line, an exact selection, or the whole document.
 5. Inspect, chart, copy, or export the result in **KX Results**.
-6. In a notebook, keep Python selected, use **Make q Cell (KX)**, select the notebook q target, then use **Run q Cell (KX)**. Enable the optional q-only controller only if that separate workflow is required.
+6. In a notebook, keep Python selected, use **Make q Cell (KX)**, activate the shared q connection, then use **Run q Cell (KX)**. Enable the optional pure-q controller only if that separate workflow is wanted.
 7. Open **View > Output** and select **KX** when diagnosing lifecycle or IPC failures.
 8. Optionally enable Server Explorer or Query History in Settings; both default off to avoid surprise metadata queries or query-text persistence.
 
@@ -59,7 +59,7 @@ SQLTools is not required.
 - [Installation](installation.md): requirements, local development, and first connection.
 - [Connections & SecretStorage](connections.md): direct IPC, namespaces, authentication, and lifecycle.
 - [Running q](running-q.md): exact editor semantics and cancellation boundaries.
-- [Jupyter/IPython Notebooks](notebooks.md): Python-first mixed execution, optional q-only controller, explicit current-profile routing, live result lifetime, bounded persistence, and the separate Python `%%q` route.
+- [Jupyter/IPython Notebooks](notebooks.md): Python-first mixed execution, optional pure-q controller, explicit active-profile routing, live result lifetime, bounded persistence, and the separate Python `%%q` route.
 - [Results Viewer](results-viewer.md): grids, q text, selection, search, sort, and column controls.
 - [Charting](charting.md): chart types, controls, sampling, and PNG export.
 - [Copy & Export](copy-export.md): formats and safety prompts.

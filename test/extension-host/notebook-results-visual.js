@@ -88,6 +88,7 @@ const RESTART_COLUMN_SIZING_FIXTURES = Object.freeze({
 });
 const EXPANDED_LIVE_FIXTURE_IDS = new Set([
   'live-full-result',
+  'row-striping-horizontal-window',
   COLUMN_SIZING_FIXTURE.id,
   ...Object.values(RESTART_COLUMN_SIZING_FIXTURES).map(fixture => fixture.id),
 ]);
@@ -302,12 +303,36 @@ async function run() {
 
     await vscode.commands.executeCommand('workbench.action.closeSidebar');
     await setTheme(workbenchConfiguration, LIGHT_THEME);
+    try {
+      interactions.push(await exerciseLogicalRowStripingWindows(cdpPort));
+    } catch (error) {
+      writeJsonAtomic(path.join(artifactDirectory, 'visual-failure.json'), {
+        stage: 'logical-row-striping-windows',
+        name: error instanceof Error ? error.name : typeof error,
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      });
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`logical-row-striping-windows failed: ${message.slice(0, 1_000)}`);
+    }
+    console.log('KX Results/notebook visual interaction: logical row striping passed');
     await showNotebookCase(liveNotebook, 0);
+    const lightStriping = await inspectNotebookRowStripingByMarker(
+      cdpPort,
+      'Live full result'
+    );
+    assert.match(lightStriping.themeClasses, /vscode-light/);
+    interactions.push({ name: 'light-live-row-striping', ...lightStriping });
     screenshots.push(await captureScreenshot(
       artifactDirectory,
       'light-table.png',
       screenSize,
-      { theme: LIGHT_THEME, caseId: 'live-full-result', widthMode: 'wide' }
+      {
+        theme: LIGHT_THEME,
+        caseId: 'live-full-result',
+        widthMode: 'wide',
+        acceptance: lightStriping,
+      }
     ));
     liveResultRecord = liveResultEvidence(liveNotebook);
     const liveRenderer = await connectNotebookRenderer(cdpPort, 'Live full result');
@@ -434,6 +459,7 @@ async function run() {
     }
 
     await setTheme(workbenchConfiguration, DARK_THEME);
+    interactions.push(await inspectOrdinaryRowStripingTheme(cdpPort));
     await showNotebookCase(savedInteractionNotebook, 0);
     const darkSavedRenderer = await connectNotebookRenderer(cdpPort, 'Line chart gallery');
     await scrollNotebookChartIntoView(darkSavedRenderer, cdpPort);
@@ -533,11 +559,22 @@ async function run() {
       )
     );
     await showNotebookCase(darkLiveNotebook, 0);
+    const darkStriping = await inspectNotebookRowStripingByMarker(
+      cdpPort,
+      'Live full result'
+    );
+    assert.match(darkStriping.themeClasses, /vscode-dark/);
+    interactions.push({ name: 'dark-live-row-striping', ...darkStriping });
     screenshots.push(await captureScreenshot(
       artifactDirectory,
       'dark-table.png',
       screenSize,
-      { theme: DARK_THEME, caseId: 'live-full-result', widthMode: 'wide' }
+      {
+        theme: DARK_THEME,
+        caseId: 'live-full-result',
+        widthMode: 'wide',
+        acceptance: darkStriping,
+      }
     ));
     await discardActiveVisualNotebook();
 
@@ -570,11 +607,18 @@ async function run() {
       vscode.NotebookEditorRevealType.InCenter
     );
     await settleRenderer();
+    const narrowStriping = await inspectNarrowRowStriping(cdpPort);
+    interactions.push({ name: 'narrow-row-striping', ...narrowStriping });
     screenshots.push(await captureScreenshot(
       artifactDirectory,
       'narrow-table.png',
       screenSize,
-      { theme: DARK_THEME, caseId: 'truncated-saved-preview', widthMode: 'split-editor' }
+      {
+        theme: DARK_THEME,
+        caseId: 'truncated-saved-preview',
+        widthMode: 'split-editor',
+        acceptance: narrowStriping,
+      }
     ));
     interactions.push(await assertNarrowLayout(cdpPort));
     await discardActiveVisualNotebook();
@@ -1664,6 +1708,8 @@ async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
       baseline.responses[0].xDomain,
       ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
     );
+    assert.deepStrictEqual(baseline.forbiddenControls, []);
+    assertChartNavigatorEvidence(baseline.navigator, 'ordinary chart baseline');
     // Let the completed draw/ResizeObserver work settle before beginning a
     // trusted gesture; this keeps the acceptance on the user-input lifecycle.
     await delay(750);
@@ -1696,10 +1742,15 @@ async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
       ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
       'ordinary first drag'
     );
-    assert.notStrictEqual(
-      first.responses[1].sampledPointCount,
+    assert.strictEqual(
       baseline.responses[0].sampledPointCount,
-      'ordinary first drag must change the reconstructed sample count'
+      7_000,
+      'ordinary full view must use the fixed 7,000-point contract'
+    );
+    assert.strictEqual(
+      first.responses[1].sampledPointCount,
+      7_000,
+      'ordinary ranged view must remain at 7,000 while at least 7,000 rows are eligible'
     );
 
     const secondDrag = await dragOrdinaryChartRange(
@@ -1754,19 +1805,118 @@ async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
       'ordinary second drag must be nested inside the first absolute range'
     );
 
-    const responseCountBeforeReset = second.hostChartDataResponseCount;
-    const plotBuildCountBeforeReset = second.uPlotBuildCount;
-    await renderer.evaluate(root => {
-      const view = root.ownerDocument.defaultView;
-      const reset = root.querySelector('#resetChartZoom');
-      if (!(reset instanceof view.HTMLButtonElement) || reset.disabled) {
-        throw new Error('ordinary Reset zoom button is missing or disabled');
-      }
-      reset.click();
-      return true;
-    });
+    const edgeDrag = await dragOrdinaryChartNavigator(
+      renderer,
+      'start',
+      -0.04,
+      second
+    );
+    const edgeDomain = integerDomainForRange(
+      edgeDrag.requestedRange,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
+    );
+    const edge = await waitForRenderer(
+      'ordinary navigator trusted edge resize refinement',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === 4 &&
+        value.plot.currentMatchesLatestResponse &&
+        sameNumericRange(value.plot.range, edgeDrag.requestedRange),
+      15_000
+    );
+    assertOrdinaryRangedChartResponse(
+      edge.responses[3],
+      edgeDomain,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
+      'ordinary navigator edge resize'
+    );
+    assertChartNavigatorEvidence(edge.navigator, 'ordinary navigator edge resize');
+    assert(
+      edgeDrag.requestedRange.min < secondDrag.requestedRange.min &&
+        Math.abs(edgeDrag.requestedRange.max - secondDrag.requestedRange.max) < 1e-6,
+      'dragging the start handle left must expand only the bounded start edge'
+    );
+
+    const windowDrag = await dragOrdinaryChartNavigator(
+      renderer,
+      'window',
+      0.04,
+      edge
+    );
+    const windowDomain = integerDomainForRange(
+      windowDrag.requestedRange,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
+    );
+    const windowMoved = await waitForRenderer(
+      'ordinary navigator trusted window pan refinement',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === 5 &&
+        value.plot.currentMatchesLatestResponse &&
+        sameNumericRange(value.plot.range, windowDrag.requestedRange),
+      15_000
+    );
+    assertOrdinaryRangedChartResponse(
+      windowMoved.responses[4],
+      windowDomain,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
+      'ordinary navigator window pan'
+    );
+    assertChartNavigatorEvidence(windowMoved.navigator, 'ordinary navigator window pan');
+    assert(
+      windowDrag.requestedRange.min > edgeDrag.requestedRange.min &&
+        windowDrag.requestedRange.max > edgeDrag.requestedRange.max &&
+        Math.abs(
+          (windowDrag.requestedRange.max - windowDrag.requestedRange.min) -
+          (edgeDrag.requestedRange.max - edgeDrag.requestedRange.min)
+        ) < 1e-6,
+      'dragging the selected navigator window must pan without resizing it'
+    );
+
+    const beforeKeyboard = await renderer.evaluate(
+      focusChartNavigatorPart,
+      '#chartNavigatorEnd'
+    );
+    assert.strictEqual(beforeKeyboard.focused, true);
+    await renderer.pressKey('ArrowLeft');
+    const keyboardPending = await renderer.evaluate(ordinaryChartLifecycleSnapshot);
+    assert.strictEqual(keyboardPending.hostChartDataResponseCount, 5);
+    assert(
+      keyboardPending.plot.range.max < windowDrag.requestedRange.max &&
+        keyboardPending.plot.range.min === windowDrag.requestedRange.min,
+      'end-handle ArrowLeft must resize only the bounded end edge'
+    );
+    assertChartNavigatorEvidence(keyboardPending.navigator, 'ordinary navigator keyboard resize');
+    const keyboardDomain = integerDomainForRange(
+      keyboardPending.plot.range,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.fullRange
+    );
+    const keyboard = await waitForRenderer(
+      'ordinary navigator keyboard refinement',
+      renderer,
+      ordinaryChartLifecycleSnapshot,
+      value => value.hostChartDataResponseCount === 6 &&
+        value.plot.currentMatchesLatestResponse &&
+        sameNumericRange(value.plot.range, keyboardPending.plot.range),
+      15_000
+    );
+    assertOrdinaryRangedChartResponse(
+      keyboard.responses[5],
+      keyboardDomain,
+      ORDINARY_CHART_LIFECYCLE_FIXTURE.rowCount,
+      'ordinary navigator keyboard resize'
+    );
+
+    const responseCountBeforeReset = keyboard.hostChartDataResponseCount;
+    const plotBuildCountBeforeReset = keyboard.uPlotBuildCount;
+    const beforeHome = await renderer.evaluate(
+      focusChartNavigatorPart,
+      '#chartNavigatorWindow'
+    );
+    assert.strictEqual(beforeHome.focused, true);
+    await renderer.pressKey('Home');
     const reset = await waitForRenderer(
-      'ordinary Reset local full-sample reconstruction',
+      'ordinary navigator Home local full-sample reconstruction',
       renderer,
       ordinaryChartLifecycleSnapshot,
       value => value.hostChartDataResponseCount === responseCountBeforeReset &&
@@ -1778,6 +1928,19 @@ async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
         value.chartStatus === 'Zoom reset to the original full data range.',
       8_000
     );
+    assertChartNavigatorEvidence(reset.navigator, 'ordinary navigator Home reset');
+    assert.strictEqual(reset.navigator.start.now, 0);
+    assert.strictEqual(reset.navigator.end.now, 100);
+    assert.strictEqual(reset.navigator.window.now, 50);
+    /* Preserve explicit Reset-button availability while proving Home semantics. */
+    await renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const reset = root.querySelector('#resetChartZoom');
+      if (!(reset instanceof view.HTMLButtonElement) || !reset.disabled) {
+        throw new Error('ordinary Reset zoom must be present and disabled after Home reset');
+      }
+      return true;
+    });
     assert.strictEqual(
       reset.plot.data.digest,
       baseline.plot.data.digest,
@@ -1808,6 +1971,33 @@ async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
         expectedEligibleDomain: secondExpectedDomain,
         nestedResponseIntroducedPoint: second.nestedResponseIntroducedPoint,
         ...ordinaryChartStageEvidence(second, 2),
+      },
+      navigatorInteractions: {
+        controlsAbsent: baseline.forbiddenControls.length === 0,
+        browserPath:
+          'trusted CDP navigator start-edge drag -> trusted CDP selected-window drag -> focused end-handle ArrowLeft -> focused selected-window Home',
+        baseline: baseline.navigator,
+        edge: {
+          drag: edgeDrag,
+          expectedEligibleDomain: edgeDomain,
+          ...ordinaryChartStageEvidence(edge, 3),
+        },
+        window: {
+          drag: windowDrag,
+          expectedEligibleDomain: windowDomain,
+          ...ordinaryChartStageEvidence(windowMoved, 4),
+        },
+        keyboard: {
+          before: beforeKeyboard,
+          pending: keyboardPending.navigator,
+          requestedRange: keyboardPending.plot.range,
+          expectedEligibleDomain: keyboardDomain,
+          ...ordinaryChartStageEvidence(keyboard, 5),
+        },
+        home: {
+          before: beforeHome,
+          after: reset.navigator,
+        },
       },
       immutableFull: {
         sourceRowCount: baseline.responses[0].sourceRowCount,
@@ -1961,8 +2151,9 @@ function installOrdinaryChartLifecycleProbe(root) {
           range: cloneRange(self.scales?.x),
           resetDisabled:
             root.querySelector('#resetChartZoom')?.disabled === true,
-          refineDisabled:
-            root.querySelector('#refineChartZoom')?.disabled === true,
+          forbiddenControlsPresent: [...root.querySelectorAll('button')]
+            .some(button => ['Pan left', 'Pan right', 'Refine zoom', 'Refine view']
+              .includes(button.textContent?.trim() || '')),
           at: view.performance.now(),
         });
       },
@@ -2054,6 +2245,27 @@ function ordinaryChartLifecycleSnapshot(root) {
   const firstRefinement = probe.responses[1];
   const nestedRefinement = probe.responses[2];
   const firstRefinementX = new Set(firstRefinement?.x || []);
+  const navigator = root.querySelector('#chartNavigator');
+  const navigatorRect = navigator?.getBoundingClientRect();
+  const navigatorPart = (selector, part) => {
+    const element = root.querySelector(selector);
+    const rect = element?.getBoundingClientRect();
+    return {
+      part,
+      exists: !!element,
+      role: element?.getAttribute('role') || '',
+      tabIndex: element?.tabIndex,
+      label: element?.getAttribute('aria-label') || '',
+      orientation: element?.getAttribute('aria-orientation') || '',
+      minimum: Number(element?.getAttribute('aria-valuemin')),
+      maximum: Number(element?.getAttribute('aria-valuemax')),
+      now: Number(element?.getAttribute('aria-valuenow')),
+      valueText: element?.getAttribute('aria-valuetext') || '',
+      focused: root.ownerDocument.activeElement === element,
+      left: rect && navigatorRect ? rect.left - navigatorRect.left : NaN,
+      width: rect?.width || 0,
+    };
+  };
   return {
     hostChartDataResponseCount: probe.responses.length,
     hostChartErrorCount: probe.errors.length,
@@ -2087,6 +2299,22 @@ function ordinaryChartLifecycleSnapshot(root) {
       !!nestedRefinement &&
       nestedRefinement.x.some(value => !firstRefinementX.has(value)),
     resetDisabled: root.querySelector('#resetChartZoom')?.disabled === true,
+    forbiddenControls: [...root.querySelectorAll('button')]
+      .map(button => button.textContent?.trim() || '')
+      .filter(label => ['Pan left', 'Pan right', 'Refine zoom', 'Refine view']
+        .includes(label)),
+    navigator: {
+      exists: !!navigator,
+      hidden: navigator?.hidden === true,
+      label: navigator?.getAttribute('aria-label') || '',
+      disabled: navigator?.getAttribute('aria-disabled') || '',
+      width: navigatorRect?.width || 0,
+      overviewPath: navigator?.querySelector('.kx-chart-navigator-overview path')
+        ?.getAttribute('d') || '',
+      window: navigatorPart('#chartNavigatorWindow', 'window'),
+      start: navigatorPart('#chartNavigatorStart', 'start'),
+      end: navigatorPart('#chartNavigatorEnd', 'end'),
+    },
     chartStatus: root.querySelector('#chartStatus')?.textContent || '',
   };
 }
@@ -2141,6 +2369,226 @@ async function dragOrdinaryChartRange(
     uPlotScaleHookCountBefore: drag.uPlotScaleHookCount,
     uPlotScaleHookCountAfter: pending.uPlotScaleHookCount,
     scaleHook: pending.latestScaleHook,
+  };
+}
+
+function assertChartNavigatorEvidence(evidence, label) {
+  assert(evidence?.exists && !evidence.hidden,
+    `${label} must expose the compact chart navigator`);
+  assert.strictEqual(evidence.label, 'Chart X navigator');
+  assert(evidence.width > 100, `${label} navigator must have usable width`);
+  assert(evidence.overviewPath.length > 8,
+    `${label} navigator must render a full-domain overview path`);
+  if (Array.isArray(evidence.forbiddenControls)) {
+    assert.deepStrictEqual(
+      evidence.forbiddenControls,
+      [],
+      `${label} must not expose Pan left, Pan right, or Refine controls`
+    );
+  }
+  for (const [part, valueTextPrefix] of [
+    ['window', 'Selected X range '],
+    ['start', 'Selected X start '],
+    ['end', 'Selected X end '],
+  ]) {
+    const slider = evidence[part];
+    assert(slider?.exists, `${label} ${part} slider is missing`);
+    assert.strictEqual(slider.role, 'slider');
+    assert.strictEqual(slider.tabIndex, 0);
+    assert.strictEqual(slider.orientation, 'horizontal');
+    assert(Number.isFinite(slider.minimum) && Number.isFinite(slider.maximum) &&
+      Number.isFinite(slider.now) && slider.minimum >= 0 && slider.maximum <= 100 &&
+      slider.minimum <= slider.now && slider.now <= slider.maximum,
+    `${label} ${part} slider must report its actual bounded ARIA range`);
+    assert(slider.valueText.startsWith(valueTextPrefix),
+      `${label} ${part} slider must expose deterministic X-range text`);
+    assert(Number.isFinite(slider.left) && slider.left >= -1 &&
+      slider.left <= evidence.width + 1,
+    `${label} ${part} slider must remain inside the navigator bounds`);
+  }
+  assert(evidence.start.now <= evidence.window.now &&
+    evidence.window.now <= evidence.end.now,
+  `${label} navigator ARIA values must stay ordered`);
+  const close = (left, right) => Math.abs(left - right) <= 1e-6;
+  const halfSpan = (evidence.end.now - evidence.start.now) / 2;
+  const startGap = evidence.end.now - evidence.start.maximum;
+  const endGap = evidence.end.minimum - evidence.start.now;
+  assert(close(evidence.window.minimum, halfSpan) &&
+    close(evidence.window.maximum, 100 - halfSpan) &&
+    close(evidence.window.now, evidence.start.now + halfSpan),
+  `${label} window slider bounds must reflect its current half span`);
+  assert(close(evidence.start.minimum, 0) && close(evidence.end.maximum, 100) &&
+    startGap > 0 && close(startGap, endGap),
+  `${label} handle slider bounds must reflect the opposite handle and minimum span`);
+}
+
+function notebookChartNavigatorSnapshot(root) {
+  const navigator = root.querySelector('.kx-chart-navigator');
+  const navigatorRect = navigator?.getBoundingClientRect();
+  const partSnapshot = (selector, part) => {
+    const element = navigator?.querySelector(selector);
+    const rect = element?.getBoundingClientRect();
+    return {
+      part,
+      exists: !!element,
+      role: element?.getAttribute('role') || '',
+      tabIndex: element?.tabIndex,
+      label: element?.getAttribute('aria-label') || '',
+      orientation: element?.getAttribute('aria-orientation') || '',
+      minimum: Number(element?.getAttribute('aria-valuemin')),
+      maximum: Number(element?.getAttribute('aria-valuemax')),
+      now: Number(element?.getAttribute('aria-valuenow')),
+      valueText: element?.getAttribute('aria-valuetext') || '',
+      focused: root.ownerDocument.activeElement === element,
+      left: rect && navigatorRect ? rect.left - navigatorRect.left : NaN,
+      width: rect?.width || 0,
+    };
+  };
+  const status = root.querySelector('.kx-chart-panel > .kx-status')?.textContent || '';
+  const eligibleMatch = /from ([\d,]+) eligible rows/.exec(status);
+  return {
+    exists: !!navigator,
+    hidden: navigator?.hidden === true,
+    label: navigator?.getAttribute('aria-label') || '',
+    disabled: navigator?.getAttribute('aria-disabled') || '',
+    width: navigatorRect?.width || 0,
+    overviewPath: navigator?.querySelector('.kx-chart-navigator-overview path')
+      ?.getAttribute('d') || '',
+    window: partSnapshot('.kx-chart-navigator-window', 'window'),
+    start: partSnapshot('.kx-chart-navigator-handle.is-start', 'start'),
+    end: partSnapshot('.kx-chart-navigator-handle.is-end', 'end'),
+    status,
+    eligibleRows: eligibleMatch
+      ? Number(eligibleMatch[1].replaceAll(',', ''))
+      : 0,
+    forbiddenControls: [...root.querySelectorAll('.kx-chart-controls button')]
+      .map(button => button.textContent?.trim() || '')
+      .filter(label => ['Pan left', 'Pan right', 'Refine zoom', 'Refine view']
+        .includes(label)),
+  };
+}
+
+function focusChartNavigatorPart(root, selector) {
+  const view = root.ownerDocument.defaultView;
+  const element = root.querySelector(selector);
+  if (!(element instanceof view.HTMLElement)) {
+    throw new Error(`chart navigator focus target missing: ${selector}`);
+  }
+  element.focus({ preventScroll: true });
+  return {
+    selector,
+    focused: root.ownerDocument.activeElement === element,
+    now: Number(element.getAttribute('aria-valuenow')),
+    valueText: element.getAttribute('aria-valuetext') || '',
+  };
+}
+
+async function dragOrdinaryChartNavigator(
+  renderer,
+  part,
+  deltaFraction,
+  before
+) {
+  const drag = await renderer.evaluate(
+    chartNavigatorDragPoints,
+    '#chartNavigator',
+    part,
+    deltaFraction
+  );
+  assert(drag?.start && drag?.end, `ordinary navigator ${part} drag points must render`);
+  assert.strictEqual(
+    drag.hostChartDataResponseCount,
+    before.hostChartDataResponseCount,
+    `ordinary navigator ${part} drag must start from the expected settled response`
+  );
+  await renderer.drag(drag.start.x, drag.start.y, drag.end.x, drag.end.y);
+  const pending = await renderer.evaluate(ordinaryChartLifecycleSnapshot);
+  assert.strictEqual(
+    pending.hostChartDataResponseCount,
+    before.hostChartDataResponseCount,
+    `ordinary navigator ${part} debounce must not settle during the trusted drag`
+  );
+  assert(
+    pending.uPlotScaleHookCount > drag.uPlotScaleHookCount,
+    `ordinary navigator ${part} drag must pass through the real uPlot scale hook`
+  );
+  assert.notDeepStrictEqual(
+    pending.plot.range,
+    drag.beforeRange,
+    `ordinary navigator ${part} drag must change the absolute X range`
+  );
+  assert.deepStrictEqual(pending.forbiddenControls, []);
+  assertChartNavigatorEvidence(pending.navigator, `ordinary navigator ${part} pending`);
+  return {
+    input: `trusted CDP chart navigator ${part} pointer drag`,
+    part,
+    deltaFraction,
+    beforeRange: drag.beforeRange,
+    requestedRange: pending.plot.range,
+    hostChartDataResponseCountBefore: drag.hostChartDataResponseCount,
+    hostChartDataResponseCountAfterDragBeforeDebounce:
+      pending.hostChartDataResponseCount,
+    uPlotScaleHookCountBefore: drag.uPlotScaleHookCount,
+    uPlotScaleHookCountAfter: pending.uPlotScaleHookCount,
+    scaleHook: pending.latestScaleHook,
+    navigator: pending.navigator,
+  };
+}
+
+function chartNavigatorDragPoints(
+  root,
+  navigatorSelector,
+  part,
+  deltaFraction
+) {
+  const view = root.ownerDocument.defaultView;
+  const probe = view.__kxOrdinaryChartLifecycleProbe;
+  const navigator = root.querySelector(navigatorSelector);
+  const selector = part === 'start'
+    ? '.kx-chart-navigator-handle.is-start'
+    : part === 'end'
+      ? '.kx-chart-navigator-handle.is-end'
+      : '.kx-chart-navigator-window';
+  const target = navigator?.querySelector(selector);
+  if (!(navigator instanceof view.HTMLElement) ||
+      !(target instanceof view.HTMLElement)) {
+    throw new Error(`chart navigator ${part} pointer target is missing`);
+  }
+  if (!Number.isFinite(deltaFraction) || Math.abs(deltaFraction) > 0.25) {
+    throw new Error('chart navigator pointer delta is invalid');
+  }
+  navigator.scrollIntoView({ block: 'center', inline: 'nearest' });
+  const navigatorRect = navigator.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  let startX = targetRect.left + targetRect.width / 2;
+  let endX = startX + navigatorRect.width * deltaFraction;
+  let y = targetRect.top + targetRect.height / 2;
+  let frameView = target.ownerDocument.defaultView;
+  const visitedViews = new Set();
+  for (let depth = 0;
+    frameView && depth < 8 && !visitedViews.has(frameView);
+    depth += 1) {
+    visitedViews.add(frameView);
+    const frame = frameView.frameElement;
+    if (!frame) {
+      break;
+    }
+    const frameRect = frame.getBoundingClientRect();
+    startX += frameRect.left + frame.clientLeft;
+    endX += frameRect.left + frame.clientLeft;
+    y += frameRect.top + frame.clientTop;
+    const parentView = frame.ownerDocument.defaultView;
+    if (!parentView || parentView === frameView) {
+      break;
+    }
+    frameView = parentView;
+  }
+  return {
+    start: { x: startX, y },
+    end: { x: endX, y },
+    beforeRange: probe?.cloneRange(probe.currentPlot?.scales?.x),
+    hostChartDataResponseCount: probe?.responses.length || 0,
+    uPlotScaleHookCount: probe?.scaleHooks.length || 0,
   };
 }
 
@@ -2686,6 +3134,529 @@ function notebookColumnSizingSnapshot(root) {
   };
 }
 
+function displayedRowStripingSnapshot(root, headerSelector, bodySelector = '') {
+  const view = root.ownerDocument.defaultView;
+  const cellSnapshot = element => {
+    const style = view.getComputedStyle(element);
+    return {
+      displayRow: Number(element.dataset.row),
+      displayOrdinal: Number(element.dataset.kxDisplayOrdinal),
+      sourceOrdinal: Number(element.dataset.kxSourceOrdinal),
+      parity: element.dataset.kxRowParity || '',
+      odd: element.classList.contains('row-odd'),
+      even: element.classList.contains('row-even'),
+      selected: element.classList.contains('is-selected'),
+      search: element.classList.contains('is-search-match'),
+      loading: element.classList.contains('is-loading') ||
+        element.classList.contains('loading'),
+      error: element.classList.contains('is-error') ||
+        element.classList.contains('error'),
+      keyColumn: element.classList.contains('is-key-column'),
+      sortedColumn: element.classList.contains('is-sorted-column'),
+      sortedHeader: element.classList.contains('is-sorted-header'),
+      selectedHeader: element.classList.contains('is-selected-header'),
+      activeCell: element.classList.contains('is-active-cell'),
+      background: style.backgroundColor,
+      boxShadow: style.boxShadow,
+      outlineStyle: style.outlineStyle,
+      outlineWidth: style.outlineWidth,
+    };
+  };
+  const headers = [...root.querySelectorAll(headerSelector)]
+    .filter(element => element.dataset.kxDisplayOrdinal !== undefined)
+    .sort((left, right) =>
+      Number(left.dataset.kxDisplayOrdinal) - Number(right.dataset.kxDisplayOrdinal))
+    .map(cellSnapshot);
+  const rowHeaders = [...root.querySelectorAll('[role="rowheader"]')]
+    .map(cellSnapshot);
+  const groupedRows = new Map();
+  if (bodySelector) {
+    [...root.querySelectorAll(bodySelector)].forEach(element => {
+      const displayRow = Number(element.dataset.row ??
+        element.closest('[data-row]')?.dataset.row);
+      if (!Number.isSafeInteger(displayRow) || displayRow < 0) {
+        return;
+      }
+      const cells = groupedRows.get(displayRow) || [];
+      cells.push(cellSnapshot(element));
+      groupedRows.set(displayRow, cells);
+    });
+  }
+  const rows = [...groupedRows.entries()]
+    .sort((left, right) => left[0] - right[0])
+    .map(([displayRow, cells]) => ({
+      displayRow,
+      parity: cells[0]?.parity || '',
+      odd: cells.every(cell => cell.odd),
+      even: cells.every(cell => cell.even),
+      cellCount: cells.length,
+      cells: cells.sort((left, right) => left.displayOrdinal - right.displayOrdinal),
+    }));
+  return {
+    themeClasses: root.ownerDocument.body?.className || '',
+    width: Math.round(root.getBoundingClientRect().width),
+    scrollTop: Math.round(
+      root.querySelector('.kx-live-viewport, #viewport, .kx-table-wrap')?.scrollTop || 0
+    ),
+    scrollLeft: Math.round(
+      root.querySelector('.kx-live-viewport, #viewport, .kx-table-wrap')?.scrollLeft || 0
+    ),
+    headers,
+    rowHeaders,
+    rows,
+  };
+}
+
+function assertDisplayedRowStriping(evidence, label, options = {}) {
+  const minimumColumns = options.minimumColumns || 3;
+  const minimumRows = options.minimumRows || 2;
+  assert(Array.isArray(evidence?.headers) && evidence.headers.length >= minimumColumns,
+    `${label} must expose at least ${minimumColumns} displayed columns`);
+  assert(
+    evidence.headers.every(header =>
+      Number.isSafeInteger(header.displayOrdinal) && header.displayOrdinal >= 0 &&
+      Number.isSafeInteger(header.sourceOrdinal) && header.sourceOrdinal >= 0 &&
+      header.parity === '' && !header.odd && !header.even),
+    `${label} headers must remain explicitly unstriped: ${JSON.stringify(evidence.headers)}`
+  );
+  assert.strictEqual(
+    new Set(evidence.headers.map(header => header.displayOrdinal)).size,
+    evidence.headers.length,
+    `${label} display ordinals must be unique`
+  );
+  assert.strictEqual(
+    new Set(evidence.headers.map(header => header.sourceOrdinal)).size,
+    evidence.headers.length,
+    `${label} source ordinals must be unique`
+  );
+  assert(Array.isArray(evidence.rowHeaders) && evidence.rowHeaders.length >= minimumRows,
+    `${label} must expose at least ${minimumRows} row headers`);
+  assert(
+    evidence.rowHeaders.every(header =>
+      header.parity === '' && !header.odd && !header.even),
+    `${label} row headers must remain explicitly unstriped: ${JSON.stringify(evidence.rowHeaders)}`
+  );
+  assert(Array.isArray(evidence.rows) && evidence.rows.length >= minimumRows,
+    `${label} must expose at least ${minimumRows} logical displayed rows`);
+  assert(
+    evidence.rows.every(row =>
+      Number.isSafeInteger(row.displayRow) && row.displayRow >= 0 &&
+      row.parity === (row.displayRow % 2 === 0 ? 'even' : 'odd') &&
+      row.odd === (row.parity === 'odd') &&
+      row.even === (row.parity === 'even') &&
+      row.cellCount >= minimumColumns &&
+      row.cells.every(cell =>
+        cell.displayRow === row.displayRow &&
+        cell.parity === row.parity &&
+        cell.odd === row.odd &&
+        cell.even === row.even)),
+    `${label} must key every visible cell to its logical displayed row: ${JSON.stringify(evidence.rows)}`
+  );
+  const rowStripePair = () => {
+    const evenRows = evidence.rows.filter(row => row.even);
+    const oddRows = evidence.rows.filter(row => row.odd);
+    for (const evenRow of evenRows) {
+      for (const evenCell of evenRow.cells) {
+        if (evenCell.selected || evenCell.search || evenCell.loading || evenCell.error ||
+          evenCell.activeCell || evenCell.sortedHeader || evenCell.selectedHeader) {
+          continue;
+        }
+        const oddCell = oddRows.flatMap(row => row.cells).find(candidate =>
+          candidate.sourceOrdinal === evenCell.sourceOrdinal &&
+          candidate.keyColumn === evenCell.keyColumn &&
+          candidate.sortedColumn === evenCell.sortedColumn &&
+          !candidate.selected && !candidate.search && !candidate.loading && !candidate.error &&
+          !candidate.activeCell && !candidate.sortedHeader && !candidate.selectedHeader);
+        if (oddCell) {
+          return { even: evenCell, odd: oddCell };
+        }
+      }
+    }
+    return undefined;
+  };
+  const stripePair = rowStripePair();
+  if (options.requireDistinctBackground !== false) {
+    assert(stripePair,
+      `${label} must expose loaded odd and even cells with the same semantic column state`);
+    assert.notStrictEqual(
+      stripePair.even.background,
+      stripePair.odd.background,
+      `${label} odd/even rows must resolve to distinct theme-derived backgrounds`
+    );
+  }
+}
+
+async function inspectNotebookRowStripingByMarker(cdpPort, marker) {
+  const renderer = await connectNotebookRenderer(cdpPort, marker);
+  try {
+    const evidence = await waitForRenderer(
+      `${marker} logical displayed-row striping`,
+      renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers.length >= 4 && value.rows.length >= 2,
+      8_000,
+      [
+        '.kx-live-header[role="columnheader"]',
+        '.kx-live-cell[role="gridcell"][data-row]',
+      ]
+    );
+    assertDisplayedRowStriping(evidence, marker, {
+      minimumColumns: 4,
+    });
+    return evidence;
+  } finally {
+    renderer.close();
+  }
+}
+
+async function inspectOrdinaryRowStripingTheme(cdpPort) {
+  const fixture = liveQueries[caseIndex(liveQueries, 'row-striping-horizontal-window')];
+  let handle;
+  try {
+    handle = await openOrdinaryColumnSizingFixture(cdpPort, fixture);
+    const evidence = await waitForRenderer(
+      'ordinary dark logical displayed-row striping',
+      handle.renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers.length >= 4 && value.rows.length >= 2,
+      8_000,
+      [
+        '#header [role="columnheader"][data-column]',
+        '#rows [role="gridcell"][data-row][data-column]',
+      ]
+    );
+    assert.match(evidence.themeClasses, /vscode-dark/);
+    assertDisplayedRowStriping(evidence, 'ordinary dark table', {
+      minimumColumns: 4,
+    });
+    return { name: 'dark-ordinary-row-striping', ...evidence };
+  } finally {
+    await closeOrdinaryColumnSizingFixture(handle).catch(() => undefined);
+  }
+}
+
+async function exerciseLogicalRowStripingWindows(cdpPort) {
+  const fixture = liveQueries[caseIndex(liveQueries, 'row-striping-horizontal-window')];
+  let ordinaryHandle;
+  let notebook;
+  let renderer;
+  let pagedNotebook;
+  let pagedRenderer;
+  try {
+    ordinaryHandle = await openOrdinaryColumnSizingFixture(cdpPort, fixture);
+    const ordinaryBefore = await waitForRenderer(
+      'ordinary row-striping baseline',
+      ordinaryHandle.renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers.length >= 4 && value.headers[0]?.displayOrdinal === 0 &&
+        value.rows.length >= 2,
+      8_000,
+      [
+        '#header [role="columnheader"][data-column]',
+        '#rows [role="gridcell"][data-row][data-column]',
+      ]
+    );
+    assertDisplayedRowStriping(ordinaryBefore, 'ordinary row-striping baseline', {
+      minimumColumns: 4,
+    });
+    await ordinaryHandle.renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const settings = root.querySelector('#settingsMenu');
+      if (settings) {
+        settings.open = true;
+      }
+      const row = [...root.querySelectorAll('#columnList .column-row')]
+        .find(candidate => candidate.querySelector('span')?.textContent ===
+          'striping_horizontal_04');
+      const checkbox = row?.querySelector('input[type="checkbox"]');
+      if (!(checkbox instanceof view.HTMLInputElement)) {
+        throw new Error('ordinary row-striping hide-column control missing');
+      }
+      checkbox.checked = false;
+      checkbox.dispatchEvent(new view.Event('change', { bubbles: true }));
+      return true;
+    });
+    await waitForRenderer(
+      'ordinary row-striping hidden source ordinal',
+      ordinaryHandle.renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers.length >= 4 &&
+        value.headers.every(column => column.sourceOrdinal !== 4),
+      8_000,
+      ['#header [role="columnheader"][data-column]']
+    );
+    await ordinaryHandle.renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const header = root.querySelector(
+        '#header [role="columnheader"][data-kx-source-ordinal="0"]'
+      );
+      if (!(header instanceof view.HTMLElement)) {
+        throw new Error('ordinary row-striping reorder header missing');
+      }
+      header.focus();
+      header.dispatchEvent(new view.KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'ArrowRight',
+        altKey: true,
+      }));
+      return true;
+    });
+    await waitForRenderer(
+      'ordinary displayed-column reorder mapping',
+      ordinaryHandle.renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers[0]?.sourceOrdinal === 1 &&
+        value.headers[1]?.sourceOrdinal === 0,
+      8_000,
+      ['#header [role="columnheader"][data-column]']
+    );
+    await ordinaryHandle.renderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const header = root.querySelector(
+        '#header [role="columnheader"][data-kx-source-ordinal="2"]'
+      );
+      if (!(header instanceof view.HTMLElement)) {
+        throw new Error('ordinary row-striping sort header missing');
+      }
+      header.focus();
+      header.dispatchEvent(new view.KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Enter',
+      }));
+      return true;
+    });
+    const ordinaryMapped = await waitForRenderer(
+      'ordinary hide/reorder/sort row-striping identity',
+      ordinaryHandle.renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers[0]?.sourceOrdinal === 1 &&
+        value.headers[1]?.sourceOrdinal === 0 &&
+        value.headers.some(column => column.sourceOrdinal === 2 && column.sortedHeader) &&
+        value.rows.some(row => row.cells.some(column => column.sourceOrdinal === 2 &&
+          column.sortedColumn && !column.loading && column.boxShadow !== 'none')),
+      8_000,
+      [
+        '#header [role="columnheader"][data-column]',
+        '#rows [role="gridcell"][data-row][data-column]',
+      ]
+    );
+    assertDisplayedRowStriping(ordinaryMapped, 'ordinary mapped table', {
+      minimumColumns: 4,
+    });
+    assert.deepStrictEqual(
+      ordinaryMapped.headers.slice(0, 3)
+        .map(column => [column.displayOrdinal, column.sourceOrdinal]),
+      [[0, 1], [1, 0], [2, 2]],
+      'ordinary hide/reorder must retain displayed/source column identity without column striping'
+    );
+    assert(!ordinaryMapped.headers.some(column => column.sourceOrdinal === 4));
+    assert.notStrictEqual(
+      ordinaryMapped.headers.find(column => column.sourceOrdinal === 2)?.boxShadow,
+      'none'
+    );
+    assert.notStrictEqual(
+      ordinaryMapped.rows[0].cells.find(column => column.sourceOrdinal === 2)?.boxShadow,
+      'none'
+    );
+    await ordinaryHandle.renderer.evaluate(scrollOrdinaryGridToRow, 31);
+    await ordinaryHandle.renderer.evaluate(root => {
+      const viewport = root.querySelector('#viewport');
+      if (!viewport) {
+        throw new Error('ordinary row-striping viewport missing');
+      }
+      viewport.scrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      viewport.dispatchEvent(new root.ownerDocument.defaultView.Event('scroll', {
+        bubbles: true,
+      }));
+      return viewport.scrollLeft;
+    });
+    const ordinaryAfter = await waitForRenderer(
+      'ordinary row striping after virtual vertical/horizontal windows',
+      ordinaryHandle.renderer,
+      displayedRowStripingSnapshot,
+      value => value.scrollTop > 0 && value.scrollLeft > 0 &&
+        value.headers.length >= 3 && value.headers[0]?.displayOrdinal > 0 &&
+        value.rows.length >= 2 && value.rows[0]?.displayRow > 0 &&
+        value.rows.some(row => row.even && row.cells.some(cell => !cell.loading)) &&
+        value.rows.some(row => row.odd && row.cells.some(cell => !cell.loading)),
+      8_000,
+      [
+        '#header [role="columnheader"][data-column]',
+        '#rows [role="gridcell"][data-row][data-column]',
+      ]
+    );
+    assertDisplayedRowStriping(ordinaryAfter, 'ordinary virtualized row window');
+    await closeOrdinaryColumnSizingFixture(ordinaryHandle);
+    ordinaryHandle = undefined;
+
+    ({ notebook, renderer } = await openColumnSizingNotebook(cdpPort, fixture));
+    const before = await waitForRenderer(
+      'notebook row-striping baseline',
+      renderer,
+      displayedRowStripingSnapshot,
+      value => value.headers.length >= 3 && value.headers[0]?.displayOrdinal === 0 &&
+        value.rows.length >= 2,
+      8_000,
+      [
+        '.kx-live-header[role="columnheader"]',
+        '.kx-live-cell[role="gridcell"][data-row]',
+      ]
+    );
+    assertDisplayedRowStriping(before, 'notebook row-striping baseline');
+    await renderer.evaluate(scrollNotebookGridToRow, 31);
+    await renderer.evaluate(root => {
+      const viewport = root.querySelector('.kx-live-viewport');
+      if (!viewport) {
+        throw new Error('notebook row-striping viewport missing');
+      }
+      viewport.scrollLeft = Math.max(0, viewport.scrollWidth - viewport.clientWidth);
+      viewport.dispatchEvent(new root.ownerDocument.defaultView.Event('scroll', {
+        bubbles: true,
+      }));
+      return viewport.scrollLeft;
+    });
+    const after = await waitForRenderer(
+      'notebook row striping after virtual vertical/horizontal windows',
+      renderer,
+      displayedRowStripingSnapshot,
+      value => value.scrollTop > 0 && value.scrollLeft > 0 &&
+        value.headers.length >= 3 && value.headers[0]?.displayOrdinal > 0 &&
+        value.rows.length >= 2 && value.rows[0]?.displayRow > 0 &&
+        value.rows.some(row => row.even && row.cells.some(cell => !cell.loading)) &&
+        value.rows.some(row => row.odd && row.cells.some(cell => !cell.loading)),
+      8_000,
+      [
+        '.kx-live-header[role="columnheader"]',
+        '.kx-live-cell[role="gridcell"][data-row]',
+      ]
+    );
+    assertDisplayedRowStriping(after, 'notebook virtualized row window');
+    renderer.close();
+    renderer = undefined;
+    await discardActiveVisualNotebook();
+    notebook = undefined;
+
+    const pagedRows = Array.from({ length: 520 }, (_, row) => [
+      { kind: 'number', value: row },
+      { kind: 'number', value: 520 - row },
+      { kind: 'string', value: row % 2 === 0 ? 'even' : 'odd' },
+    ]);
+    const pagedFixture = {
+      id: 'row-striping-pagination-acceptance',
+      title: 'Row striping pagination acceptance',
+      source: 'row striping pagination acceptance',
+      payload: {
+        version: 1,
+        kind: 'table',
+        schema: { columns: [
+          { name: 'display_row', type: 'long' },
+          { name: 'descending_value', type: 'long' },
+          { name: 'label', type: 'string' },
+        ] },
+        data: { encoding: 'rows', rows: pagedRows },
+        result: {
+          rowCount: pagedRows.length,
+          previewRowCount: pagedRows.length,
+          truncated: false,
+          truncationReasons: [],
+          rowLimit: pagedRows.length,
+          byteLimit: 1_000_000,
+        },
+        provenance: {
+          marker: '%%q',
+          label: 'Row striping pagination acceptance',
+          elapsedMs: 1,
+        },
+      },
+    };
+    pagedNotebook = await openSavedCaseNotebook(pagedFixture);
+    await showNotebookCase(pagedNotebook, 0);
+    pagedRenderer = await connectNotebookRenderer(
+      cdpPort,
+      'Row striping pagination acceptance'
+    );
+    const savedSortFocused = await pagedRenderer.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const sort = [...root.querySelectorAll('.kx-saved-sort')]
+        .find(button => button.textContent?.trim() === 'descending_value');
+      if (!(sort instanceof view.HTMLButtonElement)) {
+        throw new Error('saved pagination sort header missing');
+      }
+      sort.focus({ preventScroll: true });
+      return root.ownerDocument.activeElement === sort;
+    });
+    assert.strictEqual(savedSortFocused, true,
+      'saved pagination sort header must accept keyboard focus');
+    await pagedRenderer.pressKey('Enter');
+    const pagedBefore = await waitForRenderer(
+      'saved sorted first-page row striping',
+      pagedRenderer,
+      displayedRowStripingSnapshot,
+      value => value.headers.some(header => header.sortedHeader) &&
+        value.rows.length >= 2 && value.rows[0]?.displayRow === 0,
+      8_000,
+      [
+        '.kx-table-wrap th[role="columnheader"]',
+        '.kx-table-wrap td[role="gridcell"][data-row]',
+      ]
+    );
+    assertDisplayedRowStriping(pagedBefore, 'saved sorted first page');
+    await pagedRenderer.evaluate(root => {
+      const next = [...root.querySelectorAll('.kx-pagination button')]
+        .find(button => button.textContent?.trim() === 'Next page');
+      if (!next || next.disabled) {
+        throw new Error('saved Next page control missing or disabled');
+      }
+      next.click();
+      return true;
+    });
+    const pagedAfter = await waitForRenderer(
+      'saved sorted second-page row striping',
+      pagedRenderer,
+      displayedRowStripingSnapshot,
+      value => value.rows.length >= 2 && value.rows[0]?.displayRow === 250,
+      8_000,
+      [
+        '.kx-table-wrap th[role="columnheader"]',
+        '.kx-table-wrap td[role="gridcell"][data-row]',
+      ]
+    );
+    assertDisplayedRowStriping(pagedAfter, 'saved sorted second page');
+    return {
+      name: 'logical-row-striping-virtualized-windows',
+      ordinary: {
+        before: ordinaryBefore,
+        mapped: ordinaryMapped,
+        after: ordinaryAfter,
+      },
+      notebook: { before, after },
+      saved: { before: pagedBefore, after: pagedAfter },
+    };
+  } finally {
+    await closeOrdinaryColumnSizingFixture(ordinaryHandle).catch(() => undefined);
+    renderer?.close();
+    pagedRenderer?.close();
+    if (notebook && !notebook.isClosed) {
+      await vscode.window.showNotebookDocument(notebook, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      }).catch(() => undefined);
+      await discardActiveVisualNotebook().catch(() => undefined);
+    }
+    if (pagedNotebook && !pagedNotebook.isClosed) {
+      await vscode.window.showNotebookDocument(pagedNotebook, {
+        preserveFocus: false,
+        preview: false,
+        viewColumn: vscode.ViewColumn.One,
+      }).catch(() => undefined);
+      await discardActiveVisualNotebook().catch(() => undefined);
+    }
+  }
+}
+
 function scrollOrdinaryGridToRow(root, row) {
   const viewport = root.querySelector('#viewport');
   const firstCell = root.querySelector('#rows [role="gridcell"][data-row]');
@@ -3149,8 +4120,10 @@ function assertFullLiveResult(notebook) {
   const fullOutput = notebook.cellAt(0).outputs[0];
   const payload = outputJson(fullOutput, KX_NOTEBOOK_MIME);
   assert.strictEqual(payload.result.rowCount, 64);
-  assert.strictEqual(payload.result.previewRowCount, 20);
-  assert.strictEqual(payload.result.truncated, true);
+  assert.strictEqual(payload.persistence?.mode, 'full');
+  assert.strictEqual(payload.result.previewRowCount, 64);
+  assert.strictEqual(payload.data.rows.length, 64);
+  assert.strictEqual(payload.result.truncated, false);
 }
 
 async function openSavedCaseNotebook(fixture) {
@@ -3485,6 +4458,57 @@ async function exerciseLiveSelectionAndSearch(renderer) {
   assert.strictEqual(selection.selectedCells, 6);
   assert(selection.activeMatches > 0, 'live active search result must remain highlighted');
   assert.strictEqual(selection.focusedTable, 'KX result table');
+  const dominance = await renderer.evaluate(root => {
+    const view = root.ownerDocument.defaultView;
+    const evidence = element => {
+      const style = element ? view.getComputedStyle(element) : undefined;
+      return {
+        exists: !!element,
+        hovered: element?.matches(':hover') === true,
+        selected: element?.classList.contains('is-selected') === true,
+        search: element?.classList.contains('is-search-match') === true,
+        active: element?.classList.contains('is-active-cell') === true,
+        parity: element?.dataset.kxRowParity || '',
+        displayRow: Number(element?.dataset.row),
+        displayOrdinal: Number(element?.dataset.kxDisplayOrdinal),
+        sourceOrdinal: Number(element?.dataset.kxSourceOrdinal),
+        background: style?.backgroundColor || '',
+        outlineStyle: style?.outlineStyle || '',
+        outlineWidth: style?.outlineWidth || '',
+      };
+    };
+    const selectedCells = [...root.querySelectorAll(
+      '.kx-live-cell[role="gridcell"].is-selected'
+    )];
+    return {
+      selected: evidence(
+        selectedCells.find(cell => cell.matches(':hover')) || selectedCells[0]
+      ),
+      search: evidence(root.querySelector(
+        '.kx-live-cell[role="gridcell"].is-search-match:not(.is-selected)'
+      )),
+      active: evidence(root.querySelector(
+        '.kx-live-cell[role="gridcell"].is-active-cell'
+      )),
+      plainOdd: evidence(root.querySelector(
+        '.kx-live-cell[role="gridcell"].row-odd:not(.is-selected):not(.is-search-match)'
+      )),
+      plainEven: evidence(root.querySelector(
+        '.kx-live-cell[role="gridcell"].row-even:not(.is-selected):not(.is-search-match)'
+      )),
+    };
+  });
+  assert(dominance.selected.exists && dominance.selected.selected &&
+    dominance.selected.hovered,
+    'live selected state must remain dominant over row striping and hover');
+  assert(dominance.search.exists && dominance.search.search && !dominance.search.selected,
+    'live search state must remain dominant over row striping');
+  assert(dominance.active.exists && dominance.active.active,
+    'live focused cell must expose the active-cell state');
+  assert.notStrictEqual(dominance.active.outlineStyle, 'none');
+  assert.notStrictEqual(dominance.selected.background, dominance.search.background);
+  assert.notStrictEqual(dominance.search.background, dominance.plainOdd.background);
+  assert.notStrictEqual(dominance.plainOdd.background, dominance.plainEven.background);
   return {
     name: 'live-range-selection-search',
     firstMatch: firstMatch.status,
@@ -3498,11 +4522,53 @@ async function exerciseLiveSelectionAndSearch(renderer) {
       nextAfterRerender: nextState.focusedControl,
       previousAfterRerender: previousState.focusedControl,
     },
+    dominance,
     ...selection,
   };
 }
 
 async function exerciseColumnsOverlay(renderer) {
+  await renderer.evaluate(root => {
+    const view = root.ownerDocument.defaultView;
+    const sort = root.querySelector(
+      '.kx-live-sort[data-kx-source-ordinal="2"]'
+    );
+    if (!(sort instanceof view.HTMLButtonElement)) {
+      throw new Error('price sort header missing');
+    }
+    sort.focus();
+    sort.dispatchEvent(new view.KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: 'Enter',
+    }));
+    return true;
+  });
+  const sortedBeforeColumns = await waitForRenderer(
+    'live sorted-column state over row striping',
+    renderer,
+    displayedRowStripingSnapshot,
+    value => value.headers.some(column =>
+      column.sourceOrdinal === 2 && column.sortedHeader) &&
+      value.rows.some(row => row.cells.some(column =>
+        column.sourceOrdinal === 2 && column.sortedColumn && !column.loading)),
+    8_000,
+    [
+      '.kx-live-header[role="columnheader"]',
+      '.kx-live-cell[role="gridcell"][data-row]',
+    ]
+  );
+  assertDisplayedRowStriping(sortedBeforeColumns, 'live sorted table', {
+    minimumColumns: 4,
+  });
+  assert.notStrictEqual(
+    sortedBeforeColumns.headers.find(column => column.sourceOrdinal === 2)?.boxShadow,
+    'none'
+  );
+  assert.notStrictEqual(
+    sortedBeforeColumns.rows[0].cells.find(column => column.sourceOrdinal === 2)?.boxShadow,
+    'none'
+  );
   const focusBeforeApply = await renderer.evaluate(root => {
     const view = root.ownerDocument.defaultView;
     const details = root.querySelector('details.kx-columns');
@@ -3634,9 +4700,71 @@ async function exerciseColumnsOverlay(renderer) {
     value => value.open && value.position === 3 && value.rightDisabled &&
       value.focusedControl === 'Move row left' && value.contained
   );
+  await renderer.evaluate(root => {
+    const view = root.ownerDocument.defaultView;
+    const sort = root.querySelector(
+      '.kx-live-sort[data-kx-source-ordinal="2"]'
+    );
+    if (!(sort instanceof view.HTMLButtonElement)) {
+      throw new Error('mapped price header missing for column selection');
+    }
+    sort.focus();
+    sort.dispatchEvent(new view.KeyboardEvent('keydown', {
+      bubbles: true,
+      cancelable: true,
+      key: ' ',
+      ctrlKey: true,
+    }));
+    return true;
+  });
+  await waitForRenderer(
+    'live selected-header dominance over row striping',
+    renderer,
+    root => ({
+      selectedHeader: root.querySelector(
+        '.kx-live-header[data-kx-source-ordinal="2"]'
+      )?.classList.contains('is-selected-header') === true,
+      selectedCells: root.querySelectorAll(
+        '.kx-live-cell[role="gridcell"][data-kx-source-ordinal="2"].is-selected'
+      ).length,
+    }),
+    value => value.selectedHeader && value.selectedCells > 0
+  );
+  const striping = await renderer.evaluate(
+    displayedRowStripingSnapshot,
+    '.kx-live-header[role="columnheader"]',
+    '.kx-live-cell[role="gridcell"][data-row]'
+  );
+  assertDisplayedRowStriping(striping, 'live hide/reorder table');
+  assert.deepStrictEqual(
+    striping.headers.map(column => [column.displayOrdinal, column.sourceOrdinal]),
+    [[0, 1], [1, 2], [2, 0]],
+    'hide/reorder must retain source ordinals without introducing column striping'
+  );
+  assert.deepStrictEqual(
+    striping.rows[0].cells.map(column => [column.displayOrdinal, column.sourceOrdinal]),
+    [[0, 1], [1, 2], [2, 0]],
+    'hide/reorder body identity must match headers'
+  );
+  const sortedHeader = striping.headers.find(column => column.sourceOrdinal === 2);
+  const sortedCell = striping.rows[0].cells.find(column => column.sourceOrdinal === 2);
+  assert(sortedHeader?.sortedHeader && sortedCell?.sortedColumn,
+    'sort state must follow source ordinal through hide/reorder');
+  assert(sortedHeader.selectedHeader && sortedCell.selected,
+    'column selection must dominate alternate/sorted column backgrounds');
+  assert.strictEqual(sortedHeader.displayOrdinal, 1);
+  assert.strictEqual(sortedHeader.parity, '');
+  assert.notStrictEqual(
+    sortedHeader.background,
+    striping.headers.find(column => column.displayOrdinal === 0)?.background
+  );
+  assert.notStrictEqual(sortedHeader.boxShadow, 'none');
+  assert.notStrictEqual(sortedCell.boxShadow, 'none');
   return {
     name: 'live-columns-overlay',
     hiddenColumn: 'size',
+    sortedBeforeColumns,
+    striping,
     ...applied,
     ...overlay,
     boundary,
@@ -3900,13 +5028,18 @@ async function exerciseLiveChartControls(renderer) {
         yControl: !!root.querySelector('.kx-chart-controls details.kx-series-control'),
         exportPngDisabled: buttonDisabled('Export PNG'),
         resetDisabled: buttonDisabled('Reset zoom'),
-        refineDisabled: buttonDisabled('Refine zoom'),
+        forbiddenControls: [...root.querySelectorAll('.kx-chart-controls button')]
+          .map(button => button.textContent?.trim() || '')
+          .filter(label => ['Pan left', 'Pan right', 'Refine zoom', 'Refine view']
+            .includes(label)),
+        navigatorExists: !!root.querySelector('.kx-chart-navigator'),
       };
     },
     value => value.panel && value.yControl &&
       value.exportPngDisabled === true &&
       value.resetDisabled === true &&
-      value.refineDisabled === true
+      value.forbiddenControls.length === 0 &&
+      value.navigatorExists === false
   );
   await renderer.evaluate(root => {
     const details = root.querySelector('.kx-chart-controls details.kx-series-control');
@@ -3979,7 +5112,11 @@ async function exerciseLiveChartControls(renderer) {
         canvases: root.querySelectorAll('.kx-chart-host canvas').length,
         exportPngDisabled: buttonDisabled('Export PNG'),
         resetDisabled: buttonDisabled('Reset zoom'),
-        refineDisabled: buttonDisabled('Refine zoom'),
+        forbiddenControls: [...root.querySelectorAll('.kx-chart-controls button')]
+          .map(button => button.textContent?.trim() || '')
+          .filter(label => ['Pan left', 'Pan right', 'Refine zoom', 'Refine view']
+            .includes(label)),
+        navigatorExists: !!root.querySelector('.kx-chart-navigator'),
         statusRole:
           root.querySelector('.kx-chart-panel > .kx-status')?.getAttribute('role') || '',
         statusAriaLive:
@@ -3990,11 +5127,14 @@ async function exerciseLiveChartControls(renderer) {
     value => value.canvases > 0 &&
       value.exportPngDisabled === false &&
       value.resetDisabled === false &&
-      value.refineDisabled === false &&
+      value.forbiddenControls.length === 0 &&
+      value.navigatorExists === true &&
       value.statusRole === 'status' &&
       value.statusAriaLive === 'polite',
     15_000
   );
+  afterDraw.navigator = await renderer.evaluate(notebookChartNavigatorSnapshot);
+  assertChartNavigatorEvidence(afterDraw.navigator, 'live notebook chart');
   const autoRefinements = [];
   for (let zoomIndex = 0; zoomIndex < 2; zoomIndex += 1) {
     await dragNotebookChartInRenderer(renderer);
@@ -4010,7 +5150,7 @@ async function exerciseLiveChartControls(renderer) {
           eligibleRows: match ? Number(match[1].replaceAll(',', '')) : 0,
         };
       },
-      value => value.status.startsWith('Refined zoom') &&
+      value => value.status.startsWith('Selected range') &&
         value.eligibleRows > 0 &&
         value.eligibleRows < previousEligibleRows,
       15_000
@@ -4020,6 +5160,76 @@ async function exerciseLiveChartControls(renderer) {
     autoRefinements[1].eligibleRows < autoRefinements[0].eligibleRows,
     'a second narrower live zoom must trigger a second absolute source refinement'
   );
+  const navigatorBefore = await renderer.evaluate(notebookChartNavigatorSnapshot);
+  assertChartNavigatorEvidence(navigatorBefore, 'live notebook navigator before interaction');
+  const edgePoints = await renderer.evaluate(
+    chartNavigatorDragPoints,
+    '.kx-chart-navigator',
+    'end',
+    -0.04
+  );
+  await renderer.drag(
+    edgePoints.start.x,
+    edgePoints.start.y,
+    edgePoints.end.x,
+    edgePoints.end.y
+  );
+  await delay(750);
+  const navigatorEdge = await waitForRenderer(
+    'live navigator trusted end-edge drag refinement',
+    renderer,
+    notebookChartNavigatorSnapshot,
+    value => value.end.now < navigatorBefore.end.now &&
+      value.status.startsWith('Selected range') &&
+      value.eligibleRows > 0 && value.eligibleRows < navigatorBefore.eligibleRows &&
+      value.disabled === 'false',
+    15_000
+  );
+  assert(navigatorEdge.eligibleRows < navigatorBefore.eligibleRows,
+    'live navigator edge resize must automatically refine fewer source rows');
+  assertChartNavigatorEvidence(navigatorEdge, 'live notebook navigator edge drag');
+  const focusedWindow = await renderer.evaluate(
+    focusChartNavigatorPart,
+    '.kx-chart-navigator-window'
+  );
+  assert.strictEqual(focusedWindow.focused, true);
+  await renderer.pressKey('ArrowRight');
+  const navigatorKeyboardPending = await renderer.evaluate(notebookChartNavigatorSnapshot);
+  assert(
+    navigatorKeyboardPending.window.now > navigatorEdge.window.now,
+    'live navigator ArrowRight must pan the bounded selected window'
+  );
+  assertChartNavigatorEvidence(
+    navigatorKeyboardPending,
+    'live notebook navigator keyboard pending'
+  );
+  const keyboardValueText = navigatorKeyboardPending.window.valueText;
+  await delay(750);
+  const navigatorKeyboard = await waitForRenderer(
+    'live navigator keyboard pan refinement',
+    renderer,
+    notebookChartNavigatorSnapshot,
+    value => value.window.valueText === keyboardValueText &&
+      value.status.startsWith('Selected range') &&
+      value.disabled === 'false',
+    15_000
+  );
+  assertChartNavigatorEvidence(navigatorKeyboard, 'live notebook navigator keyboard pan');
+  const focusedHome = await renderer.evaluate(
+    focusChartNavigatorPart,
+    '.kx-chart-navigator-window'
+  );
+  assert.strictEqual(focusedHome.focused, true);
+  await renderer.pressKey('Home');
+  const navigatorHome = await waitForRenderer(
+    'live navigator Home reset',
+    renderer,
+    notebookChartNavigatorSnapshot,
+    value => value.start.now === 0 && value.end.now === 100 &&
+      value.window.now === 50 && !value.status.startsWith('Selected range'),
+    8_000
+  );
+  assertChartNavigatorEvidence(navigatorHome, 'live notebook navigator Home reset');
   await renderer.evaluate(root => {
     const details = root.querySelector('details.kx-columns');
     if (details) {
@@ -4082,6 +5292,21 @@ async function exerciseLiveChartControls(renderer) {
     yPersistence,
     afterDraw,
     autoRefinements,
+    navigatorInteractions: {
+      browserPath:
+        'trusted CDP end-handle drag -> automatic selected-range refinement -> focused window ArrowRight -> automatic selected-range refinement -> focused window Home',
+      before: navigatorBefore,
+      edge: navigatorEdge,
+      keyboard: {
+        focused: focusedWindow,
+        pending: navigatorKeyboardPending,
+        settled: navigatorKeyboard,
+      },
+      home: {
+        focused: focusedHome,
+        settled: navigatorHome,
+      },
+    },
     hiddenColumns,
   };
 }
@@ -4212,6 +5437,67 @@ async function exerciseSavedSelectionSearchAndChart(
   assert.strictEqual(selection.selectedCells, 9);
   assert(selection.activeMatches > 0, 'saved active search result must remain highlighted');
   assert.strictEqual(selection.focusedTable, 'Saved KX result preview table');
+  selection.dominance = await renderer.evaluate(root => {
+    const view = root.ownerDocument.defaultView;
+    const evidence = element => {
+      const style = element ? view.getComputedStyle(element) : undefined;
+      return {
+        exists: !!element,
+        hovered: element?.matches(':hover') === true,
+        selected: element?.classList.contains('is-selected') === true,
+        search: element?.classList.contains('is-search-match') === true,
+        active: element?.classList.contains('is-active-cell') === true,
+        parity: element?.dataset.kxRowParity || '',
+        displayRow: Number(element?.dataset.row),
+        displayOrdinal: Number(element?.dataset.kxDisplayOrdinal),
+        sourceOrdinal: Number(element?.dataset.kxSourceOrdinal),
+        background: style?.backgroundColor || '',
+        outlineStyle: style?.outlineStyle || '',
+        outlineWidth: style?.outlineWidth || '',
+      };
+    };
+    const selectedCells = [...root.querySelectorAll(
+      '.kx-table-wrap td[role="gridcell"].is-selected'
+    )];
+    return {
+      selected: evidence(
+        selectedCells.find(cell => cell.matches(':hover')) || selectedCells[0]
+      ),
+      search: evidence(root.querySelector(
+        '.kx-table-wrap td[role="gridcell"].is-search-match:not(.is-selected)'
+      )),
+      active: evidence(root.querySelector(
+        '.kx-table-wrap td[role="gridcell"].is-active-cell'
+      )),
+      plainOdd: evidence(root.querySelector(
+        '.kx-table-wrap td[role="gridcell"].row-odd:not(.is-selected):not(.is-search-match)'
+      )),
+      plainEven: evidence(root.querySelector(
+        '.kx-table-wrap td[role="gridcell"].row-even:not(.is-selected):not(.is-search-match)'
+      )),
+    };
+  });
+  assert(selection.dominance.selected.exists && selection.dominance.selected.selected &&
+    selection.dominance.selected.hovered,
+    'saved selected state must remain dominant over row striping and hover');
+  assert(selection.dominance.search.exists && selection.dominance.search.search &&
+    !selection.dominance.search.selected,
+  'saved search state must remain dominant over row striping');
+  assert(selection.dominance.active.exists && selection.dominance.active.active,
+    'saved focused cell must expose the active-cell state');
+  assert.notStrictEqual(selection.dominance.active.outlineStyle, 'none');
+  assert.notStrictEqual(
+    selection.dominance.selected.background,
+    selection.dominance.search.background
+  );
+  assert.notStrictEqual(
+    selection.dominance.search.background,
+    selection.dominance.plainOdd.background
+  );
+  assert.notStrictEqual(
+    selection.dominance.plainOdd.background,
+    selection.dominance.plainEven.background
+  );
   console.log('Notebook visual interaction: saved range selection passed');
   const savedGridSettingChange = await renderer.evaluate(root => {
     const view = root.ownerDocument.defaultView;
@@ -4269,9 +5555,10 @@ async function exerciseSavedSelectionSearchAndChart(
       throw new Error('saved Y series control missing');
     }
     if (!details.open) {
-      details.querySelector('summary')?.click();
+      details.open = true;
+      details.dispatchEvent(new details.ownerDocument.defaultView.Event('toggle'));
     }
-    return true;
+    return details.open;
   });
   await waitForRenderer(
     'saved Y control opened',
@@ -4436,7 +5723,44 @@ async function exerciseSavedSelectionSearchAndChart(
     root => root.querySelector('.kx-chart-host .u-select')?.getBoundingClientRect().width || 0,
     value => value <= 1
   );
-  const zoomDomainTicks = await waitForCanvasTicks('zoomed chart domain ticks', renderer);
+  const savedNavigatorBefore = await renderer.evaluate(notebookChartNavigatorSnapshot);
+  assertChartNavigatorEvidence(savedNavigatorBefore, 'saved notebook navigator before pan');
+  const savedWindowPoints = await renderer.evaluate(
+    chartNavigatorDragPoints,
+    '.kx-chart-navigator',
+    'window',
+    0.03
+  );
+  await renderer.drag(
+    savedWindowPoints.start.x,
+    savedWindowPoints.start.y,
+    savedWindowPoints.end.x,
+    savedWindowPoints.end.y
+  );
+  await delay(600);
+  const savedNavigatorAfter = await waitForRenderer(
+    'saved navigator trusted selected-window local pan',
+    renderer,
+    notebookChartNavigatorSnapshot,
+    value => value.window.now > savedNavigatorBefore.window.now &&
+      value.disabled === 'false',
+    8_000
+  );
+  assertChartNavigatorEvidence(savedNavigatorAfter, 'saved notebook navigator after pan');
+  assert(
+    Math.abs(
+      (savedNavigatorAfter.end.now - savedNavigatorAfter.start.now) -
+      (savedNavigatorBefore.end.now - savedNavigatorBefore.start.now)
+    ) < 0.001,
+    'saved navigator window drag must pan locally without resizing its selected range'
+  );
+  await installCanvasTextRecorder(renderer);
+  await clearCanvasTextRecorder(renderer);
+  await forceChartRedraw(renderer);
+  const zoomDomainTicks = await waitForCanvasTicks(
+    'zoomed and navigator-panned chart domain ticks',
+    renderer
+  );
   assert(
     zoomDomainTicks.maximum - zoomDomainTicks.minimum <
       fullDomainTicks.maximum - fullDomainTicks.minimum &&
@@ -4564,6 +5888,11 @@ async function exerciseSavedSelectionSearchAndChart(
     afterSetting,
     afterSettingTicks,
     zoomSelectionWidth: zoomWidth,
+    navigatorInteractions: {
+      browserPath: 'trusted CDP selected-window drag -> bounded local saved-data rebuild',
+      before: savedNavigatorBefore,
+      after: savedNavigatorAfter,
+    },
     resetSelectionWidth: resetWidth,
     resetDomainTicks,
   };
@@ -5392,6 +6721,14 @@ async function assertSavedChartFamilies(cdpPort) {
             ? dataUrl.slice('data:image/png;base64,'.length)
             : '';
           const decoded = encoded ? root.ownerDocument.defaultView.atob(encoded) : '';
+          const navigator = root.querySelector('.kx-chart-navigator');
+          const navigatorWindow = navigator?.querySelector('.kx-chart-navigator-window');
+          const navigatorStart = navigator?.querySelector(
+            '.kx-chart-navigator-handle.is-start'
+          );
+          const navigatorEnd = navigator?.querySelector(
+            '.kx-chart-navigator-handle.is-end'
+          );
           return {
             type: typeSelect?.value || '',
             canvases: host?.querySelectorAll('canvas').length || 0,
@@ -5404,6 +6741,21 @@ async function assertSavedChartFamilies(cdpPort) {
               .map(character => character.charCodeAt(0).toString(16).padStart(2, '0'))
               .join(''),
             notice: host?.querySelector('.kx-notice')?.textContent || '',
+            forbiddenControls: [...root.querySelectorAll('.kx-chart-controls button')]
+              .map(button => button.textContent?.trim() || '')
+              .filter(label => ['Pan left', 'Pan right', 'Refine zoom', 'Refine view']
+                .includes(label)),
+            navigator: {
+              exists: !!navigator,
+              label: navigator?.getAttribute('aria-label') || '',
+              overviewPath: navigator?.querySelector(
+                '.kx-chart-navigator-overview path'
+              )?.getAttribute('d') || '',
+              roles: [navigatorWindow, navigatorStart, navigatorEnd]
+                .map(element => element?.getAttribute('role') || ''),
+              values: [navigatorWindow, navigatorStart, navigatorEnd]
+                .map(element => Number(element?.getAttribute('aria-valuenow'))),
+            },
           };
         },
         value => value.canvases > 0 &&
@@ -5413,7 +6765,14 @@ async function assertSavedChartFamilies(cdpPort) {
           value.exportPngDisabled === false &&
           value.pngBytes > 1_000 &&
           value.pngSignature === '89504e470d0a1a0a' &&
-          !value.notice,
+          !value.notice &&
+          value.forbiddenControls.length === 0 &&
+          value.navigator.exists &&
+          value.navigator.label === 'Chart X navigator' &&
+          value.navigator.overviewPath.length > 8 &&
+          value.navigator.roles.every(role => role === 'slider') &&
+          value.navigator.values.every(number =>
+            Number.isFinite(number) && number >= 0 && number <= 100),
         15_000
       );
       assert.strictEqual(evidence.type, type);
@@ -5683,7 +7042,7 @@ async function assertNarrowLayout(cdpPort) {
     const savedEvidence = await saved.evaluate(root => ({
       width: Math.round(root.getBoundingClientRect().width),
       notice: root.querySelector('.kx-notice')?.textContent || '',
-      columnCount: root.querySelector('[aria-label="Saved KX result preview table"]')
+      columnCount: root.querySelector('.kx-table-wrap[role="grid"][aria-colcount]')
         ?.getAttribute('aria-colcount') || '',
       buttons: [...root.querySelectorAll('button')].map(button => button.textContent?.trim())
         .filter(Boolean),
@@ -5703,7 +7062,7 @@ async function assertNarrowLayout(cdpPort) {
     assert.match(savedEvidence.notice, /Omitted content is not stored in this notebook/);
     assert.strictEqual(savedEvidence.columnCount, '4');
     assert.strictEqual(liveEvidence.columnCount, '5');
-    for (const label of ['Open saved preview', 'Rerun cell']) {
+    for (const label of ['Open historical saved preview', 'Rerun cell']) {
       assert(savedEvidence.buttons.includes(label), `narrow saved preview must retain ${label}`);
     }
     assert.strictEqual(savedEvidence.settings, 'Settings');
@@ -5712,6 +7071,71 @@ async function assertNarrowLayout(cdpPort) {
       saved: savedEvidence,
       live: liveEvidence,
     };
+  } finally {
+    saved.close();
+    live.close();
+  }
+}
+
+async function inspectNarrowRowStriping(cdpPort) {
+  const saved = await connectNotebookRenderer(cdpPort, 'Saved preview only');
+  const live = await connectNotebookRenderer(cdpPort, 'Live full result');
+  try {
+    await saved.evaluate(root => {
+      const view = root.ownerDocument.defaultView;
+      const sort = root.querySelector(
+        '.kx-saved-sort[data-kx-source-ordinal="2"]'
+      );
+      if (!(sort instanceof view.HTMLButtonElement)) {
+        throw new Error('narrow saved price sort header missing');
+      }
+      sort.focus();
+      sort.dispatchEvent(new view.KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        key: 'Enter',
+      }));
+      return true;
+    });
+    const savedEvidence = await waitForRenderer(
+      'narrow saved displayed-row striping and sort dominance',
+      saved,
+      displayedRowStripingSnapshot,
+      value => value.width > 250 && value.width < 560 &&
+        value.headers.length === 3 && value.rows.length >= 2 &&
+        value.headers.some(column => column.sortedHeader) &&
+        value.rows.some(row => row.cells.some(column => column.sortedColumn)),
+      8_000,
+      [
+        '.kx-table-wrap th[role="columnheader"]',
+        '.kx-table-wrap td[role="gridcell"][data-row]',
+      ]
+    );
+    const liveEvidence = await waitForRenderer(
+      'narrow live displayed-row striping',
+      live,
+      displayedRowStripingSnapshot,
+      value => value.width > 250 && value.width < 560 &&
+        value.headers.length >= 2 && value.rows.length >= 2,
+      8_000,
+      [
+        '.kx-live-header[role="columnheader"]',
+        '.kx-live-cell[role="gridcell"][data-row]',
+      ]
+    );
+    assertDisplayedRowStriping(savedEvidence, 'narrow saved table');
+    assertDisplayedRowStriping(liveEvidence, 'narrow live table', {
+      minimumColumns: 2,
+    });
+    assert.match(savedEvidence.themeClasses, /vscode-dark/);
+    assert.match(liveEvidence.themeClasses, /vscode-dark/);
+    const sortedHeader = savedEvidence.headers.find(column => column.sortedHeader);
+    const sortedCell = savedEvidence.rows[0].cells.find(column => column.sortedColumn);
+    assert.strictEqual(sortedHeader?.sourceOrdinal, 2);
+    assert.strictEqual(sortedCell?.sourceOrdinal, 2);
+    assert.notStrictEqual(sortedHeader?.boxShadow, 'none');
+    assert.notStrictEqual(sortedCell?.boxShadow, 'none');
+    return { saved: savedEvidence, live: liveEvidence };
   } finally {
     saved.close();
     live.close();
@@ -5729,12 +7153,16 @@ async function assertNarrowChartOverlay(renderer) {
       .map(button => button.textContent?.trim())
       .filter(Boolean),
   }));
+  initial.navigator = await renderer.evaluate(notebookChartNavigatorSnapshot);
   assert(initial.width > 250 && initial.width < 560);
   assert(initial.canvases > 0);
   assert(initial.chartWidth > 240 && initial.chartWidth <= initial.width);
   for (const label of ['Render', 'Export PNG', 'Reset zoom']) {
     assert(initial.controls.includes(label), `narrow chart must retain ${label}`);
   }
+  assert(!initial.controls.some(label =>
+    ['Pan left', 'Pan right', 'Refine zoom', 'Refine view'].includes(label)));
+  assertChartNavigatorEvidence(initial.navigator, 'narrow saved chart navigator');
 
   await renderer.evaluate(root => {
     const details = root.querySelector('.kx-chart-controls details.kx-series-control');
@@ -5888,7 +7316,12 @@ function visualInteractionBoundaries() {
       coverage: 'test/run.js — shared result export metadata, PNG validation, and XLSX generation; shared KX Results panel/notebook UI parity contract',
     },
     {
-      actions: ['Open in KX Results', 'Open saved preview'],
+      actions: [
+        'Open in KX Results',
+        'Open saved full result',
+        'Open historical saved preview',
+        'Open saved preview',
+      ],
       reason: 'Opening the full panel destroys the deterministic inline screenshot state and is asserted at the validated host-message/runtime boundary.',
       coverage: 'test/run.js — shared KX Results panel/notebook UI parity contract; mixed q notebook command and status routing',
     },
@@ -6127,6 +7560,24 @@ class NotebookRendererCdp {
         code: 'Escape',
         windowsVirtualKeyCode: 27,
         nativeVirtualKeyCode: 27,
+      },
+      ArrowLeft: {
+        key: 'ArrowLeft',
+        code: 'ArrowLeft',
+        windowsVirtualKeyCode: 37,
+        nativeVirtualKeyCode: 37,
+      },
+      ArrowRight: {
+        key: 'ArrowRight',
+        code: 'ArrowRight',
+        windowsVirtualKeyCode: 39,
+        nativeVirtualKeyCode: 39,
+      },
+      Home: {
+        key: 'Home',
+        code: 'Home',
+        windowsVirtualKeyCode: 36,
+        nativeVirtualKeyCode: 36,
       },
     };
     const descriptor = keys[key];
@@ -6367,8 +7818,8 @@ function liveResultEvidence(notebook) {
   return {
     hasOpaqueLiveReference: !!reference,
     rowCount: payload.result.rowCount,
-    savedPreviewRowCount: payload.result.previewRowCount,
-    truncatedSavedPreview: payload.result.truncated,
+    savedRowCount: payload.result.previewRowCount,
+    savedOutputTruncated: payload.result.truncated,
   };
 }
 

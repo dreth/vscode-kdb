@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.15",
+  "version": "0.2.18",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -95,8 +95,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.15.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.15.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.18.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.18.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -325,7 +325,7 @@
       },
       {
         "command": "vscode-kdb.openNotebookPreviewInResults",
-        "title": "KX: Open Saved Notebook Preview in Results Panel",
+        "title": "KX: Open Saved Notebook Result in Results Panel",
         "icon": "$(open-preview)",
         "enablement": "vscode-kdb.notebookResultAvailable"
       }
@@ -646,13 +646,13 @@
             "panel",
             "both"
           ],
-          "description": "Automatic presentation for Python-helper KX MIME output: inline, saved-preview panel, or both. Direct IPC output from Run q Cell (KX) or the optional controller always stays inline beneath the cell; use Open full result in KX Results for an explicit live handoff. Saved or reopened first-party v2 output retains its selected preview or full persistence mode; legacy and truncated previews cannot recover omitted rows without rerunning."
+          "description": "Automatic presentation for Python-helper KX MIME output: inline, saved-preview panel, or both. Direct IPC output from Run q Cell (KX) or the optional controller always stays inline beneath the cell and automatically persists its complete exactly represented rich result. Historical saved previews remain previews until rerun with the current cell source."
         },
         "vscode-kdb.notebook.enableDirectController": {
           "type": "boolean",
           "scope": "application",
           "default": false,
-          "description": "Register the optional legacy q-only KX q (Direct IPC) notebook controller and offer it in VS Code's kernel picker. Disabled by default for the Python-first mixed workflow: Make q Cell (KX), Choose Notebook q Target, and Run q Cell (KX) remain available without registering or switching to a KX kernel. While disabled, a previously saved KX controller selection cannot be restored because that controller is not registered."
+          "description": "Register the optional pure-q KX q (Direct IPC) notebook controller and offer it in VS Code's kernel picker. Disabled by default so the Python-first mixed workflow remains the default: Make q Cell (KX), Activate q Connection, and Run q Cell (KX) remain available without registering or switching to a KX kernel. While disabled, a previously saved KX controller selection cannot be restored because that controller is not registered."
         },
         "vscode-kdb.notebook.maxOutputRows": {
           "type": "integer",
@@ -660,7 +660,7 @@
           "default": 20,
           "minimum": 1,
           "maximum": 10000,
-          "description": "Maximum rows persisted in a new KX notebook preview (20 by default). It never limits the current in-memory live result or an explicitly preserved full v2 result. Direct IPC output and newly tagged %%q cells use this preview bound; the tag command writes it into the magic and kx_notebook validates its explicit limit."
+          "description": "Maximum preview rows written by the optional Tag command for the separate Python %%q helper (20 by default). It never limits first-party Direct IPC rich output, which automatically persists every exactly representable row."
         },
         "vscode-kdb.notebook.maxOutputBytes": {
           "type": "integer",
@@ -668,13 +668,7 @@
           "default": 1000000,
           "minimum": 16384,
           "maximum": 10000000,
-          "description": "Maximum portable MIME bytes for new Direct IPC previews and newly tagged %%q cells. It does not limit an explicitly preserved full v2 rich result. Direct output also carries a bounded text/plain fallback; the Python helper applies its explicit budget across rich JSON and static HTML/plain fallbacks. Extension-managed connection credentials, session objects, and IPC handles are excluded."
-        },
-        "vscode-kdb.notebook.preserveFullResultByDefault": {
-          "type": "boolean",
-          "scope": "window",
-          "default": false,
-          "description": "Check Preserve full result for new first-party Direct IPC notebook output. This directly persists every exactly representable row, column, and cell without preview row/byte limits; an ordinary technical failure is reported if exact representation is impossible. Extension-managed connection credentials, session objects, and IPC handles are excluded."
+          "description": "Maximum portable bytes for newly tagged Python %%q helper output and for technically necessary Direct IPC static fallbacks such as text/plain. It never truncates the authoritative first-party Direct IPC rich KX output; exact rich-output representation failures are reported explicitly. Extension-managed connection credentials, session objects, and IPC handles are excluded."
         },
         "vscode-kdb.features.serverExplorer": {
           "type": "boolean",
@@ -784,10 +778,10 @@
         "vscode-kdb.queryTimeoutMs": {
           "type": "integer",
           "scope": "application",
-          "default": 1800000,
+          "default": 3600000,
           "minimum": 0,
           "maximum": 2147483647,
-          "description": "Global direct q IPC query response timeout in milliseconds. Defaults to 1800000 (30 minutes), independently of the TCP connect and q IPC handshake timeout. Use 0 to disable only the query response deadline."
+          "description": "Global direct q IPC query response timeout in milliseconds. Defaults to 3600000 (60 minutes), independently of the TCP connect and q IPC handshake timeout. Use 0 to disable only the query response deadline."
         },
         "vscode-kdb.performance.trace": {
           "type": "boolean",
@@ -907,15 +901,15 @@
           "type": "integer",
           "default": 3000,
           "minimum": 1,
-          "description": "Deprecated compatibility setting. Refined chart ranges now use the fixed 3,000-through-7,000 density contract.",
-          "deprecationMessage": "This setting is ignored. Refined ranges keep all eligible density through 7,000 rows and reduce larger ranges to about 7,000."
+          "description": "Deprecated compatibility setting. Initial/full and ranged charts now use the fixed ordinary-series density contract.",
+          "deprecationMessage": "This setting is ignored. Ordinary line, scatter, and step charts render all eligible finite points below 7,000 and target exactly 7,000 at or above that count."
         },
         "vscode-kdb.results.viewer.chartZoomMaxSampledPoints": {
           "type": "integer",
           "default": 7000,
           "minimum": 1,
-          "description": "Deprecated compatibility setting. Refined chart ranges now use a fixed target of about 7,000 points above 7,000 eligible rows.",
-          "deprecationMessage": "This setting is ignored. Refined ranges keep all eligible density through 7,000 rows and reduce larger ranges to about 7,000."
+          "description": "Deprecated compatibility setting. Initial/full and ranged ordinary line, scatter, and step charts now target exactly 7,000 points when at least that many eligible finite points exist.",
+          "deprecationMessage": "This setting is ignored. Ordinary line, scatter, and step charts render all eligible finite points below 7,000 and target exactly 7,000 at or above that count."
         },
         "vscode-kdb.results.density": {
           "type": "string",
@@ -1014,6 +1008,18 @@
           "type": "boolean",
           "default": false,
           "description": "Skip large-result sort confirmation warnings."
+        },
+        "vscode-kdb.results.largeSortWarningRowThreshold": {
+          "type": "integer",
+          "default": 5000000,
+          "minimum": 1,
+          "maximum": 2147483647,
+          "description": "Row threshold above which sorting the current displayed result requires confirmation. Exactly the configured threshold does not warn; the default first warns at 5,000,001 rows. The hideLargeSortWarnings setting remains the global opt-out."
+        },
+        "vscode-kdb.results.showColumnSummaryStatistics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Show bounded per-column summary statistics in the KX Results panel. Statistics use the current decoded result without rerunning q; large results are deterministically sampled and labelled partial."
         },
         "vscode-kdb.results.elapsedTimeDisplay": {
           "type": "string",

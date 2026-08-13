@@ -18,6 +18,7 @@ import {
   connectionTestEndpoint,
   connectionTestNamespaceQuery,
   connectionTestNamespaceResultIsSafe,
+  connectionTestQueryResultIsSafe,
 } from './connection-test';
 import { ConnectionStore } from './connection-store';
 import type { KxDiagnostics } from './diagnostics';
@@ -289,7 +290,7 @@ export class ConnectionManager implements vscode.Disposable {
       }
       reportPhase('query');
       const result = await client.query(CONNECTION_TEST_QUERY);
-      if (result !== false) {
+      if (!connectionTestQueryResultIsSafe(result)) {
         throw new ConnectionTestError('query', endpoint);
       }
       operationFailed = false;
