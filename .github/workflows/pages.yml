@@ -21,6 +21,8 @@ on:
 
 permissions:
   contents: read
+  pages: write
+  id-token: write
 
 concurrency:
   group: pages
@@ -34,6 +36,9 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Configure GitHub Pages
+        uses: actions/configure-pages@v5
 
       - name: Set up Python
         uses: actions/setup-python@v6
@@ -57,9 +62,22 @@ jobs:
             exit 1
           fi
 
-      - name: Upload generated docs artifact
+      - name: Upload GitHub Pages artifact
         if: github.event_name != 'pull_request'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-pages-artifact@v4
         with:
-          name: github-pages-docs
           path: ./docs
+
+  deploy:
+    name: Deploy GitHub Pages
+    if: github.event_name != 'pull_request'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+
+    steps:
+      - name: Deploy GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

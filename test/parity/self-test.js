@@ -7,6 +7,7 @@ const os = require('os');
 const path = require('path');
 const JSZip = require('jszip');
 
+const { loadPrivateColumnarToXlsx } = require('./loaders');
 const fixtures = require('./fixtures');
 const { buildMachineSummary, buildSummary } = require('./summary');
 const {
@@ -38,6 +39,7 @@ const tests = [
   ['chart canonicalization preserves data contracts', testCanonicalCharts],
   ['local HTTP canonicalization preserves formats', testCanonicalHttp],
   ['XLSX canonicalization ignores ZIP metadata', testCanonicalXlsx],
+  ['private panel loader mocks transitive VS Code dependencies', testTransitiveVscodeMock],
   ['status summaries classify every outcome', testStatusSummary],
   ['revision and reference dirty-state checks fail closed', testReferenceGuards],
   ['runner preflight failures are transparent', testRunnerPreflightFailures],
@@ -78,6 +80,10 @@ function testFixtures() {
     ['line', 'scatter', 'step', 'bar', 'box', 'candlestick', 'line', 'candlestick']
   );
   assert.deepStrictEqual(fixtures.createExportFixture().formats, ['tsv', 'csv', 'json', 'ndjson', 'html', 'markdown']);
+  assert.deepStrictEqual(
+    fixtures.createResultTableInteractionFixture().rowClasses,
+    ['row-even', 'row-odd', 'row-even', 'row-odd']
+  );
   assert.ok(fixtures.createLocalServerFixture().requests.some(request => request.id === 'invalid-slice'));
   assert.ok(fixtures.LIVE_QUERY_FIXTURES.some(fixture => fixture.family === 'error'));
 }
@@ -91,6 +97,31 @@ function testCanonicalQValues() {
     { $bigint: '42' },
   ]);
   assert.deepStrictEqual(canonicalQValue({ z: 1, a: 2 }), { a: 2, z: 1 });
+
+  const vectorType = Symbol.for('vscode-kdb.qVectorType');
+  const vectorAttribute = Symbol.for('vscode-kdb.qVectorAttribute');
+  const tagged = (type, values, attribute = 0) => {
+    const vector = [...values];
+    Object.defineProperty(vector, vectorType, { value: type });
+    Object.defineProperty(vector, vectorAttribute, { value: attribute });
+    return vector;
+  };
+  assert.notDeepStrictEqual(
+    canonicalQValue({ qtype: 'atom', type: 'int', value: 1 }),
+    canonicalQValue(tagged('int', [1]))
+  );
+  assert.notDeepStrictEqual(
+    canonicalQValue({ qtype: 'atom', type: 'symbol', value: 'a' }),
+    canonicalQValue(tagged('char', [97]))
+  );
+  assert.deepStrictEqual(canonicalQValue(tagged('timestamp', [42n], 1)), {
+    $q: 'vector', type: 'timestamp', attribute: 1, values: [{ $bigint: '42' }],
+  });
+  assert.deepStrictEqual(
+    canonicalQValue({ qtype: 'atom', type: 'float', value: { special: 'negativeInfinity' } }),
+    { $q: 'atom', type: 'float', value: { special: 'negativeInfinity' } }
+  );
+  assert.deepStrictEqual(canonicalQValue({ qtype: 'generalNull' }), { $q: 'generalNull' });
 
   const table = {
     qtype: 'table',
@@ -292,6 +323,25 @@ async function testCanonicalXlsx() {
     (await canonicalXlsxStructure(first)).entries.map(entry => entry.path),
     ['[Content_Types].xml', 'xl/worksheets/sheet1.xml']
   );
+}
+
+function testTransitiveVscodeMock() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'vscode-kdb-parity-loader-'));
+  try {
+    const panel = path.join(root, 'panel.js');
+    fs.writeFileSync(
+      path.join(root, 'transitive.js'),
+      `'use strict';\nconst vscode = require('vscode');\nmodule.exports = vscode.ConfigurationTarget.Global;\n`
+    );
+    fs.writeFileSync(
+      panel,
+      `'use strict';\nconst target = require('./transitive');\nfunction columnarToXlsx() { return target; }\n`
+    );
+    const loaded = loadPrivateColumnarToXlsx(root, 'panel.js', 'transitive VS Code fixture');
+    assert.strictEqual(loaded(), 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 }
 
 function testStatusSummary() {

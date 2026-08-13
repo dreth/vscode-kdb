@@ -249,20 +249,28 @@ function qResponse(payload, options) {
   return qMessage(payload, { ...(options || {}), messageType: 2 });
 }
 
+function canonicalAtom(type, value) {
+  return { $q: 'atom', type, value };
+}
+
+function canonicalVector(type, values, attribute = 0) {
+  return { $q: 'vector', type, attribute, values };
+}
+
 function createIpcFixtures() {
   return [
     {
       id: 'scalar-int',
       family: 'primitive',
       payload: qIntAtom(42),
-      expectedCanonical: 42,
+      expectedCanonical: canonicalAtom('int', 42),
       displayCases: [{ options: {}, mode: 'grid', kind: 'scalar' }],
     },
     {
       id: 'vector-int',
       family: 'vector',
       payload: qIntVector([1, -2, 3]),
-      expectedCanonical: [1, -2, 3],
+      expectedCanonical: canonicalVector('int', [1, -2, 3]),
       displayCases: [
         { options: {}, mode: 'grid', kind: 'list' },
         { options: { listDisplayStrategy: 'qText' }, mode: 'text', kind: 'list' },
@@ -272,7 +280,11 @@ function createIpcFixtures() {
       id: 'mixed-list',
       family: 'list',
       payload: qGenericList([qIntAtom(1), qCharVector('alpha'), qBooleanAtom(true)]),
-      expectedCanonical: [1, 'alpha', true],
+      expectedCanonical: canonicalVector('mixed', [
+        canonicalAtom('int', 1),
+        canonicalVector('char', [...Buffer.from('alpha', 'utf8')]),
+        canonicalAtom('boolean', true),
+      ]),
       displayCases: [
         { options: {}, mode: 'grid', kind: 'list' },
         { options: { listDisplayStrategy: 'qText' }, mode: 'text', kind: 'list' },
@@ -285,8 +297,8 @@ function createIpcFixtures() {
       expectedCanonical: {
         $q: 'dictionary',
         entries: [
-          { key: 'alpha', value: 10 },
-          { key: 'beta', value: 20 },
+          { key: canonicalAtom('symbol', 'alpha'), value: canonicalAtom('int', 10) },
+          { key: canonicalAtom('symbol', 'beta'), value: canonicalAtom('int', 20) },
         ],
       },
       displayCases: [
@@ -306,8 +318,8 @@ function createIpcFixtures() {
         columns: ['sym', 'size', 'price'],
         rowCount: 2,
         rows: [
-          ['AAPL', 100, 123.45],
-          ['MSFT', 250, 234.56],
+          [canonicalAtom('symbol', 'AAPL'), canonicalAtom('int', 100), canonicalAtom('float', 123.45)],
+          [canonicalAtom('symbol', 'MSFT'), canonicalAtom('int', 250), canonicalAtom('float', 234.56)],
         ],
       },
       displayCases: [
@@ -329,8 +341,8 @@ function createIpcFixtures() {
         columns: ['sym', 'bid', 'ask'],
         rowCount: 2,
         rows: [
-          ['AAPL', 123.4, 123.5],
-          ['MSFT', 234.5, 234.6],
+          [canonicalAtom('symbol', 'AAPL'), canonicalAtom('float', 123.4), canonicalAtom('float', 123.5)],
+          [canonicalAtom('symbol', 'MSFT'), canonicalAtom('float', 234.5), canonicalAtom('float', 234.6)],
         ],
       },
       displayCases: [{ options: {}, mode: 'grid', kind: 'keyed table' }],
@@ -453,13 +465,13 @@ const SCRIPT_GROUPING_FIXTURES = Object.freeze([
     id: 'lf-multiline-script',
     text: 'selectionA:10\nselectionB:20\nselectionA+selectionB',
     expectedExecutionKind: 'script',
-    expectedLiveResult: 30,
+    expectedLiveResult: canonicalAtom('long', '30'),
   },
   {
     id: 'crlf-multiline-script',
     text: 'scriptFn:{[x]\r\n x+1\r\n }\r\nscriptFn 4',
     expectedExecutionKind: 'script',
-    expectedLiveResult: 5,
+    expectedLiveResult: canonicalAtom('long', '5'),
   },
 ]);
 
@@ -575,8 +587,8 @@ function createChartViewportFixture() {
       { id: 'overspan', range: { min: -50, max: 150 }, expected: { min: 0, max: 100 } },
     ],
     panCases: [
-      { id: 'button-left', range: { min: 20, max: 40 }, fraction: -0.2, expected: { min: 16, max: 36 } },
-      { id: 'button-right', range: { min: 20, max: 40 }, fraction: 0.2, expected: { min: 24, max: 44 } },
+      { id: 'navigator-left', range: { min: 20, max: 40 }, fraction: -0.2, expected: { min: 16, max: 36 } },
+      { id: 'navigator-right', range: { min: 20, max: 40 }, fraction: 0.2, expected: { min: 24, max: 44 } },
       { id: 'right-clamp', range: { min: 90, max: 100 }, fraction: 0.2, expected: { min: 90, max: 100 } },
     ],
     pixelCases: [
@@ -767,16 +779,28 @@ function createOversizedLocalServerFixture(fullExportCellLimit = 1000000) {
 }
 
 const LIVE_QUERY_FIXTURES = Object.freeze([
-  { id: 'scalar', family: 'primitive', query: '42', expectedCanonical: 42 },
-  { id: 'vector', family: 'vector', query: '1 2 3', expectedCanonical: [1, 2, 3] },
-  { id: 'mixed-list', family: 'list', query: '(1;"alpha";1b)', expectedCanonical: [1, 'alpha', true] },
+  { id: 'scalar', family: 'primitive', query: '42', expectedCanonical: canonicalAtom('long', '42') },
+  { id: 'vector', family: 'vector', query: '1 2 3', expectedCanonical: canonicalVector('long', ['1', '2', '3']) },
+  {
+    id: 'mixed-list',
+    family: 'list',
+    query: '(1;"alpha";1b)',
+    expectedCanonical: canonicalVector('mixed', [
+      canonicalAtom('long', '1'),
+      canonicalVector('char', [...Buffer.from('alpha', 'utf8')]),
+      canonicalAtom('boolean', true),
+    ]),
+  },
   {
     id: 'dictionary',
     family: 'dictionary',
     query: '`alpha`beta!10 20',
     expectedCanonical: {
       $q: 'dictionary',
-      entries: [{ key: 'alpha', value: 10 }, { key: 'beta', value: 20 }],
+      entries: [
+        { key: canonicalAtom('symbol', 'alpha'), value: canonicalAtom('long', '10') },
+        { key: canonicalAtom('symbol', 'beta'), value: canonicalAtom('long', '20') },
+      ],
     },
   },
   {
@@ -808,8 +832,8 @@ const LIVE_QUERY_FIXTURES = Object.freeze([
 ]);
 
 const LIVE_NAMESPACE_FIXTURES = Object.freeze([
-  { id: 'root-passthrough', namespace: '.', query: '1+1', expected: 2 },
-  { id: 'analytics-query', namespace: '.analytics', query: 'answer', expected: 42 },
+  { id: 'root-passthrough', namespace: '.', query: '1+1', expected: canonicalAtom('long', '2') },
+  { id: 'analytics-query', namespace: '.analytics', query: 'answer', expected: canonicalAtom('long', '42') },
   { id: 'analytics-error', namespace: '.analytics', query: 'missingCrossParityNamespaceSymbol', expectedErrorPattern: /missingCrossParityNamespaceSymbol/ },
 ]);
 

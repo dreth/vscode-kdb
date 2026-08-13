@@ -1,6 +1,6 @@
 # Running q
 
-The `.q` editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. In notebooks, Python remains selected by default and **Run q Cell (KX)** executes complete q cells through an explicitly chosen Direct IPC target. Python `%%q` cells use a separate explicit helper path described in [Jupyter/IPython Notebooks](notebooks.md).
+The `.q` editor commands execute q text; they do not parse SQL, split SQL statements, or infer a SQLTools-style session. In notebooks, Python remains selected by default and **Run q Cell (KX)** executes complete q cells through the globally active Direct IPC profile. Python `%%q` cells use a separate explicit helper path described in [Jupyter/IPython Notebooks](notebooks.md).
 
 ## Commands and keybindings
 
@@ -12,7 +12,7 @@ The `.q` editor commands execute q text; they do not parse SQL, split SQL statem
 
 A code lens at the top of a q document also runs the whole script.
 
-These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected Python/Jupyter controller. Separately, only while a q code-cell editor has text focus, KX binds `Ctrl+Enter` / `Cmd+Enter` to run and stay, `Shift+Enter` to run and move next, and `Alt+Enter` / `Option+Enter` to run and insert below. Move/insert occurs only after an executed result. The guards do not match Python, Markdown, output/cell-container focus, or ordinary editors. User/keymap bindings may override defaults, so the leading q-cell action remains available from the toolbar, context menu, and Command Palette. If the optional q-only controller is enabled and selected, normal notebook Run belongs to that controller and the mixed actions stand down.
+These editor keybindings are gated to normal q text editors. VS Code delegates normal notebook Run to the selected Python/Jupyter controller. Separately, only while a q code-cell editor has text focus, KX binds `Ctrl+Enter` / `Cmd+Enter` to run and stay, `Shift+Enter` to run and move next, and `Alt+Enter` / `Option+Enter` to run and insert below. Move/insert occurs only after an executed result. The guards do not match Python, Markdown, output/cell-container focus, or ordinary editors. User/keymap bindings may override defaults, so the leading q-cell action remains available from the toolbar, context menu, and Command Palette. If the optional pure-q controller is enabled and selected, normal notebook Run belongs to that controller and the mixed actions stand down.
 
 ## Notebook commands
 
@@ -25,11 +25,11 @@ These editor keybindings are gated to normal q text editors. VS Code delegates n
 | **KX: Restore Notebook Cell Language** | Restores selected code cells to the registered notebook default resolved from Jupyter metadata. It preserves source, `%%q`, KX metadata, and output. |
 | **KX: Tag Notebook Cell as q** | Sets actual q language first, then preserves/inserts one durable `%%q --max-rows ... --max-bytes ...` marker and merges versioned `vscode-kdb` metadata without wiping unrelated metadata. It does not execute the cell. |
 | **Prepare this q cell for the active Python kernel** | Contextual action for a q-language cell without `%%q`; adds only the marker/KX metadata. It does not restore or execute the cell. |
-| **KX: Open Saved Notebook Preview in Results Panel** | Opens only a valid bounded KX MIME preview already saved on the selected cell. It never reruns q or recovers omitted rows. |
+| **KX: Open Saved Notebook Result in Results Panel** | Opens the validated rows already saved on the selected cell: every row from current first-party complete v2 output, or bounded rows from a historical/Python-helper preview. It never reruns q or recovers omitted rows. |
 
-For the default workflow, keep Python selected, use **Make q Cell (KX)** for q language/highlighting, star one active KX connection, and use **Run q Cell (KX)**. Python cells still use normal Jupyter Run. Every Direct IPC run resolves only the active profile; legacy per-notebook target metadata is ignored, connected non-active profiles never become fallback routes, and no active profile prompts for explicit activation. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait.
+For the default workflow, keep Python selected, use **Make q Cell (KX)** for q language/highlighting, star one active KX connection, and use **Run q Cell (KX)**. Python cells still use normal Jupyter Run. Every Direct IPC run resolves only the active profile; legacy per-notebook target metadata is ignored, connected non-active profiles never become fallback routes, and no active profile prompts for explicit activation. Mixed output is a normal undoable notebook edit after q finishes, not a native KX kernel execution; it marks the notebook dirty and is abandoned if that q cell changes during the wait. Every successful first-party run automatically saves complete exact rich v2 output. Clear it with VS Code/Jupyter's native **Clear Cell Output** or **Clear All Outputs** actions.
 
-For an explicitly requested q-only workflow, enable `vscode-kdb.notebook.enableDirectController`, select **KX q (Direct IPC)**, and use normal Run through the active profile. Both extension Direct IPC paths reject a leading `%%q` and use the same client-side complete-source grouping as editor scripts. For the separate Python-kernel route, install `kx-notebook==0.1.0`, leave a Python-language cell as Python, load `kx_notebook`, connect with `%kx connect`, and run a leading `%%q` through normal Jupyter Run. Do not switch one durable Direct IPC q cell back and forth between the routes. The extension does not monkey-patch Jupyter or intercept Python-controller Run.
+For an explicitly requested pure-q workflow, enable `vscode-kdb.notebook.enableDirectController`, select **KX q (Direct IPC)**, and use normal Run through the active profile. Both extension Direct IPC paths reject a leading `%%q` and use the same client-side complete-source grouping as editor scripts. For the separate Python-kernel route, install `kx-notebook==0.1.0`, leave a Python-language cell as Python, load `kx_notebook`, connect with `%kx connect`, and run a leading `%%q` through normal Jupyter Run. Do not switch one durable Direct IPC q cell back and forth between the routes. The extension does not monkey-patch Jupyter or intercept Python-controller Run.
 
 ## Exact execution semantics
 
@@ -67,7 +67,7 @@ The wrapper restores the server's previous namespace after success or failure, i
 
 The normal current-line/selection and script commands replace the active, last active, visible, or first KX result panel in that order. If no panel exists, one is created in the configured initial editor group.
 
-**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files. A Direct IPC notebook result can hand off its live in-memory value while the bound live record exists; reopened/Python-helper output contains only the saved bounded preview.
+**Run Selection in New Result** creates another panel. It does not route through SQLTools and does not create `.session.sql` files. A Direct IPC notebook result can hand off its live in-memory value while the bound live record exists; after reopening, new first-party output retains every exact v2 row, while historical direct and Python-helper previews retain only their saved bounded rows.
 
 ## Query History
 

@@ -17,6 +17,7 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
   const resultPath = path.join(controlDir, 'notebook-visual-result.json');
   const setupDeadline = Date.now() + TIMEOUT_MS;
   let session;
+  let outcome;
   const waitState = async (_client, predicate, label, stableMs = 0) => {
     const deadline = Date.now() + STATE_TIMEOUT_MS;
     let latest;
@@ -44,10 +45,11 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
           // CDP acknowledgement. Release that stale root session before opening
           // another debugger connection to the same workbench target.
           await delay(POLL_MS);
-          session = await findNotebookWebview(
-            port,
+          const reconnectBudget = Math.min(
+            1_000,
             Math.max(1, deadline - Date.now())
           );
+          session = await findNotebookWebview(port, reconnectBudget);
           missingStates = 0;
           matchingSince = undefined;
           continue;
@@ -258,15 +260,23 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
     );
     await nativeClick(
       session,
-      `document.querySelector('[data-kx-focus-key="chart:saved:render"]')`
+      `Array.from(document.querySelectorAll('.kx-root[aria-label="KX q notebook result"]'))
+        .find(candidate => {
+          const rect = candidate.getBoundingClientRect();
+          return rect.width > 0 && rect.height > 0;
+        })?.querySelector('[data-kx-focus-key="chart:saved:render"]')`
     );
     const full = await waitState(
       session.webview,
       state => state.chartReady && state.chartControlType === 'bar' &&
-        state.chartResetDisabled === false && state.chartRenderFocused &&
-        state.chartStatus === '' && validChartRange(state.chart),
+        state.chartResetDisabled === false &&
+        state.chartStatus ===
+          'Showing 29 rendered bar groups from 29 eligible rows (bar-cluster/29). ' +
+          'Null and non-finite y values are skipped where sampled.' &&
+        validChartRange(state.chart) && validChartNavigator(state.navigator),
       'saved padded-family chart render for viewport input'
     );
+    assertChartNavigator(full.navigator, 'saved-chart full-range navigator');
     const familySignature = JSON.stringify({
       chartType: 'bar',
       range: full.chart,
@@ -290,64 +300,116 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
     await nativeDrag(session, '.kx-chart-host .u-over', 0.2, 0.8, 0);
     const zoomed = await waitState(
       session.webview,
-      state => validChartRange(state.chart) && chartSpan(state.chart) < chartSpan(full.chart) * 0.9,
+      state => validChartRange(state.chart) &&
+        chartSpan(state.chart) < chartSpan(full.chart) * 0.9 &&
+        state.chartStatus.startsWith('Selected range • ') &&
+        validChartNavigator(state.navigator),
       'native saved-chart zoom'
     );
-    await nativeDrag(session, '.kx-chart-host', 0.58, 0.42, 8);
-    const shiftPanned = await waitState(
+    assertChartNavigator(zoomed.navigator, 'saved-chart navigator after main-plot zoom');
+
+    await nativeNavigatorDrag(session, 'end', -0.1);
+    const edgeResized = await waitState(
       session.webview,
       state => validChartRange(state.chart) &&
-        sameSpan(state.chart, zoomed.chart) &&
-        !sameRange(state.chart, zoomed.chart) && state.chartFocused,
-      'native Shift saved-chart pan'
+        chartSpan(state.chart) < chartSpan(zoomed.chart) * 0.95 &&
+        state.navigator.end.now < zoomed.navigator.end.now &&
+        state.chartStatus.startsWith('Selected range • ') &&
+        trustedNavigatorDrag(state.navigatorPointerTrace, 'end') &&
+        validChartNavigator(state.navigator),
+      'trusted saved-chart navigator end-edge resize'
     );
+    assertChartNavigator(edgeResized.navigator, 'saved-chart navigator after edge resize');
     await delay(600);
-    const settledShiftPan = await notebookState(session.webview);
-    if (!settledShiftPan || !sameRange(settledShiftPan.chart, shiftPanned.chart)) {
+    const settledEdgeResize = await notebookState(session.webview);
+    if (!settledEdgeResize || !sameRange(settledEdgeResize.chart, edgeResized.chart)) {
       throw new Error(
-        `Saved-chart pan settlement did not preserve the native range; state ${JSON.stringify(settledShiftPan)}`
+        `Saved-chart navigator edge settlement did not preserve the native range; state ${JSON.stringify(settledEdgeResize)}`
       );
     }
-    await nativeKey(session, '.kx-chart-host', 'ArrowRight');
+
+    await nativeNavigatorDrag(session, 'window', 0.08);
+    const windowPanned = await waitState(
+      session.webview,
+      state => validChartRange(state.chart) &&
+        sameSpan(state.chart, edgeResized.chart) &&
+        !sameRange(state.chart, edgeResized.chart) &&
+        state.navigator.window.now > edgeResized.navigator.window.now &&
+        state.chartStatus.startsWith('Selected range • ') &&
+        trustedNavigatorDrag(state.navigatorPointerTrace, 'window') &&
+        validChartNavigator(state.navigator),
+      'trusted saved-chart navigator selected-window pan'
+    );
+    assertChartNavigator(windowPanned.navigator, 'saved-chart navigator after window pan');
+    await delay(600);
+    const settledWindowPan = await notebookState(session.webview);
+    if (!settledWindowPan || !sameRange(settledWindowPan.chart, windowPanned.chart)) {
+      throw new Error(
+        `Saved-chart navigator window settlement did not preserve the native range; state ${JSON.stringify(settledWindowPan)}`
+      );
+    }
+
+    await nativeKey(session, '.kx-chart-navigator-window', 'ArrowRight');
     const keyboardPanned = await waitState(
       session.webview,
       state => validChartRange(state.chart) &&
-        sameSpan(state.chart, shiftPanned.chart) &&
-        !sameRange(state.chart, shiftPanned.chart) && state.chartFocused,
-      'native keyboard saved-chart pan'
+        sameSpan(state.chart, windowPanned.chart) &&
+        !sameRange(state.chart, windowPanned.chart) &&
+        state.navigator.window.now > windowPanned.navigator.window.now &&
+        state.navigator.window.focused &&
+        state.chartStatus.startsWith('Selected range • ') &&
+        validChartNavigator(state.navigator),
+      'native keyboard saved-chart navigator pan'
     );
+    assertChartNavigator(keyboardPanned.navigator, 'saved-chart navigator after ArrowRight');
     await delay(600);
     const settledKeyboardPan = await notebookState(session.webview);
     if (!settledKeyboardPan || !sameRange(settledKeyboardPan.chart, keyboardPanned.chart)) {
       throw new Error(
-        `Saved-chart keyboard pan settlement did not preserve the native range; state ${JSON.stringify(settledKeyboardPan)}`
+        `Saved-chart navigator keyboard settlement did not preserve the native range; state ${JSON.stringify(settledKeyboardPan)}`
       );
     }
-    await nativeKey(session, '.kx-chart-host', 'Home');
+    await nativeKey(session, '.kx-chart-navigator-window', 'Home');
     const reset = await waitState(
       session.webview,
-      state => validChartRange(state.chart) && sameRange(state.chart, full.chart),
-      'native saved-chart reset'
+      state => validChartRange(state.chart) && sameRange(state.chart, full.chart) &&
+        state.navigator.start.now === 0 && state.navigator.window.now === 50 &&
+        state.navigator.end.now === 100 &&
+        !state.chartStatus.startsWith('Selected range • ') &&
+        validChartNavigator(state.navigator),
+      'native saved-chart navigator Home reset'
     );
-    // Queue the real drag and Home key in a single root-target CDP sequence. The
-    // mouseup schedules the 450 ms refinement before the immediately following
-    // keydown resets it. Prove both the immediate reset and its survival beyond
-    // that refinement delay.
-    await nativeDragThenHome(session, '.kx-chart-host .u-over', 0.2, 0.8);
+    assertChartNavigator(reset.navigator, 'saved-chart navigator after Home reset');
+    // Queue a trusted navigator edge drag and Home in one root-target CDP
+    // sequence. Mouseup schedules the 450 ms saved-range reconstruction before
+    // the immediately following keydown resets it. Prove the reset survives the
+    // stale timer.
+    await nativeNavigatorDragThenHome(session, 'end', -0.2);
     const pendingReset = await waitState(
       session.webview,
-      state => validChartRange(state.chart) && sameRange(state.chart, full.chart),
-      'native saved-chart reset while viewport refinement is pending'
+      state => validChartRange(state.chart) && sameRange(state.chart, full.chart) &&
+        state.navigator.start.now === 0 && state.navigator.window.now === 50 &&
+        state.navigator.end.now === 100 &&
+        trustedNavigatorDrag(state.navigatorPointerTrace, 'end') &&
+        validChartNavigator(state.navigator),
+      'native saved-chart navigator reset while range reconstruction is pending'
+    );
+    assertChartNavigator(
+      pendingReset.navigator,
+      'saved-chart navigator immediately after pending Home reset'
     );
     await delay(600);
     const settledPendingReset = await notebookState(session.webview);
-    if (!settledPendingReset || !sameRange(settledPendingReset.chart, full.chart)) {
+    if (!settledPendingReset || !sameRange(settledPendingReset.chart, full.chart) ||
+      settledPendingReset.navigator.start.now !== 0 ||
+      settledPendingReset.navigator.window.now !== 50 ||
+      settledPendingReset.navigator.end.now !== 100) {
       throw new Error(
-        `A stale pending viewport reply displaced the native reset; state ${JSON.stringify(settledPendingReset)}`
+        `A stale pending navigator reconstruction displaced the native reset; state ${JSON.stringify(settledPendingReset)}`
       );
     }
 
-    writeResult(resultPath, {
+    outcome = {
       ok: true,
       nativeInput: true,
       search: {
@@ -376,7 +438,7 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
       },
       chart: {
         zoomed: chartSpan(zoomed.chart) < chartSpan(full.chart),
-        panned: !sameRange(keyboardPanned.chart, zoomed.chart),
+        panned: !sameRange(keyboardPanned.chart, edgeResized.chart),
         reset: sameRange(reset.chart, full.chart),
         pendingReset: sameRange(pendingReset.chart, full.chart) &&
           sameRange(settledPendingReset.chart, full.chart),
@@ -386,21 +448,56 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
         legendAccessibility,
         full: full.chart,
         zoom: zoomed.chart,
-        shiftPan: shiftPanned.chart,
+        navigatorEdge: edgeResized.chart,
+        navigatorWindowPan: windowPanned.chart,
         keyboardPan: keyboardPanned.chart,
+        navigator: {
+          aria: [full, zoomed, edgeResized, windowPanned, keyboardPanned, reset,
+            pendingReset, settledPendingReset]
+            .every(state => validChartNavigator(state.navigator)),
+          controlsRemoved: full.navigator.forbiddenControls.length === 0,
+          trustedEdgeResize: trustedNavigatorDrag(
+            edgeResized.navigatorPointerTrace,
+            'end'
+          ),
+          trustedWindowPan: trustedNavigatorDrag(
+            windowPanned.navigatorPointerTrace,
+            'window'
+          ),
+          keyboard: keyboardPanned.navigator.window.focused &&
+            keyboardPanned.navigator.window.now > windowPanned.navigator.window.now,
+          home: reset.navigator.start.now === 0 && reset.navigator.window.now === 50 &&
+            reset.navigator.end.now === 100,
+          pendingHome: trustedNavigatorDrag(pendingReset.navigatorPointerTrace, 'end') &&
+            settledPendingReset.navigator.start.now === 0 &&
+            settledPendingReset.navigator.window.now === 50 &&
+            settledPendingReset.navigator.end.now === 100,
+          baseline: full.navigator,
+          edge: edgeResized.navigator,
+          windowPan: windowPanned.navigator,
+          keyboardPan: keyboardPanned.navigator,
+          reset: reset.navigator,
+        },
         families,
       },
       accessibility,
-    });
+    };
   } catch (error) {
-    writeResult(resultPath, {
+    outcome = {
       ok: false,
       error: error && error.stack ? error.stack : String(error),
-    });
+    };
     throw error;
   } finally {
-    session?.webview.close();
-    session?.root.close();
+    await Promise.all([
+      session?.webview.closeAndWait(),
+      session?.root.closeAndWait(),
+    ].filter(Boolean));
+    if (outcome) {
+      // This file releases the Extension Host to open another webview. Publish
+      // it only after both debugger sessions have fully detached.
+      writeResult(resultPath, outcome);
+    }
   }
 }
 
@@ -566,6 +663,28 @@ async function notebookState(client) {
     const chartStatus = root.querySelector('.kx-chart-panel > .kx-status');
     const chartRender = root.querySelector('[data-kx-focus-key="chart:saved:render"]');
     const chartReset = root.querySelector('[data-kx-focus-key="chart:saved:reset"]');
+    const chartNavigator = root.querySelector('.kx-chart-navigator');
+    const chartNavigatorRect = chartNavigator?.getBoundingClientRect();
+    const navigatorPart = selector => {
+      const element = chartNavigator?.querySelector(selector);
+      const rect = element?.getBoundingClientRect();
+      return {
+        exists: !!element,
+        role: String(element?.getAttribute('role') || ''),
+        tabIndex: element?.tabIndex ?? -1,
+        label: String(element?.getAttribute('aria-label') || ''),
+        orientation: String(element?.getAttribute('aria-orientation') || ''),
+        minimum: Number(element?.getAttribute('aria-valuemin')),
+        maximum: Number(element?.getAttribute('aria-valuemax')),
+        now: Number(element?.getAttribute('aria-valuenow')),
+        valueText: String(element?.getAttribute('aria-valuetext') || ''),
+        focused: active === element,
+        left: rect && chartNavigatorRect ? rect.left - chartNavigatorRect.left : NaN,
+        width: rect?.width || 0,
+      };
+    };
+    const chartControlLabels = Array.from(root.querySelectorAll('.kx-chart-controls button'))
+      .map(control => String(control.textContent || '').trim());
     const number = name => host ? Number(host.dataset[name]) : NaN;
     return {
       metricValues,
@@ -591,6 +710,25 @@ async function notebookState(client) {
       chartResetDisabled: chartReset ? chartReset.disabled : null,
       chartStatus: String(chartStatus?.textContent || '').trim(),
       chartFocused: !!host && document.activeElement === host,
+      navigator: {
+        exists: !!chartNavigator,
+        hidden: chartNavigator?.hidden === true,
+        label: String(chartNavigator?.getAttribute('aria-label') || ''),
+        disabled: String(chartNavigator?.getAttribute('aria-disabled') || ''),
+        width: chartNavigatorRect?.width || 0,
+        overviewPath: String(chartNavigator
+          ?.querySelector('.kx-chart-navigator-overview path')
+          ?.getAttribute('d') || ''),
+        window: navigatorPart('.kx-chart-navigator-window'),
+        start: navigatorPart('.kx-chart-navigator-handle.is-start'),
+        end: navigatorPart('.kx-chart-navigator-handle.is-end'),
+        forbiddenControls: chartControlLabels.filter(label =>
+          ['Pan left', 'Pan right', 'Refine zoom', 'Refine view'].includes(label)
+        ),
+      },
+      navigatorPointerTrace: Array.isArray(window.__kxNavigatorPointerTrace)
+        ? window.__kxNavigatorPointerTrace.slice(-20)
+        : [],
       legendPressed: legendControls.map(control => String(control.getAttribute('aria-pressed') || '')),
       legendFocused: legendControls.includes(document.activeElement),
       legendControlIsTableHeader: legendControls.every(control =>
@@ -623,7 +761,14 @@ async function notebookState(client) {
 
 async function accessibilityState(client) {
   const dom = await evaluateAnyContext(client, `(() => {
-    const grid = document.querySelector('.kx-table-wrap[role="grid"][aria-label="Saved KX result preview table"]');
+    const root = Array.from(document.querySelectorAll('.kx-root[aria-label="KX q notebook result"]'))
+      .find(candidate => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      });
+    const grid = root?.querySelector(
+      '.kx-table-wrap[role="grid"][aria-label="Complete saved KX result table"]'
+    );
     if (!grid) return null;
     const rowCount = Number(grid.getAttribute('aria-rowcount'));
     const colCount = Number(grid.getAttribute('aria-colcount'));
@@ -634,7 +779,9 @@ async function accessibilityState(client) {
     const directTables = Array.from(grid.children).filter(child => child.tagName === 'TABLE');
     const nativeTable = directTables.length === 1 ? directTables[0] : null;
     const corner = nativeTable?.querySelector(':scope > thead > tr > th.kx-saved-corner[scope="col"]');
-    const selectAll = corner?.querySelector('button[aria-label="Select all saved preview cells"]');
+    const selectAll = corner?.querySelector(
+      'button[aria-label="Select all saved cells in this column window"]'
+    );
     const metric = grid.querySelector('[data-kx-source-ordinal="2"]')?.closest('[role="columnheader"]');
     const focusedSeparator = document.activeElement?.matches('.kx-column-resize-handle')
       ? document.activeElement
@@ -667,7 +814,10 @@ async function accessibilityState(client) {
         JSON.stringify(headerIndices) === JSON.stringify([2, 3, 4, 5, 6, 7, 8]) &&
         JSON.stringify(rowIndices) === JSON.stringify(Array.from({ length: 31 }, (_v, i) => i + 1)) &&
         rowHeaders.length === 30 && rowHeaders.every(header =>
-          Number(header.getAttribute('aria-colindex')) === 1
+          Number(header.getAttribute('aria-colindex')) === 1 &&
+          !header.classList.contains('row-odd') &&
+          !header.classList.contains('row-even') &&
+          !header.hasAttribute('data-kx-row-parity')
         ) && rows.slice(1).every(row =>
           JSON.stringify(Array.from(row.querySelectorAll('[role="gridcell"]')).map(cell =>
             Number(cell.getAttribute('aria-colindex'))
@@ -678,27 +828,21 @@ async function accessibilityState(client) {
   await client.send('Accessibility.enable');
   const activeContext = client.executionContexts.find(context => context.id === client.contextId);
   const frameId = activeContext?.auxData?.frameId;
-  const response = await client.send(
-    'Accessibility.getFullAXTree',
-    frameId ? { frameId } : {}
+  const nodes = await accessibilityNodesForElement(
+    client,
+    `Array.from(document.querySelectorAll('.kx-root[aria-label="KX q notebook result"]'))
+      .find(candidate => {
+        const rect = candidate.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      })?.querySelector('.kx-table-wrap[role="grid"][aria-label="Complete saved KX result table"]')`,
+    true
   );
-  const nodes = response.nodes || [];
-  const byId = new Map(nodes.map(node => [node.nodeId, node]));
   const grid = nodes.find(node => !node.ignored &&
     String(node.role?.value || '').toLowerCase() === 'grid' &&
-    String(node.name?.value || '') === 'Saved KX result preview table');
-  const descendants = [];
-  const pending = grid ? [...(grid.childIds || [])] : [];
-  const seen = new Set();
-  while (pending.length > 0) {
-    const nodeId = pending.pop();
-    if (seen.has(nodeId)) continue;
-    seen.add(nodeId);
-    const node = byId.get(nodeId);
-    if (!node) continue;
-    descendants.push(node);
-    pending.push(...(node.childIds || []));
-  }
+    String(node.name?.value || '') === 'Complete saved KX result table');
+  const descendants = grid
+    ? nodes.filter(node => node.nodeId !== grid.nodeId)
+    : [];
   const roleCount = role => descendants.filter(node => !node.ignored &&
     String(node.role?.value || '').toLowerCase() === role).length;
   const property = (node, name) => node?.properties?.find(item => item.name === name)?.value?.value;
@@ -787,7 +931,7 @@ async function chartLegendAccessibilityState(client) {
   return result;
 }
 
-async function accessibilityNodesForElement(client, expression) {
+async function accessibilityNodesForElement(client, expression, querySubtree = false) {
   const contexts = client.executionContexts
     .filter(context => !context.auxData || context.auxData.isDefault !== false)
     .map(context => context.id);
@@ -803,10 +947,15 @@ async function accessibilityNodesForElement(client, expression) {
     const objectId = evaluation?.result?.objectId;
     if (!objectId) continue;
     try {
-      const response = await client.send('Accessibility.getPartialAXTree', {
-        objectId,
-        fetchRelatives: true,
-      });
+      let response;
+      if (querySubtree) {
+        response = await client.send('Accessibility.queryAXTree', { objectId });
+      } else {
+        response = await client.send('Accessibility.getPartialAXTree', {
+          objectId,
+          fetchRelatives: true,
+        });
+      }
       client.contextId = contextId;
       return response.nodes || [];
     } finally {
@@ -864,15 +1013,34 @@ async function nativeDrag(session, selector, startRatio, endRatio, modifiers) {
   });
 }
 
-async function nativeDragThenHome(session, selector, startRatio, endRatio) {
-  session.root.actionLabel = `drag-then-Home ${selector}`;
-  const { rect, outer } = await nativeElementGeometry(
+async function nativeNavigatorDrag(session, part, deltaFraction) {
+  const selector = part === 'start'
+    ? '.kx-chart-navigator-handle.is-start'
+    : part === 'end'
+      ? '.kx-chart-navigator-handle.is-end'
+      : part === 'window'
+        ? '.kx-chart-navigator-window'
+        : '';
+  if (!selector || !Number.isFinite(deltaFraction) || Math.abs(deltaFraction) > 0.25) {
+    throw new Error(`Invalid navigator drag ${part}/${deltaFraction}`);
+  }
+  await resetNavigatorPointerTrace(session);
+  const target = await nativeElementGeometry(
     session,
     visibleElementExpression(selector)
   );
-  const startX = outer.left + rect.left + rect.width * startRatio;
-  const endX = outer.left + rect.left + rect.width * endRatio;
-  const y = outer.top + rect.top + rect.height * 0.5;
+  const navigatorRect = await elementRect(
+    session.webview,
+    visibleElementExpression('.kx-chart-navigator')
+  );
+  const startX = target.outer.left + target.rect.left + target.rect.width / 2;
+  const desiredEndX = startX + navigatorRect.width * deltaFraction;
+  const endX = Math.max(
+    target.outer.left + navigatorRect.left + 2,
+    Math.min(target.outer.left + navigatorRect.left + navigatorRect.width - 2, desiredEndX)
+  );
+  const y = target.outer.top + target.rect.top + target.rect.height / 2;
+  session.root.actionLabel = `drag saved chart navigator ${part}`;
   await session.root.send('Page.bringToFront');
   await dispatchMouseEvent(session.root, { type: 'mouseMoved', x: startX, y });
   await delay(30);
@@ -893,9 +1061,42 @@ async function nativeDragThenHome(session, selector, startRatio, endRatio) {
   await dispatchMouseEvent(session.root, {
     type: 'mouseReleased', x: endX, y, button: 'left', buttons: 0, clickCount: 1,
   });
-  const home = { key: 'Home', code: 'Home', windowsVirtualKeyCode: 36, nativeVirtualKeyCode: 36 };
-  await session.root.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', ...home });
-  await dispatchKeyUp(session.root, home);
+}
+
+async function nativeNavigatorDragThenHome(session, part, deltaFraction) {
+  await nativeNavigatorDrag(session, part, deltaFraction);
+  session.root.actionLabel = `drag saved chart navigator ${part} then Home`;
+  await dispatchNativeKey(session.root, 'Home', 'Home', 36);
+}
+
+async function resetNavigatorPointerTrace(session) {
+  const installed = await evaluateAnyContext(session.webview, `(() => {
+    window.__kxNavigatorPointerTrace = [];
+    if (window.__kxNavigatorPointerTraceInstalled) return true;
+    window.__kxNavigatorPointerTraceInstalled = true;
+    for (const type of ['pointerdown', 'pointermove', 'pointerup']) {
+      window.addEventListener(type, event => {
+        const target = event.target instanceof Element ? event.target : null;
+        const part = target?.closest('[data-kx-navigator-part]')
+          ?.getAttribute('data-kx-navigator-part') || '';
+        window.__kxNavigatorPointerTrace.push({
+          type,
+          isTrusted: event.isTrusted,
+          pointerId: event.pointerId,
+          buttons: event.buttons,
+          part,
+          target: target ? [target.tagName, target.className].join('.') : String(event.target),
+        });
+        if (window.__kxNavigatorPointerTrace.length > 40) {
+          window.__kxNavigatorPointerTrace.shift();
+        }
+      }, true);
+    }
+    return true;
+  })()`, candidate => candidate === true);
+  if (installed !== true) {
+    throw new Error('Could not install the saved-chart navigator pointer trace');
+  }
 }
 
 async function nativeDragBy(session, selector, deltaX) {
@@ -1303,6 +1504,58 @@ function validChartRange(range) {
   return range && Number.isFinite(range.min) && Number.isFinite(range.max) && range.max > range.min;
 }
 
+function validChartNavigator(navigator) {
+  if (!navigator?.exists || navigator.hidden || navigator.label !== 'Chart X navigator' ||
+    navigator.disabled !== 'false' || !(navigator.width > 100) ||
+    !(navigator.overviewPath.length > 8) || navigator.forbiddenControls.length !== 0) {
+    return false;
+  }
+  const prefixes = {
+    window: 'Selected X range ',
+    start: 'Selected X start ',
+    end: 'Selected X end ',
+  };
+  for (const [name, prefix] of Object.entries(prefixes)) {
+    const part = navigator[name];
+    if (!part?.exists || part.role !== 'slider' || part.tabIndex !== 0 ||
+      part.orientation !== 'horizontal' || !Number.isFinite(part.minimum) ||
+      !Number.isFinite(part.maximum) || !Number.isFinite(part.now) ||
+      part.minimum < 0 || part.maximum > 100 || part.minimum > part.now ||
+      part.now > part.maximum ||
+      !part.valueText.startsWith(prefix) || !Number.isFinite(part.left) ||
+      part.left < -1 || part.left > navigator.width + 1) {
+      return false;
+    }
+  }
+  const close = (left, right) => Math.abs(left - right) <= 1e-6;
+  const halfSpan = (navigator.end.now - navigator.start.now) / 2;
+  const startGap = navigator.end.now - navigator.start.maximum;
+  const endGap = navigator.end.minimum - navigator.start.now;
+  return navigator.start.now <= navigator.window.now &&
+    navigator.window.now <= navigator.end.now &&
+    close(navigator.window.minimum, halfSpan) &&
+    close(navigator.window.maximum, 100 - halfSpan) &&
+    close(navigator.window.now, navigator.start.now + halfSpan) &&
+    close(navigator.start.minimum, 0) && close(navigator.end.maximum, 100) &&
+    startGap > 0 && close(startGap, endGap);
+}
+
+function assertChartNavigator(navigator, label) {
+  if (!validChartNavigator(navigator)) {
+    throw new Error(`${label} is not accessible or bounded: ${JSON.stringify(navigator)}`);
+  }
+}
+
+function trustedNavigatorDrag(trace, part) {
+  return Array.isArray(trace) &&
+    trace.some(event => event.type === 'pointerdown' && event.isTrusted === true &&
+      event.part === part && Number.isFinite(event.pointerId)) &&
+    trace.some(event => event.type === 'pointermove' && event.isTrusted === true &&
+      event.buttons === 1) &&
+    trace.some(event => event.type === 'pointerup' && event.isTrusted === true &&
+      event.buttons === 0);
+}
+
 function chartSpan(range) {
   return range.max - range.min;
 }
@@ -1477,6 +1730,28 @@ class CdpClient {
 
   close() {
     this.socket.close();
+  }
+
+  async closeAndWait(timeoutMs = 2_000) {
+    if (this.socket.readyState === WebSocket.CLOSED) {
+      return;
+    }
+    await new Promise(resolve => {
+      let settled = false;
+      const finish = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve();
+      };
+      const timeout = setTimeout(finish, timeoutMs);
+      this.socket.addEventListener('close', finish, { once: true });
+      try {
+        this.socket.close();
+      } catch {
+        finish();
+      }
+    });
   }
 }
 

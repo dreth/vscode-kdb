@@ -303,7 +303,8 @@ export function resultTableHeaderAriaLabel(
   columnCount: number,
   sorted: boolean,
   direction: ResultTableSortDirection | undefined,
-  selected = false
+  selected = false,
+  keyColumn = false
 ): string {
   const position = Math.min(
     Math.max(1, Math.floor(Number(displayColumn) || 0) + 1),
@@ -316,7 +317,8 @@ export function resultTableHeaderAriaLabel(
       ? 'sorted descending'
       : 'sorted ascending';
   const selectionState = selected ? 'selected, ' : '';
-  return `${String(columnName)}, column ${position} of ${count}, ${selectionState}${sortState}; ` +
+  const keyState = keyColumn ? 'key column, ' : '';
+  return `${String(columnName)}, ${keyState}column ${position} of ${count}, ${selectionState}${sortState}; ` +
     'click to sort, drag to reorder, Control or Command click to select column';
 }
 

@@ -14,16 +14,21 @@ import {
   ColumnarPanelResult,
   TextExportFormat,
   applyColumnarRowOrder,
+  cellValueToBoundedExportText,
   cellValueToBoundedText,
   createColumnarPanelResult,
   kxResultJsonCharacterLength,
   kxResultJsonStringCharacterLength,
+  projectColumnarPanelResult,
   rowIndexColumnName,
   sortedColumnarRowOrder,
 } from './kx-results';
 import {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
+  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
+  parseNotebookLiveResultReference,
+  parseNotebookPortableOutputBinding,
 } from './notebook-message';
 import { widestDisplayedColumnTextLengthsAsync } from './column-sizing';
 import {
@@ -31,7 +36,6 @@ import {
   QResultDisplayOptions,
   QValue,
   qValueToColumnarPanel,
-  qValueToLosslessPortablePanel,
   qValueToQText,
 } from './q-ipc';
 
@@ -43,7 +47,6 @@ export const MAX_LIVE_NOTEBOOK_SLICE_TEXT_CHARS = 2_000_000;
 export const MAX_LIVE_NOTEBOOK_SEARCH_MATCHES = 1_000;
 export const MAX_LIVE_NOTEBOOK_SEARCH_CELLS = 2_000_000;
 export const MAX_LIVE_NOTEBOOK_SEARCH_MS = 1_500;
-export const MAX_LIVE_NOTEBOOK_INLINE_SORT_ROWS = 250_000;
 export const MAX_LIVE_NOTEBOOK_CELL_TEXT_CHARS = 65_536;
 export const MAX_LIVE_NOTEBOOK_SORT_CACHE_ENTRIES = 4;
 export const MAX_LIVE_NOTEBOOK_COPY_CELLS = MAX_NOTEBOOK_LIVE_COPY_CELLS;
@@ -59,6 +62,11 @@ export interface LiveNotebookResultRegistration {
   value: QValue;
 }
 
+export interface NotebookOutputSnapshot {
+  metadata?: { [key: string]: unknown };
+  items: readonly { mime: string; data: Uint8Array }[];
+}
+
 export interface LiveNotebookDisplayOptions extends QResultDisplayOptions {
   arrayDisplayFormat?: ArrayDisplayFormat;
 }
@@ -71,6 +79,7 @@ export interface LiveNotebookResultView {
   connectionName: string;
   elapsedMs: number;
   columns: string[];
+  keyColumnOrdinals?: number[];
   rowCount: number;
   chartXColumns: string[];
   chartYColumns: string[];
@@ -118,7 +127,6 @@ export interface LiveNotebookChartRequest {
   lowColumn?: string;
   closeColumn?: string;
   maxPoints: number;
-  minPoints?: number;
   maxSourceRows?: number;
   xMin?: number;
   xMax?: number;
@@ -146,9 +154,17 @@ export interface LiveNotebookResultRange {
   range: CellRange;
 }
 
+export interface LiveNotebookSortWarningState {
+  generation: number;
+  rowCount: number;
+  approved: boolean;
+}
+
 interface LiveNotebookRecord extends LiveNotebookResultRegistration {
   id: string;
+  generation: number;
   createdAt: number;
+  sortWarningApproved: boolean;
   staged?: boolean;
   viewKey?: string;
   converted?: QPanelResult;
@@ -166,7 +182,7 @@ interface LiveNotebookRecord extends LiveNotebookResultRegistration {
 export class LiveNotebookResultStore {
   private readonly records = new Map<string, LiveNotebookRecord>();
   private readonly cellResults = new Map<string, string>();
-  private readonly pendingCellMoves = new Map<string, string>();
+  private nextRecordGeneration = 0;
 
   public constructor(
     private readonly maxEntries = MAX_LIVE_NOTEBOOK_RESULTS,
@@ -191,8 +207,10 @@ export class LiveNotebookResultStore {
     this.records.set(id, {
       ...registration,
       id,
+      generation: ++this.nextRecordGeneration,
       createdAt: Date.now(),
       staged: true,
+      sortWarningApproved: false,
       sortOrders: new Map<string, number[]>(),
     });
     return id;
@@ -208,10 +226,12 @@ export class LiveNotebookResultStore {
   public bindStagedOutput(
     id: string,
     notebookUri: string,
-    cellUri: string
+    cellUri: string,
+    outputId: string
   ): boolean {
     const record = this.records.get(id);
-    if (!record?.staged || record.notebookUri !== notebookUri) {
+    if (!record?.staged || record.notebookUri !== notebookUri ||
+      record.outputId !== outputId) {
       return false;
     }
     this.bind(id, {
@@ -244,61 +264,8 @@ export class LiveNotebookResultStore {
     if (!id) {
       return;
     }
-    if (this.pendingCellMoves.get(key) === id) {
-      return;
-    }
     this.cellResults.delete(key);
     this.records.delete(id);
-  }
-
-  public beginCellMove(id: string, notebookUri: string, cellUri: string): boolean {
-    const key = cellKey(notebookUri, cellUri);
-    const record = this.record(id, notebookUri, cellUri);
-    if (!record || this.cellResults.get(key) !== id || this.pendingCellMoves.has(key)) {
-      return false;
-    }
-    this.pendingCellMoves.set(key, id);
-    return true;
-  }
-
-  public completeCellMove(
-    id: string,
-    notebookUri: string,
-    previousCellUri: string,
-    nextCellUri: string
-  ): boolean {
-    const previousKey = cellKey(notebookUri, previousCellUri);
-    const nextKey = cellKey(notebookUri, nextCellUri);
-    const record = this.records.get(id);
-    if (this.pendingCellMoves.get(previousKey) !== id ||
-      !record || record.notebookUri !== notebookUri || record.cellUri !== previousCellUri) {
-      return false;
-    }
-    const replaced = this.cellResults.get(nextKey);
-    if (replaced && replaced !== id) {
-      this.records.delete(replaced);
-    }
-    this.cellResults.delete(previousKey);
-    this.pendingCellMoves.delete(previousKey);
-    record.cellUri = nextCellUri;
-    this.cellResults.set(nextKey, id);
-    return true;
-  }
-
-  public cancelCellMove(
-    id: string,
-    notebookUri: string,
-    previousCellUri: string,
-    removeResult = false
-  ): void {
-    const key = cellKey(notebookUri, previousCellUri);
-    if (this.pendingCellMoves.get(key) !== id) {
-      return;
-    }
-    this.pendingCellMoves.delete(key);
-    if (removeResult) {
-      this.remove(id, notebookUri);
-    }
   }
 
   public closeNotebook(notebookUri: string): void {
@@ -313,7 +280,6 @@ export class LiveNotebookResultStore {
   public clear(): void {
     this.records.clear();
     this.cellResults.clear();
-    this.pendingCellMoves.clear();
   }
 
   public has(id: string, notebookUri: string, cellUri?: string): boolean {
@@ -328,6 +294,38 @@ export class LiveNotebookResultStore {
   ): boolean {
     const record = this.record(id, notebookUri, cellUri);
     return record?.outputId === outputId;
+  }
+
+  public sortWarningState(
+    id: string,
+    notebookUri: string,
+    options: LiveNotebookDisplayOptions = {},
+    cellUri?: string
+  ): LiveNotebookSortWarningState | undefined {
+    const record = this.record(id, notebookUri, cellUri);
+    if (!record) {
+      return undefined;
+    }
+    const converted = this.converted(record, options);
+    return {
+      generation: record.generation,
+      rowCount: converted.mode === 'grid' ? converted.result.rowCount : 0,
+      approved: record.sortWarningApproved,
+    };
+  }
+
+  public approveSortWarning(
+    id: string,
+    notebookUri: string,
+    generation: number,
+    cellUri?: string
+  ): boolean {
+    const record = this.record(id, notebookUri, cellUri);
+    if (!record || record.generation !== generation) {
+      return false;
+    }
+    record.sortWarningApproved = true;
+    return true;
   }
 
   public tableColumns(
@@ -381,6 +379,9 @@ export class LiveNotebookResultStore {
       connectionName: record.connectionName,
       elapsedMs: record.elapsedMs,
       columns: converted.result.columns.slice(),
+      ...(converted.result.keyColumnOrdinals === undefined
+        ? {}
+        : { keyColumnOrdinals: converted.result.keyColumnOrdinals.slice() }),
       rowCount: converted.result.rowCount,
       chartXColumns: chartOptions.xColumns.map(option => option.columnName),
       chartYColumns: chartOptions.yColumns.map(option => option.columnName),
@@ -426,7 +427,8 @@ export class LiveNotebookResultStore {
         converted.result.columns.slice(0, columnLimit),
         converted.result.rowCount,
         (row, column) => converted.result.cellValue(row, column),
-        converted.result.columnTypes?.slice(0, columnLimit)
+        converted.result.columnTypes?.slice(0, columnLimit),
+        converted.result.keyColumnOrdinals?.filter(ordinal => ordinal < columnLimit)
       );
     scan.promise = widestDisplayedColumnTextLengthsAsync(
       scanTable,
@@ -464,16 +466,6 @@ export class LiveNotebookResultStore {
       return undefined;
     }
     return qValueToQText(record.value, { maxChars: Number.MAX_SAFE_INTEGER });
-  }
-
-  public portablePanel(
-    id: string,
-    notebookUri: string,
-    options: LiveNotebookDisplayOptions = {},
-    cellUri?: string
-  ): QPanelResult | undefined {
-    const record = this.record(id, notebookUri, cellUri);
-    return record ? qValueToLosslessPortablePanel(record.value, options) : undefined;
   }
 
   public slice(
@@ -667,9 +659,6 @@ export class LiveNotebookResultStore {
       width: 720,
       maxSourceRows: safePositiveInteger(request.maxSourceRows, CHART_MAX_SOURCE_ROWS),
       maxSampledPoints: safePositiveInteger(request.maxPoints, 2_500),
-      minSampledPoints: request.xMin !== undefined && request.xMax !== undefined
-        ? safePositiveInteger(request.minPoints, 1)
-        : undefined,
     });
   }
 
@@ -720,7 +709,7 @@ export class LiveNotebookResultStore {
         table.columns.map(column => boundedLiveCellText(column, fairCellLimit)),
         table.rowCount,
         (rowIndex, columnIndex) => {
-          const rendered = cellValueToBoundedText(
+          const rendered = cellValueToBoundedExportText(
             table.cellValue(rowIndex, columnIndex),
             fairCellLimit,
             textOptions
@@ -830,6 +819,9 @@ export class LiveNotebookResultStore {
 
   private bind(id: string, registration: LiveNotebookResultRegistration): void {
     const previous = this.records.get(id);
+    const sameDisplayedResult = !!previous &&
+      previous.value === registration.value &&
+      previous.outputId === registration.outputId;
     if (previous) {
       const previousKey = cellKey(previous.notebookUri, previous.cellUri);
       if (this.cellResults.get(previousKey) === id) {
@@ -844,13 +836,21 @@ export class LiveNotebookResultStore {
     this.records.set(id, {
       ...registration,
       id,
-      createdAt: previous?.createdAt ?? Date.now(),
+      generation: sameDisplayedResult
+        ? previous!.generation
+        : ++this.nextRecordGeneration,
+      createdAt: sameDisplayedResult ? previous!.createdAt : Date.now(),
       staged: false,
-      viewKey: previous?.viewKey,
-      converted: previous?.converted,
+      sortWarningApproved: sameDisplayedResult
+        ? previous!.sortWarningApproved
+        : false,
+      viewKey: sameDisplayedResult ? previous!.viewKey : undefined,
+      converted: sameDisplayedResult ? previous!.converted : undefined,
       columnTextLengthCache: undefined,
       columnTextLengthScan: undefined,
-      sortOrders: previous?.sortOrders ?? new Map<string, number[]>(),
+      sortOrders: sameDisplayedResult
+        ? previous!.sortOrders
+        : new Map<string, number[]>(),
     });
     this.cellResults.set(targetKey, id);
     this.evictOldest();
@@ -874,6 +874,33 @@ export class LiveNotebookResultStore {
   }
 }
 
+/** Reconcile public VS Code/Jupyter output changes with the transient live owner.
+ * Native Clear Cell Output/Clear All Outputs leave no valid owned KX output, so
+ * the old live value is removed and cannot be reached by a stale renderer. */
+export function reconcileLiveNotebookCellOutputs(
+  liveResults: Pick<LiveNotebookResultStore, 'hasForOutput' | 'removeCell'>,
+  notebookUri: string,
+  cellUri: string,
+  outputs: readonly NotebookOutputSnapshot[]
+): boolean {
+  const retainsOwner = outputs.some(output => {
+    const live = parseNotebookLiveResultReference(
+      output.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
+    );
+    const binding = parseNotebookPortableOutputBinding(output.metadata, output.items);
+    return !!live && !!binding && liveResults.hasForOutput(
+      live.id,
+      notebookUri,
+      cellUri,
+      binding.id
+    );
+  });
+  if (!retainsOwner) {
+    liveResults.removeCell(notebookUri, cellUri);
+  }
+  return retainsOwner;
+}
+
 function sortedTable(
   record: LiveNotebookRecord,
   table: ColumnarPanelResult,
@@ -892,12 +919,6 @@ function sortedTable(
   if (sourceOrdinal < 0 || sourceOrdinal >= table.columns.length ||
     (direction !== 'asc' && direction !== 'desc')) {
     return table;
-  }
-  if (table.rowCount >= MAX_LIVE_NOTEBOOK_INLINE_SORT_ROWS) {
-    throw new Error(
-      `Inline notebook sort is limited to fewer than ${MAX_LIVE_NOTEBOOK_INLINE_SORT_ROWS} rows. ` +
-      'Open the full KX Results panel for the large-sort confirmation flow.'
-    );
   }
   const key = `${record.viewKey || ''}\0${options.arrayDisplayFormat || ''}\0${sourceOrdinal}\0${direction}`;
   let order = record.sortOrders.get(key);
@@ -957,26 +978,16 @@ function columnSelectionTable(
   rawIndexes: readonly number[]
 ): ColumnarPanelResult {
   const indexes = validColumnIndexes(rawIndexes, table.columns.length);
-  return createColumnarPanelResult(
-    indexes.map(index => table.columns[index]),
-    table.rowCount,
-    (rowIndex, columnIndex) => table.cellValue(rowIndex, indexes[columnIndex]),
-    table.columnTypes
-      ? indexes.map(index => table.columnTypes![index])
-      : undefined
-  );
+  return projectColumnarPanelResult(table, indexes);
 }
 
 function inlineChartSource(table: ColumnarPanelResult): ColumnarPanelResult {
   if (table.columns.length <= MAX_NOTEBOOK_LIVE_COLUMNS) {
     return table;
   }
-  const columns = table.columns.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS);
-  return createColumnarPanelResult(
-    columns,
-    table.rowCount,
-    (rowIndex, columnIndex) => table.cellValue(rowIndex, columnIndex),
-    table.columnTypes?.slice(0, MAX_NOTEBOOK_LIVE_COLUMNS)
+  return projectColumnarPanelResult(
+    table,
+    Array.from({ length: MAX_NOTEBOOK_LIVE_COLUMNS }, (_value, index) => index)
   );
 }
 

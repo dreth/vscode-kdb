@@ -3,7 +3,6 @@ import * as vscode from 'vscode';
 import { connectionEndpoint, KxConnection } from './connection';
 import {
   KX_NOTEBOOK_MIME,
-  NotebookPersistenceMode,
   NotebookV2CreationResult,
   PortableKxResult,
   createPortableKxResultV2,
@@ -15,7 +14,6 @@ import {
   NotebookSettings,
   hasNotebookQMarker,
   safeNotebookByteLimit,
-  safeNotebookPreserveFullResultByDefault,
   safeNotebookRowLimit,
 } from './notebook-settings';
 import {
@@ -30,7 +28,6 @@ import { NotebookQTargetProfile } from './notebook-q-target';
 import {
   QResultDisplayOptions,
   QValue,
-  qValueToColumnarPanel,
   qValueToLosslessPortablePanel,
 } from './q-ipc';
 
@@ -435,15 +432,15 @@ export class KxQNotebookRunner implements vscode.Disposable {
     }
 
     const index = current.index;
+    const expectedOutputs = Array.isArray(output) ? [...output] : [output];
     const replacement = new vscode.NotebookCellData(
       current.kind,
       current.document.getText(),
       current.document.languageId
     );
     replacement.metadata = { ...current.metadata };
-    replacement.outputs = Array.isArray(output) ? [...output] : [output];
+    replacement.outputs = expectedOutputs;
 
-    let eventCell: vscode.NotebookCell | undefined;
     let resolveReplacement: (() => void) | undefined;
     const replacementEvent = new Promise<void>(resolve => {
       resolveReplacement = resolve;
@@ -459,14 +456,17 @@ export class KxQNotebookRunner implements vscode.Disposable {
           continue;
         }
         const added = change.addedCells.find(candidate =>
-          candidate.kind === vscode.NotebookCellKind.Code &&
-          candidate.document.languageId === snapshot.languageId &&
-          candidate.document.getText() === snapshot.source
+          mixedCellHasCommittedOutputs(candidate, snapshot, index, expectedOutputs)
         );
         if (added) {
-          eventCell = added;
           resolveReplacement?.();
         }
+      }
+      if (event.cellChanges.some(change =>
+        change.outputs !== undefined &&
+        mixedCellHasCommittedOutputs(change.cell, snapshot, index, expectedOutputs)
+      )) {
+        resolveReplacement?.();
       }
     });
 
@@ -506,17 +506,22 @@ export class KxQNotebookRunner implements vscode.Disposable {
         return { status: 'unavailable' };
       }
 
-      let written = eventCell ?? notebookCellAt(snapshot.notebook, index);
-      if (!written || written.document.uri.toString() === snapshot.cellUri) {
+      let written = notebookCellAt(snapshot.notebook, index);
+      if (!written || !mixedCellHasCommittedOutputs(
+        written,
+        snapshot,
+        index,
+        expectedOutputs
+      )) {
         await waitForNotebookReplacement(replacementEvent);
-        written = eventCell ?? notebookCellAt(snapshot.notebook, index);
+        written = notebookCellAt(snapshot.notebook, index);
       }
-      if (!written ||
-        written.document.uri.toString() === snapshot.cellUri ||
-        written.notebook !== snapshot.notebook ||
-        written.kind !== vscode.NotebookCellKind.Code ||
-        written.document.languageId !== snapshot.languageId ||
-        written.document.getText() !== snapshot.source) {
+      if (!written || !mixedCellHasCommittedOutputs(
+        written,
+        snapshot,
+        index,
+        expectedOutputs
+      )) {
         return {
           status: snapshot.notebook.isClosed ? 'unavailable' : 'write-failed',
         };
@@ -831,8 +836,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
       displayOptions,
       connection,
       elapsedMs,
-      outputId,
-      settings.preserveFullResultByDefault ? 'full' : 'preview'
+      outputId
     );
   }
 
@@ -856,9 +860,6 @@ export function directNotebookSettings(): NotebookSettings {
     presentation: 'inline',
     rowLimit: safeNotebookRowLimit(configuration.get('maxOutputRows')),
     byteLimit: safeNotebookByteLimit(configuration.get('maxOutputBytes')),
-    preserveFullResultByDefault: safeNotebookPreserveFullResultByDefault(
-      configuration.get('preserveFullResultByDefault')
-    ),
   };
 }
 
@@ -888,8 +889,7 @@ export function directQResultOutputItems(
   displayOptions: QResultDisplayOptions,
   connection: KxConnection,
   elapsedMs: number,
-  outputId = crypto.randomBytes(24).toString('hex'),
-  persistenceMode: NotebookPersistenceMode = 'preview'
+  outputId = crypto.randomBytes(24).toString('hex')
 ): vscode.NotebookCellOutputItem[] {
   const created = directQPortableResult(
     value,
@@ -897,8 +897,7 @@ export function directQResultOutputItems(
     displayOptions,
     connection,
     elapsedMs,
-    outputId,
-    persistenceMode
+    outputId
   );
   if (!created.ok) {
     throw new Error(created.error);
@@ -912,18 +911,23 @@ export function directQPortableResult(
   displayOptions: QResultDisplayOptions,
   connection: KxConnection,
   elapsedMs: number,
-  outputId: string,
-  persistenceMode: NotebookPersistenceMode
+  outputId: string
 ): NotebookV2CreationResult {
-  const panel = persistenceMode === 'full'
-    ? qValueToLosslessPortablePanel(value, displayOptions)
-    : qValueToColumnarPanel(value, displayOptions);
+  const panel = qValueToLosslessPortablePanel(value, displayOptions);
   if (!panel) {
     return {
       ok: false,
       error: 'The complete q result cannot be converted to portable output without losing values.',
       rowCount: 0,
       columnCount: 0,
+    };
+  }
+  if (panel.exactPersistenceIssue) {
+    return {
+      ok: false,
+      error: panel.exactPersistenceIssue,
+      rowCount: panel.mode === 'grid' ? panel.result.rowCount : 0,
+      columnCount: panel.mode === 'grid' ? panel.result.columns.length : 0,
     };
   }
   return panel.mode === 'text'
@@ -934,12 +938,15 @@ export function directQPortableResult(
       label: `${connection.name} • Direct IPC • ${connection.database}`,
       elapsedMs,
       marker: 'direct-ipc',
-    }, { outputId, persistenceMode })
+    }, { outputId, persistenceMode: 'full' })
     : createPortableKxResultV2({
       columns: panel.result.columns.map((name, index) => ({
         name,
         type: panel.result.columnTypes?.[index] || 'mixed',
       })),
+      ...(panel.result.keyColumnOrdinals === undefined
+        ? {}
+        : { keyColumnOrdinals: panel.result.keyColumnOrdinals }),
       rows: [],
       cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
       rowCount: panel.result.rowCount,
@@ -948,7 +955,7 @@ export function directQPortableResult(
       label: `${connection.name} • Direct IPC • ${connection.database}`,
       elapsedMs,
       marker: 'direct-ipc',
-    }, { outputId, persistenceMode });
+    }, { outputId, persistenceMode: 'full' });
 }
 
 export function notebookOutputItems(
@@ -1098,6 +1105,73 @@ function mixedCellMatchesSnapshot(
     cell.outputs.length === snapshot.outputs.length &&
     cell.outputs.every((output, index) => output === snapshot.outputs[index]) &&
     executionSummaryKey(cell.executionSummary) === snapshot.executionSummary;
+}
+
+function mixedCellHasCommittedOutputs(
+  cell: vscode.NotebookCell,
+  snapshot: MixedCellSnapshot,
+  index: number,
+  expectedOutputs: readonly vscode.NotebookCellOutput[]
+): boolean {
+  return cell.notebook === snapshot.notebook &&
+    cell.index === index &&
+    cell.kind === vscode.NotebookCellKind.Code &&
+    cell.document.languageId === snapshot.languageId &&
+    cell.document.getText() === snapshot.source &&
+    notebookCellOutputsEqual(cell.outputs, expectedOutputs);
+}
+
+function notebookCellOutputsEqual(
+  actual: readonly vscode.NotebookCellOutput[],
+  expected: readonly vscode.NotebookCellOutput[]
+): boolean {
+  return actual.length === expected.length && actual.every((output, index) => {
+    const target = expected[index];
+    if (output === target) {
+      return true;
+    }
+    if (!notebookJsonEqual(output.metadata, target.metadata) ||
+      output.items.length !== target.items.length) {
+      return false;
+    }
+    return output.items.every((item, itemIndex) => {
+      const targetItem = target.items[itemIndex];
+      if (item.mime !== targetItem.mime) {
+        return false;
+      }
+      if (item.data instanceof Uint8Array && targetItem.data instanceof Uint8Array) {
+        return notebookBytesEqual(item.data, targetItem.data);
+      }
+      return notebookJsonEqual(item, targetItem);
+    });
+  });
+}
+
+function notebookBytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function notebookJsonEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) {
+    return true;
+  }
+  if (typeof left !== 'object' || left === null ||
+    typeof right !== 'object' || right === null) {
+    return false;
+  }
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => notebookJsonEqual(value, right[index]));
+  }
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const leftKeys = Object.keys(leftRecord);
+  const rightKeys = Object.keys(rightRecord);
+  return leftKeys.length === rightKeys.length && leftKeys.every(key =>
+    Object.prototype.hasOwnProperty.call(rightRecord, key) &&
+    notebookJsonEqual(leftRecord[key], rightRecord[key])
+  );
 }
 
 function executionSummaryKey(

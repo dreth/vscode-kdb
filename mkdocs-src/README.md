@@ -38,7 +38,7 @@ npm run test:extension-host
 npm run test:notebook-results-visual
 ```
 
-The 0.2.9 chart repair treats each distinct valid completed live zoom as a source-resampling request after a 450 ms debounce in both KX Results and live notebook output. Notebook requests stay clamped to the original full X domain across successive narrower refinements; initial/full-domain renders, duplicate scale notifications, dirty charts, and pending requests do not auto-request. Manual **Refine zoom** remains immediate.
+Each distinct valid settled live navigator or main-plot range is an absolute source-resampling request after a 450 ms debounce in both KX Results and live notebook output. Requests stay clamped to the original full X domain across successive narrower ranges; initial/full-domain renders, duplicate scale notifications, dirty charts, and pending requests do not auto-request. Refinement is automatic and has no separate visible Refine control.
 
 For a release candidate, require the live IPC check instead of allowing it to skip:
 
@@ -51,20 +51,20 @@ Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.2.15.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.18.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.15.vsix")
-with ZipFile("vscode-kdb-0.2.15-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.18.vsix")
+with ZipFile("vscode-kdb-0.2.18-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.15.vsix vscode-kdb-0.2.15-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.18.vsix vscode-kdb-0.2.18-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.
 
 ## Workflow behavior
 
-`.github/workflows/pages.yml` builds strictly, normalizes `docs/`, fails if committed output drifts, and uploads `docs/` as the `github-pages-docs` artifact on non-pull-request runs. It intentionally has no deployment job and does not change repository Pages configuration.
+`.github/workflows/pages.yml` builds strictly, normalizes `docs/`, and fails if committed output drifts. On non-pull-request runs it uploads `docs/` as the GitHub Pages artifact and deploys that artifact through the repository's `github-pages` environment. The workflow requests only the `pages: write` and `id-token: write` permissions required by the official Pages deployment actions in addition to read-only repository contents.

@@ -2,7 +2,7 @@
 
 The result viewer is designed to stay usable with large tables, but q IPC responses are not streamed through the complete pipeline.
 
-Direct notebook execution keeps the decoded live value in extension-host memory while its live record exists, but only a bounded snapshot is written into `.ipynb`. Reopened output never embeds or reconstructs the full value.
+Direct notebook execution keeps the decoded live value in extension-host memory while its live record exists and automatically writes every exactly representable row using the typed portable v2 contract. The authoritative rich output therefore remains complete after reopening and can make the notebook large; it deliberately ignores helper-preview and static-fallback row/byte limits. A value outside the exact contract fails explicitly instead of being saved as a partial result labelled complete.
 
 ## Memory and rendering model
 
@@ -26,24 +26,26 @@ select avg price by 0D00:05 xbar time from trade where date=.z.D
 | --- | --- |
 | Result notice | Non-blocking notice at 5,000,000 cells, 1,000,000 rows, or 500 columns. |
 | Search (panel and live notebook) | At most 1,000 matching rows; a scan can stop after 2,000,000 cells or about 1.5 seconds and reports partial status. |
-| Sort (full panel) | Confirmation at 250,000 rows unless explicitly disabled. |
-| Sort (inline live notebook) | Declines results with 250,000 or more rows; open the full panel for its confirmation flow. |
+| Sort (panel and live notebook) | Confirmation only above `vscode-kdb.results.largeSortWarningRowThreshold`, which defaults to 5,000,000 rows; exactly 5,000,000 does not warn. Confirmation approves only the exact displayed result, while the global hide setting skips the guardrail. |
+| Column summaries (panel only, opt-in) | Exact only through both inclusive limits of 50,000 rows and 100,000 cells. Larger results use deterministic evenly spaced sampling of at most 10,000 rows and 100,000 cells, labelled sampled/partial. |
 | Copy/export | Confirmation at 1,000,000 selected cells or an estimated 50 MiB; large realized clipboard output gets another export suggestion. |
-| Built-in chart | Rejects sources over 2,000,000 rows by default and reduces plotted points. |
+| Built-in chart | Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views show all eligible finite points below 7,000 and deterministically target exactly 7,000 at or above that count; semantic groups/candles may be fewer. |
 | Local server full export | Rejects more than 1,000,000 visible cells by default. |
 | Local server slice | Fixed maximum of 1,000,000 requested cells. |
 | q-text | Bounds nested traversal at 16 levels; caps very large output at 1,048,576 characters and marks character truncation. |
-| Notebook live registry | Current extension-host session only; records are bound to notebook/cell URI, removed on rerun/cell removal/notebook close/deactivation, capped at 512, and oldest-first evicted. Each result caches at most four full sort orders. |
+| Notebook live registry | Current extension-host session only; records are bound to notebook/cell URI, removed on rerun, cell removal, native output clearing, notebook close, or deactivation, capped at 512, and oldest-first evicted. Each result caches at most four full sort orders. |
 | Notebook live slice | At most 500 rows, 128 columns, 20,000 cells, and 2,000,000 aggregate text characters per host message; individual display cells cap at 65,536 characters. |
-| Notebook saved output | Defaults to 20 rows and 1,000,000 bytes; accepted settings are 1-10,000 rows and 16,384-10,000,000 bytes. Tables with at most 20 rows persist fully at the default; larger tables retain schema/headers, a 20-row preview, total count, and an explicit truncation notice. The contract additionally caps 256 columns and 32,768 characters per table cell or 1,048,576 qText characters. |
+| Notebook saved output | Every successful first-party Direct IPC run automatically persists complete exact rich v2 output without the `maxOutputRows` or `maxOutputBytes` ceilings. Its saved grid and column controls page through bounded windows, bound visible cell/page text and search work, and display at most 1,048,576 full-qText characters with an explicit notice; Copy/Export with no selection still uses every retained visible column or the complete saved qText. The 1-10,000-row and 16,384-10,000,000-byte settings continue to bound tagged Python-helper previews and static fallback material where applicable. Historical preview payloads retain their declared 256-column, 32,768-character cell, and 1,048,576-character qText safety limits. |
 
 Some cell and chart limits are configurable. Internal time, byte-size, group-count, and file-format limits remain protective boundaries. Raising a configurable limit can temporarily block the extension host.
 
-Notebook row/byte options constrain serialization, not q execution. Apply a q-side limit when the full q value itself should not materialize. A direct result may retain omitted rows only in its transient live registry record; the `.ipynb` contains no recovery handle. Rerun, cell removal, notebook close, deactivation, oldest-first eviction, or reopening leaves only the bounded snapshot, and a saved-snapshot panel handoff cannot recover omitted rows.
+Large-sort approval is transient result state. Cancellation does not grant it, and re-execution, replacement, reopening, or a new output identity resets it. Column summaries use the already-decoded result without another q query, retain source-column ordinals, and send only compact payloads to the webview. In bounded mode, evaluated, valid, null, distinct, frequent-value, and numeric/temporal metrics describe only the deterministic sample; no count is extrapolated to unevaluated rows.
+
+Notebook row/byte options constrain tagged Python-helper previews and static fallback material where applicable, not q execution or authoritative first-party rich persistence. Apply a q-side limit when the full q value itself should not materialize or be stored. A historical or Python-helper preview has no recovery handle for omitted rows in the `.ipynb`; rerunning a historical first-party preview executes the current cell source and replaces it with new complete exact v2 output. Native output clearing removes the output and its live ownership so stale data cannot reappear. Cell removal, notebook close, deactivation, oldest-first eviction, or reopening likewise cannot recover rows absent from a saved preview.
 
 ## Timeout and queue behavior
 
-`vscode-kdb.connectionTimeoutMs` defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. The independent `vscode-kdb.queryTimeoutMs` defaults to 1,800,000 milliseconds (30 minutes).
+`vscode-kdb.connectionTimeoutMs` defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. The independent `vscode-kdb.queryTimeoutMs` defaults to 3,600,000 milliseconds (60 minutes). Mixed q-cell execution and the optional pure-q controller both inherit the active profile's effective query timeout and add no separate 30-second query ceiling.
 
 The **KX Connection** form's **Advanced direct q IPC** section accepts optional per-profile `connectTimeoutMs` and `queryTimeoutMs` overrides. Blank inherits the corresponding global value, including for existing profiles whose query override is omitted. Every timeout is a whole number from `0` through `2147483647` milliseconds; use `0` only when an unbounded phase wait is intentional. Zero disables only the corresponding connect/handshake or query response deadline.
 
@@ -71,4 +73,4 @@ Performance trace can add small measurement and output overhead. Disable it afte
 
 ## External analysis
 
-For a result already loaded in the panel, use bounded [Local Data Server](local-data-server.md) slices to avoid creating an additional q query. For data that should never be fully loaded into VS Code, query and aggregate it directly in q or use a separately managed client suited to that volume.
+The optional [Local Data Server](local-data-server.md) provides an explicit loopback workflow with bounded slices and tokenized endpoints. For data that should never be fully loaded into VS Code, query and aggregate it directly in q or use a separately managed client suited to that volume.

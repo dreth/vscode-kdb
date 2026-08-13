@@ -25,6 +25,7 @@ import {
   LiveNotebookResultStore,
   LiveNotebookSlice,
   LiveNotebookSliceRequest,
+  reconcileLiveNotebookCellOutputs,
 } from './notebook-live-results';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import {
@@ -68,6 +69,13 @@ export interface KxExtensionHostTestApi {
   ): void;
   holdNextNotebookQuery(): ExtensionHostNotebookQueryGate;
   notebookQueryCalls(): readonly { connectionId: string; source: string }[];
+  resultsPanelSnapshot(): {
+    panelCount: number;
+    visible: boolean;
+    version: number;
+    mode?: 'table' | 'text';
+    rowCount?: number;
+  };
   hasLiveNotebookResult(liveId: string, notebookUri: string): boolean;
   notebookLiveSlice(
     liveId: string,
@@ -184,6 +192,16 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
           liveNotebookResults.removeCell(notebookUri, cell.document.uri.toString());
         }
       }
+      for (const change of event.cellChanges) {
+        if (change.outputs !== undefined) {
+          reconcileLiveNotebookCellOutputs(
+            liveNotebookResults,
+            notebookUri,
+            change.cell.document.uri.toString(),
+            change.cell.outputs
+          );
+        }
+      }
     }),
     { dispose: () => configurePerfOutput(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
@@ -260,6 +278,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
         extensionHostNotebookExecutor.queueTable(columns, rows),
       holdNextNotebookQuery: () => extensionHostNotebookExecutor.holdNextQuery(),
       notebookQueryCalls: () => extensionHostNotebookExecutor.calls(),
+      resultsPanelSnapshot: () => KxResultsPanel.extensionHostTestSnapshot(),
       hasLiveNotebookResult: (liveId: string, notebookUri: string) =>
         liveNotebookResults.has(liveId, notebookUri),
       notebookLiveSlice: (

@@ -1,3 +1,13 @@
+import {
+  isQAtom,
+  isQGeneralNull,
+  isQRuntimeValue,
+  qValueToBoundedGridCellText,
+  qValueToBoundedLiteral,
+  qValueToGridCellText,
+  qValueToLiteral,
+} from './q-value';
+
 export interface CellPosition {
   row: number;
   column: number;
@@ -27,6 +37,8 @@ export type RowValue = { [key: string]: unknown };
 export type ArrayDisplayFormat = 'commaSpace' | 'space' | 'raw';
 export interface CellTextOptions {
   arrayDisplayFormat?: ArrayDisplayFormat;
+  maxChars?: number;
+  truncationMarker?: string;
 }
 export interface ExportOptions extends CellTextOptions {
   includeHeaders?: boolean;
@@ -45,6 +57,8 @@ export interface ExportShape {
 export interface ColumnarPanelResult {
   columns: string[];
   columnTypes?: string[];
+  /** Zero-based ordinals in this table's source schema that came from q keyed-table keys. */
+  keyColumnOrdinals?: number[];
   rowCount: number;
   cellValue(rowIndex: number, columnIndex: number): unknown;
   cellText(rowIndex: number, columnIndex: number, options?: CellTextOptions): string;
@@ -155,10 +169,10 @@ export function rowsToTsv(
   if (options.includeHeaders) {
     const headers: string[] = [];
     if (options.includeRowIndex) {
-      headers.push(cellValueToText(rowIndexColumnName(columns, clamped)));
+      headers.push(cellValueToExactText(rowIndexColumnName(columns, clamped), options));
     }
     for (let columnIndex = clamped.startColumn; columnIndex <= clamped.endColumn; columnIndex++) {
-      headers.push(cellValueToText(columns[columnIndex], options));
+      headers.push(cellValueToExactText(columns[columnIndex], options));
     }
     lines.push(headers.join('\t'));
   }
@@ -170,7 +184,7 @@ export function rowsToTsv(
       values.push(String(rowIndex + 1));
     }
     for (let columnIndex = clamped.startColumn; columnIndex <= clamped.endColumn; columnIndex++) {
-      values.push(cellValueToText(row[columns[columnIndex]], options));
+      values.push(cellValueToExactText(row[columns[columnIndex]], options));
     }
     lines.push(values.join('\t'));
   }
@@ -356,17 +370,24 @@ export function createColumnarPanelResult(
   columns: string[],
   rowCount: number,
   cellValue: (rowIndex: number, columnIndex: number) => unknown,
-  columnTypes?: readonly string[]
+  columnTypes?: readonly string[],
+  keyColumnOrdinals?: readonly number[]
 ): ColumnarPanelResult {
   const normalizedColumns = columns.map(column => String(column));
   const normalizedRowCount = nonNegativeCount(rowCount);
   const normalizedColumnTypes = columnTypes?.slice(0, normalizedColumns.length)
     .map(type => String(type || 'mixed'));
+  const normalizedKeyColumnOrdinals = keyColumnOrdinals === undefined
+    ? undefined
+    : strictColumnOrdinals(keyColumnOrdinals, normalizedColumns.length);
   const result: ColumnarPanelResult = {
     columns: normalizedColumns,
     ...(normalizedColumnTypes && normalizedColumnTypes.length > 0
       ? { columnTypes: normalizedColumnTypes }
       : {}),
+    ...(normalizedKeyColumnOrdinals === undefined
+      ? {}
+      : { keyColumnOrdinals: normalizedKeyColumnOrdinals }),
     rowCount: normalizedRowCount,
     cellValue(rowIndex: number, columnIndex: number): unknown {
       if (rowIndex < 0 || rowIndex >= normalizedRowCount || columnIndex < 0 || columnIndex >= normalizedColumns.length) {
@@ -415,7 +436,15 @@ export function projectColumnarPanelResult(
     (rowIndex, columnIndex) => result.cellValue(rowIndex, positions[columnIndex]),
     result.columnTypes
       ? positions.map(position => result.columnTypes![position])
-      : undefined
+      : undefined,
+    result.keyColumnOrdinals === undefined
+      ? undefined
+      : positions.reduce<number[]>((ordinals, sourcePosition, projectedPosition) => {
+        if (result.keyColumnOrdinals!.includes(sourcePosition)) {
+          ordinals.push(projectedPosition);
+        }
+        return ordinals;
+      }, [])
   );
 }
 
@@ -446,8 +475,46 @@ export function applyColumnarRowOrder(result: ColumnarPanelResult, rowOrder: num
     result.columns,
     sourceRowIndexes.length,
     (rowIndex, columnIndex) => result.cellValue(sourceRowIndexes[rowIndex], columnIndex),
-    result.columnTypes
+    result.columnTypes,
+    result.keyColumnOrdinals
   );
+}
+
+function strictColumnOrdinals(
+  ordinals: readonly number[],
+  columnCount: number
+): number[] {
+  if (!Array.isArray(ordinals) || !isDenseOrdinalArray(ordinals)) {
+    throw new RangeError('Column ordinals must be unique zero-based positions in the source schema.');
+  }
+  const normalized = ordinals.slice();
+  if (normalized.some(ordinal =>
+    typeof ordinal !== 'number' || !Number.isSafeInteger(ordinal) ||
+    ordinal < 0 || ordinal >= columnCount
+  ) || new Set(normalized).size !== normalized.length) {
+    throw new RangeError('Column ordinals must be unique zero-based positions in the source schema.');
+  }
+  return normalized;
+}
+
+function isDenseOrdinalArray(ordinals: readonly number[]): boolean {
+  try {
+    const keys = Reflect.ownKeys(ordinals);
+    if (keys.length !== ordinals.length + 1 || keys.some(key => key !== 'length' && (
+      typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= ordinals.length
+    ))) {
+      return false;
+    }
+    for (let index = 0; index < ordinals.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(ordinals, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export function sortedColumnarRowOrder(
@@ -461,17 +528,58 @@ export function sortedColumnarRowOrder(
   }
 
   const texts: string[] = [];
+  const values: unknown[] = [];
   const rowOrder: number[] = [];
   for (let rowIndex = 0; rowIndex < result.rowCount; rowIndex++) {
-    texts[rowIndex] = result.cellText(rowIndex, columnIndex, options);
+    values[rowIndex] = result.cellValue(rowIndex, columnIndex);
     rowOrder.push(rowIndex);
   }
 
   rowOrder.sort((leftRow, rightRow) => {
-    const compared = compareColumnarCellText(texts[leftRow], texts[rightRow], direction);
+    const valueCompared = compareColumnarCellValues(
+      values[leftRow],
+      values[rightRow],
+      direction
+    );
+    if (valueCompared !== undefined) {
+      return valueCompared === 0 ? leftRow - rightRow : valueCompared;
+    }
+    const leftText = texts[leftRow] ??
+      (texts[leftRow] = result.cellText(leftRow, columnIndex, options));
+    const rightText = texts[rightRow] ??
+      (texts[rightRow] = result.cellText(rightRow, columnIndex, options));
+    const compared = compareColumnarCellText(leftText, rightText, direction);
     return compared === 0 ? leftRow - rightRow : compared;
   });
   return rowOrder;
+}
+
+/** Compare raw scalar values when their q/JavaScript domains are compatible.
+ * Explicit nulls remain last for both directions; exact integer comparison
+ * avoids rounding decoded q longs through Number. */
+export function compareColumnarCellValues(
+  left: unknown,
+  right: unknown,
+  direction: ColumnarSortDirection = 'asc'
+): number | undefined {
+  const leftNull = isExplicitNullSortValue(left);
+  const rightNull = isExplicitNullSortValue(right);
+  if (leftNull || rightNull) {
+    if (leftNull && rightNull) {
+      return 0;
+    }
+    return leftNull ? 1 : -1;
+  }
+
+  const leftValue = semanticScalarSortValue(left);
+  const rightValue = semanticScalarSortValue(right);
+  if (!leftValue || !rightValue || leftValue.domain !== rightValue.domain ||
+    (leftValue.domain === 'temporal' && rightValue.domain === 'temporal' &&
+      leftValue.type !== rightValue.type)) {
+    return undefined;
+  }
+  const compared = compareSemanticScalarSortValues(leftValue, rightValue);
+  return direction === 'desc' ? -compared : compared;
 }
 
 export function compareColumnarCellText(
@@ -519,7 +627,7 @@ export function columnarToCellWindow(
   for (let rowIndex = clamped.startRow; rowIndex <= clamped.endRow; rowIndex++) {
     const values: string[] = [];
     for (let columnIndex = clamped.startColumn; columnIndex <= clamped.endColumn; columnIndex++) {
-      values.push(result.cellText(rowIndex, columnIndex, options));
+      values.push(cellValueToWindowText(result.cellValue(rowIndex, columnIndex), options));
     }
     cells.push(values);
   }
@@ -531,6 +639,21 @@ export function columnarToCellWindow(
     endColumn: clamped.endColumn,
     cells,
   };
+}
+
+function cellValueToWindowText(value: unknown, options?: CellTextOptions): string {
+  if (!options || !Number.isFinite(options.maxChars)) {
+    return cellValueToText(value, options);
+  }
+  const maxChars = Math.max(0, Math.floor(options.maxChars!));
+  const marker = typeof options.truncationMarker === 'string'
+    ? options.truncationMarker
+    : '… [truncated]';
+  if (marker.length >= maxChars) {
+    return marker.slice(0, maxChars);
+  }
+  const bounded = cellValueToBoundedText(value, maxChars - marker.length, options);
+  return bounded.truncated ? `${bounded.text}${marker}` : bounded.text;
 }
 
 export function columnarToTextFormat(
@@ -568,10 +691,10 @@ function columnarToTsv(result: ColumnarPanelResult, range: CellRange, options: N
   if (options.includeHeaders) {
     const headers: string[] = [];
     if (options.includeRowIndex) {
-      headers.push(cellValueToText(rowIndexColumnName(result.columns, clamped)));
+      headers.push(cellValueToExactText(rowIndexColumnName(result.columns, clamped), options));
     }
     for (let columnIndex = clamped.startColumn; columnIndex <= clamped.endColumn; columnIndex++) {
-      headers.push(cellValueToText(result.columns[columnIndex], options));
+      headers.push(cellValueToExactText(result.columns[columnIndex], options));
     }
     lines.push(headers.join('\t'));
   }
@@ -582,7 +705,7 @@ function columnarToTsv(result: ColumnarPanelResult, range: CellRange, options: N
       values.push(String(rowIndex + 1));
     }
     for (let columnIndex = clamped.startColumn; columnIndex <= clamped.endColumn; columnIndex++) {
-      values.push(cellValueToText(result.cellValue(rowIndex, columnIndex), options));
+      values.push(cellValueToExactText(result.cellValue(rowIndex, columnIndex), options));
     }
     lines.push(values.join('\t'));
   }
@@ -734,7 +857,7 @@ export function rowsToCellWindow(
     const row = rows[rowIndex] || {};
     const values: string[] = [];
     for (let columnIndex = clamped.startColumn; columnIndex <= clamped.endColumn; columnIndex++) {
-      values.push(cellValueToText(row[columns[columnIndex]], options));
+      values.push(cellValueToWindowText(row[columns[columnIndex]], options));
     }
     cells.push(values);
   }
@@ -752,6 +875,10 @@ export function cellValueToText(value: unknown, options?: CellTextOptions): stri
   return sanitizeTsvCell(cellValueToReadableText(value, options));
 }
 
+function cellValueToExactText(value: unknown, options?: CellTextOptions): string {
+  return sanitizeTsvCell(cellValueToExactReadableText(value, options));
+}
+
 export interface BoundedCellText {
   text: string;
   truncated: boolean;
@@ -763,6 +890,7 @@ interface BoundedReadableTextState {
   limit: number;
   truncated: boolean;
   skipLfAfterCr: boolean;
+  qRenderMode: 'grid' | 'literal';
   stack: Set<object>;
   options: NormalizedCellTextOptions;
 }
@@ -781,6 +909,33 @@ export function cellValueToBoundedText(
     limit,
     truncated: false,
     skipLfAfterCr: false,
+    qRenderMode: 'grid',
+    stack: new Set<object>(),
+    options: normalizeCellTextOptions(options),
+  };
+  appendBoundedReadableValue(state, value, true, 0);
+  return {
+    text: state.chunks.join(''),
+    truncated: state.truncated,
+  };
+}
+
+/** Exact q-aware bounded text for copy/export sizing and format limits. */
+export function cellValueToBoundedExportText(
+  value: unknown,
+  maxChars: number,
+  options?: CellTextOptions
+): BoundedCellText {
+  const limit = Number.isFinite(maxChars)
+    ? Math.max(0, Math.floor(maxChars))
+    : 0;
+  const state: BoundedReadableTextState = {
+    chunks: [],
+    length: 0,
+    limit,
+    truncated: false,
+    skipLfAfterCr: false,
+    qRenderMode: 'literal',
     stack: new Set<object>(),
     options: normalizeCellTextOptions(options),
   };
@@ -836,6 +991,176 @@ function compareNonEmptyCellText(left: string, right: string): number {
   return 0;
 }
 
+type SemanticScalarSortValue =
+  | { domain: 'boolean'; value: 0 | 1 }
+  | { domain: 'numeric'; value: number | bigint; infinity: -1 | 0 | 1 }
+  | {
+    domain: 'temporal';
+    type: string;
+    value: number | bigint;
+    infinity: -1 | 0 | 1;
+  };
+
+const Q_NUMERIC_SORT_TYPES = new Set([
+  'byte',
+  'short',
+  'int',
+  'long',
+  'real',
+  'float',
+]);
+const Q_INT32_TEMPORAL_SORT_TYPES = new Set([
+  'month',
+  'date',
+  'minute',
+  'second',
+  'time',
+]);
+const Q_INT64_TEMPORAL_SORT_TYPES = new Set(['timestamp', 'timespan']);
+
+function isExplicitNullSortValue(value: unknown): boolean {
+  if (value === null || value === undefined || isQGeneralNull(value)) {
+    return true;
+  }
+  return isQAtom(value) && qSpecialSortKind(value.value) === 'null';
+}
+
+function semanticScalarSortValue(value: unknown): SemanticScalarSortValue | undefined {
+  if (typeof value === 'boolean') {
+    return { domain: 'boolean', value: value ? 1 : 0 };
+  }
+  if (typeof value === 'bigint') {
+    return { domain: 'numeric', value, infinity: 0 };
+  }
+  if (typeof value === 'number') {
+    return Number.isNaN(value)
+      ? undefined
+      : {
+        domain: 'numeric',
+        value,
+        infinity: value === Number.NEGATIVE_INFINITY ? -1 : value === Number.POSITIVE_INFINITY ? 1 : 0,
+      };
+  }
+  if (!isQAtom(value)) {
+    return undefined;
+  }
+  if (value.type === 'boolean') {
+    return typeof value.value === 'boolean'
+      ? { domain: 'boolean', value: value.value ? 1 : 0 }
+      : undefined;
+  }
+  const numeric = Q_NUMERIC_SORT_TYPES.has(value.type);
+  const temporal = Q_INT32_TEMPORAL_SORT_TYPES.has(value.type) ||
+    Q_INT64_TEMPORAL_SORT_TYPES.has(value.type) || value.type === 'datetime';
+  if (!numeric && !temporal) {
+    return undefined;
+  }
+  const domain = temporal ? 'temporal' as const : 'numeric' as const;
+  const special = qSpecialSortKind(value.value);
+  if (special === 'negativeInfinity' || special === 'positiveInfinity') {
+    return {
+      domain,
+      ...(temporal ? { type: value.type } : {}),
+      value: special === 'negativeInfinity' ? Number.NEGATIVE_INFINITY : Number.POSITIVE_INFINITY,
+      infinity: special === 'negativeInfinity' ? -1 : 1,
+    } as SemanticScalarSortValue;
+  }
+  if (special === 'negativeZero') {
+    return {
+      domain,
+      ...(temporal ? { type: value.type } : {}),
+      value: -0,
+      infinity: 0,
+    } as SemanticScalarSortValue;
+  }
+  if (special !== undefined) {
+    return undefined;
+  }
+  try {
+    if (value.type === 'long' || Q_INT64_TEMPORAL_SORT_TYPES.has(value.type)) {
+      return {
+        domain,
+        ...(temporal ? { type: value.type } : {}),
+        value: BigInt(String(value.value)),
+        infinity: 0,
+      } as SemanticScalarSortValue;
+    }
+    if (value.type === 'byte' || value.type === 'short' || value.type === 'int' ||
+      Q_INT32_TEMPORAL_SORT_TYPES.has(value.type)) {
+      return {
+        domain,
+        ...(temporal ? { type: value.type } : {}),
+        value: BigInt(Number(value.value)),
+        infinity: 0,
+      } as SemanticScalarSortValue;
+    }
+    const scalar = Number(value.value);
+    return Number.isNaN(scalar)
+      ? undefined
+      : {
+        domain,
+        ...(temporal ? { type: value.type } : {}),
+        value: scalar,
+        infinity: 0,
+      } as SemanticScalarSortValue;
+  } catch {
+    return undefined;
+  }
+}
+
+function qSpecialSortKind(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null || !('special' in value)) {
+    return undefined;
+  }
+  return typeof value.special === 'string' ? value.special : undefined;
+}
+
+function compareSemanticScalarSortValues(
+  left: SemanticScalarSortValue,
+  right: SemanticScalarSortValue
+): number {
+  if (left.domain === 'boolean' && right.domain === 'boolean') {
+    return left.value - right.value;
+  }
+  if (left.domain === 'boolean' || right.domain === 'boolean') {
+    return 0;
+  }
+  if (left.infinity !== right.infinity) {
+    return left.infinity < right.infinity ? -1 : 1;
+  }
+  if (left.infinity !== 0) {
+    return 0;
+  }
+  return compareFiniteNumericSortValues(left.value, right.value);
+}
+
+function compareFiniteNumericSortValues(left: number | bigint, right: number | bigint): number {
+  if (typeof left === 'bigint' && typeof right === 'bigint') {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  if (typeof left === 'number' && typeof right === 'number') {
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  return typeof left === 'bigint'
+    ? compareBigIntToFiniteNumber(left, right as number)
+    : -compareBigIntToFiniteNumber(right as bigint, left);
+}
+
+function compareBigIntToFiniteNumber(integer: bigint, numeric: number): number {
+  if (Number.isInteger(numeric)) {
+    const numericInteger = BigInt(numeric);
+    return integer < numericInteger ? -1 : integer > numericInteger ? 1 : 0;
+  }
+  const truncated = BigInt(Math.trunc(numeric));
+  if (integer < truncated) {
+    return -1;
+  }
+  if (integer > truncated) {
+    return 1;
+  }
+  return numeric > 0 ? -1 : 1;
+}
+
 function booleanSortValue(value: string): number | null {
   const normalized = value.trim().toLocaleLowerCase();
   if (normalized === 'false') {
@@ -858,16 +1183,24 @@ function numericSortValue(value: string): number | null {
 }
 
 function cellValueToCsvText(value: unknown, options?: CellTextOptions): string {
-  return cellValueToReadableText(value, options);
+  return cellValueToExactReadableText(value, options);
 }
 
 function cellValueToReadableText(value: unknown, options?: CellTextOptions): string {
   return readableValueText(value, true, normalizeCellTextOptions(options));
 }
 
+function cellValueToExactReadableText(value: unknown, options?: CellTextOptions): string {
+  return exactReadableValueText(value, true, normalizeCellTextOptions(options));
+}
+
 function readableValueText(value: unknown, topLevel: boolean, options: NormalizedCellTextOptions): string {
   if (value === null || value === undefined) {
     return '';
+  }
+
+  if (isQRuntimeValue(value)) {
+    return qValueToGridCellText(value);
   }
 
   if (typeof value === 'string') {
@@ -893,6 +1226,47 @@ function readableValueText(value: unknown, topLevel: boolean, options: Normalize
   return cellValueToExportText(value);
 }
 
+function exactReadableValueText(
+  value: unknown,
+  topLevel: boolean,
+  options: NormalizedCellTextOptions
+): string {
+  if (value === null || value === undefined) {
+    return '';
+  }
+
+  if (isQRuntimeValue(value)) {
+    return qValueToLiteral(value);
+  }
+
+  if (typeof value === 'string') {
+    return value;
+  }
+
+  if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
+    return String(value);
+  }
+
+  if (Array.isArray(value)) {
+    const text = value.map(item => exactReadableValueText(item, false, options))
+      .join(arrayDisplaySeparator(options.arrayDisplayFormat));
+    return topLevel && options.arrayDisplayFormat !== 'raw' ? text : `[${text}]`;
+  }
+
+  if (isPlainObject(value)) {
+    const parts = Object.keys(value as { [key: string]: unknown }).map(key => {
+      return `${JSON.stringify(key)}: ${exactReadableValueText(
+        (value as { [key: string]: unknown })[key],
+        false,
+        options
+      )}`;
+    });
+    return `{${parts.join(', ')}}`;
+  }
+
+  return cellValueToExportText(value);
+}
+
 function appendBoundedReadableValue(
   state: BoundedReadableTextState,
   value: unknown,
@@ -907,6 +1281,19 @@ function appendBoundedReadableValue(
     return;
   }
   if (value === null || value === undefined) {
+    return;
+  }
+  if (isQRuntimeValue(value)) {
+    const bounded = (state.qRenderMode === 'literal'
+      ? qValueToBoundedLiteral
+      : qValueToBoundedGridCellText)(value, {
+      maxChars: Math.max(0, state.limit - state.length),
+      maxDepth: Math.max(0, 512 - depth),
+    });
+    appendBoundedSanitizedText(state, bounded.text);
+    if (bounded.truncated) {
+      state.truncated = true;
+    }
     return;
   }
   if (typeof value === 'string') {
@@ -1132,6 +1519,10 @@ function cellValueToExportText(value: unknown): string {
     return '';
   }
 
+  if (isQRuntimeValue(value)) {
+    return qValueToLiteral(value);
+  }
+
   if (typeof value === 'string') {
     return value;
   }
@@ -1336,6 +1727,9 @@ export function kxResultJsonStringUtf8ByteLength(
 }
 
 function jsonReplacer(_key: string, value: unknown): unknown {
+  if (isQRuntimeValue(value)) {
+    return qValueToLiteral(value);
+  }
   if (typeof value === 'bigint') {
     return String(value);
   }
@@ -1356,6 +1750,16 @@ function jsonValueCharacterLength(
 ): number | undefined {
   if (depth > 512) {
     throw new RangeError('KX result JSON nesting exceeds the safe depth limit');
+  }
+  if (isQRuntimeValue(input)) {
+    const bounded = qValueToBoundedLiteral(input, {
+      maxChars: Math.max(0, limit - 2),
+      maxDepth: Math.max(0, 512 - depth),
+    });
+    if (bounded.truncated) {
+      return undefined;
+    }
+    return kxResultJsonStringCharacterLength(bounded.text, limit);
   }
   let value = input;
   if ((typeof value === 'object' && value !== null) ||
@@ -1564,8 +1968,9 @@ function escapeHtml(value: string): string {
 }
 
 function escapeMarkdownTableCell(value: unknown, options?: CellTextOptions): string {
-  return cellValueToReadableText(value, options)
+  return cellValueToExactReadableText(value, options)
     .replace(/\\/g, '\\\\')
+    .replace(/`/g, '\\`')
     .replace(/\|/g, '\\|')
     .replace(/\r\n|\r|\n/g, '<br>');
 }

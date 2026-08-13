@@ -45,12 +45,59 @@ export interface NotebookGridWindow {
   endColumn: number;
 }
 
+export interface NotebookSavedColumnWindow {
+  columns: number[];
+  start: number;
+  end: number;
+  total: number;
+  hasPrevious: boolean;
+  hasNext: boolean;
+}
+
 export type NotebookCopyFormat = 'tsv' | 'csv';
 
 export const NOTEBOOK_GRID_MIN_HEIGHT = 72;
 export const NOTEBOOK_GRID_DEFAULT_MAX_HEIGHT = 420;
 export const NOTEBOOK_GRID_RESIZE_MAX_HEIGHT = 900;
 export const NOTEBOOK_CHART_MAX_Y_COLUMNS = 16;
+
+export function notebookSavedCellTextLimit(
+  pageRows: number,
+  visibleColumns: number,
+  perCellLimit: number,
+  aggregateLimit: number
+): number {
+  const cells = Math.max(
+    1,
+    nonNegativeInteger(pageRows) * Math.max(1, nonNegativeInteger(visibleColumns))
+  );
+  return Math.min(
+    Math.max(1, nonNegativeInteger(perCellLimit)),
+    Math.max(1, Math.floor(nonNegativeInteger(aggregateLimit) / cells))
+  );
+}
+
+/** Keep saved-table DOM work bounded while retaining every persisted column. */
+export function notebookSavedColumnWindow(
+  columnIndexes: readonly number[],
+  requestedStart: number,
+  maximumColumns: number
+): NotebookSavedColumnWindow {
+  const total = columnIndexes.length;
+  const size = Math.max(1, nonNegativeInteger(maximumColumns));
+  const lastStart = total === 0 ? 0 : Math.floor((total - 1) / size) * size;
+  const requestedPage = Math.floor(nonNegativeInteger(requestedStart) / size) * size;
+  const start = Math.min(lastStart, requestedPage);
+  const end = Math.min(total, start + size);
+  return {
+    columns: columnIndexes.slice(start, end),
+    start,
+    end,
+    total,
+    hasPrevious: start > 0,
+    hasNext: end < total,
+  };
+}
 
 /** Build a stable, unbounded display-row order for a fully persisted result. */
 export function notebookSavedRowOrder(
