@@ -17,6 +17,9 @@ const VOLATILE_HTTP_HEADERS = new Set([
   'transfer-encoding',
 ]);
 
+const Q_VECTOR_TYPE = Symbol.for('vscode-kdb.qVectorType');
+const Q_VECTOR_ATTRIBUTE = Symbol.for('vscode-kdb.qVectorAttribute');
+
 function canonicalQValue(value, options = {}) {
   const state = {
     sortObjectKeys: options.sortObjectKeys !== false,
@@ -72,9 +75,29 @@ function canonicalValue(value, state, path) {
   enterObject(value, state, path);
   try {
     if (Array.isArray(value)) {
+      const vectorType = value[Q_VECTOR_TYPE];
+      const vectorAttribute = value[Q_VECTOR_ATTRIBUTE];
+      if (typeof vectorType === 'string') {
+        return {
+          $q: 'vector',
+          type: vectorType,
+          attribute: Number(vectorAttribute || 0),
+          values: value.map((item, index) => canonicalValue(item, state, `${path}[${index}]`)),
+        };
+      }
       return value.map((item, index) => canonicalValue(item, state, `${path}[${index}]`));
     }
 
+    if (value.qtype === 'atom') {
+      return {
+        $q: 'atom',
+        type: String(value.type),
+        value: canonicalValue(value.value, state, `${path}.value`),
+      };
+    }
+    if (value.qtype === 'generalNull') {
+      return { $q: 'generalNull' };
+    }
     if (value.qtype === 'table') {
       return canonicalQTable(value, state, path, 'table');
     }
@@ -121,15 +144,36 @@ function canonicalQTable(value, state, path, qtype) {
   const columns = Array.isArray(value.columns) ? value.columns.map(String) : [];
   const rows = Array.isArray(value.rows) ? value.rows : [];
   const rowCount = Number.isFinite(Number(value.rowCount)) ? Number(value.rowCount) : rows.length;
+  const columnData = qtype === 'keyedTable'
+    ? [
+      ...(value.keyTable && Array.isArray(value.keyTable.columnData) ? value.keyTable.columnData : []),
+      ...(value.valueTable && Array.isArray(value.valueTable.columnData) ? value.valueTable.columnData : []),
+    ]
+    : Array.isArray(value.columnData) ? value.columnData : [];
   return {
     $q: qtype,
     columns,
     rowCount,
-    rows: rows.map((row, rowIndex) => columns.map((column, columnIndex) => {
-      const cell = row && typeof row === 'object' ? row[column] : undefined;
-      return canonicalValue(cell, state, `${path}.rows[${rowIndex}][${columnIndex}]`);
-    })),
+    rows: Array.from({ length: rowCount }, (_unused, rowIndex) =>
+      columns.map((column, columnIndex) => {
+        const sourceColumn = columnData[columnIndex];
+        const cell = Array.isArray(sourceColumn)
+          ? canonicalQVectorCell(sourceColumn, rowIndex)
+          : rows[rowIndex] && typeof rows[rowIndex] === 'object'
+            ? rows[rowIndex][column]
+            : undefined;
+        return canonicalValue(cell, state, `${path}.rows[${rowIndex}][${columnIndex}]`);
+      })),
   };
+}
+
+function canonicalQVectorCell(vector, index) {
+  const value = vector[index];
+  const type = vector[Q_VECTOR_TYPE];
+  if (typeof type !== 'string' || type === 'mixed') {
+    return value;
+  }
+  return { qtype: 'atom', type, value };
 }
 
 function canonicalQDictionary(value, state, path) {

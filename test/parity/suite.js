@@ -249,7 +249,7 @@ async function chartViewportCases(ctx) {
 
   await ctx.case(caseDef(
     'chart-viewport-clamp-pan-direction',
-    'chart viewport clamp, button pan, and grab-content direction',
+    'chart viewport clamp, navigator pan, and grab-content direction',
     'deterministic',
     'PASS',
     'Both products applied identical absolute X-only viewport clamping and pan direction at domain edges.'
@@ -813,7 +813,11 @@ async function ipcLifecycleCases(ctx) {
         await client.connect();
         const error = await captureAsyncError(() => client.query('bad-query'));
         const value = await client.query('1+1');
-        results.push({ error: canonical.canonicalError(error), value, queryCount });
+        results.push({
+          error: canonical.canonicalError(error),
+          value: canonical.canonicalQValue(value),
+          queryCount,
+        });
       } finally {
         await client.close();
         await mock.close();
@@ -822,7 +826,7 @@ async function ipcLifecycleCases(ctx) {
     t.deepEqual(results[0], results[1]);
     t.equal(results[0].error.name, 'KdbQError');
     t.equal(results[0].error.classification, 'q-error');
-    t.equal(results[0].value, 2);
+    t.deepEqual(results[0].value, { $q: 'atom', type: 'int', value: 2 });
     t.equal(results[0].queryCount, 2);
   });
 
@@ -1019,8 +1023,12 @@ async function liveQCases(ctx) {
           t.deepEqual(canonical.canonicalError(leftError), canonical.canonicalError(rightError));
           t.equal(leftError.name, fixture.expectedErrorName);
           t.match(leftError.message, fixture.expectedErrorPattern);
-          t.equal(await leftClient.query('1+1'), 2);
-          t.equal(await rightClient.query('1+1'), 2);
+          t.deepEqual(canonical.canonicalQValue(await leftClient.query('1+1')), {
+            $q: 'atom', type: 'long', value: '2',
+          });
+          t.deepEqual(canonical.canonicalQValue(await rightClient.query('1+1')), {
+            $q: 'atom', type: 'long', value: '2',
+          });
           return;
         }
         const leftValue = await leftClient.query(fixture.query);
@@ -1064,11 +1072,15 @@ async function liveQCases(ctx) {
           t.match(leftError.message, fixture.expectedErrorPattern);
           t.match(rightError.message, fixture.expectedErrorPattern);
         } else {
-          t.deepEqual(await leftClient.query(leftQuery), fixture.expected);
-          t.deepEqual(await rightClient.query(rightQuery), fixture.expected);
+          t.deepEqual(canonical.canonicalQValue(await leftClient.query(leftQuery)), fixture.expected);
+          t.deepEqual(canonical.canonicalQValue(await rightClient.query(rightQuery)), fixture.expected);
         }
-        t.equal(await leftClient.query('string system "d"'), '.');
-        t.equal(await rightClient.query('string system "d"'), '.');
+        t.deepEqual(canonical.canonicalQValue(await leftClient.query('string system "d"')), {
+          $q: 'vector', type: 'char', attribute: 0, values: [46],
+        });
+        t.deepEqual(canonical.canonicalQValue(await rightClient.query('string system "d"')), {
+          $q: 'vector', type: 'char', attribute: 0, values: [46],
+        });
       });
     }
 
@@ -1088,7 +1100,7 @@ async function liveQCases(ctx) {
           fixture.text,
           '.standaloneParityScript'
         ));
-        t.equal(left, fixture.expectedLiveResult);
+        t.deepEqual(canonical.canonicalQValue(left), fixture.expectedLiveResult);
         const rightError = await captureAsyncError(() => rightClient.query(
           reference.namespace.queryInNamespace(fixture.text, '.referenceParityScript')
         ));
@@ -1096,8 +1108,12 @@ async function liveQCases(ctx) {
         failures.push(rightError.name);
       }
       t.deepEqual(failures, ['KdbQError', 'KdbQError']);
-      t.equal(await leftClient.query('string system "d"'), '.');
-      t.equal(await rightClient.query('string system "d"'), '.');
+      t.deepEqual(canonical.canonicalQValue(await leftClient.query('string system "d"')), {
+        $q: 'vector', type: 'char', attribute: 0, values: [46],
+      });
+      t.deepEqual(canonical.canonicalQValue(await rightClient.query('string system "d"')), {
+        $q: 'vector', type: 'char', attribute: 0, values: [46],
+      });
     });
   } finally {
     await Promise.all([
@@ -1223,10 +1239,10 @@ async function boundaryCases(ctx) {
     area: 'VSIX install and Marketplace publication',
     mode: 'boundary',
     expectedStatus: 'NOT_TESTABLE_HERE',
-    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.15 archive inventory and hashes must be verified separately by the release gate.',
+    rationale: 'The executable parity gate does not package or install a VSIX and is not authorized to upload to Marketplace. The 0.2.18 archive inventory and hashes must be verified separately by the release gate.',
     signoff: 'Record a clean supported Extension Host installation separately; require explicit authorization before any future Marketplace identity, credential, or upload check.',
   }, t => {
-    t.equal(standalone.packageJson.version, '0.2.15');
+    t.equal(standalone.packageJson.version, '0.2.18');
     t.equal(reference.packageJson.version, '0.3.21');
   });
 

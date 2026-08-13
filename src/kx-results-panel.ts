@@ -3,8 +3,6 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import {
   CHART_MAX_SOURCE_ROWS,
-  CHART_ZOOM_MAX_SAMPLED_POINTS,
-  CHART_ZOOM_MIN_SAMPLED_POINTS,
   ChartDataError,
   ChartType,
   buildChartData,
@@ -12,9 +10,13 @@ import {
   normalizeChartType,
 } from './charting';
 import {
+  adjustChartNavigatorRange,
   applyChartZoomLifecycleFailure,
   applyChartZoomLifecycleResponse,
   clampChartViewport,
+  chartNavigatorSliderBounds,
+  chartNavigatorWindow,
+  chartOverviewIntervalHasGap,
   chartRangeIsZoomed,
   chartVisibleIndexBounds,
   chartZoomCanReset,
@@ -24,8 +26,10 @@ import {
   chartZoomRequestedRenderRange,
   isValidChartRange,
   issueChartZoomLifecycleRequest,
+  mergeChartPixelGaps,
   panChartViewport,
   panChartViewportByPixels,
+  recenterChartNavigatorRange,
   reduceChartZoomLifecycle,
   resetChartZoomLifecycle,
 } from './chart-zoom';
@@ -53,6 +57,7 @@ import {
   VisibleIndexRange,
   allCellsRange,
   applyColumnarRowOrder,
+  cellValueToBoundedText,
   clampCellRange,
   projectColumnarPanelResult,
   sortedColumnarRowOrder,
@@ -102,7 +107,31 @@ import {
   resultTableSortIndicator,
   updateHeaderPointer,
 } from './result-table-interaction';
+import {
+  DEFAULT_LARGE_SORT_WARNING_ROW_THRESHOLD,
+  ExactResultSortWarningApproval,
+  MAX_LARGE_SORT_WARNING_ROW_THRESHOLD,
+  MIN_LARGE_SORT_WARNING_ROW_THRESHOLD,
+  normalizeLargeSortWarningRowThreshold,
+  ResultSortWarningIdentity,
+  shouldWarnForLargeSort,
+} from './result-sort-warning';
+import {
+  KxColumnSummaryBatch,
+  computeResultColumnSummaries,
+} from './result-column-summary';
+import {
+  dataWranglerLocalHandoffUnsupportedReason,
+  openDataWranglerSnapshot,
+} from './data-wrangler-handoff';
 export { SharedKxResultSettings } from './results-ui-contract';
+
+export const KX_RESULTS_PANEL_SLICE_CELL_TEXT_CHARS = 64 * 1024;
+export const KX_RESULTS_PANEL_SLICE_TEXT_CHARS = 2_000_000;
+export const KX_RESULTS_PANEL_SLICE_MAX_CELLS = 20_000;
+const KX_RESULTS_PANEL_SEARCH_CELL_TEXT_CHARS = 4_096;
+const KX_RESULTS_PANEL_SLICE_TRUNCATION_MARKER =
+  '… [cell truncated; copy/export uses full value]';
 
 type KxPanelResultMode = 'table' | 'text';
 
@@ -118,6 +147,13 @@ interface KxPanelBaseResult {
 export interface KxPanelTableResult extends KxPanelBaseResult {
   mode?: 'table';
   table: ColumnarPanelResult;
+  snapshotScope?: KxPanelTableSnapshotScope;
+}
+
+export interface KxPanelTableSnapshotScope {
+  kind: 'complete' | 'truncatedSavedPreview';
+  savedRowCount?: number;
+  totalRowCount?: number;
 }
 
 export interface KxPanelTextResult extends KxPanelBaseResult {
@@ -136,6 +172,7 @@ interface KxPanelMetadata {
   mode: KxPanelResultMode;
   columns: string[];
   columnPositions: number[];
+  keyColumnPositions: number[];
   allColumns: string[];
   allColumnPositions: number[];
   hiddenColumnCount: number;
@@ -156,6 +193,7 @@ interface KxPanelMetadata {
   sort: KxPanelSortState | null;
   guardrailMessage?: string;
   chartAutoOpen?: boolean;
+  snapshotScope?: KxPanelTableSnapshotScope;
 }
 
 export type KxPanelDensity = KxResultDensity;
@@ -171,8 +209,11 @@ interface KxPanelSortState {
 }
 
 interface KxPanelSettings extends SharedKxResultSettings {
+  dataWranglerEnabled: boolean;
   hideLargeResultWarnings: boolean;
   hideLargeSortWarnings: boolean;
+  largeSortWarningRowThreshold: number;
+  showColumnSummaryStatistics: boolean;
   localDataServerFullExportCellLimit: number;
 }
 
@@ -196,7 +237,6 @@ const LARGE_RESULT_WARNING_CELL_THRESHOLD = 5 * 1000 * 1000;
 const LARGE_RESULT_WARNING_ROW_THRESHOLD = 1000000;
 const LARGE_RESULT_WARNING_COLUMN_THRESHOLD = 500;
 const COPY_EXPORT_CONFIRM_CELL_THRESHOLD = 1000000;
-const SORT_CONFIRM_ROW_THRESHOLD = 250000;
 const SEARCH_MATCH_CAP = 1000;
 const SEARCH_YIELD_CELL_INTERVAL = 10000;
 const SEARCH_SCAN_CELL_LIMIT = 2000000;
@@ -206,6 +246,7 @@ const CHART_DECIMAL_PLACES_MIN = 0;
 const CHART_DECIMAL_PLACES_MAX = 12;
 const CHART_SELECTION_STATE_PREFIX = 'vscode-kdb.results.viewer.chartSelection.v1.';
 const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
+  dataWranglerEnabled: false,
   cellWidth: 160,
   columnWidths: {},
   autoFitColumns: true,
@@ -218,13 +259,13 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   includeRowIndex: true,
   hideLargeResultWarnings: false,
   hideLargeSortWarnings: false,
+  largeSortWarningRowThreshold: DEFAULT_LARGE_SORT_WARNING_ROW_THRESHOLD,
+  showColumnSummaryStatistics: false,
   copyExportConfirmCellThreshold: COPY_EXPORT_CONFIRM_CELL_THRESHOLD,
   localDataServerFullExportCellLimit: LOCAL_DATA_SERVER_FULL_EXPORT_CELL_LIMIT,
   elapsedTimeDisplay: 'auto',
   chartDecimalPlaces: CHART_DECIMAL_PLACES_DEFAULT,
   chartMaxSourceRows: CHART_MAX_SOURCE_ROWS,
-  chartZoomMinSampledPoints: CHART_ZOOM_MIN_SAMPLED_POINTS,
-  chartZoomMaxSampledPoints: CHART_ZOOM_MAX_SAMPLED_POINTS,
   qTextSyntaxHighlighting: false,
   qTextDisplayFormatting: false,
   arrayDisplayFormat: 'commaSpace',
@@ -283,6 +324,19 @@ export class KxResultsPanel {
   private sortState: KxPanelSortState | undefined;
   private sortIntentState: KxPanelSortState | undefined;
   private activeSortId = 0;
+  private readonly sortWarningApproval =
+    new ExactResultSortWarningApproval<KxPanelResult>();
+  private pendingSortWarningConfirmation: {
+    identity: ResultSortWarningIdentity<KxPanelResult>;
+    promise: Promise<string | undefined>;
+  } | undefined;
+  private columnSummaryResultIdentity = 0;
+  private activeColumnSummaryId = 0;
+  private columnSummaryCache: {
+    resultIdentity: number;
+    table: ColumnarPanelResult;
+    summary: KxColumnSummaryBatch;
+  } | undefined;
   private hiddenColumnSchema: string[] | undefined;
   private columnOrderSchema: string[] | undefined;
   private baseVisibleTableCache: { version: number; source: ColumnarPanelResult; table: ColumnarPanelResult } | undefined;
@@ -310,6 +364,7 @@ export class KxResultsPanel {
   private chartPanelOpen = false;
   private chartPanelRendered = false;
   private pendingAutoChart = false;
+  private dataWranglerHandoffPending = false;
   private runningQueryCancel: { version: number; cancel(): void } | undefined;
 
   public static showLoading(
@@ -327,6 +382,11 @@ export class KxResultsPanel {
     panel.sortState = undefined;
     panel.sortIntentState = undefined;
     panel.activeSortId += 1;
+    panel.sortWarningApproval.clear();
+    panel.pendingSortWarningConfirmation = undefined;
+    panel.columnSummaryResultIdentity += 1;
+    panel.activeColumnSummaryId += 1;
+    panel.columnSummaryCache = undefined;
     panel.hideLargeResultWarningOnce = false;
     panel.baseVisibleTableCache = undefined;
     panel.visibleTableCache = undefined;
@@ -368,6 +428,11 @@ export class KxResultsPanel {
     this.sortState = undefined;
     this.sortIntentState = undefined;
     this.activeSortId += 1;
+    this.sortWarningApproval.replace(result);
+    this.pendingSortWarningConfirmation = undefined;
+    this.columnSummaryResultIdentity += 1;
+    this.activeColumnSummaryId += 1;
+    this.columnSummaryCache = undefined;
     this.hideLargeResultWarningOnce = false;
     this.baseVisibleTableCache = undefined;
     this.visibleTableCache = undefined;
@@ -443,11 +508,36 @@ export class KxResultsPanel {
       KxResultsPanel.panels[0];
   }
 
+  private static displayedPanel(): KxResultsPanel | undefined {
+    const active = KxResultsPanel.panels.find(panel =>
+      panel.panel.active && panel.panel.visible);
+    if (active) {
+      return active;
+    }
+    if (KxResultsPanel.lastActivePanel &&
+      KxResultsPanel.panels.indexOf(KxResultsPanel.lastActivePanel) !== -1 &&
+      KxResultsPanel.lastActivePanel.panel.visible) {
+      return KxResultsPanel.lastActivePanel;
+    }
+    return KxResultsPanel.panels.find(panel => panel.panel.visible);
+  }
+
   public static copySelectionFromActivePanel(): void {
     const panel = KxResultsPanel.reusablePanel();
     if (panel) {
       panel.post({ type: 'copySelection' });
     }
+  }
+
+  public static async openInDataWranglerFromActivePanel(): Promise<void> {
+    const panel = KxResultsPanel.displayedPanel();
+    if (!panel) {
+      await vscode.window.showWarningMessage(
+        'Make a tabular KX result panel visible before exporting a Data Wrangler snapshot.'
+      );
+      return;
+    }
+    await panel.openInDataWranglerSnapshot(panel.version);
   }
 
   public static async openLocalDataServerForActivePanel(): Promise<void> {
@@ -553,6 +643,11 @@ export class KxResultsPanel {
     this.sortState = undefined;
     this.sortIntentState = undefined;
     this.activeSortId += 1;
+    this.sortWarningApproval.clear();
+    this.pendingSortWarningConfirmation = undefined;
+    this.columnSummaryResultIdentity += 1;
+    this.activeColumnSummaryId += 1;
+    this.columnSummaryCache = undefined;
     this.hiddenColumnPositions = [];
     this.hiddenColumnSchema = undefined;
     this.columnOrder = undefined;
@@ -607,6 +702,11 @@ export class KxResultsPanel {
 
     if (message.type === 'selectionChanged') {
       this.updateSelectionFromWebview(message);
+      return;
+    }
+
+    if (message.type === 'openInDataWrangler') {
+      await this.openInDataWranglerSnapshot(message.version);
       return;
     }
 
@@ -761,6 +861,7 @@ export class KxResultsPanel {
       const metadata = this.metadataForResult(this.result);
       this.post({ type: 'resultMeta', result: metadata });
       this.scheduleWholeResultColumnTextLengths(metadata.settings);
+      this.scheduleColumnSummaries(metadata.settings);
       this.postLocalDataServerStatus();
     } finally {
       if (tracePerf) {
@@ -781,6 +882,87 @@ export class KxResultsPanel {
       wholeResultColumnTextLengths: this.wholeResultColumnTextLengths(settings),
     });
     this.scheduleWholeResultColumnTextLengths(settings);
+    if (settings.showColumnSummaryStatistics) {
+      this.scheduleColumnSummaries(settings);
+    } else {
+      this.activeColumnSummaryId += 1;
+      this.post({
+        type: 'columnSummaries',
+        version: this.version,
+        resultIdentity: this.columnSummaryResultIdentity,
+        summary: null,
+      });
+    }
+  }
+
+  private scheduleColumnSummaries(settings: KxPanelSettings): void {
+    if (!settings.showColumnSummaryStatistics || !this.result ||
+      isTextPanelResult(this.result) || this.disposed) {
+      return;
+    }
+    const result = this.result;
+    const table = result.table;
+    const resultIdentity = this.columnSummaryResultIdentity;
+    const cached = this.columnSummaryCache;
+    if (cached?.resultIdentity === resultIdentity && cached.table === table) {
+      this.postColumnSummaries(cached.summary, result, resultIdentity);
+      return;
+    }
+
+    const requestId = ++this.activeColumnSummaryId;
+    this.post({
+      type: 'columnSummaryPending',
+      version: this.version,
+      resultIdentity,
+    });
+    void computeResultColumnSummaries(table, {
+      shouldCancel: () => this.disposed ||
+        requestId !== this.activeColumnSummaryId ||
+        this.columnSummaryResultIdentity !== resultIdentity ||
+        this.result !== result ||
+        !panelSettings().showColumnSummaryStatistics,
+    }).then(summary => {
+      if (!summary || this.disposed || requestId !== this.activeColumnSummaryId ||
+        this.columnSummaryResultIdentity !== resultIdentity || this.result !== result ||
+        !panelSettings().showColumnSummaryStatistics) {
+        return;
+      }
+      this.columnSummaryCache = { resultIdentity, table, summary };
+      this.postColumnSummaries(summary, result, resultIdentity);
+    }).catch(error => {
+      if (requestId === this.activeColumnSummaryId &&
+        this.columnSummaryResultIdentity === resultIdentity && this.result === result) {
+        this.post({
+          type: 'columnSummaryError',
+          version: this.version,
+          resultIdentity,
+          message: `Column summary failed: ${toError(error).message}`,
+        });
+      }
+    });
+  }
+
+  private postColumnSummaries(
+    summary: KxColumnSummaryBatch,
+    result: KxPanelTableResult,
+    resultIdentity: number
+  ): void {
+    if (this.result !== result || this.columnSummaryResultIdentity !== resultIdentity ||
+      !panelSettings().showColumnSummaryStatistics) {
+      return;
+    }
+    const positions = this.visibleColumnPositions(result);
+    this.post({
+      type: 'columnSummaries',
+      version: this.version,
+      resultIdentity,
+      summary: {
+        ...summary,
+        columns: positions
+          .map(position => summary.columns[position])
+          .filter(column => column !== undefined),
+      },
+    });
   }
 
   private metadataForResult(result: KxPanelResult): KxPanelMetadata {
@@ -790,6 +972,7 @@ export class KxResultsPanel {
         mode: 'text',
         columns: [],
         columnPositions: [],
+        keyColumnPositions: [],
         allColumns: [],
         allColumnPositions: [],
         hiddenColumnCount: 0,
@@ -819,6 +1002,7 @@ export class KxResultsPanel {
       mode: 'table',
       columns,
       columnPositions: this.visibleColumnPositions(result),
+      keyColumnPositions: result.table.keyColumnOrdinals?.slice() || [],
       allColumns: result.table.columns.slice(),
       allColumnPositions: sourceColumnPositions(result.table.columns.length),
       hiddenColumnCount: hiddenColumnPositions.length,
@@ -836,6 +1020,7 @@ export class KxResultsPanel {
       wholeResultColumnTextLengths: this.wholeResultColumnTextLengths(settings),
       sort: this.visibleSortState(result),
       chartAutoOpen: this.pendingAutoChart,
+      snapshotScope: result.snapshotScope || { kind: 'complete' },
       guardrailMessage: settings.hideLargeResultWarnings || this.hideLargeResultWarningOnce
         ? undefined
         : resultSizeGuardrailMessage(result.table.rowCount, result.table.columns.length),
@@ -1007,7 +1192,6 @@ export class KxResultsPanel {
       }
       const xMin = Number.isFinite(Number(message.xMin)) ? Number(message.xMin) : undefined;
       const xMax = Number.isFinite(Number(message.xMax)) ? Number(message.xMax) : undefined;
-      const zoomSamplePoints = xMin !== undefined && xMax !== undefined ? chartZoomSamplePointSettings() : null;
       const data = buildChartData(table, {
         chartType: normalizeChartType(message.chartType),
         version: requestVersion,
@@ -1023,8 +1207,6 @@ export class KxResultsPanel {
         xMax,
         width: Number(message.width) || 0,
         maxSourceRows: chartMaxSourceRowsSetting(),
-        maxSampledPoints: zoomSamplePoints ? zoomSamplePoints.chartZoomMaxSampledPoints : undefined,
-        minSampledPoints: zoomSamplePoints ? zoomSamplePoints.chartZoomMinSampledPoints : undefined,
       });
       if (this.version !== requestVersion || this.activeChartRequestId !== requestId) {
         return;
@@ -1363,8 +1545,23 @@ export class KxResultsPanel {
       return;
     }
 
-    const rowRange = messageRange(message.rows, table.rowCount);
-    const columnRange = messageRange(message.columns, table.columns.length);
+    let rowRange = messageRange(message.rows, table.rowCount);
+    let columnRange = messageRange(message.columns, table.columns.length);
+    const requestedColumns = Math.max(0, columnRange.end - columnRange.start + 1);
+    if (requestedColumns > KX_RESULTS_PANEL_SLICE_MAX_CELLS) {
+      columnRange = {
+        start: columnRange.start,
+        end: columnRange.start + KX_RESULTS_PANEL_SLICE_MAX_CELLS - 1,
+      };
+    }
+    const boundedColumns = Math.max(1, columnRange.end - columnRange.start + 1);
+    const maximumRows = Math.max(
+      1,
+      Math.floor(KX_RESULTS_PANEL_SLICE_MAX_CELLS / boundedColumns)
+    );
+    if (rowRange.end - rowRange.start + 1 > maximumRows) {
+      rowRange = { start: rowRange.start, end: rowRange.start + maximumRows - 1 };
+    }
     const firstSlice = this.firstSliceVersion !== this.version;
     const sliceSpan = tracePerf ? perfSpan('results-panel.slice.generate', {
         version: this.version,
@@ -1385,7 +1582,20 @@ export class KxResultsPanel {
       }) : null;
     try {
       const cellTextOptions = panelCellTextOptions();
-      const slice = table.cellWindow(rowRange, columnRange, cellTextOptions);
+      const requestedCells = Math.max(
+        1,
+        (rowRange.end - rowRange.start + 1) *
+          (columnRange.end - columnRange.start + 1)
+      );
+      const sliceCellTextChars = Math.min(
+        KX_RESULTS_PANEL_SLICE_CELL_TEXT_CHARS,
+        Math.max(1, Math.floor(KX_RESULTS_PANEL_SLICE_TEXT_CHARS / requestedCells))
+      );
+      const slice = table.cellWindow(rowRange, columnRange, {
+        ...cellTextOptions,
+        maxChars: sliceCellTextChars,
+        truncationMarker: KX_RESULTS_PANEL_SLICE_TRUNCATION_MARKER,
+      });
       const sliceDetails = tracePerf ? {
         rows: slice.endRow >= slice.startRow ? slice.endRow - slice.startRow + 1 : 0,
         columns: slice.endColumn >= slice.startColumn ? slice.endColumn - slice.startColumn + 1 : 0,
@@ -1445,6 +1655,7 @@ export class KxResultsPanel {
     let scannedCells = 0;
     let capped = false;
     let partial = false;
+    let cellTextPartial = false;
     let cancelled = false;
     const cellTextOptions = panelCellTextOptions();
 
@@ -1456,7 +1667,13 @@ export class KxResultsPanel {
           let rowMatched = false;
           for (let columnIndex = 0; columnIndex < table.columns.length; columnIndex++) {
             scannedCells += 1;
-            if (table.cellText(rowIndex, columnIndex, cellTextOptions).toLowerCase().indexOf(needle) !== -1) {
+            const rendered = cellValueToBoundedText(
+              table.cellValue(rowIndex, columnIndex),
+              KX_RESULTS_PANEL_SEARCH_CELL_TEXT_CHARS,
+              cellTextOptions
+            );
+            cellTextPartial ||= rendered.truncated;
+            if (rendered.text.toLowerCase().indexOf(needle) !== -1) {
               rowMatched = true;
               break;
             }
@@ -1503,7 +1720,7 @@ export class KxResultsPanel {
         totalScanned,
         scannedCells,
         capped,
-        partial,
+        partial: partial || cellTextPartial,
         matchCap: SEARCH_MATCH_CAP,
       });
     } finally {
@@ -1513,7 +1730,7 @@ export class KxResultsPanel {
           totalScanned,
           scannedCells,
           capped,
-          partial,
+          partial: partial || cellTextPartial,
           cancelled,
         });
       }
@@ -1569,16 +1786,35 @@ export class KxResultsPanel {
       direction: nextSortPlan.direction,
     };
     this.sortIntentState = nextSort;
+    const warningIdentity = this.sortWarningApproval.current();
     const isCurrentSort = (): boolean =>
-      this.activeSortId === sortId && this.isCurrentVersion(requestVersion);
+      this.activeSortId === sortId && this.isCurrentVersion(requestVersion) &&
+      warningIdentity !== undefined && this.sortWarningApproval.isCurrent(warningIdentity);
 
-    if (table.rowCount >= SORT_CONFIRM_ROW_THRESHOLD && !panelSettings().hideLargeSortWarnings) {
-      const choice = await vscode.window.showWarningMessage(
-        `Sort ${formatCount(table.rowCount)} rows by ${columnName}? This may take a moment.`,
-        'Sort',
-        "Sort and Don't Warn Again",
-        'Cancel'
-      );
+    const settings = panelSettings();
+    if (shouldWarnForLargeSort(table.rowCount, {
+      rowThreshold: settings.largeSortWarningRowThreshold,
+      hideWarnings: settings.hideLargeSortWarnings,
+      approved: this.sortWarningApproval.isApproved(warningIdentity),
+    })) {
+      let pendingConfirmation = this.pendingSortWarningConfirmation;
+      if (!pendingConfirmation || pendingConfirmation.identity !== warningIdentity) {
+        const promise = Promise.resolve(vscode.window.showWarningMessage(
+          `Sort ${formatCount(table.rowCount)} rows in this displayed result? This may take a moment.`,
+          'Sort',
+          "Sort and Don't Warn Again",
+          'Cancel'
+        ));
+        pendingConfirmation = { identity: warningIdentity!, promise };
+        this.pendingSortWarningConfirmation = pendingConfirmation;
+        const clearPendingConfirmation = (): void => {
+          if (this.pendingSortWarningConfirmation === pendingConfirmation) {
+            this.pendingSortWarningConfirmation = undefined;
+          }
+        };
+        void promise.then(clearPendingConfirmation, clearPendingConfirmation);
+      }
+      const choice = await pendingConfirmation.promise;
       if (!isCurrentSort()) {
         return;
       }
@@ -1600,6 +1836,7 @@ export class KxResultsPanel {
         this.post({ type: 'sortSkipped', version: requestVersion });
         return;
       }
+      this.sortWarningApproval.approve(warningIdentity!);
     }
 
     const tracePerf = isPerfTraceEnabled();
@@ -1786,6 +2023,125 @@ export class KxResultsPanel {
     const rows = clamped.endRow - clamped.startRow + 1;
     const columns = clamped.endColumn - clamped.startColumn + 1;
     this.post({ type: 'exported', version: requestVersion, rows, columns, format, includeHeaders, includeRowIndex });
+  }
+
+  private async openInDataWranglerSnapshot(version: any): Promise<void> {
+    if (!panelSettings().dataWranglerEnabled) {
+      return;
+    }
+    const requestVersion = integerOrNull(version);
+    if (requestVersion === null || requestVersion !== this.version || !this.result) {
+      return;
+    }
+    if (this.dataWranglerHandoffPending) {
+      void vscode.window.showInformationMessage(
+        'A Data Wrangler CSV snapshot export is already in progress for this result panel.'
+      );
+      return;
+    }
+    if (isTextPanelResult(this.result)) {
+      void vscode.window.showWarningMessage(
+        'Open in Data Wrangler requires a decoded tabular KX result.'
+      );
+      return;
+    }
+    if (this.result.error || this.result.canceled) {
+      void vscode.window.showWarningMessage(
+        'Open in Data Wrangler requires a complete successful tabular KX result.'
+      );
+      return;
+    }
+    if (this.result.snapshotScope?.kind === 'truncatedSavedPreview') {
+      const savedRows = Math.max(0, Math.floor(Number(this.result.snapshotScope.savedRowCount) || 0));
+      const totalRows = Math.max(savedRows, Math.floor(Number(this.result.snapshotScope.totalRowCount) || savedRows));
+      const message = `This saved notebook output owns only ${formatCount(savedRows)} of ` +
+        `${formatCount(totalRows)} rows. Open in Data Wrangler is disabled because omitted rows cannot ` +
+        'be recovered without rerunning q.';
+      void vscode.window.showWarningMessage(message);
+      if (this.isCurrentVersion(requestVersion)) {
+        this.post({ type: 'dataWranglerStatus', version: requestVersion, ok: false, message });
+      }
+      return;
+    }
+
+    const unsupported = dataWranglerLocalHandoffUnsupportedReason(this.context);
+    if (unsupported) {
+      void vscode.window.showWarningMessage(unsupported);
+      if (this.isCurrentVersion(requestVersion)) {
+        this.post({ type: 'dataWranglerStatus', version: requestVersion, ok: false, message: unsupported });
+      }
+      return;
+    }
+
+    const table = this.dataWranglerExportTable();
+    if (!table || table.columns.length === 0) {
+      void vscode.window.showWarningMessage(
+        'Open in Data Wrangler requires at least one displayed result column.'
+      );
+      return;
+    }
+
+    this.dataWranglerHandoffPending = true;
+    try {
+      const estimate = estimateCopyExport(
+        table,
+        allCellsRange(table.rowCount, table.columns.length),
+        'csv',
+        true,
+        false,
+        panelCellTextOptions()
+      );
+      if (!(await this.confirmLargeCopyExport('export', 'csv', estimate))) {
+        if (this.isCurrentVersion(requestVersion)) {
+          this.post({
+            type: 'dataWranglerStatus',
+            version: requestVersion,
+            ok: false,
+            message: 'Data Wrangler CSV snapshot export canceled.',
+          });
+        }
+        return;
+      }
+      if (!this.isCurrentVersion(requestVersion) || this.visibleTable() !== table) {
+        return;
+      }
+
+      const outcome = await vscode.window.withProgress({
+        location: vscode.ProgressLocation.Notification,
+        title: `Exporting ${formatCount(table.rowCount)} rows for Data Wrangler`,
+        cancellable: true,
+      }, (_progress, token) => openDataWranglerSnapshot(this.context, table, {
+        cellTextOptions: panelCellTextOptions(),
+        sourceCsvHeaders: this.result && !isTextPanelResult(this.result)
+          ? this.result.table.columns
+          : undefined,
+        sourceColumnPositions: this.result && !isTextPanelResult(this.result)
+          ? this.visibleColumnPositions(this.result)
+          : undefined,
+        shouldCancel: () => token.isCancellationRequested ||
+          !this.isCurrentVersion(requestVersion) || this.visibleTable() !== table,
+      }));
+      if (this.isCurrentVersion(requestVersion) && this.visibleTable() === table) {
+        this.post({
+          type: 'dataWranglerStatus',
+          version: requestVersion,
+          ok: outcome.created,
+          message: outcome.message,
+        });
+      }
+    } catch (error) {
+      const message = `Data Wrangler CSV snapshot failed: ${toError(error).message}`;
+      await vscode.window.showErrorMessage(message);
+      if (this.isCurrentVersion(requestVersion) && this.visibleTable() === table) {
+        this.post({ type: 'dataWranglerStatus', version: requestVersion, ok: false, message });
+      }
+    } finally {
+      this.dataWranglerHandoffPending = false;
+    }
+  }
+
+  private dataWranglerExportTable(): ColumnarPanelResult | null {
+    return this.visibleTable();
   }
 
   private async copyText(version: any): Promise<void> {
@@ -2436,13 +2792,60 @@ export class KxResultsPanel {
     .message.error {
       color: var(--vscode-errorForeground);
     }
+    .column-summaries {
+      flex: 0 0 auto;
+      max-height: min(210px, 32vh);
+      overflow: auto;
+      padding: 7px 10px;
+      border-bottom: 1px solid var(--vscode-panel-border);
+      background: var(--vscode-editor-background);
+    }
+    .column-summaries[hidden] {
+      display: none;
+    }
+    .column-summary-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 6px;
+    }
+    .column-summary-status {
+      color: var(--vscode-descriptionForeground);
+      font-size: .9em;
+    }
+    .column-summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr));
+      gap: 6px;
+    }
+    .column-summary-card {
+      min-width: 0;
+      padding: 6px 8px;
+      border: 1px solid var(--vscode-panel-border);
+      border-radius: 3px;
+      background: var(--vscode-editorWidget-background, var(--vscode-editor-background));
+    }
+    .column-summary-card-title {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      font-weight: 600;
+    }
+    .column-summary-card-meta,
+    .column-summary-values {
+      margin-top: 3px;
+      color: var(--vscode-descriptionForeground);
+      font-size: .88em;
+      overflow-wrap: anywhere;
+    }
     .message-text {
       white-space: pre-wrap;
     }
     .chart-panel {
       flex: 0 0 auto;
       display: grid;
-      grid-template-rows: auto auto auto;
+      grid-template-rows: auto auto auto auto;
       gap: 8px;
       padding: 8px 10px 10px;
       border-bottom: 1px solid var(--vscode-panel-border);
@@ -2768,9 +3171,6 @@ export class KxResultsPanel {
       text-align: right;
       background: var(--vscode-sideBar-background);
     }
-    .row.row-odd .cell:not(.selected):not(.search-match):not(.loading) {
-      background: var(--vscode-tree-tableOddRowsBackground, rgba(127, 127, 127, 0.055));
-    }
     .cell.loading {
       background: var(--vscode-editor-background);
     }
@@ -2788,15 +3188,6 @@ export class KxResultsPanel {
       position: absolute;
       padding: 16px;
       color: var(--vscode-descriptionForeground);
-    }
-    body.vscode-high-contrast .row.row-odd .cell:not(.selected):not(.search-match):not(.loading),
-    body.vscode-high-contrast-light .row.row-odd .cell:not(.selected):not(.search-match):not(.loading) {
-      background: var(--vscode-tree-tableOddRowsBackground, transparent);
-    }
-    @media (forced-colors: active) {
-      .row.row-odd .cell:not(.selected):not(.search-match):not(.loading) {
-        background: var(--vscode-tree-tableOddRowsBackground, transparent);
-      }
     }
   </style>
 </head>
@@ -2831,6 +3222,14 @@ export class KxResultsPanel {
             <span id="searchStatus" class="search-status"></span>
           </span>
         </details>
+        ${panelSettings().dataWranglerEnabled ? `<details class="settings-section" id="dataWranglerSection">
+          <summary class="settings-heading"><span>External tools</span><span id="dataWranglerBadge" class="tool-summary-status">CSV snapshot</span></summary>
+          <div id="dataWranglerStatus" class="tool-menu-status">Exports the complete displayed table as a lossy local CSV snapshot.</div>
+          <div class="tool-menu-note">The snapshot is not live or type-perfect q data. KX does not install or enable Data Wrangler.</div>
+          <div class="tool-actions">
+            <button id="openInDataWrangler" disabled title="Export a lossy local CSV snapshot and open it in Data Wrangler">Open in Data Wrangler</button>
+          </div>
+        </details>` : ''}
         <details class="settings-section" id="dataServerSection">
           <summary class="settings-heading"><span>Data server</span><span id="localDataServerBadge" class="tool-summary-status">Stopped</span></summary>
           <div id="localDataServerStatus" class="tool-menu-status">Server stopped</div>
@@ -2855,12 +3254,12 @@ export class KxResultsPanel {
           <label class="checkbox"><input id="settingsIncludeRowIndex" type="checkbox">Include row #</label>
           <label class="checkbox"><input id="settingsHideLargeResultWarnings" type="checkbox">Hide large-result warnings</label>
           <label class="checkbox"><input id="settingsHideLargeSortWarnings" type="checkbox">Hide large-sort warnings</label>
+          <label class="settings-row"><span>Large-sort warning rows</span><input id="settingsLargeSortWarningRowThreshold" type="number" min="${MIN_LARGE_SORT_WARNING_ROW_THRESHOLD}" max="${MAX_LARGE_SORT_WARNING_ROW_THRESHOLD}" step="1" title="Warn only when the current result has more than this many rows"></label>
+          <label class="checkbox"><input id="settingsShowColumnSummaryStatistics" type="checkbox">Show column summary statistics</label>
           <label class="settings-row"><span>Copy/export confirm cells</span><input id="settingsCopyExportConfirmCellThreshold" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Local server current.* cell limit</span><input id="settingsLocalDataServerFullExportCellLimit" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Chart decimals</span><input id="settingsChartDecimalPlaces" type="number" min="0" max="12" step="1" title="Decimal places for chart numeric labels, 0-12"></label>
           <label class="settings-row"><span>Chart source rows</span><input id="settingsChartMaxSourceRows" type="number" min="1" step="1"></label>
-          <label class="settings-row"><span>Zoom minimum points</span><input id="settingsChartZoomMinSampledPoints" type="number" min="1" step="1"></label>
-          <label class="settings-row"><span>Zoom maximum points</span><input id="settingsChartZoomMaxSampledPoints" type="number" min="1" step="1"></label>
           <label class="settings-row"><span>Elapsed time</span><select id="settingsElapsedTimeDisplay">
             <option value="auto">Auto</option>
             <option value="milliseconds">Milliseconds</option>
@@ -2926,6 +3325,13 @@ export class KxResultsPanel {
     <span id="selection" class="selection"></span>
   </div>
   <div id="message" class="message" hidden></div>
+  <section id="columnSummaries" class="column-summaries" aria-labelledby="columnSummaryTitle" hidden>
+    <div class="column-summary-heading">
+      <strong id="columnSummaryTitle">Column summary statistics</strong>
+      <span id="columnSummaryStatus" class="column-summary-status" role="status" aria-live="polite"></span>
+    </div>
+    <div id="columnSummaryGrid" class="column-summary-grid"></div>
+  </section>
   <div id="chartPanel" class="chart-panel" hidden>
     <div class="chart-toolbar">
       <label class="chart-field"><span>Chart type</span><select id="chartType" aria-label="Chart type">
@@ -2944,16 +3350,19 @@ export class KxResultsPanel {
       </div>
       <button id="renderChart" disabled>${KX_RESULT_UI_LABELS.renderChart}</button>
       <button id="exportChart" hidden disabled>${KX_RESULT_UI_LABELS.exportChartPng}</button>
-      <button id="panChartLeft" disabled aria-label="Pan chart left by 20 percent">Pan left</button>
-      <button id="panChartRight" disabled aria-label="Pan chart right by 20 percent">Pan right</button>
       <button id="resetChartZoom" disabled>${KX_RESULT_UI_LABELS.resetZoom}</button>
-      <button id="refineChartZoom" disabled>Refine view</button>
       <button id="closeChart">${KX_RESULT_UI_LABELS.closeChart}</button>
       <span id="chartStatus" class="status"></span>
     </div>
     <div id="chartCanvasWrap" class="chart-canvas-wrap" tabindex="0" role="region" aria-label="Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.">
       <div id="chartPlot" class="chart-plot"></div>
       <div id="chartTooltip" class="chart-tooltip" hidden></div>
+    </div>
+    <div id="chartNavigator" class="kx-chart-navigator" role="region" aria-label="Chart X navigator" hidden>
+      <svg id="chartNavigatorOverview" class="kx-chart-navigator-overview" viewBox="0 0 1000 30" preserveAspectRatio="none" aria-hidden="true"></svg>
+      <div id="chartNavigatorWindow" class="kx-chart-navigator-window" role="slider" tabindex="0" aria-label="Selected X window; use Left and Right Arrow to pan, Home to reset"></div>
+      <span id="chartNavigatorStart" class="kx-chart-navigator-handle is-start" role="slider" tabindex="0" aria-label="Start of selected X window; use Left and Right Arrow to resize"></span>
+      <span id="chartNavigatorEnd" class="kx-chart-navigator-handle is-end" role="slider" tabindex="0" aria-label="End of selected X window; use Left and Right Arrow to resize"></span>
     </div>
     <div id="chartLegend" class="chart-legend"></div>
   </div>
@@ -2994,13 +3403,13 @@ export class KxResultsPanel {
         includeRowIndex: true,
         hideLargeResultWarnings: false,
         hideLargeSortWarnings: false,
+        largeSortWarningRowThreshold: ${DEFAULT_LARGE_SORT_WARNING_ROW_THRESHOLD},
+        showColumnSummaryStatistics: false,
         copyExportConfirmCellThreshold: 1000000,
         localDataServerFullExportCellLimit: 1000000,
         elapsedTimeDisplay: 'auto',
         chartDecimalPlaces: 4,
         chartMaxSourceRows: ${CHART_MAX_SOURCE_ROWS},
-        chartZoomMinSampledPoints: ${CHART_ZOOM_MIN_SAMPLED_POINTS},
-        chartZoomMaxSampledPoints: ${CHART_ZOOM_MAX_SAMPLED_POINTS},
         qTextSyntaxHighlighting: false,
         qTextDisplayFormatting: false,
         arrayDisplayFormat: 'commaSpace',
@@ -3038,12 +3447,12 @@ export class KxResultsPanel {
       const settingsIncludeRowIndex = document.getElementById('settingsIncludeRowIndex');
       const settingsHideLargeResultWarnings = document.getElementById('settingsHideLargeResultWarnings');
       const settingsHideLargeSortWarnings = document.getElementById('settingsHideLargeSortWarnings');
+      const settingsLargeSortWarningRowThreshold = document.getElementById('settingsLargeSortWarningRowThreshold');
+      const settingsShowColumnSummaryStatistics = document.getElementById('settingsShowColumnSummaryStatistics');
       const settingsCopyExportConfirmCellThreshold = document.getElementById('settingsCopyExportConfirmCellThreshold');
       const settingsLocalDataServerFullExportCellLimit = document.getElementById('settingsLocalDataServerFullExportCellLimit');
       const settingsChartDecimalPlaces = document.getElementById('settingsChartDecimalPlaces');
       const settingsChartMaxSourceRows = document.getElementById('settingsChartMaxSourceRows');
-      const settingsChartZoomMinSampledPoints = document.getElementById('settingsChartZoomMinSampledPoints');
-      const settingsChartZoomMaxSampledPoints = document.getElementById('settingsChartZoomMaxSampledPoints');
       const settingsElapsedTimeDisplay = document.getElementById('settingsElapsedTimeDisplay');
       const settingsArrayDisplayFormat = document.getElementById('settingsArrayDisplayFormat');
       const settingsQTextSyntaxHighlighting = document.getElementById('settingsQTextSyntaxHighlighting');
@@ -3069,6 +3478,9 @@ export class KxResultsPanel {
       const localDataServerStatus = document.getElementById('localDataServerStatus');
       const localDataServerBadge = document.getElementById('localDataServerBadge');
       const localDataServerBaseUrl = document.getElementById('localDataServerBaseUrl');
+      const openInDataWrangler = document.getElementById('openInDataWrangler');
+      const dataWranglerStatus = document.getElementById('dataWranglerStatus');
+      const dataWranglerBadge = document.getElementById('dataWranglerBadge');
       const openChart = document.getElementById('openChart');
       const spinner = document.getElementById('spinner');
       const cancelQuery = document.getElementById('cancelQuery');
@@ -3081,6 +3493,9 @@ export class KxResultsPanel {
       const status = document.getElementById('status');
       const selectionLabel = document.getElementById('selection');
       const message = document.getElementById('message');
+      const columnSummaries = document.getElementById('columnSummaries');
+      const columnSummaryStatus = document.getElementById('columnSummaryStatus');
+      const columnSummaryGrid = document.getElementById('columnSummaryGrid');
       const chartPanel = document.getElementById('chartPanel');
       const chartType = document.getElementById('chartType');
       const chartXColumn = document.getElementById('chartXColumn');
@@ -3094,15 +3509,17 @@ export class KxResultsPanel {
       const chartCloseColumn = document.getElementById('chartCloseColumn');
       const renderChart = document.getElementById('renderChart');
       const exportChart = document.getElementById('exportChart');
-      const panChartLeftButton = document.getElementById('panChartLeft');
-      const panChartRightButton = document.getElementById('panChartRight');
       const resetChartZoomButton = document.getElementById('resetChartZoom');
-      const refineChartZoomButton = document.getElementById('refineChartZoom');
       const closeChart = document.getElementById('closeChart');
       const chartStatus = document.getElementById('chartStatus');
       const chartCanvasWrap = document.getElementById('chartCanvasWrap');
       const chartPlot = document.getElementById('chartPlot');
       const chartTooltip = document.getElementById('chartTooltip');
+      const chartNavigator = document.getElementById('chartNavigator');
+      const chartNavigatorOverview = document.getElementById('chartNavigatorOverview');
+      const chartNavigatorWindowElement = document.getElementById('chartNavigatorWindow');
+      const chartNavigatorStart = document.getElementById('chartNavigatorStart');
+      const chartNavigatorEnd = document.getElementById('chartNavigatorEnd');
       const chartLegend = document.getElementById('chartLegend');
       const chartSplitter = document.getElementById('chartSplitter');
       const empty = document.getElementById('empty');
@@ -3148,12 +3565,19 @@ export class KxResultsPanel {
       let chartAutoRefineScheduledRange = null;
       let chartLastAutoRefineKey = '';
       let chartPanState = null;
+      let chartNavigatorPointerState = null;
+      let chartNavigatorOverviewData = null;
       const CHART_PNG_DATA_URL_PREFIX = '${CHART_PNG_DATA_URL_PREFIX}';
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
       const CHART_AUTO_REFINE_DELAY_MS = 450;
       ${isValidChartRange.toString()}
       ${clampChartViewport.toString()}
+      ${chartNavigatorWindow.toString()}
+      ${chartNavigatorSliderBounds.toString()}
+      ${chartOverviewIntervalHasGap.toString()}
+      ${adjustChartNavigatorRange.toString()}
+      ${recenterChartNavigatorRange.toString()}
       ${chartRangeIsZoomed.toString()}
       ${chartVisibleIndexBounds.toString()}
       ${chartZoomCanReset.toString()}
@@ -3163,6 +3587,7 @@ export class KxResultsPanel {
       ${chartZoomRequestedRenderRange.toString()}
       ${reduceChartZoomLifecycle.toString()}
       ${issueChartZoomLifecycleRequest.toString()}
+      ${mergeChartPixelGaps.toString()}
       ${panChartViewport.toString()}
       ${panChartViewportByPixels.toString()}
       ${applyChartZoomLifecycleFailure.toString()}
@@ -3190,6 +3615,12 @@ export class KxResultsPanel {
           setSlice(msg);
         } else if (msg.type === 'searchResults') {
           setSearchResults(msg);
+        } else if (msg.type === 'columnSummaryPending' && isCurrentVersionMessage(msg)) {
+          setColumnSummaryPending();
+        } else if (msg.type === 'columnSummaries' && isCurrentVersionMessage(msg)) {
+          setColumnSummaries(msg.summary);
+        } else if (msg.type === 'columnSummaryError' && isCurrentVersionMessage(msg)) {
+          setColumnSummaryError(String(msg.message || 'Column summary failed.'));
         } else if (msg.type === 'settings') {
           const arrayDisplayFormatChanged =
             normalizeArrayDisplayFormat(msg.settings?.arrayDisplayFormat) !==
@@ -3245,6 +3676,14 @@ export class KxResultsPanel {
           setLocalDataServerStatus(msg.server || null, String(msg.message || ''));
         } else if (msg.type === 'localDataServerMessage') {
           setLocalDataServerStatus(localDataServer, String(msg.message || ''));
+        } else if (msg.type === 'dataWranglerStatus' && isCurrentVersionMessage(msg)) {
+          if (dataWranglerStatus) {
+            dataWranglerStatus.textContent = String(msg.message || 'Data Wrangler snapshot action finished.');
+          }
+          if (dataWranglerBadge) {
+            dataWranglerBadge.textContent = msg.ok ? 'Exported' : 'CSV snapshot';
+          }
+          status.textContent = String(msg.message || 'Data Wrangler snapshot action finished.');
         } else if (msg.type === 'chartOptions' && isCurrentVersionMessage(msg)) {
           setChartOptions(msg);
         } else if (msg.type === 'chartData' && msg.data) {
@@ -3269,6 +3708,11 @@ export class KxResultsPanel {
       });
       copyButton.addEventListener('click', copySelection);
       exportButton.addEventListener('click', exportSelection);
+      if (openInDataWrangler) {
+        openInDataWrangler.addEventListener('click', () => {
+          vscode.postMessage({ type: 'openInDataWrangler', version: data.version });
+        });
+      }
       includeHeaders.addEventListener('change', () => updateSetting('includeHeaders', !!includeHeaders.checked));
       includeRowIndex.addEventListener('change', () => updateSetting('includeRowIndex', !!includeRowIndex.checked));
       autoFit.addEventListener('change', () => setAutoFitEnabled(!!autoFit.checked));
@@ -3295,12 +3739,17 @@ export class KxResultsPanel {
       settingsIncludeRowIndex.addEventListener('change', () => updateSetting('includeRowIndex', !!settingsIncludeRowIndex.checked));
       settingsHideLargeResultWarnings.addEventListener('change', () => updateSetting('hideLargeResultWarnings', !!settingsHideLargeResultWarnings.checked));
       settingsHideLargeSortWarnings.addEventListener('change', () => updateSetting('hideLargeSortWarnings', !!settingsHideLargeSortWarnings.checked));
+      settingsLargeSortWarningRowThreshold.addEventListener('change', () => updateIntegerSetting(
+        'largeSortWarningRowThreshold',
+        settingsLargeSortWarningRowThreshold,
+        ${MIN_LARGE_SORT_WARNING_ROW_THRESHOLD},
+        ${MAX_LARGE_SORT_WARNING_ROW_THRESHOLD}
+      ));
+      settingsShowColumnSummaryStatistics.addEventListener('change', () => updateSetting('showColumnSummaryStatistics', !!settingsShowColumnSummaryStatistics.checked));
       settingsCopyExportConfirmCellThreshold.addEventListener('change', () => updatePositiveIntegerSetting('copyExportConfirmCellThreshold', settingsCopyExportConfirmCellThreshold));
       settingsLocalDataServerFullExportCellLimit.addEventListener('change', () => updatePositiveIntegerSetting('localDataServerFullExportCellLimit', settingsLocalDataServerFullExportCellLimit));
       settingsChartDecimalPlaces.addEventListener('change', () => updateNumberSetting('chartDecimalPlaces', settingsChartDecimalPlaces, 0, 12));
       settingsChartMaxSourceRows.addEventListener('change', () => updatePositiveIntegerSetting('chartMaxSourceRows', settingsChartMaxSourceRows));
-      settingsChartZoomMinSampledPoints.addEventListener('change', () => updatePositiveIntegerSetting('chartZoomMinSampledPoints', settingsChartZoomMinSampledPoints));
-      settingsChartZoomMaxSampledPoints.addEventListener('change', () => updatePositiveIntegerSetting('chartZoomMaxSampledPoints', settingsChartZoomMaxSampledPoints));
       expandSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(true));
       collapseSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(false));
       settingsElapsedTimeDisplay.addEventListener('change', () => updateSetting('elapsedTimeDisplay', String(settingsElapsedTimeDisplay.value || 'auto')));
@@ -3356,11 +3805,15 @@ export class KxResultsPanel {
       chartCloseColumn.addEventListener('change', onChartControlChanged);
       renderChart.addEventListener('click', requestChartData);
       exportChart.addEventListener('click', exportChartPng);
-      panChartLeftButton.addEventListener('click', () => panChartByFraction(-0.2, 'button'));
-      panChartRightButton.addEventListener('click', () => panChartByFraction(0.2, 'button'));
       resetChartZoomButton.addEventListener('click', resetChartZoom);
-      refineChartZoomButton.addEventListener('click', refineChartZoom);
       closeChart.addEventListener('click', closeChartPanel);
+      chartNavigatorWindowElement.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'window'));
+      chartNavigatorStart.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'start'));
+      chartNavigatorEnd.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'end'));
+      chartNavigator.addEventListener('pointerdown', startChartNavigatorTrackPointer);
+      chartNavigatorWindowElement.addEventListener('keydown', event => onChartNavigatorKeyDown(event, 'window'));
+      chartNavigatorStart.addEventListener('keydown', event => onChartNavigatorKeyDown(event, 'start'));
+      chartNavigatorEnd.addEventListener('keydown', event => onChartNavigatorKeyDown(event, 'end'));
       chartCanvasWrap.addEventListener('mouseleave', hideChartTooltip);
       chartCanvasWrap.addEventListener('keydown', event => {
         if (event.key === 'Home') {
@@ -3520,11 +3973,13 @@ export class KxResultsPanel {
         cancelQuery.hidden = false;
         cancelQuery.disabled = false;
         setActionsDisabled(true);
+        updateDataWranglerControls();
         updateLocalDataServerControls();
         resetChartState('Run a query result before charting.');
         sendSelectionChanged();
         renderColumnSettings();
         showMessage('', false);
+        clearColumnSummaries();
         updateLargeResultWarning();
         renderNow();
       }
@@ -3549,6 +4004,10 @@ export class KxResultsPanel {
           nextAllColumns = nextColumns.slice();
           nextAllColumnPositions = nextColumnPositions.slice();
         }
+        const nextKeyColumnPositions = normalizeSourceColumnPositionList(
+          result.keyColumnPositions,
+          nextAllColumnPositions
+        );
         const nextHiddenColumnPositions = Array.isArray(result.hiddenColumnPositions)
           ? normalizeSourceColumnPositionList(
             result.hiddenColumnPositions,
@@ -3570,6 +4029,8 @@ export class KxResultsPanel {
           mode,
           columns: nextColumns,
           columnPositions: nextColumnPositions,
+          keyColumnPositions: nextKeyColumnPositions,
+          keyColumnPositionLookup: new Set(nextKeyColumnPositions),
           allColumns: nextAllColumns,
           allColumnPositions: nextAllColumnPositions,
           hiddenColumnNames: Array.isArray(result.hiddenColumnNames) ? result.hiddenColumnNames.map(String) : [],
@@ -3586,6 +4047,7 @@ export class KxResultsPanel {
           error: !!result.error,
           canceled: !!result.canceled,
           sort: normalizeSortState(result.sort, nextColumns, nextColumnPositions),
+          snapshotScope: normalizeSnapshotScope(result.snapshotScope),
           wholeResultColumnTextLengths:
             normalizeColumnTextLengths(
               result.wholeResultColumnTextLengths,
@@ -3610,6 +4072,7 @@ export class KxResultsPanel {
         updateSelectionLabel();
         renderColumnSettings();
         showMessage(resultMessageText(data), data.error);
+        clearColumnSummaries();
         updateLargeResultWarning();
         renderNow();
         if (chartAutoRenderPending && hasTableCells() && !data.error && !data.canceled) {
@@ -3855,6 +4318,7 @@ export class KxResultsPanel {
 
       function updateActionState() {
         setActionsDisabled(!hasActionContent());
+        updateDataWranglerControls();
         updateLocalDataServerControls();
         updateChartControls();
       }
@@ -3873,6 +4337,38 @@ export class KxResultsPanel {
 
       function hasTableColumns() {
         return !isTextResult() && data.hasResult && !data.error && !data.canceled && data.columns.length > 0;
+      }
+
+      function updateDataWranglerControls() {
+        if (!openInDataWrangler || !dataWranglerStatus || !dataWranglerBadge) {
+          return;
+        }
+        const truncatedSavedPreview = data.snapshotScope &&
+          data.snapshotScope.kind === 'truncatedSavedPreview';
+        const available = hasTableColumns() && !truncatedSavedPreview;
+        openInDataWrangler.disabled = !available;
+        if (truncatedSavedPreview) {
+          const savedRows = toNonNegativeInteger(data.snapshotScope.savedRowCount, data.rowCount);
+          const totalRows = toNonNegativeInteger(data.snapshotScope.totalRowCount, savedRows);
+          dataWranglerStatus.textContent = 'Unavailable: this saved notebook preview owns only ' +
+            formatUiCount(savedRows) + ' of ' + formatUiCount(totalRows) +
+            ' rows. Rerun or save full output, then open it in KX Results.';
+          dataWranglerBadge.textContent = 'Preview only';
+          openInDataWrangler.title = 'Omitted saved-preview rows cannot be recovered without rerunning q';
+          return;
+        }
+        if (data.error || data.canceled) {
+          dataWranglerStatus.textContent =
+            'Unavailable: handoff requires a complete successful tabular result.';
+          dataWranglerBadge.textContent = 'Incomplete';
+          openInDataWrangler.title = 'A failed or canceled result is not a complete snapshot';
+          return;
+        }
+        dataWranglerStatus.textContent = available
+          ? 'Exports the complete displayed table as a lossy local CSV snapshot.'
+          : 'Open a tabular result with at least one visible column.';
+        dataWranglerBadge.textContent = 'CSV snapshot';
+        openInDataWrangler.title = 'Export a lossy local CSV snapshot and open it in Data Wrangler';
       }
 
       function setLocalDataServerStatus(server, message) {
@@ -3927,10 +4423,11 @@ export class KxResultsPanel {
         const canExport = chartCanExport();
         exportChart.hidden = !canExport;
         exportChart.disabled = !canExport;
-        panChartLeftButton.disabled = !canExport || !chartZoomLifecycle.fullRange || chartControlsDirty;
-        panChartRightButton.disabled = !canExport || !chartZoomLifecycle.fullRange || chartControlsDirty;
         resetChartZoomButton.disabled = !chartCanResetZoom();
-        refineChartZoomButton.disabled = !chartCanRefineZoom();
+        chartNavigator.setAttribute(
+          'aria-disabled',
+          canExport && chartZoomLifecycle.fullRange && !chartControlsDirty ? 'false' : 'true'
+        );
         openChart.textContent = chartPanel.hidden ? 'Chart' : (chartControlsDirty ? 'Chart*' : 'Chart');
         openChart.title = chartPanel.hidden ? 'Open chart' : (chartControlsDirty ? 'Chart settings changed — Render to update' : 'Chart open');
         chartSplitter.hidden = chartPanel.hidden;
@@ -4261,10 +4758,6 @@ export class KxResultsPanel {
         return !chartControlsDirty && chartZoomCanReset(chartZoomLifecycle, chartZoomed);
       }
 
-      function chartCanRefineZoom() {
-        return chartCanExport() && chartZoomed && !chartControlsDirty && !!currentChartZoomRange();
-      }
-
       function chartControlStatusMessage() {
         const type = selectedChartType();
         if (!String(chartXColumn.value || '')) {
@@ -4353,6 +4846,7 @@ export class KxResultsPanel {
 
       function clearChartZoomBaseline() {
         clearChartPanState();
+        clearChartNavigatorPointer();
         chartZoomLifecycle = reduceChartZoomLifecycle(chartZoomLifecycle, {
           type: 'clear',
           requestId: latestChartRequestId
@@ -4360,6 +4854,9 @@ export class KxResultsPanel {
         chartZoomed = false;
         chartLastAutoRefineKey = '';
         clearChartAutoRefineTimer();
+        chartNavigatorOverviewData = null;
+        chartNavigatorOverview.textContent = '';
+        chartNavigator.hidden = true;
       }
 
       function selectedChartYColumns() {
@@ -4403,21 +4900,6 @@ export class KxResultsPanel {
         requestChartDataForRange(null, 'Sampling chart data...');
       }
 
-      function refineChartZoom() {
-        if (chartControlsDirty) {
-          chartStatus.textContent = 'Render changed chart settings before refining zoom.';
-          updateChartControls();
-          return;
-        }
-        const range = currentChartZoomRange();
-        if (!range) {
-          chartStatus.textContent = 'Zoom the chart before refining.';
-          updateChartControls();
-          return;
-        }
-        requestChartDataForRange(range, 'Refining chart to zoom range...');
-      }
-
       function requestChartDataForRange(xRange, messageText) {
         if (!chartCanRender()) {
           chartStatus.textContent = chartControlStatusMessage();
@@ -4455,8 +4937,6 @@ export class KxResultsPanel {
             if (request.range) {
               message.xMin = request.range.min;
               message.xMax = request.range.max;
-              message.minSampledPoints = chartZoomMinSampledPoints();
-              message.maxSampledPoints = chartZoomMaxSampledPoints();
             }
             vscode.postMessage(message);
           }
@@ -4553,8 +5033,12 @@ export class KxResultsPanel {
             ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
               ' box groups from ' + formatUiCount(chartData.eligibleRowCount) +
               ' eligible rows (' + chartData.algorithm + '). Group by is unavailable.' + warnings
-            : 'Showing ' + formatUiCount(chartData.sampledPointCount) +
-              ' of ' + formatUiCount(chartData.eligibleRowCount) +
+            : chartData.chartType === 'bar'
+              ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
+                ' rendered bar groups from ' + formatUiCount(chartData.eligibleRowCount) +
+                ' eligible rows' + grouped + ' (' + chartData.algorithm + ').' + warnings
+              : 'Showing ' + formatUiCount(chartData.sampledPointCount) +
+              ' rendered points from ' + formatUiCount(chartData.eligibleRowCount) +
               ' eligible rows' + grouped + ' (' + chartData.algorithm + ').' + warnings;
       }
 
@@ -4592,6 +5076,9 @@ export class KxResultsPanel {
                 : [],
               gapFlags: Array.isArray(series && series.gapFlags)
                 ? series.gapFlags.map(flag => flag === true)
+                : [],
+              gapBefore: Array.isArray(series && series.gapBefore)
+                ? series.gapBefore.map(flag => flag === true)
                 : []
             };
           }).filter(series => series.columnName) : [],
@@ -4818,6 +5305,30 @@ export class KxResultsPanel {
         return aligned;
       }
 
+      function chartSeriesSourceGaps(series) {
+        return (self, _seriesIndex, indexStart, indexEnd, gaps) => {
+          const start = Math.max(1, indexStart);
+          const end = Math.min(indexEnd, chartData.x.length - 1);
+          for (let index = start; index <= end; index++) {
+            if (!series.gapBefore[index] || !Number.isFinite(series.values[index])) {
+              continue;
+            }
+            let previous = index - 1;
+            while (previous >= indexStart && !Number.isFinite(series.values[previous])) {
+              previous -= 1;
+            }
+            if (previous >= indexStart) {
+              window.uPlot.addGap(
+                gaps,
+                self.valToPos(chartData.x[previous], 'x', true),
+                self.valToPos(chartData.x[index], 'x', true)
+              );
+            }
+          }
+          return mergeChartPixelGaps(gaps);
+        };
+      }
+
       function chartUPlotOptions(dimensions) {
         const colors = chartColors();
         const axisColor = cssColor('--vscode-descriptionForeground', '#888');
@@ -4855,6 +5366,9 @@ export class KxResultsPanel {
               points: chartSeriesPoints(type, color),
               value: (_self, rawValue, _seriesIndex, valueIndex) => chartSeriesValueLabel(type, index, rawValue, valueIndex)
             };
+            if ((type === 'line' || type === 'step') && item.gapBefore.some(Boolean)) {
+              config.gaps = chartSeriesSourceGaps(item);
+            }
             if (type === 'step') {
               const stepped = window.uPlot && window.uPlot.paths && window.uPlot.paths.stepped;
               if (typeof stepped !== 'function') {
@@ -5126,7 +5640,7 @@ export class KxResultsPanel {
         });
         ctx.restore();
         if (skippedDenseBars && chartStatus.textContent.indexOf('Dense bar clusters') === -1) {
-          chartStatus.textContent += ' Dense bar clusters too narrow to distinguish were skipped; refine zoom to inspect them.';
+          chartStatus.textContent += ' Dense bar clusters too narrow to distinguish were skipped; zoom or use the navigator to inspect them.';
         }
       }
 
@@ -5354,7 +5868,7 @@ export class KxResultsPanel {
         const slotWidth = groupWidth / seriesCount;
         if (slotWidth < 1.75 * pxRatio) {
           if (chartStatus.textContent.indexOf('Dense box groups') === -1) {
-            chartStatus.textContent += ' Dense box groups too narrow to distinguish were skipped; refine zoom or select fewer Y columns.';
+            chartStatus.textContent += ' Dense box groups too narrow to distinguish were skipped; zoom, use the navigator, or select fewer Y columns.';
           }
           return;
         }
@@ -5606,6 +6120,7 @@ export class KxResultsPanel {
         } else {
           clearChartAutoRefineTimer();
         }
+        updateChartNavigator();
         updateChartControls();
       }
 
@@ -5639,6 +6154,291 @@ export class KxResultsPanel {
         }
         clearChartSelection();
         hideChartTooltip();
+        updateChartNavigator();
+      }
+
+      function updateChartNavigator() {
+        const fullRange = chartZoomLifecycle.fullRange;
+        const overviewData = chartZoomLifecycle.fullData || chartData;
+        const currentRange = currentChartViewportRange() || fullRange;
+        const windowState = chartNavigatorWindow(currentRange, fullRange);
+        const sliderBounds = chartNavigatorSliderBounds(currentRange, fullRange);
+        if (!chartUPlot || !overviewData || !fullRange || !windowState || !sliderBounds) {
+          chartNavigator.hidden = true;
+          return;
+        }
+        chartNavigator.hidden = false;
+        const blocked = chartControlsDirty || !chartRendered;
+        chartNavigator.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+        const startPercent = windowState.startFraction * 100;
+        const endPercent = windowState.endFraction * 100;
+        chartNavigatorWindowElement.style.left = startPercent + '%';
+        chartNavigatorWindowElement.style.width = Math.max(0, endPercent - startPercent) + '%';
+        chartNavigatorStart.style.left = 'clamp(5px, ' + startPercent + '%, calc(100% - 5px))';
+        chartNavigatorEnd.style.left = 'clamp(5px, ' + endPercent + '%, calc(100% - 5px))';
+        setChartNavigatorAria(
+          chartNavigatorWindowElement,
+          sliderBounds.window,
+          'Selected X range ' + formatChartNavigatorValue(currentRange.min) +
+            ' to ' + formatChartNavigatorValue(currentRange.max)
+        );
+        setChartNavigatorAria(
+          chartNavigatorStart,
+          sliderBounds.start,
+          'Selected X start ' + formatChartNavigatorValue(currentRange.min)
+        );
+        setChartNavigatorAria(
+          chartNavigatorEnd,
+          sliderBounds.end,
+          'Selected X end ' + formatChartNavigatorValue(currentRange.max)
+        );
+        renderChartNavigatorOverview(overviewData, fullRange);
+      }
+
+      function setChartNavigatorAria(element, bounds, text) {
+        element.setAttribute('aria-orientation', 'horizontal');
+        element.setAttribute('aria-valuemin', String(bounds.minimum));
+        element.setAttribute('aria-valuemax', String(bounds.maximum));
+        element.setAttribute('aria-valuenow', String(bounds.now));
+        element.setAttribute('aria-valuetext', text);
+      }
+
+      function formatChartNavigatorValue(value) {
+        if (chartData && chartData.xKind === 'temporal') {
+          const date = new Date(value);
+          if (Number.isFinite(date.getTime())) {
+            return date.toISOString();
+          }
+        }
+        return formatChartNumber(value);
+      }
+
+      function renderChartNavigatorOverview(overviewData, fullRange) {
+        const rangeKey = chartZoomRangeKey(fullRange);
+        if (chartNavigatorOverviewData === overviewData &&
+          chartNavigatorOverview.dataset.kxRangeKey === rangeKey) {
+          return;
+        }
+        chartNavigatorOverviewData = overviewData;
+        chartNavigatorOverview.dataset.kxRangeKey = rangeKey;
+        chartNavigatorOverview.textContent = '';
+        const xValues = Array.isArray(overviewData.x) ? overviewData.x : [];
+        const overviewSeries = overviewData.chartType === 'candlestick'
+          ? null
+          : (Array.isArray(overviewData.series)
+            ? overviewData.series.reduce((best, series) => {
+              const candidate = series && Array.isArray(series.values) ? series.values : [];
+              const candidateFinite = candidate.reduce(
+                (count, value) => count +
+                  (typeof value === 'number' && Number.isFinite(value) ? 1 : 0),
+                0
+              );
+              const bestValues = best && Array.isArray(best.values) ? best.values : [];
+              const bestFinite = bestValues.reduce(
+                (count, value) => count +
+                  (typeof value === 'number' && Number.isFinite(value) ? 1 : 0),
+                0
+              );
+              return candidateFinite > bestFinite ? series : best;
+            }, null)
+            : null);
+        const values = overviewData.chartType === 'candlestick'
+          ? (Array.isArray(overviewData.candlesticks)
+            ? overviewData.candlesticks.map(candle => candle && candle.close)
+            : [])
+          : (overviewSeries && Array.isArray(overviewSeries.values) ? overviewSeries.values : []);
+        const gapBefore = overviewSeries && Array.isArray(overviewSeries.gapBefore)
+          ? overviewSeries.gapBefore
+          : [];
+        const gapFlags = overviewSeries && Array.isArray(overviewSeries.gapFlags)
+          ? overviewSeries.gapFlags
+          : [];
+        const count = Math.min(xValues.length, values.length);
+        if (count === 0) {
+          return;
+        }
+        let yMin = Infinity;
+        let yMax = -Infinity;
+        for (let index = 0; index < count; index++) {
+          const value = values[index];
+          if (typeof value === 'number' && Number.isFinite(value)) {
+            yMin = Math.min(yMin, value);
+            yMax = Math.max(yMax, value);
+          }
+        }
+        if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+          return;
+        }
+        const path = document.createElementNS('http://www.w3.org/2000/svg', 'path');
+        const xSpan = fullRange.max - fullRange.min;
+        const ySpan = yMax > yMin ? yMax - yMin : 1;
+        const maxOverviewPoints = 1200;
+        const indexes = [];
+        const target = Math.min(count, maxOverviewPoints);
+        for (let point = 0; point < target; point++) {
+          const index = target === 1
+            ? 0
+            : Math.floor(point * (count - 1) / (target - 1));
+          if (indexes[indexes.length - 1] !== index) {
+            indexes.push(index);
+          }
+        }
+        let drawing = false;
+        const commands = [];
+        let previousIndex = -1;
+        indexes.forEach(index => {
+          const intervalHasGap = chartOverviewIntervalHasGap(
+            values,
+            gapFlags,
+            gapBefore,
+            previousIndex,
+            index
+          );
+          previousIndex = index;
+          const x = Number(xValues[index]);
+          const rawY = values[index];
+          if (!Number.isFinite(x) || typeof rawY !== 'number' || !Number.isFinite(rawY)) {
+            if (intervalHasGap) {
+              drawing = false;
+            }
+            return;
+          }
+          if (intervalHasGap) {
+            drawing = false;
+          }
+          const y = rawY;
+          const px = Math.max(0, Math.min(1000, (x - fullRange.min) / xSpan * 1000));
+          const py = 27 - (y - yMin) / ySpan * 24;
+          commands.push((drawing ? 'L' : 'M') + px.toFixed(2) + ' ' + py.toFixed(2));
+          drawing = true;
+        });
+        path.setAttribute('d', commands.join(' '));
+        chartNavigatorOverview.appendChild(path);
+      }
+
+      function chartNavigatorInteractionBlocked() {
+        return chartNavigator.hidden || chartControlsDirty || !chartUPlot ||
+          !chartRendered || !chartZoomLifecycle.fullRange;
+      }
+
+      function startChartNavigatorPointer(event, part) {
+        if (event.button !== 0 || chartNavigatorInteractionBlocked()) {
+          return;
+        }
+        const range = currentChartViewportRange();
+        if (!range) {
+          return;
+        }
+        chartNavigatorPointerState = {
+          pointerId: event.pointerId,
+          part,
+          startX: event.clientX,
+          range
+        };
+        chartNavigatorWindowElement.classList.add('is-dragging');
+        event.currentTarget.focus({ preventScroll: true });
+        window.addEventListener('pointermove', updateChartNavigatorPointer, true);
+        window.addEventListener('pointerup', finishChartNavigatorPointer, true);
+        window.addEventListener('pointercancel', finishChartNavigatorPointer, true);
+        event.preventDefault();
+        event.stopPropagation();
+      }
+
+      function updateChartNavigatorPointer(event) {
+        const pointer = chartNavigatorPointerState;
+        if (!pointer || event.pointerId !== pointer.pointerId) {
+          return;
+        }
+        const width = Math.max(1, chartNavigator.getBoundingClientRect().width);
+        const range = adjustChartNavigatorRange(
+          pointer.range,
+          chartZoomLifecycle.fullRange,
+          pointer.part,
+          (event.clientX - pointer.startX) / width
+        );
+        if (range) {
+          setChartViewportLocally(range);
+          chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange, range);
+        }
+        event.preventDefault();
+      }
+
+      function finishChartNavigatorPointer(event) {
+        const pointer = chartNavigatorPointerState;
+        if (!pointer || event.pointerId !== pointer.pointerId) {
+          return;
+        }
+        updateChartNavigatorPointer(event);
+        const range = currentChartViewportRange();
+        clearChartNavigatorPointer();
+        if (range && chartZoomRangeKey(range) !== chartZoomRangeKey(pointer.range)) {
+          completeChartViewport(range, 'navigator');
+          updateChartControls();
+        }
+        event.preventDefault();
+      }
+
+      function clearChartNavigatorPointer() {
+        chartNavigatorPointerState = null;
+        chartNavigatorWindowElement.classList.remove('is-dragging');
+        window.removeEventListener('pointermove', updateChartNavigatorPointer, true);
+        window.removeEventListener('pointerup', finishChartNavigatorPointer, true);
+        window.removeEventListener('pointercancel', finishChartNavigatorPointer, true);
+      }
+
+      function startChartNavigatorTrackPointer(event) {
+        if (event.button !== 0 || chartNavigatorInteractionBlocked() ||
+          event.target === chartNavigatorWindowElement ||
+          event.target === chartNavigatorStart || event.target === chartNavigatorEnd) {
+          return;
+        }
+        const rect = chartNavigator.getBoundingClientRect();
+        const range = recenterChartNavigatorRange(
+          currentChartViewportRange(),
+          chartZoomLifecycle.fullRange,
+          (event.clientX - rect.left) / Math.max(1, rect.width)
+        );
+        if (range) {
+          const before = currentChartViewportRange();
+          setChartViewportLocally(range);
+          chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange, range);
+          if (!before || chartZoomRangeKey(before) !== chartZoomRangeKey(range)) {
+            completeChartViewport(range, 'navigator');
+          }
+          chartNavigatorWindowElement.focus({ preventScroll: true });
+          updateChartControls();
+        }
+        event.preventDefault();
+      }
+
+      function onChartNavigatorKeyDown(event, part) {
+        if (chartNavigatorInteractionBlocked()) {
+          return;
+        }
+        if (event.key === 'Home') {
+          resetChartZoom();
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
+        if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+          return;
+        }
+        const current = currentChartViewportRange();
+        const range = adjustChartNavigatorRange(
+          current,
+          chartZoomLifecycle.fullRange,
+          part,
+          (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 0.1 : 0.01)
+        );
+        if (range && (!current || chartZoomRangeKey(range) !== chartZoomRangeKey(current))) {
+          setChartViewportLocally(range);
+          chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange, range);
+          completeChartViewport(range, 'navigator');
+          updateChartControls();
+        }
+        event.preventDefault();
+        event.stopPropagation();
       }
 
       function panChartByFraction(fraction, reason) {
@@ -5742,7 +6542,9 @@ export class KxResultsPanel {
             settled,
             reason === 'zoom'
               ? 'Auto-refining zoom range...'
-              : 'Resampling panned chart range...'
+              : reason === 'navigator'
+                ? 'Loading selected navigator range...'
+                : 'Resampling panned chart range...'
           );
         };
         const action = chartZoomAutoRefineQueueAction(chartAutoRefineScheduledRange, clamped);
@@ -5789,17 +6591,6 @@ export class KxResultsPanel {
         chartAutoRefineScheduledRange = null;
       }
 
-      function chartZoomMinSampledPoints() {
-        return positiveIntegerSetting(settings.chartZoomMinSampledPoints, DEFAULT_SETTINGS.chartZoomMinSampledPoints);
-      }
-
-      function chartZoomMaxSampledPoints() {
-        return Math.max(
-          chartZoomMinSampledPoints(),
-          positiveIntegerSetting(settings.chartZoomMaxSampledPoints, DEFAULT_SETTINGS.chartZoomMaxSampledPoints)
-        );
-      }
-
       function notifyChartPanelState(rendered) {
         vscode.postMessage({
           type: 'chartPanelState',
@@ -5842,6 +6633,7 @@ export class KxResultsPanel {
 
       function destroyChartPlot() {
         clearChartPanState();
+        clearChartNavigatorPointer();
         captureChartSeriesVisibility(chartUPlot);
         if (chartUPlot && typeof chartUPlot.destroy === 'function') {
           try {
@@ -5851,6 +6643,7 @@ export class KxResultsPanel {
           }
         }
         chartUPlot = null;
+        chartNavigator.hidden = true;
         chartRenderedSeriesKeys = [];
         chartZoomed = false;
         clearChartAutoRefineTimer();
@@ -6103,6 +6896,9 @@ export class KxResultsPanel {
         root.style.setProperty('--header-height', layout.headerHeight + 'px');
         root.style.setProperty('--cell-padding-x', layout.cellPaddingX + 'px');
         root.style.setProperty('--panel-font-size', settings.fontSize > 0 ? settings.fontSize + 'px' : 'var(--vscode-font-size)');
+        if (!settings.showColumnSummaryStatistics) {
+          clearColumnSummaries();
+        }
         if (settings.chartDecimalPlaces !== previousChartDecimalPlaces) {
           refreshChartFormatting();
         }
@@ -6123,11 +6919,6 @@ export class KxResultsPanel {
       }
 
       function normalizeSettings(value) {
-        const chartZoomMinSampledPoints = positiveIntegerSetting(value.chartZoomMinSampledPoints, DEFAULT_SETTINGS.chartZoomMinSampledPoints);
-        const chartZoomMaxSampledPoints = Math.max(
-          chartZoomMinSampledPoints,
-          positiveIntegerSetting(value.chartZoomMaxSampledPoints, DEFAULT_SETTINGS.chartZoomMaxSampledPoints)
-        );
         return {
           cellWidth: boundedSetting(value.cellWidth, DEFAULT_SETTINGS.cellWidth, 80, 600),
           columnWidths: normalizePositionalColumnWidths(value.columnWidths),
@@ -6143,6 +6934,15 @@ export class KxResultsPanel {
           includeRowIndex: typeof value.includeRowIndex === 'boolean' ? value.includeRowIndex : DEFAULT_SETTINGS.includeRowIndex,
           hideLargeResultWarnings: typeof value.hideLargeResultWarnings === 'boolean' ? value.hideLargeResultWarnings : DEFAULT_SETTINGS.hideLargeResultWarnings,
           hideLargeSortWarnings: typeof value.hideLargeSortWarnings === 'boolean' ? value.hideLargeSortWarnings : DEFAULT_SETTINGS.hideLargeSortWarnings,
+          largeSortWarningRowThreshold: boundedSetting(
+            value.largeSortWarningRowThreshold,
+            DEFAULT_SETTINGS.largeSortWarningRowThreshold,
+            ${MIN_LARGE_SORT_WARNING_ROW_THRESHOLD},
+            ${MAX_LARGE_SORT_WARNING_ROW_THRESHOLD}
+          ),
+          showColumnSummaryStatistics: typeof value.showColumnSummaryStatistics === 'boolean'
+            ? value.showColumnSummaryStatistics
+            : DEFAULT_SETTINGS.showColumnSummaryStatistics,
           copyExportConfirmCellThreshold: positiveIntegerSetting(value.copyExportConfirmCellThreshold, DEFAULT_SETTINGS.copyExportConfirmCellThreshold),
           localDataServerFullExportCellLimit: positiveIntegerSetting(value.localDataServerFullExportCellLimit, DEFAULT_SETTINGS.localDataServerFullExportCellLimit),
           elapsedTimeDisplay: normalizeElapsedTimeDisplay(value.elapsedTimeDisplay),
@@ -6151,8 +6951,6 @@ export class KxResultsPanel {
             value.chartMaxSourceRows,
             DEFAULT_SETTINGS.chartMaxSourceRows
           ),
-          chartZoomMinSampledPoints,
-          chartZoomMaxSampledPoints,
           qTextSyntaxHighlighting: typeof value.qTextSyntaxHighlighting === 'boolean'
             ? value.qTextSyntaxHighlighting
             : DEFAULT_SETTINGS.qTextSyntaxHighlighting,
@@ -6178,12 +6976,12 @@ export class KxResultsPanel {
         settingsIncludeRowIndex.checked = settings.includeRowIndex;
         settingsHideLargeResultWarnings.checked = settings.hideLargeResultWarnings;
         settingsHideLargeSortWarnings.checked = settings.hideLargeSortWarnings;
+        settingsLargeSortWarningRowThreshold.value = String(settings.largeSortWarningRowThreshold);
+        settingsShowColumnSummaryStatistics.checked = settings.showColumnSummaryStatistics;
         settingsCopyExportConfirmCellThreshold.value = String(settings.copyExportConfirmCellThreshold);
         settingsLocalDataServerFullExportCellLimit.value = String(settings.localDataServerFullExportCellLimit);
         settingsChartDecimalPlaces.value = String(settings.chartDecimalPlaces);
         settingsChartMaxSourceRows.value = String(settings.chartMaxSourceRows);
-        settingsChartZoomMinSampledPoints.value = String(settings.chartZoomMinSampledPoints);
-        settingsChartZoomMaxSampledPoints.value = String(settings.chartZoomMaxSampledPoints);
         settingsElapsedTimeDisplay.value = settings.elapsedTimeDisplay;
         settingsArrayDisplayFormat.value = settings.arrayDisplayFormat;
         settingsQTextSyntaxHighlighting.checked = settings.qTextSyntaxHighlighting;
@@ -6216,13 +7014,13 @@ export class KxResultsPanel {
           includeRowIndex: settings.includeRowIndex,
           hideLargeResultWarnings: settings.hideLargeResultWarnings,
           hideLargeSortWarnings: settings.hideLargeSortWarnings,
+          largeSortWarningRowThreshold: settings.largeSortWarningRowThreshold,
+          showColumnSummaryStatistics: settings.showColumnSummaryStatistics,
           copyExportConfirmCellThreshold: settings.copyExportConfirmCellThreshold,
           localDataServerFullExportCellLimit: settings.localDataServerFullExportCellLimit,
           elapsedTimeDisplay: settings.elapsedTimeDisplay,
           chartDecimalPlaces: settings.chartDecimalPlaces,
           chartMaxSourceRows: settings.chartMaxSourceRows,
-          chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
-          chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
           qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
           qTextDisplayFormatting: settings.qTextDisplayFormatting,
           arrayDisplayFormat: settings.arrayDisplayFormat,
@@ -6307,6 +7105,15 @@ export class KxResultsPanel {
           return;
         }
         updateSetting(key, clampInteger(value, min, max));
+      }
+
+      function updateIntegerSetting(key, input, min, max) {
+        const value = Number(input.value);
+        if (!Number.isSafeInteger(value) || value < min || value > max) {
+          syncSettingsControls();
+          return;
+        }
+        updateSetting(key, value);
       }
 
       function updatePositiveIntegerSetting(key, input) {
@@ -6626,6 +7433,116 @@ export class KxResultsPanel {
         textElement.className = 'message-text';
         textElement.textContent = text;
         message.appendChild(textElement);
+      }
+
+      function clearColumnSummaries() {
+        columnSummaries.hidden = true;
+        columnSummaryStatus.textContent = '';
+        columnSummaryGrid.textContent = '';
+      }
+
+      function setColumnSummaryPending() {
+        if (!settings.showColumnSummaryStatistics || isTextResult() || !data.hasResult) {
+          clearColumnSummaries();
+          return;
+        }
+        columnSummaries.hidden = false;
+        columnSummaryStatus.textContent = 'Computing bounded statistics…';
+        columnSummaryGrid.textContent = '';
+      }
+
+      function setColumnSummaryError(detail) {
+        if (!settings.showColumnSummaryStatistics) {
+          clearColumnSummaries();
+          return;
+        }
+        columnSummaries.hidden = false;
+        columnSummaryStatus.textContent = detail;
+        columnSummaryGrid.textContent = '';
+      }
+
+      function setColumnSummaries(value) {
+        if (!settings.showColumnSummaryStatistics || !value) {
+          clearColumnSummaries();
+          return;
+        }
+        const columns = Array.isArray(value.columns) ? value.columns : [];
+        const totalRows = toNonNegativeInteger(value.totalRowCount, data.rowCount);
+        const evaluatedRows = toNonNegativeInteger(value.evaluatedRowCount, 0);
+        const evaluatedCells = toNonNegativeInteger(value.evaluatedCellCount, 0);
+        const exact = value.mode === 'exact';
+        columnSummaries.hidden = false;
+        columnSummaryStatus.textContent = exact
+          ? 'Exact • all ' + formatUiCount(evaluatedRows) + ' rows • ' +
+            formatUiCount(evaluatedCells) + ' cells evaluated'
+          : 'Sampled / partial • ' + formatUiCount(evaluatedRows) + ' evenly spaced of ' +
+            formatUiCount(totalRows) + ' rows • observed counts only';
+        columnSummaryGrid.textContent = '';
+        if (columns.length === 0) {
+          columnSummaryGrid.appendChild(document.createTextNode('No visible data columns.'));
+          return;
+        }
+        const fragment = document.createDocumentFragment();
+        columns.forEach(column => fragment.appendChild(columnSummaryCard(column, exact)));
+        columnSummaryGrid.appendChild(fragment);
+      }
+
+      function columnSummaryCard(column, exactBatch) {
+        const card = document.createElement('article');
+        card.className = 'column-summary-card';
+        const sourcePosition = toNonNegativeInteger(column.sourceColumnPosition, 0);
+        card.dataset.kxSourceOrdinal = String(sourcePosition);
+        const title = document.createElement('div');
+        title.className = 'column-summary-card-title';
+        title.textContent = String(column.columnName || '') + ' • source #' + (sourcePosition + 1) +
+          (column.columnType ? ' • ' + String(column.columnType) : '');
+        const counts = document.createElement('div');
+        counts.className = 'column-summary-card-meta';
+        const distinctLabel = exactBatch && column.distinctComplete === true
+          ? 'distinct'
+          : 'distinct observed';
+        counts.textContent = 'total ' + formatUiCount(column.totalRowCount) +
+          ' • evaluated ' + formatUiCount(column.evaluatedRowCount) +
+          ' • valid ' + formatUiCount(column.validCount) +
+          ' • null ' + formatUiCount(column.nullCount) +
+          ' • ' + distinctLabel + ' ' + formatUiCount(column.distinctCount);
+        card.append(title, counts);
+        const metrics = columnSummaryMetricText(column);
+        if (metrics) {
+          const values = document.createElement('div');
+          values.className = 'column-summary-values';
+          values.textContent = metrics;
+          card.append(values);
+        }
+        return card;
+      }
+
+      function columnSummaryMetricText(column) {
+        const metrics = [];
+        ['min', 'max', 'mean', 'median'].forEach(key => {
+          const value = column[key];
+          if (value && typeof value.text === 'string') {
+            metrics.push(key + ' ' + value.text + (value.approximate ? ' (approx.)' : ''));
+          }
+        });
+        if (column.meanUnavailableReason) {
+          metrics.push('mean unavailable (' + String(column.meanUnavailableReason) + ')');
+        }
+        if (column.medianUnavailableReason) {
+          metrics.push('median unavailable (' + String(column.medianUnavailableReason) + ')');
+        }
+        if (column.metricUnavailableReason) {
+          metrics.push('metrics unavailable (' + String(column.metricUnavailableReason) + ')');
+        } else if (column.metricsComplete === false) {
+          metrics.push('metrics partial: ' + formatUiCount(column.metricValueCount) +
+            ' compatible of ' + formatUiCount(column.validCount) + ' valid values');
+        }
+        if (Array.isArray(column.frequentValues) && column.frequentValues.length > 0) {
+          metrics.push('frequent ' + column.frequentValues.map(value =>
+            String(value.text || '') + ' ×' + formatUiCount(value.count)
+          ).join(', '));
+        }
+        return metrics.join(' • ');
       }
 
       function resultMessageText(value) {
@@ -6982,7 +7899,9 @@ export class KxResultsPanel {
         const cells = [];
         for (let column = columns.start; column <= columns.end; column++) {
           const width = columnWidthAt(metrics, column);
-          const sorted = !!data.sort && data.sort.columnPosition === data.columnPositions[column];
+          const sourceOrdinal = data.columnPositions[column] ?? column;
+          const sorted = !!data.sort && data.sort.columnPosition === sourceOrdinal;
+          const keyColumn = data.keyColumnPositionLookup.has(sourceOrdinal);
           cells.push(createCell({
             text: data.columns[column] + (sorted
               ? ' ' + resultTableSortIndicator(true, data.sort.direction)
@@ -7004,7 +7923,8 @@ export class KxResultsPanel {
               data.columns.length,
               sorted,
               data.sort ? data.sort.direction : undefined,
-              isColumnSelected(column, range)
+              isColumnSelected(column, range),
+              keyColumn
             )
           }));
         }
@@ -7046,7 +7966,7 @@ export class KxResultsPanel {
         const fragment = document.createDocumentFragment();
         for (let row = rows.start; row <= rows.end; row++) {
           const rowElement = document.createElement('div');
-          rowElement.className = 'row ' + absoluteDisplayRowClass(row);
+          rowElement.className = 'row';
           rowElement.setAttribute('role', 'row');
           rowElement.setAttribute('aria-rowindex', String(row + 2));
           rowElement.style.top = renderedRowTop(row, verticalState, layout) + 'px';
@@ -7099,9 +8019,37 @@ export class KxResultsPanel {
       function createCell(options) {
         const cell = document.createElement('div');
         cell.className = options.className +
-          (options.selected ? ' selected' : '') +
-          (options.searchMatch ? ' search-match' : '') +
+          (options.selected ? ' selected is-selected' : '') +
+          (options.searchMatch ? ' search-match is-search-match' : '') +
           (options.searchActive ? ' search-active' : '');
+        if (options.column >= 0) {
+          const sourceOrdinal = data.columnPositions[options.column] ?? options.column;
+          const sorted = !!data.sort && data.sort.columnPosition === sourceOrdinal;
+          const keyColumn = data.keyColumnPositionLookup.has(sourceOrdinal);
+          cell.classList.add('is-cell-hoverable');
+          cell.classList.toggle('is-key-column', keyColumn);
+          cell.dataset.kxDisplayOrdinal = String(options.column);
+          cell.dataset.kxSourceOrdinal = String(sourceOrdinal);
+          if (options.headerCell) {
+            cell.classList.add('is-column-header');
+            cell.classList.toggle('is-selected-header', options.selected === true);
+            cell.classList.toggle('is-sorted-header', sorted);
+          } else {
+            cell.classList.toggle('is-sorted-column', sorted);
+            if (selection && selection.focusRow === options.row &&
+              selection.focusColumn === options.column) {
+              cell.classList.add('is-active-cell');
+            }
+          }
+        }
+        if (options.row >= 0 && options.column >= 0) {
+          const parity = absoluteDisplayRowClass(options.row);
+          cell.classList.add(parity);
+          cell.dataset.kxRowParity = parity === 'row-odd' ? 'odd' : 'even';
+        }
+        if (cell.classList.contains('loading')) {
+          cell.classList.add('is-loading');
+        }
         cell.setAttribute(
           'role',
           options.row >= 0 && options.column < 0
@@ -7729,12 +8677,25 @@ export class KxResultsPanel {
         }, []);
       }
 
+      function normalizeSnapshotScope(value) {
+        if (!value || value.kind !== 'truncatedSavedPreview') {
+          return { kind: 'complete' };
+        }
+        return {
+          kind: 'truncatedSavedPreview',
+          savedRowCount: toNonNegativeInteger(value.savedRowCount, 0),
+          totalRowCount: toNonNegativeInteger(value.totalRowCount, 0)
+        };
+      }
+
       function emptyData() {
         return {
           version: 0,
           mode: 'table',
           columns: [],
           columnPositions: [],
+          keyColumnPositions: [],
+          keyColumnPositionLookup: new Set(),
           allColumns: [],
           allColumnPositions: [],
           hiddenColumnNames: [],
@@ -7751,6 +8712,7 @@ export class KxResultsPanel {
           error: false,
           canceled: false,
           sort: null,
+          snapshotScope: { kind: 'complete' },
           wholeResultColumnTextLengths: [],
           hasResult: false
         };
@@ -7844,6 +8806,10 @@ function panelSettings(): KxPanelSettings {
   const density = panelDensity(config.get<string>('density'));
   const size = panelSizeSettings(config, density);
   return {
+    dataWranglerEnabled: booleanSetting(
+      config.get<boolean>('dataWrangler.enabled'),
+      DEFAULT_PANEL_SETTINGS.dataWranglerEnabled
+    ),
     cellWidth: size.cellWidth,
     columnWidths: normalizePositionalColumnWidths(
       config.get<unknown>('viewer.columnWidths')
@@ -7867,6 +8833,14 @@ function panelSettings(): KxPanelSettings {
       config.get<boolean>('hideLargeSortWarnings'),
       DEFAULT_PANEL_SETTINGS.hideLargeSortWarnings
     ),
+    largeSortWarningRowThreshold: normalizeLargeSortWarningRowThreshold(
+      config.get<number>('largeSortWarningRowThreshold'),
+      DEFAULT_PANEL_SETTINGS.largeSortWarningRowThreshold
+    ),
+    showColumnSummaryStatistics: booleanSetting(
+      config.get<boolean>('showColumnSummaryStatistics'),
+      DEFAULT_PANEL_SETTINGS.showColumnSummaryStatistics
+    ),
     copyExportConfirmCellThreshold: positiveIntegerConfigSetting(
       config.get<number>('copyExportConfirmCellThreshold'),
       DEFAULT_PANEL_SETTINGS.copyExportConfirmCellThreshold
@@ -7880,7 +8854,6 @@ function panelSettings(): KxPanelSettings {
     chartMaxSourceRows: chartMaxSourceRowsSettingValue(
       config.get<number>('viewer.chartMaxSourceRows')
     ),
-    ...chartZoomSamplePointSettings(config),
     qTextSyntaxHighlighting: booleanSetting(
       config.get<boolean>('qText.syntaxHighlighting'),
       DEFAULT_PANEL_SETTINGS.qTextSyntaxHighlighting
@@ -7914,8 +8887,6 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     chartDecimalPlaces: settings.chartDecimalPlaces,
     chartMaxSourceRows: settings.chartMaxSourceRows,
     copyExportConfirmCellThreshold: settings.copyExportConfirmCellThreshold,
-    chartZoomMinSampledPoints: settings.chartZoomMinSampledPoints,
-    chartZoomMaxSampledPoints: settings.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
     qTextDisplayFormatting: settings.qTextDisplayFormatting,
     arrayDisplayFormat: settings.arrayDisplayFormat,
@@ -8020,35 +8991,6 @@ function chartDecimalPlacesSettingValue(value: any, fallback = CHART_DECIMAL_PLA
   return boundedSettingNumber(value, fallback, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX);
 }
 
-function chartZoomSamplePointSettings(config = vscode.workspace.getConfiguration('vscode-kdb.results')): Pick<KxPanelSettings, 'chartZoomMinSampledPoints' | 'chartZoomMaxSampledPoints'> {
-  const min = chartZoomMinSampledPointsSettingValue(config.get<number>('viewer.chartZoomMinSampledPoints'));
-  const max = chartZoomMaxSampledPointsSettingValue(config.get<number>('viewer.chartZoomMaxSampledPoints'), min);
-  return {
-    chartZoomMinSampledPoints: min,
-    chartZoomMaxSampledPoints: max,
-  };
-}
-
-function chartZoomMinSampledPointsSettingValue(value: any, fallback = CHART_ZOOM_MIN_SAMPLED_POINTS): number {
-  const number = Number(value);
-  if (!Number.isFinite(number)) {
-    return fallback;
-  }
-  const integer = Math.floor(number);
-  return integer >= 1 ? integer : fallback;
-}
-
-function chartZoomMaxSampledPointsSettingValue(
-  value: any,
-  minSampledPoints = CHART_ZOOM_MIN_SAMPLED_POINTS,
-  fallback = CHART_ZOOM_MAX_SAMPLED_POINTS
-): number {
-  const min = chartZoomMinSampledPointsSettingValue(minSampledPoints);
-  const number = Number(value);
-  const integer = Number.isFinite(number) ? Math.floor(number) : fallback;
-  return integer >= min ? integer : min;
-}
-
 function panelSizeSettings(
   config: vscode.WorkspaceConfiguration,
   density: KxPanelDensity
@@ -8077,8 +9019,6 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
     key === 'autoFitMode' ||
     key === 'chartMaxSourceRows' ||
     key === 'chartDecimalPlaces' ||
-    key === 'chartZoomMinSampledPoints' ||
-    key === 'chartZoomMaxSampledPoints' ||
     key === 'functionDisplayStrategy' ||
     key === 'dictionaryDisplayStrategy' ||
     key === 'listDisplayStrategy' ||
@@ -8131,13 +9071,17 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   includeRowIndex: booleanSettingUpdate,
   hideLargeResultWarnings: booleanSettingUpdate,
   hideLargeSortWarnings: booleanSettingUpdate,
+  largeSortWarningRowThreshold: value => integerSettingUpdate(
+    value,
+    MIN_LARGE_SORT_WARNING_ROW_THRESHOLD,
+    MAX_LARGE_SORT_WARNING_ROW_THRESHOLD
+  ),
+  showColumnSummaryStatistics: booleanSettingUpdate,
   copyExportConfirmCellThreshold: positiveIntegerSettingUpdate,
   localDataServerFullExportCellLimit: positiveIntegerSettingUpdate,
   elapsedTimeDisplay: elapsedTimeDisplaySettingUpdate,
   chartDecimalPlaces: value => numberSettingUpdate(value, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX),
   chartMaxSourceRows: positiveIntegerSettingUpdate,
-  chartZoomMinSampledPoints: positiveIntegerSettingUpdate,
-  chartZoomMaxSampledPoints: positiveIntegerSettingUpdate,
   arrayDisplayFormat: arrayDisplayFormatSettingUpdate,
   functionDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'qText'),
   dictionaryDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
@@ -8213,6 +9157,13 @@ function numberSettingUpdate(value: any, min: number, max: number): number | nul
   }
 
   return Math.min(Math.max(Math.floor(number), min), max);
+}
+
+function integerSettingUpdate(value: any, min: number, max: number): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) &&
+    value >= min && value <= max
+    ? value
+    : null;
 }
 
 function positiveIntegerSettingUpdate(value: any): number | null {

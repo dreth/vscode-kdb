@@ -4,9 +4,11 @@
 
 KX for VS Code requires VS Code `1.96.0` or newer and a kdb+/q process reachable over q IPC for normal `.q` editor execution. The extension does not bundle q or a kdb+ license.
 
-Mixed-notebook **Run q Cell (KX)** uses the notebook's explicitly selected current q target while Python stays selected. The optional **KX q (Direct IPC)** controller uses the active profile only when its default-false setting is enabled and it is selected. Both use the same direct q machinery as editor execution and neither requires a Python package. Release 0.2.8 preserves 0.2.7's client-side complete-source grouping and ordinary q `value` evaluation, so it does not require `.Q.ld` or reject a process by q release date. Compatibility is covered deterministically for generated source when `.Q.ld` is absent and live on the installed modern q runtime; no historical q binary was available, so no exact minimum q version or live old-q result is claimed. The separate optional Python-kernel `%%q` route requires Python 3.9 through 3.13, IPython, and the separately installed `kx-notebook==0.1.0` distribution (`import kx_notebook`) in that kernel. The companion has direct q IPC built in; it bundles no q runtime or PyKX binary.
+Mixed-notebook **Run q Cell (KX)** uses the globally active q profile while Python stays selected. The optional pure-q **KX q (Direct IPC)** controller uses that same active profile only when its default-false setting is enabled and it is selected. Both use the same direct q machinery as editor execution and neither requires a Python package. Release 0.2.18 preserves 0.2.7's client-side complete-source grouping and ordinary q `value` evaluation, so it does not require `.Q.ld` or reject a process by q release date. Compatibility is covered deterministically for generated source when `.Q.ld` is absent and live on the installed modern q runtime; no historical q binary was available, so no exact minimum q version or live old-q result is claimed. The separate optional Python-kernel `%%q` route requires Python 3.9 through 3.13, IPython, and the separately installed `kx-notebook==0.1.0` distribution (`import kx_notebook`) in that kernel. The companion has direct q IPC built in; it bundles no q runtime or PyKX binary.
 
 SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's `sqltools.connections` setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.
+
+Data Wrangler is optional. **Open in Data Wrangler** requires the separately installed `ms-toolsai.datawrangler` extension only for direct launch; KX never adds it as an extension dependency/pack, installs it, or enables it. Launch support uses feature-detected URI-command behavior observed in Data Wrangler 1.24.2, not a published stable in-memory table API, and therefore remains version-sensitive. The CSV fallback remains usable without Data Wrangler, while Python, Jupyter, or kernel setup needed after launch is managed by that extension.
 
 ## Install the extension
 
@@ -69,15 +71,23 @@ The KX action executes the complete q source through the globally starred active
 
 When the q cell editor itself has text focus, the contributed defaults preserve notebook semantics: `Ctrl+Enter` / `Cmd+Enter` runs and stays, `Shift+Enter` runs and moves next, and `Alt+Enter` / `Option+Enter` runs and inserts below. Move/insert happens only after a successful executed result. The bindings are limited to q code-cell editor focus and are disabled when the KX direct controller is selected. Python, Markdown, cell-container, and output focus keep their normal notebook shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if a shortcut was customized.
 
-Mixed mode is an explicit KX action, not native KX kernel execution, while Python is selected. After q finishes, the KX action applies its output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten.
+Mixed mode is an explicit KX action, not native KX kernel execution, while Python is selected. After q finishes, the KX action applies complete exact rich v2 output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten. Use VS Code/Jupyter's native **Clear Cell Output** or **Clear All Outputs** actions to remove output.
 
 KX is absent from the kernel candidates by default. VS Code's top-right Jupyter selector remains; KX does not remove it.
 
 ## Optional native direct q notebook controller
 
-Set the application-scoped `vscode-kdb.notebook.enableDirectController` setting to `true`, then choose **KX q (Direct IPC)** from the normal notebook kernel selector. This opt-in controller executes complete q cells through the active profile's existing direct q client and namespace using normal **Run Cell**, **Run All**, and notebook shortcuts.
+Set the application-scoped `vscode-kdb.notebook.enableDirectController` setting to `true`, then choose **KX q (Direct IPC)** from the normal notebook kernel selector. This opt-in controller executes complete q cells through the active profile's existing direct q client and namespace using normal **Run Cell**, **Run All**, and notebook shortcuts. Each successful execution uses standard notebook output APIs and automatically persists complete exact rich v2 output.
 
 Turning the setting off disposes the controller, so a previously saved KX selection cannot be restored while it is unregistered. Use ordinary q source: a leading `%%q` is rejected and belongs to the separate Python route. The controller does not install a q kernel, intercept Python/Jupyter, use private APIs, or create a notebook-specific connection. See [Jupyter/IPython Notebooks](notebooks.md).
+
+## Result command
+
+| Command | Use |
+| --- | --- |
+| **KX Results: Open Exported Snapshot in Data Wrangler** | From the current complete decoded table in KX Results, create a private, lossy UTF-8 CSV snapshot and attempt the optional Data Wrangler launch. A truncated historical or Python-helper saved preview is not a complete source. Missing/incompatible Data Wrangler retains and reveals the file instead of installing anything. |
+
+The contributed command ID is `vscode-kdb.openInDataWrangler`. Its **Settings > External tools** button is labelled **Open in Data Wrangler**; the table context menu and Command Palette use the full contributed title above.
 
 ## Notebook commands
 
@@ -89,7 +99,7 @@ Turning the setting off disposes the controller, so a previously saved KX select
 | **KX: Restore Notebook Cell Language** | Restore selected code cells to the notebook default, normally Python. |
 | **KX: Tag Notebook Cell as q** | Legacy editing aid that adds q language, a `%%q` marker, and output limits; the released companion's normal route instead keeps a Python cell Python. |
 | **Prepare this q cell for the active Python kernel** | Add legacy marker/metadata without executing; not required by `kx-notebook==0.1.0`. |
-| **KX: Open Saved Notebook Preview in Results Panel** | Open only the bounded stored snapshot when no live direct result is available. |
+| **KX: Open Saved Notebook Result in Results Panel** | Open validated stored rows when no live direct result is available: every row from current first-party complete v2 output, or bounded rows from a historical/Python-helper preview. |
 
 ## Optional: install the Python notebook helper
 
@@ -139,4 +149,4 @@ When a local q executable is available:
 VSCODE_KDB_LIVE_REQUIRED=1 npm run test:live-q
 ```
 
-Pure helpers and faithful VS Code providers/fakes cover migration configuration, native active-profile routing, mixed explicit-target routing, live results, status, menus, and keybinding scopes. `npm run test:notebook-cross` installs exactly `kx-notebook==0.1.0`, imports `kx_notebook`, and validates its emitted version-1 MIME payload with the TypeScript contract. The scoped Extension Host smoke covers activation, contributed commands, isolated two-profile configuration/active selection, and real q-language/KX metadata persistence through save, close, and reopen; it remains non-visual and does not exercise the connection form, selector, toolbar/status layout, or target QuickPick. The notebook-results visual check requires VS Code, Xvfb/ffmpeg, and q; it records 12 validated screenshots covering light/dark table/chart, opt-in qText, tracked-file reopen, live-full state, every chart family, narrow live/saved layouts, and a narrow overlay.
+Pure helpers and faithful VS Code providers/fakes cover migration configuration, native active-profile routing, mixed explicit-target routing, live results, status, menus, keybinding scopes, Data Wrangler CSV/handoff boundaries, and its success/fallback command behavior. `npm run test:notebook-cross` installs exactly `kx-notebook==0.1.0`, imports `kx_notebook`, and validates its emitted version-1 MIME payload with the TypeScript contract. The scoped Extension Host smoke covers activation, contributed commands including Data Wrangler handoff registration, isolated two-profile configuration/active selection, and real q-language/KX metadata persistence through save, close, and reopen; it remains non-visual and does not exercise the connection form, selector, toolbar/status layout, target QuickPick, or real Data Wrangler UI. Data Wrangler command execution is represented by a faithful 1.24.2 command fake, so no real Data Wrangler UI acceptance is claimed. The notebook-results visual check requires VS Code, Xvfb/ffmpeg, and q; it records 12 validated screenshots covering light/dark table/chart, opt-in qText, tracked-file reopen, live-full state, every chart family, narrow live/saved layouts, and a narrow overlay.

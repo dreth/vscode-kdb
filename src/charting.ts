@@ -3,6 +3,7 @@ import {
   isKnownQType,
   qTypeChartColumnKind,
 } from './q-type';
+import { isQRuntimeValue, qValueToSemanticPrimitive } from './q-value';
 
 export type ChartColumnKind = 'numeric' | 'temporal';
 export type ChartGroupColumnKind = 'categorical';
@@ -50,7 +51,6 @@ export interface LineChartRequest {
   requestId: number;
   maxSourceRows?: number;
   maxSampledPoints?: number;
-  minSampledPoints?: number;
 }
 
 export interface LineChartSeries {
@@ -59,6 +59,8 @@ export interface LineChartSeries {
   groupValue?: string;
   values: Array<number | null>;
   gapFlags?: boolean[];
+  /** A real source null/non-finite run occurs before this retained point. */
+  gapBefore?: boolean[];
 }
 
 export interface CandlestickColumns {
@@ -212,8 +214,7 @@ export class ChartDataError extends Error {
 export const CHART_INFERENCE_SAMPLE_SIZE = 200;
 export const CHART_MAX_SOURCE_ROWS = 2000000;
 export const CHART_MAX_SAMPLED_POINTS = 12000;
-export const CHART_ZOOM_MIN_SAMPLED_POINTS = 3000;
-export const CHART_ZOOM_MAX_SAMPLED_POINTS = 7000;
+export const CHART_ORDINARY_TARGET_POINTS = 7000;
 export const CHART_POINTS_PER_PIXEL = 3;
 export const CHART_CANDLES_PER_PIXEL = 1;
 export const CHART_MAX_BOX_GROUPS = 120;
@@ -318,31 +319,42 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
   if (!hasAnyFiniteY(grouped.points)) {
     throw new ChartDataError('No selected y column has finite numeric values.');
   }
+  const eligibleRowCount = grouped.points.filter(chartPointHasFiniteY).length;
+  const finiteGroupedPoints = grouped.points.filter(chartPointHasFiniteY);
 
-  const maxSampledPoints = chartRequestTargetPointCount(request, xRange);
+  // Ordinary point charts use one fixed full/ranged density contract. Semantic
+  // grouping still happens before sampling and can therefore yield fewer items.
+  const targetPointCount = chartType === 'bar'
+    ? chartTargetPointCount(request.width, request.maxSampledPoints)
+    : CHART_ORDINARY_TARGET_POINTS;
   const preparedPoints = chartType === 'bar' || !!source.groupColumnName
-    ? consolidateChartPointsByX(grouped.points, grouped.series, chartType, warnings)
-    : grouped.points;
+    ? consolidateChartPointsByX(finiteGroupedPoints, grouped.series, chartType, warnings)
+    : finiteGroupedPoints;
   const sampled = chartType === 'bar'
-    ? downsampleBarClusters(preparedPoints, maxSampledPoints, warnings)
+    ? downsampleBarClusters(preparedPoints, targetPointCount, warnings)
     : downsampleMinMax(
       preparedPoints,
       grouped.series.length,
-      maxSampledPoints,
-      chartType === 'line' || chartType === 'step',
-      !!xRange
+      targetPointCount,
+      chartType === 'line' || chartType === 'step'
     );
-  const xDomain = preparedPoints.length > 0
-    ? { min: preparedPoints[0].x, max: preparedPoints[preparedPoints.length - 1].x }
-    : undefined;
+  // Keep the navigator on the full valid-X domain. Missing-Y edge rows are
+  // not eligible plotted points, but still define the source domain.
+  const xDomain = { min: points[0].x, max: points[points.length - 1].x };
   const series = grouped.series.map((definition, seriesIndex) => {
     const gapFlags = sampled.points.map(point => !!point.gapFlags && point.gapFlags[seriesIndex] === true);
+    const gapBefore = chartType === 'line' || chartType === 'step'
+      ? sourceGapBeforeSampledPoints(grouped.points, sampled.points, seriesIndex)
+      : [];
     const result: LineChartSeries = {
       ...definition,
       values: sampled.points.map(point => point.y[seriesIndex]),
     };
     if (source.groupColumnName) {
       result.gapFlags = gapFlags;
+    }
+    if (gapBefore.some(Boolean)) {
+      result.gapBefore = gapBefore;
     }
     return result;
   });
@@ -359,7 +371,7 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
     xDomain,
     series,
     sourceRowCount: table.rowCount,
-    eligibleRowCount: points.length,
+    eligibleRowCount,
     sampledPointCount: sampled.points.length,
     algorithm: sampled.algorithm,
     sorted,
@@ -386,9 +398,10 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
   }
 
   const sorted = sortCandlestickPoints(collected.points, warnings);
-  const targetPointCount = xRange
-    ? chartRequestTargetPointCount(request, xRange)
-    : candlestickTargetPointCount(request.width, request.maxSampledPoints);
+  const targetPointCount = candlestickTargetPointCount(
+    request.width,
+    request.maxSampledPoints
+  );
   const aggregation = aggregateCandlestickPoints(collected.points, targetPointCount, !!xRange);
   if (aggregation.exactPointCount < collected.points.length) {
     warnings.push(`Candlestick data aggregated ${collected.points.length} eligible rows into ${aggregation.exactPointCount} distinct x candles.`);
@@ -442,16 +455,14 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
   }
 
   const sorted = sortChartPoints(points, warnings);
-  const requestTargetPointCount = chartRequestTargetPointCount(request, xRange);
-  const maxGroups = xRange
-    ? Math.max(1, Math.min(points.length, requestTargetPointCount))
-    : boxChartTargetGroupCount(
-      points.length,
-      source.yColumnNames.length,
-      request.width,
-      requestTargetPointCount
-    );
-  const bins = buildBoxChartBins(points, source.yColumnNames.length, maxGroups);
+  const eligiblePoints = points.filter(chartPointHasFiniteY);
+  const maxGroups = boxChartTargetGroupCount(
+    eligiblePoints.length,
+    source.yColumnNames.length,
+    request.width,
+    request.maxSampledPoints
+  );
+  const bins = buildBoxChartBins(eligiblePoints, source.yColumnNames.length, maxGroups);
   const xDomain = { min: points[0].x, max: points[points.length - 1].x };
   const boxSeries = source.yColumnNames.map((columnName, seriesIndex) => {
     return {
@@ -463,8 +474,8 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
     throw new ChartDataError('No selected y column has finite numeric values for box statistics.');
   }
 
-  if (bins.length < distinctXCount(points)) {
-    warnings.push(`Box plot grouped ${points.length} eligible rows into ${bins.length} x buckets.`);
+  if (bins.length < distinctXCount(eligiblePoints)) {
+    warnings.push(`Box plot grouped ${eligiblePoints.length} eligible rows into ${bins.length} x buckets.`);
   }
 
   return {
@@ -488,9 +499,9 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
     }),
     boxSeries,
     sourceRowCount: table.rowCount,
-    eligibleRowCount: points.length,
+    eligibleRowCount: eligiblePoints.length,
     sampledPointCount: bins.length,
-    algorithm: bins.length < distinctXCount(points) ? `box-bucket/${bins.length}` : `box-exact/${bins.length}`,
+    algorithm: bins.length < distinctXCount(eligiblePoints) ? `box-bucket/${bins.length}` : `box-exact/${bins.length}`,
     sorted,
     warnings,
   };
@@ -978,13 +989,11 @@ function sortCandlestickPoints(points: CandlestickInputPoint[], warnings: string
 
 export function chartTargetPointCount(
   width: number,
-  maxSampledPoints = CHART_MAX_SAMPLED_POINTS,
-  minSampledPoints = 0
+  maxSampledPoints = CHART_MAX_SAMPLED_POINTS
 ): number {
   const pixelWidth = Math.max(1, Math.floor(Number(width) || 0));
   const maxPoints = positiveInteger(maxSampledPoints, CHART_MAX_SAMPLED_POINTS);
-  const minPoints = Math.min(maxPoints, nonNegativeInteger(minSampledPoints, 0));
-  const target = Math.max(200, pixelWidth * CHART_POINTS_PER_PIXEL, minPoints);
+  const target = Math.max(200, pixelWidth * CHART_POINTS_PER_PIXEL);
   return Math.min(maxPoints, target);
 }
 
@@ -1426,6 +1435,7 @@ function normalizeNumericValue(value: unknown): number | null {
 }
 
 function normalizeNumericValueWithText(value: unknown): NormalizedValue | null {
+  value = semanticQValue(value);
   if (isMissing(value)) {
     return null;
   }
@@ -1448,6 +1458,7 @@ function normalizeNumericValueWithText(value: unknown): NormalizedValue | null {
 }
 
 function normalizeTemporalValue(value: unknown): NormalizedValue | null {
+  value = semanticQValue(value);
   if (isMissing(value)) {
     return null;
   }
@@ -1503,6 +1514,7 @@ function parseIsoTemporalMilliseconds(text: string): number {
 }
 
 function normalizeCategoricalValue(value: unknown): string | null {
+  value = semanticQValue(value);
   if (isMissing(value) || isNonFiniteScalar(value)) {
     return null;
   }
@@ -1529,23 +1541,18 @@ function normalizedChartXRange(request: LineChartRequest): ChartXRange | undefin
   const min = Number(request.xMin);
   const max = Number(request.xMax);
   if (!Number.isFinite(min) || !Number.isFinite(max) || max <= min) {
-    throw new ChartDataError('Refine zoom needs a valid x range.');
+    throw new ChartDataError('Chart range needs valid minimum and maximum X values.');
   }
   return { min, max };
 }
 
-function chartRequestTargetPointCount(request: LineChartRequest, xRange?: ChartXRange): number {
-  if (xRange) {
-    return CHART_ZOOM_MAX_SAMPLED_POINTS;
-  }
-  return chartTargetPointCount(request.width, request.maxSampledPoints, request.minSampledPoints);
-}
-
 function isMissing(value: unknown): boolean {
+  value = semanticQValue(value);
   return value === null || value === undefined || (typeof value === 'string' && value.trim() === '');
 }
 
 function isNonFiniteScalar(value: unknown): boolean {
+  value = semanticQValue(value);
   if (typeof value === 'number') {
     return !Number.isFinite(value);
   }
@@ -1555,6 +1562,10 @@ function isNonFiniteScalar(value: unknown): boolean {
       text === 'infinity' || text === '+infinity' || text === '-infinity';
   }
   return false;
+}
+
+function semanticQValue(value: unknown): unknown {
+  return isQRuntimeValue(value) ? qValueToSemanticPrimitive(value) : value;
 }
 
 function isSortedByX(points: ChartPoint[]): boolean {
@@ -1578,12 +1589,60 @@ function hasAnyFiniteY(points: ChartPoint[]): boolean {
   return false;
 }
 
+function chartPointHasFiniteY(point: ChartPoint): boolean {
+  return point.y.some(value => Number.isFinite(value));
+}
+
+/**
+ * Preserve real source discontinuities without spending sampled-point slots on
+ * nonvisual all-null rows. The returned flags align with the finite sampled
+ * points and mark a break immediately before a retained point.
+ *
+ * Grouped charts use gapFlags to distinguish a null in the retained group
+ * (true) from a structural hole belonging to another group (false).
+ */
+function sourceGapBeforeSampledPoints(
+  sourcePoints: ChartPoint[],
+  sampledPoints: ChartPoint[],
+  seriesIndex: number
+): boolean[] {
+  const result = sampledPoints.map(() => false);
+  if (sampledPoints.length < 2 || sourcePoints.length < 3) {
+    return result;
+  }
+
+  let sourceIndex = 0;
+  let previousFiniteX: number | undefined;
+  for (let sampledIndex = 0; sampledIndex < sampledPoints.length; sampledIndex++) {
+    const sampled = sampledPoints[sampledIndex];
+    if (!Number.isFinite(sampled.y[seriesIndex])) {
+      continue;
+    }
+    if (previousFiniteX !== undefined) {
+      while (sourceIndex < sourcePoints.length && sourcePoints[sourceIndex].x <= previousFiniteX) {
+        sourceIndex += 1;
+      }
+      for (; sourceIndex < sourcePoints.length && sourcePoints[sourceIndex].x < sampled.x; sourceIndex++) {
+        const point = sourcePoints[sourceIndex];
+        const realGap = Array.isArray(point.gapFlags)
+          ? point.gapFlags[seriesIndex] === true
+          : point.y[seriesIndex] === null;
+        if (realGap) {
+          result[sampledIndex] = true;
+          break;
+        }
+      }
+    }
+    previousFiniteX = sampled.x;
+  }
+  return result;
+}
+
 function downsampleMinMax(
   points: ChartPoint[],
   seriesCount: number,
   maxPoints: number,
-  preserveSourceGaps: boolean,
-  fillToTarget: boolean
+  preserveSourceGaps: boolean
 ): { points: ChartPoint[]; algorithm: string } {
   if (points.length <= maxPoints) {
     return { points, algorithm: 'none' };
@@ -1670,9 +1729,7 @@ function downsampleMinMax(
     }
   }
 
-  if (fillToTarget) {
-    fillSelectedPointIndexes(selected, points.length, maxPoints);
-  }
+  fillSelectedPointIndexes(selected, points.length, maxPoints);
   const sampled = points.filter((_point, index) => selected[index]);
   return {
     points: sampled.length <= maxPoints ? sampled : evenlyThin(sampled, maxPoints),
@@ -1728,9 +1785,4 @@ function evenlyThin(points: ChartPoint[], maxPoints: number): ChartPoint[] {
 function positiveInteger(value: number | undefined, fallback: number): number {
   const number = Math.floor(Number(value));
   return Number.isFinite(number) && number > 0 ? number : fallback;
-}
-
-function nonNegativeInteger(value: number | undefined, fallback: number): number {
-  const number = Math.floor(Number(value));
-  return Number.isFinite(number) && number >= 0 ? number : fallback;
 }

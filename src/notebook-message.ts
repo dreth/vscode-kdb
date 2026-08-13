@@ -1,6 +1,5 @@
 import {
   KX_NOTEBOOK_MIME,
-  MAX_NOTEBOOK_ROW_LIMIT,
   PortableKxResult,
   validatePortableKxResult,
 } from './notebook-contract';
@@ -57,13 +56,6 @@ export type NotebookOutputBindingReference = NotebookLiveResultReference;
 
 export type NotebookRendererMessage =
   | { type: 'ready' }
-  | {
-    type: 'bindOutput' | 'unbindOutput';
-    outputId: string;
-    liveId?: string;
-    renderGeneration: number;
-    requestId: number;
-  }
   | {
     type: 'openPreview';
     outputId?: string;
@@ -200,19 +192,11 @@ export type NotebookRendererMessage =
   }
   | { type: 'rerunPreview'; outputId?: string; payload: PortableKxResult; requestId: number }
   | { type: 'openLiveResult'; outputId: string; liveId: string; requestId: number }
-  | {
-    type: 'setOutputPersistence';
-    outputId: string;
-    liveId?: string;
-    renderGeneration: number;
-    requestId: number;
-    mode: 'preview' | 'full';
-  }
   | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean }
   | { type: 'setResultColumnWidth'; position: number; width: number }
   | { type: 'resetResultColumnWidths' };
 
-export interface NotebookRendererSettingsMessage extends NotebookSettings {
+export interface NotebookRendererSettingsMessage extends Pick<NotebookSettings, 'presentation'> {
   type: 'settings';
   resultSettings: NotebookSharedKxResultSettings;
 }
@@ -234,6 +218,7 @@ export interface NotebookLiveResultMessage {
   mode?: 'table' | 'text';
   kind?: string;
   columns?: string[];
+  keyColumnOrdinals?: number[];
   totalColumnCount?: number;
   rowCount?: number;
   chartXColumns?: string[];
@@ -283,6 +268,7 @@ export interface NotebookLiveChartSeries {
   groupValue?: string;
   values: Array<number | null>;
   gapFlags?: boolean[];
+  gapBefore?: boolean[];
 }
 
 export interface NotebookLiveBoxStats {
@@ -357,17 +343,6 @@ export interface NotebookActionResultMessage {
   message: string;
 }
 
-export interface NotebookOutputPersistenceMessage {
-  type: 'outputPersistence';
-  outputId: string;
-  renderGeneration: number;
-  requestId: number;
-  mode: 'preview' | 'full';
-  enabled: boolean;
-  checked: boolean;
-  message?: string;
-}
-
 export type NotebookRendererHostMessage =
   | NotebookRendererSettingsMessage
   | NotebookLiveResultMessage
@@ -376,8 +351,7 @@ export type NotebookRendererHostMessage =
   | NotebookLiveSearchMessage
   | NotebookLiveChartMessage
   | NotebookLiveCopyMessage
-  | NotebookActionResultMessage
-  | NotebookOutputPersistenceMessage;
+  | NotebookActionResultMessage;
 
 export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMessage | undefined {
   if (!isRecord(raw) || typeof raw.type !== 'string') {
@@ -385,25 +359,6 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
   }
   if (raw.type === 'ready') {
     return Object.keys(raw).length === 1 ? { type: 'ready' } : undefined;
-  }
-  if (raw.type === 'bindOutput' || raw.type === 'unbindOutput') {
-    return hasOnlyKeys(raw, [
-      'type',
-      'outputId',
-      'liveId',
-      'renderGeneration',
-      'requestId',
-    ]) && validOutputId(raw.outputId) &&
-      (raw.liveId === undefined || validLiveId(raw.liveId)) &&
-      validRequestId(raw.renderGeneration) && validRequestId(raw.requestId)
-      ? {
-        type: raw.type,
-        outputId: raw.outputId,
-        ...(typeof raw.liveId === 'string' ? { liveId: raw.liveId } : {}),
-        renderGeneration: raw.renderGeneration,
-        requestId: raw.requestId,
-      }
-      : undefined;
   }
   if (raw.type === 'openPreview') {
     if (!hasOnlyKeys(raw, ['type', 'outputId', 'payload', 'requestId']) ||
@@ -492,29 +447,6 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
       }
       : undefined;
   }
-  if (raw.type === 'setOutputPersistence') {
-    return hasOnlyKeys(raw, [
-      'type',
-      'outputId',
-      'liveId',
-      'renderGeneration',
-      'requestId',
-      'mode',
-    ]) &&
-      validOutputId(raw.outputId) &&
-      (raw.liveId === undefined || validLiveId(raw.liveId)) &&
-      validRequestId(raw.renderGeneration) && validRequestId(raw.requestId) &&
-      (raw.mode === 'preview' || raw.mode === 'full')
-      ? {
-        type: raw.type,
-        outputId: raw.outputId,
-        ...(typeof raw.liveId === 'string' ? { liveId: raw.liveId } : {}),
-        renderGeneration: raw.renderGeneration,
-        requestId: raw.requestId,
-        mode: raw.mode,
-      }
-      : undefined;
-  }
   if (raw.type === 'updateResultSetting') {
     return parseResultSettingUpdate(raw);
   }
@@ -569,17 +501,18 @@ export function parseNotebookRendererHostMessage(raw: unknown): NotebookRenderer
   if (raw.type === 'actionResult') {
     return parseActionResultMessage(raw);
   }
-  if (raw.type === 'outputPersistence') {
-    return parseOutputPersistenceMessage(raw);
-  }
   return undefined;
 }
 
 export function notebookRendererSettingsMessage(
-  settings: NotebookSettings,
+  settings: Pick<NotebookSettings, 'presentation'>,
   resultSettings: NotebookSharedKxResultSettings
 ): NotebookRendererSettingsMessage {
-  return { type: 'settings', ...settings, resultSettings };
+  return {
+    type: 'settings',
+    presentation: settings.presentation,
+    resultSettings,
+  };
 }
 
 export function parseNotebookLiveResultReference(raw: unknown): NotebookLiveResultReference | undefined {
@@ -937,8 +870,8 @@ function parsePreviewExportRequest(
       : !isExportFormat(raw.format)) ||
     typeof raw.includeHeaders !== 'boolean' ||
     typeof raw.includeRowIndex !== 'boolean' ||
-    !validOptionalColumnIndexes(raw.columnIndexes) ||
-    !validOptionalRowIndexes(raw.rowIndexes)) {
+    (raw.columnIndexes !== undefined && !Array.isArray(raw.columnIndexes)) ||
+    (raw.rowIndexes !== undefined && !Array.isArray(raw.rowIndexes))) {
     return undefined;
   }
   const validation = validatePortableKxResult(raw.payload);
@@ -946,6 +879,10 @@ function parsePreviewExportRequest(
     return undefined;
   }
   const payload = validation.value;
+  if (!validOptionalSavedIndexes(raw.columnIndexes, payload.schema.columns.length) ||
+    !validOptionalSavedIndexes(raw.rowIndexes, payload.data.rows.length)) {
+    return undefined;
+  }
   if ((raw.endRow as number) >= payload.data.rows.length ||
     (raw.endColumn as number) >= payload.schema.columns.length) {
     return undefined;
@@ -1052,13 +989,8 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
   if (!hasOnlyKeys(raw, [
     'type',
     'presentation',
-    'rowLimit',
-    'byteLimit',
-    'preserveFullResultByDefault',
     'resultSettings',
-  ]) || !isPresentation(raw.presentation) || !positiveSafeInteger(raw.rowLimit) ||
-    !positiveSafeInteger(raw.byteLimit) ||
-    typeof raw.preserveFullResultByDefault !== 'boolean') {
+  ]) || !isPresentation(raw.presentation)) {
     return undefined;
   }
   const resultSettings = parseSharedResultSettings(raw.resultSettings);
@@ -1066,9 +998,6 @@ function parseSettingsMessage(raw: Record<string, unknown>): NotebookRendererSet
     ? {
       type: 'settings',
       presentation: raw.presentation,
-      rowLimit: raw.rowLimit,
-      byteLimit: raw.byteLimit,
-      preserveFullResultByDefault: raw.preserveFullResultByDefault,
       resultSettings,
     }
     : undefined;
@@ -1083,6 +1012,7 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     'mode',
     'kind',
     'columns',
+    'keyColumnOrdinals',
     'totalColumnCount',
     'rowCount',
     'chartXColumns',
@@ -1109,6 +1039,7 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     !validBoundedText(raw.kind, 128) ||
     !Array.isArray(raw.columns) || raw.columns.length > MAX_NOTEBOOK_LIVE_COLUMNS ||
     !raw.columns.every(validColumnName) || !nonNegativeSafeInteger(raw.rowCount) ||
+    !validOptionalKeyColumnOrdinals(raw.keyColumnOrdinals, raw.columns.length) ||
     (raw.totalColumnCount !== undefined &&
       (!nonNegativeSafeInteger(raw.totalColumnCount) ||
         raw.totalColumnCount < raw.columns.length)) ||
@@ -1133,6 +1064,9 @@ function parseLiveResultMessage(raw: Record<string, unknown>): NotebookLiveResul
     mode: raw.mode,
     kind: raw.kind,
     columns: raw.columns.slice(),
+    ...(Array.isArray(raw.keyColumnOrdinals)
+      ? { keyColumnOrdinals: raw.keyColumnOrdinals.slice() as number[] }
+      : {}),
     ...(typeof raw.totalColumnCount === 'number'
       ? { totalColumnCount: raw.totalColumnCount }
       : {}),
@@ -1339,37 +1273,6 @@ function parseActionResultMessage(
   };
 }
 
-function parseOutputPersistenceMessage(
-  raw: Record<string, unknown>
-): NotebookOutputPersistenceMessage | undefined {
-  if (!hasOnlyKeys(raw, [
-    'type',
-    'outputId',
-    'renderGeneration',
-    'requestId',
-    'mode',
-    'enabled',
-    'checked',
-    'message',
-  ]) || !validOutputId(raw.outputId) || !validRequestId(raw.renderGeneration) ||
-    !validRequestId(raw.requestId) ||
-    (raw.mode !== 'preview' && raw.mode !== 'full') ||
-    typeof raw.enabled !== 'boolean' || typeof raw.checked !== 'boolean' ||
-    !validOptionalText(raw.message, 4_096)) {
-    return undefined;
-  }
-  return {
-    type: 'outputPersistence',
-    outputId: raw.outputId,
-    renderGeneration: raw.renderGeneration,
-    requestId: raw.requestId,
-    mode: raw.mode,
-    enabled: raw.enabled,
-    checked: raw.checked,
-    ...(typeof raw.message === 'string' ? { message: raw.message } : {}),
-  };
-}
-
 function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
   if (!isRecord(raw) || !hasOnlyKeys(raw, [
     'chartType',
@@ -1412,6 +1315,7 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
       'groupValue',
       'values',
       'gapFlags',
+      'gapBefore',
     ]) ||
       !validColumnName(value.columnName) || !Array.isArray(value.values) ||
       value.values.length !== raw.x.length ||
@@ -1420,7 +1324,10 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
       !validOptionalText(value.groupValue, 512) ||
       (value.gapFlags !== undefined &&
         (!Array.isArray(value.gapFlags) || value.gapFlags.length !== raw.x.length ||
-          !value.gapFlags.every(flag => typeof flag === 'boolean')))) {
+          !value.gapFlags.every(flag => typeof flag === 'boolean'))) ||
+      (value.gapBefore !== undefined &&
+        (!Array.isArray(value.gapBefore) || value.gapBefore.length !== raw.x.length ||
+          !value.gapBefore.every(flag => typeof flag === 'boolean')))) {
       return undefined;
     }
     series.push({
@@ -1432,6 +1339,9 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
       values: value.values.slice() as Array<number | null>,
       ...(Array.isArray(value.gapFlags)
         ? { gapFlags: value.gapFlags.slice() as boolean[] }
+        : {}),
+      ...(Array.isArray(value.gapBefore)
+        ? { gapBefore: value.gapBefore.slice() as boolean[] }
         : {}),
     });
   }
@@ -1636,8 +1546,6 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     'elapsedTimeDisplay',
     'chartDecimalPlaces',
     'chartMaxSourceRows',
-    'chartZoomMinSampledPoints',
-    'chartZoomMaxSampledPoints',
     'qTextSyntaxHighlighting',
     'qTextDisplayFormatting',
     'arrayDisplayFormat',
@@ -1657,9 +1565,6 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     (raw.elapsedTimeDisplay !== 'auto' && raw.elapsedTimeDisplay !== 'milliseconds') ||
     !integerInRange(raw.chartDecimalPlaces, 0, 12) ||
     !positiveSafeInteger(raw.chartMaxSourceRows) ||
-    !positiveSafeInteger(raw.chartZoomMinSampledPoints) ||
-    !positiveSafeInteger(raw.chartZoomMaxSampledPoints) ||
-    raw.chartZoomMaxSampledPoints < raw.chartZoomMinSampledPoints ||
     typeof raw.qTextSyntaxHighlighting !== 'boolean' ||
     typeof raw.qTextDisplayFormatting !== 'boolean' ||
     (raw.arrayDisplayFormat !== 'commaSpace' && raw.arrayDisplayFormat !== 'space' &&
@@ -1685,8 +1590,6 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     elapsedTimeDisplay: raw.elapsedTimeDisplay,
     chartDecimalPlaces: raw.chartDecimalPlaces,
     chartMaxSourceRows: raw.chartMaxSourceRows,
-    chartZoomMinSampledPoints: raw.chartZoomMinSampledPoints,
-    chartZoomMaxSampledPoints: raw.chartZoomMaxSampledPoints,
     qTextSyntaxHighlighting: raw.qTextSyntaxHighlighting,
     qTextDisplayFormatting: raw.qTextDisplayFormatting,
     arrayDisplayFormat: raw.arrayDisplayFormat,
@@ -1728,8 +1631,6 @@ function normalizedResultSettingValue(
       return integerInRange(value, 0, 12) ? value : undefined;
     case 'copyExportConfirmCellThreshold':
     case 'chartMaxSourceRows':
-    case 'chartZoomMinSampledPoints':
-    case 'chartZoomMaxSampledPoints':
       return positiveSafeInteger(value) ? value : undefined;
     case 'arrayDisplayFormat':
       return value === 'commaSpace' || value === 'space' || value === 'raw'
@@ -1757,20 +1658,50 @@ function validOptionalColumnIndexes(value: unknown): boolean {
       value.every(nonNegativeSafeInteger) && new Set(value).size === value.length);
 }
 
+function validOptionalSavedIndexes(value: unknown, maximumLength: number): boolean {
+  return value === undefined ||
+    (Array.isArray(value) && value.length > 0 && value.length <= maximumLength &&
+      value.every(nonNegativeSafeInteger) && new Set(value).size === value.length);
+}
+
 function validColumnOrdinals(value: unknown, allowEmpty = false): value is number[] {
   return Array.isArray(value) && (allowEmpty || value.length > 0) &&
     value.length <= MAX_NOTEBOOK_LIVE_COLUMNS &&
-    value.every(nonNegativeSafeInteger) && new Set(value).size === value.length;
+    isDensePrimitiveArray(value) && value.every(nonNegativeSafeInteger) &&
+    new Set(value).size === value.length;
+}
+
+function validOptionalKeyColumnOrdinals(
+  value: unknown,
+  columnCount: number
+): boolean {
+  return value === undefined || (
+    validColumnOrdinals(value, true) && value.every(ordinal => ordinal < columnCount)
+  );
+}
+
+function isDensePrimitiveArray(value: unknown[]): boolean {
+  try {
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== value.length + 1 || keys.some(key => key !== 'length' && (
+      typeof key !== 'string' || !/^(0|[1-9]\d*)$/.test(key) || Number(key) >= value.length
+    ))) {
+      return false;
+    }
+    for (let index = 0; index < value.length; index++) {
+      const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+      if (!descriptor || !descriptor.enumerable || !('value' in descriptor)) {
+        return false;
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function optionalColumnIndexes(value: unknown): number[] | undefined {
   return Array.isArray(value) ? (value as number[]).slice() : undefined;
-}
-
-function validOptionalRowIndexes(value: unknown): boolean {
-  return value === undefined ||
-    (Array.isArray(value) && value.length > 0 && value.length <= MAX_NOTEBOOK_ROW_LIMIT &&
-      value.every(nonNegativeSafeInteger) && new Set(value).size === value.length);
 }
 
 function optionalRowIndexes(value: unknown): number[] | undefined {

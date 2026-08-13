@@ -10,6 +10,15 @@ const { runNotebookVisualAcceptance } = require('../test/extension-host/visual-c
 const REPOSITORY_ROOT = path.resolve(__dirname, '..');
 const TEMP_ROOT = path.resolve(os.tmpdir());
 const EXTENSION_TESTS_PATH = path.join(REPOSITORY_ROOT, 'test', 'extension-host', 'index.js');
+const DATA_WRANGLER_FIXTURE_PATH = path.join(
+  REPOSITORY_ROOT,
+  'test',
+  'fixtures',
+  'extensions',
+  'data-wrangler'
+);
+const DATA_WRANGLER_FIXTURE_ID = 'ms-toolsai.datawrangler';
+const DATA_WRANGLER_FIXTURE_VERSION = '1.24.2';
 const SIBLING_TEST_ROOT = path.resolve(
   REPOSITORY_ROOT,
   '..',
@@ -31,6 +40,7 @@ const VSCODE_LIBRARY_PATH = process.env.VSCODE_KDB_E2E_LIBS ||
     ? DEFAULT_LIBRARY_PATH
     : undefined);
 const TEST_TIMEOUT_MS = Number(process.env.VSCODE_KDB_E2E_TIMEOUT_MS || 150_000);
+const DATA_WRANGLER_ONLY = process.env.VSCODE_KDB_E2E_DATA_WRANGLER_ONLY === '1';
 
 let xvfbProcess;
 let vscodeProcess;
@@ -58,6 +68,32 @@ function resetE2eRoot() {
   extensionsDir = path.join(e2eRoot, 'extensions');
   fs.mkdirSync(userDataDir, { recursive: true });
   fs.mkdirSync(extensionsDir, { recursive: true });
+}
+
+function installDataWranglerFixture() {
+  const fixtureManifestPath = path.join(DATA_WRANGLER_FIXTURE_PATH, 'package.json');
+  assertFile(fixtureManifestPath, 'Data Wrangler Extension Host fixture manifest');
+  assertFile(
+    path.join(DATA_WRANGLER_FIXTURE_PATH, 'extension.js'),
+    'Data Wrangler Extension Host fixture entrypoint'
+  );
+  const manifest = JSON.parse(fs.readFileSync(fixtureManifestPath, 'utf8'));
+  const fixtureId = `${String(manifest.publisher)}.${String(manifest.name)}`;
+  if (fixtureId !== DATA_WRANGLER_FIXTURE_ID ||
+      manifest.version !== DATA_WRANGLER_FIXTURE_VERSION) {
+    throw new Error(
+      `Unexpected Data Wrangler fixture identity ${fixtureId}@${String(manifest.version)}.`
+    );
+  }
+  const destination = path.join(
+    extensionsDir,
+    `${DATA_WRANGLER_FIXTURE_ID}-${DATA_WRANGLER_FIXTURE_VERSION}`
+  );
+  fs.cpSync(DATA_WRANGLER_FIXTURE_PATH, destination, {
+    recursive: true,
+    errorOnExist: true,
+    force: false,
+  });
 }
 
 function cleanE2eRoot() {
@@ -223,6 +259,7 @@ async function main() {
   }
 
   resetE2eRoot();
+  installDataWranglerFixture();
   const controlDir = path.join(e2eRoot, 'control');
   fs.mkdirSync(controlDir, { recursive: true });
   console.log(`Extension Host runtime: ${VSCODE_PATH}`);
@@ -236,6 +273,11 @@ async function main() {
   }
   const remoteDebuggingPort = await availablePort();
   console.log(`Extension Host reopen CDP port: ${remoteDebuggingPort}`);
+  if (DATA_WRANGLER_ONLY) {
+    await runVsCode(display, remoteDebuggingPort, controlDir, 'reopen');
+    console.log('Focused Data Wrangler Extension Host handoff assertions passed.');
+    return;
+  }
   const [host, visual] = await Promise.allSettled([
     runVsCode(display, remoteDebuggingPort, controlDir, 'reopen'),
     runNotebookVisualAcceptance({ port: remoteDebuggingPort, controlDir }),
@@ -253,6 +295,9 @@ async function main() {
   if (visual.status === 'rejected') {
     throw visual.reason;
   }
+  const handoffPort = await availablePort();
+  console.log(`Extension Host handoff CDP port: ${handoffPort}`);
+  await runVsCode(display, handoffPort, controlDir, 'handoff');
   console.log('Extension Host smoke test passed.');
 }
 

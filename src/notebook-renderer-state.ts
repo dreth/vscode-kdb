@@ -1,10 +1,5 @@
-export interface NotebookRendererStateIdentity {
-  readonly outputId: string;
-  readonly renderGeneration: number;
-}
-
 export interface DetachedNotebookRendererState<T> {
-  readonly key: string;
+  readonly outputItemId: string;
   readonly state: T;
 }
 
@@ -70,45 +65,23 @@ export function notebookChartViewportInteractionBlocked(
   return source === 'live' && liveChartDirty;
 }
 
-export function notebookRendererStateKey(identity: NotebookRendererStateIdentity): string {
-  return `${identity.outputId}:${identity.renderGeneration}`;
-}
-
 export class NotebookRendererStateRegistry<T> {
   private readonly states = new Map<string, T>();
-  private readonly outputItemKeys = new Map<string, string>();
 
-  public bind(outputItemId: string, identity: NotebookRendererStateIdentity, state: T): void {
-    const key = notebookRendererStateKey(identity);
-    if (this.outputItemKeys.has(outputItemId) || this.states.has(key)) {
-      throw new Error('Notebook renderer state must be detached before rebinding an identity.');
+  public bind(outputItemId: string, state: T): void {
+    if (this.states.has(outputItemId)) {
+      throw new Error('Notebook renderer state must be detached before rebinding an output.');
     }
-    this.states.set(key, state);
-    this.outputItemKeys.set(outputItemId, key);
-  }
-
-  public get(identity: NotebookRendererStateIdentity): T | undefined {
-    return this.states.get(notebookRendererStateKey(identity));
+    this.states.set(outputItemId, state);
   }
 
   public takeOutputItem(outputItemId: string): DetachedNotebookRendererState<T> | undefined {
-    const key = this.outputItemKeys.get(outputItemId);
-    return key ? this.takeKey(key) : undefined;
-  }
-
-  public takeKey(key: string): DetachedNotebookRendererState<T> | undefined {
-    const state = this.states.get(key);
+    const state = this.states.get(outputItemId);
     if (!state) {
       return undefined;
     }
-    this.states.delete(key);
-    for (const [outputItemId, candidate] of this.outputItemKeys) {
-      if (candidate === key) {
-        this.outputItemKeys.delete(outputItemId);
-        break;
-      }
-    }
-    return { key, state };
+    this.states.delete(outputItemId);
+    return { outputItemId, state };
   }
 
   public keys(): string[] {

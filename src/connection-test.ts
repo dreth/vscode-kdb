@@ -4,6 +4,7 @@ import {
   validateNamespace,
   type KxConnection,
 } from './connection';
+import { isQRuntimeValue, qValueToSemanticPrimitive } from './q-value';
 
 export type ConnectionTestPhase =
   | 'validation'
@@ -46,8 +47,13 @@ export function connectionTestNamespaceQuery(namespace: string): string {
 }
 
 export function connectionTestNamespaceResultIsSafe(value: unknown): boolean {
-  return Array.isArray(value) && value.length === 3 &&
-    typeof value[0] === 'string' && value[1] === true && value[2] === value[0];
+  const semantic = semanticQValue(value);
+  return Array.isArray(semantic) && semantic.length === 3 &&
+    typeof semantic[0] === 'string' && semantic[1] === true && semantic[2] === semantic[0];
+}
+
+export function connectionTestQueryResultIsSafe(value: unknown): boolean {
+  return semanticQValue(value) === false;
 }
 
 export function connectionTestEndpoint(
@@ -85,4 +91,8 @@ function safeErrorCode(error: unknown): string | undefined {
   }
   const code = (error as NodeJS.ErrnoException).code;
   return typeof code === 'string' && /^[A-Z0-9_-]{1,64}$/i.test(code) ? code : undefined;
+}
+
+function semanticQValue(value: unknown): unknown {
+  return isQRuntimeValue(value) ? qValueToSemanticPrimitive(value) : value;
 }

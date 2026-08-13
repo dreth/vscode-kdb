@@ -1,6 +1,7 @@
 'use strict';
 
 const assert = require('assert');
+const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
@@ -11,6 +12,12 @@ const SET_Q_COMMAND = 'vscode-kdb.setNotebookCellLanguageQ';
 const RESTORE_LANGUAGE_COMMAND = 'vscode-kdb.restoreNotebookCellLanguage';
 const SET_ACTIVE_CONNECTION_COMMAND = 'vscode-kdb.setActiveConnection';
 const SELECT_QUERY_CONNECTION_COMMAND = 'vscode-kdb.selectQueryConnection';
+const OPEN_NOTEBOOK_PREVIEW_IN_RESULTS_COMMAND =
+  'vscode-kdb.openNotebookPreviewInResults';
+const OPEN_IN_DATA_WRANGLER_COMMAND = 'vscode-kdb.openInDataWrangler';
+const DATA_WRANGLER_EXTENSION_ID = 'ms-toolsai.datawrangler';
+const DATA_WRANGLER_OPEN_COMMAND = 'dataWrangler.openInDataWrangler';
+const DATA_WRANGLER_EVIDENCE_FILE = 'data-wrangler-handoff.json';
 const DIRECT_CONTROLLER_SETTING = 'enableDirectController';
 const RUN_Q_NOTEBOOK_CELL_COMMAND = 'vscode-kdb.runQNotebookCell';
 const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
@@ -209,7 +216,7 @@ async function exerciseDirectControllerLifecycle(testApi) {
     assert.strictEqual(
       configuration.get(DIRECT_CONTROLLER_SETTING),
       false,
-      'the optional KX q-only controller setting must default to false'
+      'the optional pure-q KX controller setting must default to false'
     );
     assert.strictEqual(
       testApi.isDirectControllerRegistered(),
@@ -548,6 +555,93 @@ async function waitForJson(filePath, label, timeoutMs = 60_000) {
   assert.fail(`timed out waiting for ${label}: ${lastError?.message || 'no result'}`);
 }
 
+function assertDataWranglerHandoff(evidence, saved) {
+  assert.deepStrictEqual(
+    {
+      version: evidence.version,
+      extensionId: evidence.extensionId,
+      command: evidence.command,
+      argumentCount: evidence.argumentCount,
+      stableCompleteRead: evidence.stableCompleteRead,
+    },
+    {
+      version: 1,
+      extensionId: DATA_WRANGLER_EXTENSION_ID,
+      command: DATA_WRANGLER_OPEN_COMMAND,
+      argumentCount: 1,
+      stableCompleteRead: true,
+    },
+    'the Data Wrangler fake must observe exactly one complete local-file handoff'
+  );
+  assert.strictEqual(path.isAbsolute(evidence.csvPath), true);
+  assert.strictEqual(path.extname(evidence.csvPath).toLowerCase(), '.csv');
+  assert.strictEqual(evidence.csvUri, vscode.Uri.file(evidence.csvPath).toString());
+  assert.match(
+    path.basename(evidence.csvPath),
+    /^kx-result-[0-9a-f]{32}\.csv$/,
+    'the handoff filename must be random and contain no query, profile, or result data'
+  );
+  assert.match(
+    path.basename(path.dirname(evidence.csvPath)),
+    /^vscode-kdb-data-wrangler-[A-Za-z0-9]+$/,
+    'the generated CSV must remain in its fresh random temporary directory'
+  );
+
+  const csvBytes = fs.readFileSync(evidence.csvPath);
+  assert.strictEqual(csvBytes.length, evidence.byteLength);
+  assert.strictEqual(
+    crypto.createHash('sha256').update(csvBytes).digest('hex'),
+    evidence.sha256,
+    'the fake evidence hash must cover the same complete CSV read asserted by the host test'
+  );
+  if (process.platform !== 'win32') {
+    assert.strictEqual(
+      fs.statSync(evidence.csvPath).mode & 0o777,
+      0o600,
+      'the Data Wrangler CSV must be owner-readable and owner-writable only'
+    );
+    assert.strictEqual(
+      fs.statSync(path.dirname(evidence.csvPath)).mode & 0o777,
+      0o700,
+      'the temporary handoff directory must be accessible by its owner only'
+    );
+  }
+  const normalizedCsv = csvBytes.toString('utf8')
+    .replace(/^\uFEFF/, '')
+    .replace(/\r\n/g, '\n');
+  const csvLines = normalizedCsv.split('\n');
+  if (csvLines.at(-1) === '') {
+    csvLines.pop();
+  }
+  assert.strictEqual(
+    csvLines.length,
+    saved.rowCount + 1,
+    'the Data Wrangler snapshot must contain the header plus every persisted full-v2 row'
+  );
+  const expectedHeaders = ['row', 'value', 'metric', 'open', 'high', 'low', 'close'];
+  const headers = csvLines[0].split(',');
+  const includesDisplayRowIndex = headers[0] === '#';
+  assert.deepStrictEqual(
+    headers.slice(includesDisplayRowIndex ? 1 : 0),
+    expectedHeaders,
+    'the CSV handoff must preserve the displayed source-column order'
+  );
+  const expectedFirst = ['0', 'stable-0', '0', '100', '105', '97', '99'];
+  const expectedNull = ['7', 'stable-7', '', '107', '112', '104', '107'];
+  const expectedTail = ['29', saved.tail, '23', '129', '134', '126', '130'];
+  const rowFields = line => {
+    const fields = line.split(',');
+    return fields.slice(includesDisplayRowIndex ? 1 : 0);
+  };
+  assert.deepStrictEqual(rowFields(csvLines[1]), expectedFirst);
+  assert.deepStrictEqual(
+    rowFields(csvLines[8]),
+    expectedNull,
+    'CSV q-display semantics must retain the saved null as an empty field'
+  );
+  assert.deepStrictEqual(rowFields(csvLines.at(-1)), expectedTail);
+}
+
 async function exerciseRepeatedIdenticalMixedQ(testApi) {
   const controlDir = process.env.VSCODE_KDB_E2E_CONTROL_DIR;
   assert(controlDir, 'the two-host notebook acceptance requires its control directory');
@@ -561,8 +655,6 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
   };
   const notebookConfiguration = vscode.workspace.getConfiguration('vscode-kdb.notebook');
   const previousRows = notebookConfiguration.inspect('maxOutputRows')?.globalValue;
-  const previousPreserve = notebookConfiguration
-    .inspect('preserveFullResultByDefault')?.globalValue;
   const notebookUri = vscode.Uri.file(path.join(controlDir, 'roundtrip.ipynb'));
   let notebook;
   let eventSubscription;
@@ -580,11 +672,6 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     await notebookConfiguration.update(
       'maxOutputRows',
       20,
-      vscode.ConfigurationTarget.Global
-    );
-    await notebookConfiguration.update(
-      'preserveFullResultByDefault',
-      false,
       vscode.ConfigurationTarget.Global
     );
 
@@ -725,8 +812,10 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       'the first committed mixed-q output must own a live result before replacement'
     );
     assert.strictEqual(firstPayload.outputId, firstOutputId);
-    assert.strictEqual(firstPayload.persistence.mode, 'preview');
-    assert.strictEqual(firstPayload.data.rows.length, 20);
+    assert.strictEqual(firstPayload.version, 2);
+    assert.strictEqual(firstPayload.persistence.mode, 'full');
+    assert.strictEqual(firstPayload.data.rows.length, 30);
+    assert.strictEqual(firstPayload.data.rows[29][1].value, 'tail-1');
 
     const secondRunEventStart = notebookEvents.length;
     await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, afterFirst);
@@ -748,12 +837,14 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       'two identical command invocations must issue q twice'
     );
     assert.strictEqual(secondPayload.outputId, secondOutputId);
-    assert.strictEqual(secondPayload.persistence.mode, 'preview');
-    assert.strictEqual(secondPayload.data.rows.length, 20);
+    assert.strictEqual(secondPayload.version, 2);
+    assert.strictEqual(secondPayload.persistence.mode, 'full');
+    assert.strictEqual(secondPayload.data.rows.length, 30);
+    assert.strictEqual(secondPayload.data.rows[29][1].value, 'tail-2');
     assert.deepStrictEqual(
-      secondPayload.data.rows,
-      firstPayload.data.rows,
-      'identical persisted preview rows must not suppress a fresh execution'
+      secondPayload.data.rows.slice(0, 29),
+      firstPayload.data.rows.slice(0, 29),
+      'identical persisted rows must not suppress a fresh execution'
     );
     assert.notStrictEqual(secondOutputId, firstOutputId);
     assert.notStrictEqual(secondLiveId, firstLiveId);
@@ -805,34 +896,6 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       undefined,
       'Direct IPC output must not reintroduce omitted query text into persisted provenance'
     );
-    await notebookConfiguration.update(
-      'preserveFullResultByDefault',
-      true,
-      vscode.ConfigurationTarget.Global
-    );
-    testApi.queueNotebookTable(
-      ['row', 'value', 'metric', 'open', 'high', 'low', 'close'],
-      repeatedRows('tail-3')
-    );
-    await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, afterSecond);
-    const durableCell = notebook.cellAt(0);
-    assert.strictEqual(notebook.cellCount, 2);
-    assert.strictEqual(durableCell.outputs.length, 1);
-    const durablePayload = portableOutput(durableCell);
-    const durableOutput = durableCell.outputs[0];
-    const durableOutputId = outputIdentity(durableOutput)?.id;
-    const durableLiveId = durableOutput.metadata?.[KX_LIVE_METADATA_KEY]?.id;
-    assert.strictEqual(durablePayload.outputId, durableOutputId);
-    assert.strictEqual(durablePayload.persistence.mode, 'full');
-    assert.strictEqual(durablePayload.data.rows.length, 30);
-    assert.strictEqual(durablePayload.data.rows[29][1].value, 'tail-3');
-    assert.strictEqual(durablePayload.provenance.qSource, undefined);
-    assert.notStrictEqual(durableOutputId, secondOutputId);
-    assert.notStrictEqual(durableLiveId, secondLiveId);
-    assert.strictEqual(testApi.hasLiveNotebookResult(secondLiveId, notebook.uri.toString()), false);
-    assert.strictEqual(testApi.hasLiveNotebookResult(durableLiveId, notebook.uri.toString()), true);
-    assert.strictEqual(notebook.cellAt(1).document.uri.toString(), originalPythonCellUri);
-    assert.strictEqual(notebook.cellAt(1).document.getText(), pythonSource);
     assert.strictEqual(notebook.isDirty, true, 'the real notebook output edit must mark .ipynb dirty');
     assert.strictEqual(await notebook.save(), true, 'the real .ipynb save must succeed');
     await waitFor('saved .ipynb clean state', () => !notebook.isDirty);
@@ -849,7 +912,7 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     assert(savedOutput, 'saved .ipynb must contain the first-party KX output');
     assert.strictEqual(
       savedOutput.metadata?.[KX_OUTPUT_METADATA_KEY]?.id,
-      durableOutputId,
+      secondOutputId,
       'the durable output identity must survive through Jupyter output metadata'
     );
     assert.strictEqual(
@@ -857,8 +920,13 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       false,
       'the session-only live identity must not be serialized into .ipynb'
     );
+    const savedPayload = savedOutput.data[KX_NOTEBOOK_MIME];
+    assert.strictEqual(savedPayload.version, 2);
+    assert.strictEqual(savedPayload.persistence.mode, 'full');
+    assert.strictEqual(savedPayload.data.rows.length, 30);
+    assert.strictEqual(savedPayload.data.rows[29][1].value, 'tail-2');
     assert.strictEqual(
-      savedOutput.data[KX_NOTEBOOK_MIME].provenance.qSource,
+      savedPayload.provenance.qSource,
       undefined,
       'saved portable output must retain the deliberate qSource omission'
     );
@@ -872,10 +940,10 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       `${JSON.stringify({
         version: 1,
         notebookUri: notebookUri.toString(),
-        outputId: durableOutputId,
-        priorLiveId: durableLiveId,
+        outputId: secondOutputId,
+        priorLiveId: secondLiveId,
         rowCount: 30,
-        tail: 'tail-3',
+        tail: 'tail-2',
       })}\n`,
       { flag: 'wx' }
     );
@@ -895,11 +963,6 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     await notebookConfiguration.update(
       'maxOutputRows',
       previousRows,
-      vscode.ConfigurationTarget.Global
-    );
-    await notebookConfiguration.update(
-      'preserveFullResultByDefault',
-      previousPreserve,
       vscode.ConfigurationTarget.Global
     );
   }
@@ -924,6 +987,49 @@ function assertNotebookVisualResult(visual) {
   assert.strictEqual(visual.chart.panned, true);
   assert.strictEqual(visual.chart.reset, true);
   assert.strictEqual(visual.chart.pendingReset, true);
+  const navigatorEvidence = JSON.stringify(visual.chart.navigator);
+  assert.strictEqual(
+    visual.chart.navigator.aria,
+    true,
+    `saved-chart navigator ARIA/bounds evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(
+    visual.chart.navigator.controlsRemoved,
+    true,
+    `saved-chart obsolete-control evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(
+    visual.chart.navigator.trustedEdgeResize,
+    true,
+    `saved-chart navigator trusted edge-resize evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(
+    visual.chart.navigator.trustedWindowPan,
+    true,
+    `saved-chart navigator trusted window-pan evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(
+    visual.chart.navigator.keyboard,
+    true,
+    `saved-chart navigator keyboard evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(
+    visual.chart.navigator.home,
+    true,
+    `saved-chart navigator Home evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(
+    visual.chart.navigator.pendingHome,
+    true,
+    `saved-chart navigator pending-reset evidence: ${navigatorEvidence}`
+  );
+  assert.strictEqual(visual.chart.navigator.baseline.label, 'Chart X navigator');
+  assert.deepStrictEqual(visual.chart.navigator.baseline.forbiddenControls, []);
+  for (const part of ['window', 'start', 'end']) {
+    assert.strictEqual(visual.chart.navigator.baseline[part].role, 'slider');
+    assert.strictEqual(visual.chart.navigator.baseline[part].tabIndex, 0);
+    assert.strictEqual(visual.chart.navigator.baseline[part].orientation, 'horizontal');
+  }
   const legendEvidence = JSON.stringify(visual.chart.legendAccessibility);
   assert.strictEqual(
     visual.chart.legendAccessibility.chartRegion,
@@ -959,7 +1065,11 @@ function assertNotebookVisualResult(visual) {
   assert.strictEqual(visual.accessibility.gridcell, true);
   assert.strictEqual(visual.accessibility.namedGrid, true);
   assert.strictEqual(visual.accessibility.ownedRows, true);
-  assert.strictEqual(visual.accessibility.singleNativeTable, true);
+  assert.strictEqual(
+    visual.accessibility.singleNativeTable,
+    true,
+    `saved-table native-table AX evidence: ${tableAccessibilityEvidence}`
+  );
   assert.strictEqual(visual.accessibility.multiselectable, true);
   assert.strictEqual(visual.accessibility.selection, true);
   assert.strictEqual(
@@ -981,6 +1091,8 @@ function assertNotebookVisualResult(visual) {
 
 async function exerciseReopenedNotebook(testApi) {
   const controlDir = process.env.VSCODE_KDB_E2E_CONTROL_DIR;
+  const handoffPhase = process.env.VSCODE_KDB_E2E_PHASE === 'handoff' ||
+    process.env.VSCODE_KDB_E2E_DATA_WRANGLER_ONLY === '1';
   assert(controlDir, 'the fresh-host reopen phase requires its control directory');
   const saved = JSON.parse(fs.readFileSync(
     path.join(controlDir, 'notebook-host-saved.json'),
@@ -1038,14 +1150,86 @@ async function exerciseReopenedNotebook(testApi) {
       })}\n`,
       { flag: 'wx' }
     );
-    const visual = await waitForJson(
-      path.join(controlDir, 'notebook-visual-result.json'),
-      'native notebook renderer acceptance'
+    if (!handoffPhase) {
+      const visual = await waitForJson(
+        path.join(controlDir, 'notebook-visual-result.json'),
+        'native notebook renderer acceptance'
+      );
+      assertNotebookVisualResult(visual);
+    }
+
+    const evidencePath = path.join(controlDir, DATA_WRANGLER_EVIDENCE_FILE);
+    assert.strictEqual(
+      fs.statSync(evidencePath, { throwIfNoEntry: false }),
+      undefined,
+      'the Data Wrangler fake must not run before the explicit KX Results action'
     );
-    assertNotebookVisualResult(visual);
+    if (!handoffPhase) {
+      return;
+    }
+    const notebookCallsBeforeHandoff = testApi.notebookQueryCalls().map(call => ({ ...call }));
+    const resultViewerConfiguration = vscode.workspace.getConfiguration(
+      'vscode-kdb.results.viewer'
+    );
+    const resultConfiguration = vscode.workspace.getConfiguration('vscode-kdb.results');
+    const previousInitialViewColumn = resultViewerConfiguration.get('initialViewColumn');
+    const previousDataWranglerEnabled = resultConfiguration.get('dataWrangler.enabled');
+    await resultViewerConfiguration.update(
+      'initialViewColumn',
+      'beside',
+      vscode.ConfigurationTarget.Global
+    );
+    await resultConfiguration.update(
+      'dataWrangler.enabled',
+      true,
+      vscode.ConfigurationTarget.Global
+    );
+    await waitFor(
+      'effective Data Wrangler opt-in setting',
+      () => vscode.workspace.getConfiguration('vscode-kdb.results').get('dataWrangler.enabled') === true
+    );
+    console.log('KX Extension Host Data Wrangler phase: open persisted result panel');
+    try {
+      await vscode.commands.executeCommand(OPEN_NOTEBOOK_PREVIEW_IN_RESULTS_COMMAND);
+      console.log('KX Extension Host Data Wrangler phase: invoke handoff command');
+      await vscode.commands.executeCommand(OPEN_IN_DATA_WRANGLER_COMMAND);
+    } finally {
+      await resultViewerConfiguration.update(
+        'initialViewColumn',
+        previousInitialViewColumn,
+        vscode.ConfigurationTarget.Global
+      );
+      await resultConfiguration.update(
+        'dataWrangler.enabled',
+        previousDataWranglerEnabled,
+        vscode.ConfigurationTarget.Global
+      );
+    }
+    console.log('KX Extension Host Data Wrangler phase: command resolved');
+    const evidence = await waitForJson(
+      evidencePath,
+      'the fake Data Wrangler CSV handoff'
+    );
+    assertDataWranglerHandoff(evidence, saved);
+    assert.strictEqual(
+      vscode.extensions.getExtension(DATA_WRANGLER_EXTENSION_ID)?.isActive,
+      true,
+      'the KX action must resolve through the installed fake Data Wrangler command'
+    );
+    assert(
+      new Set(await vscode.commands.getCommands(true)).has(DATA_WRANGLER_OPEN_COMMAND),
+      'the fake Data Wrangler command must be registered after the KX action activates it'
+    );
+    assert.deepStrictEqual(
+      testApi.notebookQueryCalls(),
+      notebookCallsBeforeHandoff,
+      'opening the persisted full-v2 snapshot in Data Wrangler must not rerun q'
+    );
   } finally {
     await closeNotebookTabs(notebook).catch(() => undefined);
-    await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
+    if (handoffPhase) {
+      await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
+    }
   }
 }
 async function run() {
@@ -1066,14 +1250,37 @@ async function run() {
     SET_ACTIVE_CONNECTION_COMMAND,
     SELECT_QUERY_CONNECTION_COMMAND,
     RUN_Q_NOTEBOOK_CELL_COMMAND,
+    OPEN_IN_DATA_WRANGLER_COMMAND,
   ]) {
     assert(commands.has(command), `activated extension must register ${command}`);
   }
+  const contributedCommands = new Set(
+    (extension.packageJSON?.contributes?.commands || []).map(command => command.command)
+  );
+  assert(
+    contributedCommands.has(OPEN_IN_DATA_WRANGLER_COMMAND),
+    `extension manifest must contribute ${OPEN_IN_DATA_WRANGLER_COMMAND}`
+  );
+  const dataWranglerExtension = vscode.extensions.getExtension(DATA_WRANGLER_EXTENSION_ID);
+  assert(dataWranglerExtension, 'the isolated Data Wrangler command fake must be installed');
+  assert.strictEqual(dataWranglerExtension.packageJSON.publisher, 'ms-toolsai');
+  assert.strictEqual(dataWranglerExtension.packageJSON.name, 'datawrangler');
+  assert.strictEqual(dataWranglerExtension.packageJSON.version, '1.24.2');
+  assert(
+    (dataWranglerExtension.packageJSON.contributes?.commands || []).some(command =>
+      command.command === DATA_WRANGLER_OPEN_COMMAND),
+    `Data Wrangler fixture manifest must contribute ${DATA_WRANGLER_OPEN_COMMAND}`
+  );
 
   if (process.env.VSCODE_KDB_E2E_PHASE === 'reopen') {
     await exerciseReopenedNotebook(testApi);
     console.log(
-      'KX Extension Host reopen assertions passed: fresh-process .ipynb load, persisted-only output identity, native Chromium input, sort/null order, resize, bar-chart viewport races, and owned AX grid semantics.'
+      'KX Extension Host reopen assertions passed: fresh-process .ipynb load, persisted-only output identity, native Chromium input, sort/null order, resize, bar-chart navigator/viewport races, and owned AX grid semantics.'
+    );
+  } else if (process.env.VSCODE_KDB_E2E_PHASE === 'handoff') {
+    await exerciseReopenedNotebook(testApi);
+    console.log(
+      'KX Extension Host handoff assertions passed: fresh-process persisted full-v2 Data Wrangler CSV command contract without a q rerun.'
     );
   } else {
     console.log('KX Extension Host phase: connection store');
