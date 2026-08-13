@@ -5,8 +5,7 @@ import {
   ColumnarPanelResult,
   ExportFormat,
   TextExportFormat,
-  cellValueToBoundedText,
-  cellValueToText,
+  cellValueToBoundedExportText,
   exportShape,
   kxResultJsonStringUtf8ByteLength,
   rowIndexColumnName,
@@ -23,6 +22,7 @@ export type { KxResultExportFormatDefinition } from './results-ui-contract';
 export const CHART_PNG_DATA_URL_PREFIX = 'data:image/png;base64,';
 export const CHART_EXPORT_MAX_BYTES = 50 * 1024 * 1024;
 export const COPY_EXPORT_CONFIRM_BYTES = 50 * 1024 * 1024;
+export const XLSX_MAX_CELL_CHARACTERS = 32_767;
 
 const COPY_EXPORT_CONFIRM_CELL_THRESHOLD = 1_000_000;
 const COPY_EXPORT_SAMPLE_ROWS = 32;
@@ -261,7 +261,7 @@ function estimateAverageCellBytes(
       columnOffset += columnStep
     ) {
       const columnIndex = Math.min(range.endColumn, range.startColumn + columnOffset);
-      const rendered = cellValueToBoundedText(
+      const rendered = cellValueToBoundedExportText(
         result.cellValue(rowIndex, columnIndex),
         COPY_EXPORT_SAMPLE_CELL_MAX_CHARS,
         cellTextOptions
@@ -439,10 +439,14 @@ function sheetRowsXml(
   if (includeHeaders) {
     const headers: string[] = [];
     if (includeRowIndex) {
-      headers.push(cellValueToText(rowIndexColumnName(result.columns, range)));
+      headers.push(xlsxCellText(
+        rowIndexColumnName(result.columns, range),
+        outputRow,
+        headers.length + 1
+      ));
     }
     for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      headers.push(cellValueToText(result.columns[columnIndex]));
+      headers.push(xlsxCellText(result.columns[columnIndex], outputRow, headers.length + 1));
     }
     parts.push(sheetRowXml(outputRow, headers));
     outputRow += 1;
@@ -454,12 +458,37 @@ function sheetRowsXml(
       values.push(String(rowIndex + 1));
     }
     for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      values.push(result.cellText(rowIndex, columnIndex, cellTextOptions));
+      values.push(xlsxCellText(
+        result.cellValue(rowIndex, columnIndex),
+        outputRow,
+        values.length + 1,
+        cellTextOptions
+      ));
     }
     parts.push(sheetRowXml(outputRow, values));
     outputRow += 1;
   }
   return parts.join('');
+}
+
+function xlsxCellText(
+  value: unknown,
+  outputRow: number,
+  outputColumn: number,
+  cellTextOptions: CellTextOptions = {}
+): string {
+  const rendered = cellValueToBoundedExportText(
+    value,
+    XLSX_MAX_CELL_CHARACTERS + 1,
+    cellTextOptions
+  );
+  if (rendered.truncated || rendered.text.length > XLSX_MAX_CELL_CHARACTERS) {
+    throw new Error(
+      `XLSX export cell at row ${outputRow}, column ${outputColumn} ` +
+      `exceeds Excel's ${XLSX_MAX_CELL_CHARACTERS}-character cell limit.`
+    );
+  }
+  return rendered.text;
 }
 
 function sheetRowXml(rowNumber: number, values: string[]): string {

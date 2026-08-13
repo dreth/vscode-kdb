@@ -29,12 +29,9 @@ import {
 } from './notebook-cell-preparation';
 import {
   KX_NOTEBOOK_MIME,
-  NotebookV2CreationResult,
   PortableKxResult,
   PortableKxTableResult,
-  createPortableKxPreviewFromV2Full,
-  createPortableKxResultV2,
-  createPortableKxTextResultV2,
+  isPortableKxFullResult,
   notebookSavedPreviewNotice,
   portableCellValue,
   validatePortableKxResult,
@@ -61,21 +58,22 @@ import {
   NotebookLiveResultMessage,
   NotebookLiveSearchMessage,
   NotebookLiveSliceMessage,
-  NotebookOutputPersistenceMessage,
   NotebookRendererMessage,
   MAX_NOTEBOOK_LIVE_COLUMNS,
   notebookRendererSettingsMessage,
   parseNotebookLiveResultReference,
   parseNotebookOutputBindingFromMetadata,
-  parseNotebookPortableOutputBinding,
   parseNotebookRendererMessage,
 } from './notebook-message';
+import {
+  normalizeLargeSortWarningRowThreshold,
+  shouldWarnForLargeSort,
+} from './result-sort-warning';
 import {
   NotebookSettings,
   hasNotebookQMarker,
   notebookQSourceFromMagic,
   safeNotebookByteLimit,
-  safeNotebookPreserveFullResultByDefault,
   safeNotebookPresentation,
   safeNotebookRowLimit,
 } from './notebook-settings';
@@ -83,10 +81,9 @@ import {
   NotebookQTargetProfile,
   safeConnectionName,
 } from './notebook-q-target';
-import {
-  notebookOutputItems,
-  type DirectQCellRunOptions,
-  type DirectQCellRunResult,
+import type {
+  DirectQCellRunOptions,
+  DirectQCellRunResult,
 } from './notebook-controller';
 
 export const KX_NOTEBOOK_RENDERER_ID = 'vscode-kdb.kx-notebook-renderer';
@@ -141,13 +138,6 @@ type LiveScopedRendererMessage = Extract<
   { liveId: string; outputId: string; requestId: number }
 >;
 
-interface RendererOutputBindingEpoch {
-  renderGeneration: number;
-  liveId?: string;
-  latestPersistenceRequestId: number;
-  rejectedReason?: string;
-}
-
 type NotebookQCellRunOutcome = DirectQCellRunResult | 'canceled' | 'controller-selected';
 
 export class NotebookIntegration implements vscode.Disposable {
@@ -156,11 +146,7 @@ export class NotebookIntegration implements vscode.Disposable {
   private readonly messaging: vscode.NotebookRendererMessaging;
   private readonly directRunner: DirectQNotebookRunner | undefined;
   private readonly statusBarChanged = new vscode.EventEmitter<void>();
-  private readonly rendererOutputBindings = new WeakMap<
-    vscode.NotebookEditor,
-    Map<string, RendererOutputBindingEpoch>
-  >();
-  private readonly outputMutations = new Map<string, Promise<void>>();
+  private readonly pendingLiveSortConfirmations = new Map<string, Promise<boolean>>();
   private readonly cellLanguageProvider = new NotebookCellLanguageProvider<vscode.TextDocument>(
     (document, languageId) => vscode.languages.setTextDocumentLanguage(document, languageId)
   );
@@ -257,6 +243,7 @@ export class NotebookIntegration implements vscode.Disposable {
   }
 
   public dispose(): void {
+    this.pendingLiveSortConfirmations.clear();
     this.disposables.splice(0).forEach(disposable => disposable.dispose());
     void vscode.commands.executeCommand('setContext', NOTEBOOK_Q_CELL_RESOURCES_CONTEXT, []);
     void vscode.commands.executeCommand(
@@ -275,21 +262,7 @@ export class NotebookIntegration implements vscode.Disposable {
       return;
     }
     if (message.type === 'ready') {
-      this.rendererOutputBindings.delete(event.editor);
       await this.messaging.postMessage(this.rendererSettingsMessage(), event.editor);
-      return;
-    }
-    if (message.type === 'bindOutput') {
-      this.bindRendererOutput(event.editor, message);
-      return;
-    }
-    if (message.type === 'unbindOutput') {
-      const bindings = this.rendererOutputBindings.get(event.editor);
-      const current = bindings?.get(message.outputId);
-      if (current && current.renderGeneration === message.renderGeneration &&
-        current.liveId === message.liveId) {
-        bindings?.delete(message.outputId);
-      }
       return;
     }
     if (message.type === 'openPreview') {
@@ -300,10 +273,10 @@ export class NotebookIntegration implements vscode.Disposable {
           message.payload
         );
         if (!payload) {
-          throw new Error('The requested preview is not present in the current notebook.');
+          throw new Error('The requested saved result is not present in the current notebook.');
         }
         this.showPreview(payload);
-        return 'Opened saved preview in KX Results.';
+        return 'Opened saved result in KX Results.';
       });
       await this.messaging.postMessage(response, event.editor);
       return;
@@ -324,25 +297,6 @@ export class NotebookIntegration implements vscode.Disposable {
       return;
     }
 
-    if (message.type === 'setOutputPersistence') {
-      if (!this.claimRendererPersistenceRequest(event.editor, message)) {
-        return;
-      }
-      const notebookUri = event.editor.notebook.uri.toString();
-      const key = `${notebookUri}\0${message.outputId}`;
-      const response = await this.withOutputMutation(key, () =>
-        this.setOutputPersistence(
-          event.editor,
-          message,
-          this.options.liveResults,
-          liveNotebookDisplayOptions(sharedKxResultSettings()),
-          () => this.isCurrentRendererPersistenceRequest(event.editor, message)
-        )
-      );
-      await this.messaging.postMessage(response, event.editor);
-      return;
-    }
-
     const liveResults = this.options.liveResults;
     const notebookUri = event.editor.notebook.uri.toString();
     const resultSettings = sharedKxResultSettings();
@@ -356,8 +310,18 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       const cellUri = binding?.cell.document.uri.toString();
       const available = !!binding && !!cellUri && (
-        liveResults?.has(message.liveId, notebookUri, cellUri) ||
-        liveResults?.bindStagedOutput(message.liveId, notebookUri, cellUri)
+        liveResults?.hasForOutput(
+          message.liveId,
+          notebookUri,
+          cellUri,
+          message.outputId
+        ) ||
+        liveResults?.bindStagedOutput(
+          message.liveId,
+          notebookUri,
+          cellUri,
+          message.outputId
+        )
       );
       if (!available || !cellUri) {
         await this.rejectUnavailableLiveMessage(message, event.editor);
@@ -415,6 +379,27 @@ export class NotebookIntegration implements vscode.Disposable {
       return;
     }
     if (message.type === 'requestLiveSlice') {
+      if (!(await this.confirmLiveSortIfNeeded(
+        liveResults,
+        notebookUri,
+        message,
+        displayOptions,
+        authorizedCellUri
+      ))) {
+        await this.messaging.postMessage({
+          type: 'liveSlice',
+          liveId: message.liveId,
+          requestId: message.requestId,
+          startRow: 0,
+          endRow: -1,
+          startColumn: 0,
+          endColumn: -1,
+          columnOrdinals: [],
+          cells: [],
+          error: 'Large sort canceled.',
+        }, event.editor);
+        return;
+      }
       await this.messaging.postMessage(
         liveSliceMessage(
           liveResults,
@@ -428,6 +413,26 @@ export class NotebookIntegration implements vscode.Disposable {
       return;
     }
     if (message.type === 'searchLiveResult') {
+      if (!(await this.confirmLiveSortIfNeeded(
+        liveResults,
+        notebookUri,
+        message,
+        displayOptions,
+        authorizedCellUri
+      ))) {
+        await this.messaging.postMessage({
+          type: 'liveSearch',
+          liveId: message.liveId,
+          requestId: message.requestId,
+          matches: [],
+          totalScanned: 0,
+          scannedCells: 0,
+          capped: false,
+          partial: false,
+          error: 'Large sort canceled.',
+        }, event.editor);
+        return;
+      }
       await this.messaging.postMessage(
         liveSearchMessage(
           liveResults,
@@ -457,6 +462,23 @@ export class NotebookIntegration implements vscode.Disposable {
     if (message.type === 'copyLiveRange') {
       let response: NotebookLiveCopyMessage;
       try {
+        if (!(await this.confirmLiveSortIfNeeded(
+          liveResults,
+          notebookUri,
+          message,
+          displayOptions,
+          authorizedCellUri
+        ))) {
+          response = {
+            type: 'liveCopy',
+            liveId: message.liveId,
+            requestId: message.requestId,
+            ok: false,
+            message: 'Large sort canceled.',
+          };
+          await this.messaging.postMessage(response, event.editor);
+          return;
+        }
         const rangeRequest = {
           startRow: message.startRow,
           endRow: message.endRow,
@@ -536,6 +558,15 @@ export class NotebookIntegration implements vscode.Disposable {
     }
     if (message.type === 'exportLiveRange') {
       const response = await notebookActionResult(message.requestId, 'export', async () => {
+        if (!(await this.confirmLiveSortIfNeeded(
+          liveResults,
+          notebookUri,
+          message,
+          displayOptions,
+          authorizedCellUri
+        ))) {
+          return { canceled: true, message: 'Large sort canceled.' };
+        }
         const selected = liveResults?.resultRange(
           message.liveId,
           notebookUri,
@@ -579,7 +610,7 @@ export class NotebookIntegration implements vscode.Disposable {
           message.payload
         );
         if (!payload || payload.kind !== 'table') {
-          throw new Error('The requested saved preview is not present in the current notebook.');
+          throw new Error('The requested saved result is not present in the current notebook.');
         }
         const selected = portablePreviewRange(payload, {
           startRow: message.startRow,
@@ -609,7 +640,7 @@ export class NotebookIntegration implements vscode.Disposable {
           message.payload
         );
         if (!payload || payload.kind !== 'table') {
-          throw new Error('The requested saved preview is not present in the current notebook.');
+          throw new Error('The requested saved result is not present in the current notebook.');
         }
         const selected = portablePreviewRange(payload, {
           startRow: message.startRow,
@@ -672,7 +703,7 @@ export class NotebookIntegration implements vscode.Disposable {
           message.payload
         );
         if (!payload || payload.kind !== 'qText') {
-          throw new Error('The requested saved preview is not present in the current notebook.');
+          throw new Error('The requested saved result is not present in the current notebook.');
         }
         return saveNotebookTextExport(payload.data.text);
       });
@@ -702,7 +733,7 @@ export class NotebookIntegration implements vscode.Disposable {
           message.payload
         );
         if (!match) {
-          throw new Error('The requested saved preview is not present in the current notebook.');
+          throw new Error('The requested saved result is not present in the current notebook.');
         }
         if (match.payload.provenance.marker === 'direct-ipc') {
           if (this.directControllerSelected(event.editor.notebook)) {
@@ -738,11 +769,134 @@ export class NotebookIntegration implements vscode.Disposable {
     }
   }
 
+  private async confirmLiveSortIfNeeded(
+    liveResults: LiveNotebookResultStore | undefined,
+    notebookUri: string,
+    message: {
+      liveId: string;
+      sortOrdinal?: number;
+      sortColumn?: string;
+      sortDirection?: 'asc' | 'desc';
+    },
+    displayOptions: LiveNotebookDisplayOptions,
+    cellUri?: string
+  ): Promise<boolean> {
+    if (!message.sortDirection) {
+      return true;
+    }
+    const state = liveResults?.sortWarningState(
+      message.liveId,
+      notebookUri,
+      displayOptions,
+      cellUri
+    );
+    if (!state) {
+      return false;
+    }
+    const config = vscode.workspace.getConfiguration('vscode-kdb.results');
+    if (!shouldWarnForLargeSort(state.rowCount, {
+      rowThreshold: normalizeLargeSortWarningRowThreshold(
+        config.get<number>('largeSortWarningRowThreshold')
+      ),
+      hideWarnings: config.get<boolean>('hideLargeSortWarnings') === true,
+      approved: state.approved,
+    })) {
+      return true;
+    }
+
+    const key = `${message.liveId}\0${state.generation}`;
+    const pending = this.pendingLiveSortConfirmations.get(key);
+    if (pending) {
+      return pending;
+    }
+    const confirmation = this.confirmLiveSort(
+      liveResults!,
+      notebookUri,
+      message,
+      displayOptions,
+      state.generation,
+      state.rowCount,
+      cellUri
+    );
+    this.pendingLiveSortConfirmations.set(key, confirmation);
+    try {
+      return await confirmation;
+    } finally {
+      if (this.pendingLiveSortConfirmations.get(key) === confirmation) {
+        this.pendingLiveSortConfirmations.delete(key);
+      }
+    }
+  }
+
+  private async confirmLiveSort(
+    liveResults: LiveNotebookResultStore,
+    notebookUri: string,
+    message: {
+      liveId: string;
+      sortOrdinal?: number;
+      sortColumn?: string;
+      sortDirection?: 'asc' | 'desc';
+    },
+    displayOptions: LiveNotebookDisplayOptions,
+    generation: number,
+    rowCount: number,
+    cellUri?: string
+  ): Promise<boolean> {
+    const columns = liveResults.tableColumns(
+      message.liveId,
+      notebookUri,
+      displayOptions,
+      cellUri
+    ) || [];
+    const column = Number.isSafeInteger(message.sortOrdinal) && message.sortOrdinal! >= 0
+      ? columns[message.sortOrdinal!]
+      : message.sortColumn;
+    const choice = await vscode.window.showWarningMessage(
+      `Sort ${rowCount.toLocaleString('en-US')} rows` +
+        `${column ? ` by ${column}` : ''}? This may take a moment.`,
+      'Sort',
+      "Sort and Don't Warn Again",
+      'Cancel'
+    );
+    const current = liveResults.sortWarningState(
+      message.liveId,
+      notebookUri,
+      displayOptions,
+      cellUri
+    );
+    if (!current || current.generation !== generation ||
+      (choice !== 'Sort' && choice !== "Sort and Don't Warn Again")) {
+      return false;
+    }
+    if (choice === "Sort and Don't Warn Again") {
+      await vscode.workspace.getConfiguration('vscode-kdb.results').update(
+        'hideLargeSortWarnings',
+        true,
+        vscode.ConfigurationTarget.Global
+      );
+      const afterUpdate = liveResults.sortWarningState(
+        message.liveId,
+        notebookUri,
+        displayOptions,
+        cellUri
+      );
+      if (!afterUpdate || afterUpdate.generation !== generation) {
+        return false;
+      }
+    }
+    return liveResults.approveSortWarning(
+      message.liveId,
+      notebookUri,
+      generation,
+      cellUri
+    );
+  }
+
   private async rejectUnavailableLiveMessage(
     message: LiveScopedRendererMessage,
     editor: vscode.NotebookEditor
   ): Promise<void> {
-    const detail = 'Live result unavailable. Only the bounded saved preview remains.';
+    const detail = 'Live result unavailable. Use the saved notebook output or rerun the cell.';
     if (message.type === 'copyLiveRange') {
       await this.messaging.postMessage({
         type: 'liveCopy',
@@ -770,270 +924,6 @@ export class NotebookIntegration implements vscode.Disposable {
       unavailableLiveResultMessage(message.liveId, message.requestId, detail),
       editor
     );
-  }
-
-  private bindRendererOutput(
-    editor: vscode.NotebookEditor,
-    message: Extract<NotebookRendererMessage, { type: 'bindOutput' | 'unbindOutput' }>
-  ): void {
-    let bindings = this.rendererOutputBindings.get(editor);
-    if (!bindings) {
-      bindings = new Map<string, RendererOutputBindingEpoch>();
-      this.rendererOutputBindings.set(editor, bindings);
-    }
-    const current = bindings.get(message.outputId);
-    if (current && current.renderGeneration >= message.renderGeneration) {
-      return;
-    }
-    const reject = (reason: string): void => {
-      bindings!.set(message.outputId, {
-        renderGeneration: message.renderGeneration,
-        ...(message.liveId ? { liveId: message.liveId } : {}),
-        latestPersistenceRequestId: 0,
-        rejectedReason: reason,
-      });
-    };
-    let located: BoundNotebookOutput | undefined;
-    try {
-      located = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
-    } catch (error) {
-      reject(safeHostError(error));
-      return;
-    }
-    if (!located || located.payload.version !== 2 || located.liveId !== message.liveId) {
-      reject('The renderer output identity is no longer uniquely bound in this notebook.');
-      return;
-    }
-    const notebookUri = editor.notebook.uri.toString();
-    const cellUri = located.cell.document.uri.toString();
-    if (located.liveId && this.options.liveResults?.has(located.liveId, notebookUri) &&
-      !this.options.liveResults.hasForOutput(
-        located.liveId,
-        notebookUri,
-        cellUri,
-        message.outputId
-      )) {
-      reject('The live result belongs to a different notebook output.');
-      return;
-    }
-    bindings.set(message.outputId, {
-      renderGeneration: message.renderGeneration,
-      ...(message.liveId ? { liveId: message.liveId } : {}),
-      latestPersistenceRequestId: 0,
-    });
-  }
-
-  private claimRendererPersistenceRequest(
-    editor: vscode.NotebookEditor,
-    identity: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>
-  ): boolean {
-    const current = this.rendererOutputBindings.get(editor)?.get(identity.outputId);
-    if (!current || current.rejectedReason ||
-      current.renderGeneration !== identity.renderGeneration ||
-      (identity.liveId !== undefined && current.liveId !== identity.liveId) ||
-      identity.requestId <= current.latestPersistenceRequestId) {
-      return false;
-    }
-    current.latestPersistenceRequestId = identity.requestId;
-    return true;
-  }
-
-  private isCurrentRendererPersistenceRequest(
-    editor: vscode.NotebookEditor,
-    identity: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>
-  ): boolean {
-    const current = this.rendererOutputBindings.get(editor)?.get(identity.outputId);
-    return !!current && !current.rejectedReason &&
-      current.renderGeneration === identity.renderGeneration &&
-      current.latestPersistenceRequestId === identity.requestId &&
-      (identity.liveId === undefined || current.liveId === identity.liveId);
-  }
-
-  private async withOutputMutation<T>(key: string, action: () => Promise<T>): Promise<T> {
-    const previous = this.outputMutations.get(key) ?? Promise.resolve();
-    const task = previous.catch(() => undefined).then(action);
-    const settled = task.then(() => undefined, () => undefined);
-    this.outputMutations.set(key, settled);
-    try {
-      return await task;
-    } finally {
-      if (this.outputMutations.get(key) === settled) {
-        this.outputMutations.delete(key);
-      }
-    }
-  }
-
-  private async setOutputPersistence(
-    editor: vscode.NotebookEditor,
-    message: Extract<NotebookRendererMessage, { type: 'setOutputPersistence' }>,
-    liveResults: LiveNotebookResultStore | undefined,
-    displayOptions: LiveNotebookDisplayOptions,
-    isCurrentRequest: () => boolean
-  ): Promise<NotebookOutputPersistenceMessage> {
-    const identity = {
-      outputId: message.outputId,
-      renderGeneration: message.renderGeneration,
-      requestId: message.requestId,
-    };
-    const unavailable = (detail: string): NotebookOutputPersistenceMessage => ({
-      type: 'outputPersistence',
-      ...identity,
-      mode: 'preview',
-      enabled: false,
-      checked: false,
-      message: detail,
-    });
-    if (!isCurrentRequest()) {
-      return unavailable('A newer renderer request replaced this persistence action.');
-    }
-
-    let located: BoundNotebookOutput;
-    try {
-      const candidate = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
-      if (!candidate || candidate.payload.version !== 2 ||
-        candidate.payload.outputId !== message.outputId) {
-        return unavailable(
-          'Full-result persistence is available only for a current first-party v2 output.'
-        );
-      }
-      located = candidate;
-    } catch (error) {
-      return unavailable(safeHostError(error));
-    }
-
-    const currentState = (
-      current: BoundNotebookOutput,
-      detail?: string
-    ): NotebookOutputPersistenceMessage => {
-      const checked = current.payload.persistence?.mode === 'full';
-      const enabled = checked || !!(current.liveId && liveResults?.hasForOutput(
-        current.liveId,
-        editor.notebook.uri.toString(),
-        current.cell.document.uri.toString(),
-        message.outputId
-      ));
-      return {
-        type: 'outputPersistence',
-        ...identity,
-        mode: checked ? 'full' : 'preview',
-        enabled,
-        checked,
-        ...(detail ? { message: detail } : {}),
-      };
-    };
-
-    const settings = notebookSettings();
-    if (message.mode === 'preview') {
-      if (located.payload.persistence?.mode !== 'full') {
-        return currentState(located);
-      }
-      const preview = createPortableKxPreviewFromV2Full(
-        located.payload,
-        settings.rowLimit,
-        settings.byteLimit
-      );
-      if (!preview.ok) {
-        return currentState(located, preview.error);
-      }
-      if (!isCurrentRequest()) {
-        return unavailable('A newer renderer request replaced this persistence action.');
-      }
-      const applied = await replaceBoundNotebookOutput(
-        editor.notebook,
-        located,
-        preview.value,
-        settings.byteLimit,
-        liveResults
-      );
-      if (!applied) {
-        return unavailable(
-          'The notebook changed before the configured preview could be saved. The newer state was kept.'
-        );
-      }
-      const fresh = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
-      return fresh
-        ? currentState(fresh)
-        : unavailable('The saved preview could not be revalidated after writing.');
-    }
-
-    if (located.payload.persistence?.mode === 'full') {
-      return currentState(located);
-    }
-    const notebookUri = editor.notebook.uri.toString();
-    const cellUri = located.cell.document.uri.toString();
-    if (!message.liveId || located.liveId !== message.liveId ||
-      !liveResults?.hasForOutput(message.liveId, notebookUri, cellUri, message.outputId)) {
-      return unavailable(
-        'The complete live result is no longer available. Rerun the q cell to preserve it.'
-      );
-    }
-
-    let full: NotebookV2CreationResult;
-    try {
-      const view = liveResults.view(message.liveId, notebookUri, displayOptions, cellUri);
-      const panel = liveResults.portablePanel(message.liveId, notebookUri, displayOptions, cellUri);
-      if (!view || !panel) {
-        return currentState(
-          located,
-          'Full persistence failed because the q result cannot be represented exactly.'
-        );
-      }
-      full = portableFullResultFromLiveView(
-        view,
-        panel,
-        located.payload,
-        message.outputId,
-        settings
-      );
-    } catch {
-      return currentState(
-        located,
-        'Full persistence failed while converting the q result exactly.'
-      );
-    }
-    if (!full.ok) {
-      return currentState(located, full.error);
-    }
-    if (!isCurrentRequest()) {
-      return unavailable('A newer renderer request replaced this persistence action.');
-    }
-
-    let fresh: BoundNotebookOutput | undefined;
-    try {
-      fresh = uniquelyBoundNotebookOutput(editor.notebook, message.outputId);
-    } catch (error) {
-      return unavailable(safeHostError(error));
-    }
-    if (!fresh || fresh.payload.persistence?.mode !== 'preview' ||
-      fresh.liveId !== message.liveId ||
-      !liveResults.hasForOutput(
-        message.liveId,
-        notebookUri,
-        fresh.cell.document.uri.toString(),
-        message.outputId
-      )) {
-      return unavailable(
-        'The notebook changed before the full result could be saved. The newer state was kept.'
-      );
-    }
-    const applied = await replaceBoundNotebookOutput(
-      editor.notebook,
-      fresh,
-      full.value,
-      settings.byteLimit,
-      liveResults
-    );
-    return applied
-      ? {
-        type: 'outputPersistence',
-        ...identity,
-        mode: 'full',
-        enabled: true,
-        checked: true,
-      }
-      : unavailable(
-        'The notebook changed before the full result could be saved. The newer state was kept.'
-      );
   }
 
   private async runQCellWithKx(
@@ -1547,7 +1437,7 @@ export class NotebookIntegration implements vscode.Disposable {
         }
       } else {
         void vscode.window.showWarningMessage(
-          'The selected cell has no valid saved KX preview. Run a prepared %%q cell through kx_notebook first.'
+          'The selected cell has no valid saved KX result. Run a prepared %%q cell through kx_notebook first.'
         );
       }
       return;
@@ -1556,6 +1446,7 @@ export class NotebookIntegration implements vscode.Disposable {
   }
 
   private showPreview(payload: PortableKxResult): void {
+    const complete = isPortableKxFullResult(payload);
     if (payload.kind === 'qText') {
       KxResultsPanel.showResult(this.context, {
         mode: 'text',
@@ -1565,15 +1456,13 @@ export class NotebookIntegration implements vscode.Disposable {
           : '%%q'),
         connectionName: payload.provenance.label ?? 'Notebook result',
         elapsedMs: payload.provenance.elapsedMs ?? 0,
-        messages: payload.result.truncated
-          ? [notebookSavedPreviewNotice(payload)]
-          : [],
+        messages: complete ? [] : [notebookSavedPreviewNotice(payload)],
       });
       return;
     }
     const columns = payload.schema.columns.map(column => column.name);
     const messages: string[] = [];
-    if (payload.result.truncated) {
+    if (!complete) {
       messages.push(notebookSavedPreviewNotice(payload));
     }
     KxResultsPanel.showResult(this.context, {
@@ -1582,7 +1471,8 @@ export class NotebookIntegration implements vscode.Disposable {
         payload.data.rows.length,
         (rowIndex, columnIndex) =>
           portableCellValue(payload.data.rows[rowIndex][columnIndex]),
-        payload.schema.columns.map(column => column.type)
+        payload.schema.columns.map(column => column.type),
+        payload.schema.keyColumnOrdinals
       ),
       query: payload.provenance.qSource ?? (payload.provenance.marker === 'direct-ipc'
         ? 'Direct IPC'
@@ -1590,6 +1480,17 @@ export class NotebookIntegration implements vscode.Disposable {
       connectionName: payload.provenance.label ?? 'Notebook result',
       elapsedMs: payload.provenance.elapsedMs ?? 0,
       messages,
+      snapshotScope: complete
+        ? {
+          kind: 'complete',
+          savedRowCount: payload.data.rows.length,
+          totalRowCount: payload.result.rowCount,
+        }
+        : {
+          kind: 'truncatedSavedPreview',
+          savedRowCount: payload.data.rows.length,
+          totalRowCount: payload.result.rowCount,
+        },
     }, 'replace', { autoChart: payload.chart?.visible === true });
   }
 
@@ -1742,9 +1643,6 @@ export function notebookSettings(): NotebookSettings {
     presentation: safeNotebookPresentation(configuration.get('presentation')),
     rowLimit: safeNotebookRowLimit(configuration.get('maxOutputRows')),
     byteLimit: safeNotebookByteLimit(configuration.get('maxOutputBytes')),
-    preserveFullResultByDefault: safeNotebookPreserveFullResultByDefault(
-      configuration.get('preserveFullResultByDefault')
-    ),
   };
 }
 
@@ -1922,8 +1820,10 @@ function matchingLiveNotebookOutput(
   if (!match || reference?.id !== liveId) {
     return undefined;
   }
-  const v2 = portableOutputPayloads(match.output).find(payload => payload.version === 2);
-  return !v2 || v2.outputId === outputId ? match : undefined;
+  const ownedPayloads = portableOutputPayloads(match.output).filter(payload =>
+    payload.version === 2 && payload.outputId === outputId
+  );
+  return ownedPayloads.length === 1 ? match : undefined;
 }
 
 function exactNotebookOutput(
@@ -1998,189 +1898,6 @@ function portableOutputPayloads(output: vscode.NotebookCellOutput): PortableKxRe
     }
   }
   return payloads;
-}
-
-interface BoundNotebookOutput {
-  cell: vscode.NotebookCell;
-  cellIndex: number;
-  cellDocumentVersion: number;
-  notebookVersion: number;
-  output: vscode.NotebookCellOutput;
-  outputIndex: number;
-  payload: PortableKxResult;
-  liveId?: string;
-}
-
-/** Resolve durable identity from outer metadata first. Portable bytes are read
- * only after one exact outer owner has been proven. */
-function uniquelyBoundNotebookOutput(
-  notebook: vscode.NotebookDocument,
-  outputId: string
-): BoundNotebookOutput | undefined {
-  const match = exactNotebookOutput(notebook, outputId);
-  if (!match) {
-    return undefined;
-  }
-  const binding = parseNotebookPortableOutputBinding(
-    match.output.metadata,
-    match.output.items
-  );
-  if (binding?.id !== outputId) {
-    return undefined;
-  }
-  const payloads = portableOutputPayloads(match.output)
-    .filter(payload => payload.version === 2 && payload.outputId === outputId);
-  if (payloads.length !== 1) {
-    return undefined;
-  }
-  const outputIndex = match.cell.outputs.indexOf(match.output);
-  if (outputIndex < 0) {
-    return undefined;
-  }
-  const live = parseNotebookLiveResultReference(
-    match.output.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
-  );
-  return {
-    cell: match.cell,
-    cellIndex: match.cell.index,
-    cellDocumentVersion: match.cell.document.version,
-    notebookVersion: notebook.version,
-    output: match.output,
-    outputIndex,
-    payload: payloads[0],
-    ...(live ? { liveId: live.id } : {}),
-  };
-}
-
-function portableFullResultFromLiveView(
-  view: NonNullable<ReturnType<LiveNotebookResultStore['view']>>,
-  panel: NonNullable<ReturnType<LiveNotebookResultStore['portablePanel']>>,
-  current: PortableKxResult,
-  outputId: string,
-  settings: NotebookSettings
-): NotebookV2CreationResult {
-  const qSource = current.provenance.qSource;
-  if (panel.mode === 'text') {
-    return createPortableKxTextResultV2({
-      text: panel.text,
-      rowLimit: settings.rowLimit,
-      byteLimit: settings.byteLimit,
-      label: view.connectionName,
-      elapsedMs: view.elapsedMs,
-      ...(qSource === undefined ? {} : { qSource }),
-      marker: 'direct-ipc',
-    }, { outputId, persistenceMode: 'full' });
-  }
-  return createPortableKxResultV2({
-    columns: panel.result.columns.map((name, index) => ({
-      name,
-      type: panel.result.columnTypes?.[index] || 'mixed',
-    })),
-    rows: [],
-    cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
-    rowCount: panel.result.rowCount,
-    rowLimit: settings.rowLimit,
-    byteLimit: settings.byteLimit,
-    label: view.connectionName,
-    elapsedMs: view.elapsedMs,
-    ...(qSource === undefined ? {} : { qSource }),
-    marker: 'direct-ipc',
-    ...(current.kind === 'table' && current.chart ? { chart: current.chart } : {}),
-  }, { outputId, persistenceMode: 'full' });
-}
-
-async function replaceBoundNotebookOutput(
-  notebook: vscode.NotebookDocument,
-  located: BoundNotebookOutput,
-  portable: PortableKxResult,
-  byteLimit: number,
-  liveResults: LiveNotebookResultStore | undefined
-): Promise<boolean> {
-  let current: BoundNotebookOutput | undefined;
-  try {
-    current = uniquelyBoundNotebookOutput(notebook, located.payload.outputId || '');
-  } catch {
-    return false;
-  }
-  if (!current || current.cellIndex !== located.cellIndex ||
-    current.outputIndex !== located.outputIndex ||
-    current.notebookVersion !== located.notebookVersion ||
-    current.cellDocumentVersion !== located.cellDocumentVersion ||
-    current.output !== located.output ||
-    JSON.stringify(current.payload) !== JSON.stringify(located.payload)) {
-    return false;
-  }
-
-  const replacementOutput = new vscode.NotebookCellOutput(
-    notebookOutputItems(portable, byteLimit),
-    { ...current.output.metadata }
-  );
-  const replacement = new vscode.NotebookCellData(
-    current.cell.kind,
-    current.cell.document.getText(),
-    current.cell.document.languageId
-  );
-  replacement.metadata = { ...current.cell.metadata };
-  replacement.outputs = current.cell.outputs.map((output, index) =>
-    index === current!.outputIndex ? replacementOutput : output
-  );
-  replacement.executionSummary = current.cell.executionSummary;
-
-  const notebookUri = notebook.uri.toString();
-  const previousCellUri = current.cell.document.uri.toString();
-  const movingLiveId = current.liveId && liveResults?.hasForOutput(
-    current.liveId,
-    notebookUri,
-    previousCellUri,
-    located.payload.outputId || ''
-  )
-    ? liveResults.beginCellMove(current.liveId, notebookUri, previousCellUri)
-      ? current.liveId
-      : undefined
-    : undefined;
-  if (current.liveId && liveResults?.has(current.liveId, notebookUri, previousCellUri) &&
-    !movingLiveId) {
-    return false;
-  }
-
-  let applied = false;
-  try {
-    const edit = new vscode.WorkspaceEdit();
-    edit.set(notebook.uri, [
-      vscode.NotebookEdit.replaceCells(
-        new vscode.NotebookRange(current.cellIndex, current.cellIndex + 1),
-        [replacement]
-      ),
-    ]);
-    applied = await vscode.workspace.applyEdit(edit);
-    if (!applied || notebook.isClosed) {
-      return false;
-    }
-    const committed = uniquelyBoundNotebookOutput(notebook, portable.outputId || '');
-    if (!committed || JSON.stringify(committed.payload) !== JSON.stringify(portable)) {
-      return false;
-    }
-    if (movingLiveId && !liveResults?.completeCellMove(
-      movingLiveId,
-      notebookUri,
-      previousCellUri,
-      committed.cell.document.uri.toString()
-    )) {
-      return false;
-    }
-    return true;
-  } catch {
-    return false;
-  } finally {
-    if (movingLiveId) {
-      liveResults?.cancelCellMove(
-        movingLiveId,
-        notebookUri,
-        previousCellUri,
-        applied
-      );
-    }
-  }
 }
 
 function isLiveScopedRendererMessage(
@@ -2442,7 +2159,15 @@ function portablePreviewRange(
         ? null
         : portableCellValue(payload.data.rows[sourceRow][indexes[columnIndex]]);
     },
-    indexes.map(index => payload.schema.columns[index].type)
+    indexes.map(index => payload.schema.columns[index].type),
+    payload.schema.keyColumnOrdinals === undefined
+      ? undefined
+      : indexes.reduce<number[]>((ordinals, sourceOrdinal, projectedOrdinal) => {
+        if (payload.schema.keyColumnOrdinals!.includes(sourceOrdinal)) {
+          ordinals.push(projectedOrdinal);
+        }
+        return ordinals;
+      }, [])
   );
   return {
     table,
@@ -2511,6 +2236,13 @@ export function liveResultMessage(
     mode: view.mode,
     kind: boundedHostText(view.kind, 128),
     columns,
+    ...(view.keyColumnOrdinals === undefined
+      ? {}
+      : {
+        keyColumnOrdinals: view.keyColumnOrdinals.filter(
+          ordinal => ordinal < columns.length
+        ),
+      }),
     totalColumnCount: view.columns.length,
     rowCount: view.rowCount,
     chartXColumns,
@@ -2761,9 +2493,6 @@ export function liveChartMessage(
         lowColumn: sourceLowColumn,
         closeColumn: sourceCloseColumn,
         maxPoints: message.maxPoints,
-        minPoints: message.xMin !== undefined && message.xMax !== undefined
-          ? resultSettings.chartZoomMinSampledPoints
-          : undefined,
         maxSourceRows: resultSettings.chartMaxSourceRows,
         xMin: message.xMin,
         xMax: message.xMax,
@@ -2810,6 +2539,7 @@ export function liveChartMessage(
             : {}),
           values: series.values,
           ...(series.gapFlags ? { gapFlags: series.gapFlags } : {}),
+          ...(series.gapBefore ? { gapBefore: series.gapBefore } : {}),
         })),
         ...(chart.boxSeries
           ? {

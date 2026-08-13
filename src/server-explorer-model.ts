@@ -1,4 +1,5 @@
 import type { QTable, QValue } from './q-ipc';
+import { isQRuntimeValue, qValueToSemanticPrimitive } from './q-value';
 
 export const DEFAULT_SERVER_PREVIEW_CELL_LIMIT = 10_000;
 export const MIN_SERVER_PREVIEW_CELL_LIMIT = 1;
@@ -210,13 +211,16 @@ export function qMetaTypeName(code: string): string {
 }
 
 function stringCandidates(value: QValue): string[] {
-  if (typeof value === 'string') {
-    return value ? [value] : [];
+  const semantic = semanticQValue(value);
+  if (typeof semantic === 'string') {
+    return semantic ? [semantic] : [];
   }
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(semantic)) {
     throw new Error('q returned an unexpected table-list shape.');
   }
-  return value.filter((item): item is string => typeof item === 'string');
+  return semantic
+    .map(semanticQValue)
+    .filter((item): item is string => typeof item === 'string');
 }
 
 function qTable(value: QValue): QTable | undefined {
@@ -227,7 +231,12 @@ function qTable(value: QValue): QTable | undefined {
 }
 
 function safeMetadataText(value: unknown, fallback: string): string {
-  const text = typeof value === 'string' ? value : fallback;
+  const semantic = semanticQValue(value);
+  const text = typeof semantic === 'string' ? semantic : fallback;
   const withoutControls = text.replace(/[\u0000-\u001f\u007f]/g, '');
   return (withoutControls || fallback).slice(0, 512);
+}
+
+function semanticQValue(value: unknown): unknown {
+  return isQRuntimeValue(value) ? qValueToSemanticPrimitive(value) : value;
 }

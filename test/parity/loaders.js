@@ -139,17 +139,22 @@ function compileCommonJsInMemory(filename, source, vscodeMock) {
   const testModule = new Module(filename, module);
   testModule.filename = filename;
   testModule.paths = Module._nodeModulePaths(path.dirname(filename));
-  testModule.require = request => {
+  const originalLoad = Module._load;
+  const loadWithVscodeMock = (request, parent, isMain) => {
     if (request === 'vscode') {
       return vscodeMock;
     }
-    return Module._load(request, testModule, false);
+    return originalLoad(request, parent, isMain);
   };
+  testModule.require = request => loadWithVscodeMock(request, testModule, false);
 
+  Module._load = loadWithVscodeMock;
   try {
     testModule._compile(source, filename);
   } catch (error) {
     throw contextualError(`Could not compile parity adapter for ${filename}`, error);
+  } finally {
+    Module._load = originalLoad;
   }
   return testModule.exports;
 }

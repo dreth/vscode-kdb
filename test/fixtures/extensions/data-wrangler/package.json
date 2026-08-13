@@ -1,0 +1,23 @@
+{
+  "name": "datawrangler",
+  "displayName": "Data Wrangler Extension Host Fake",
+  "description": "Isolated command-contract fake used only by vscode-kdb Extension Host tests.",
+  "version": "1.24.2",
+  "publisher": "ms-toolsai",
+  "private": true,
+  "engines": {
+    "vscode": "^1.96.0"
+  },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onCommand:dataWrangler.openInDataWrangler"
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "command": "dataWrangler.openInDataWrangler",
+        "title": "Data Wrangler Test Fake: Open in Data Wrangler"
+      }
+    ]
+  }
+}

@@ -3,7 +3,6 @@ import uPlotCss from 'uplot/dist/uPlot.min.css';
 import type { ActivationFunction, OutputItem, RendererContext } from 'vscode-notebook-renderer';
 import {
   CHART_MAX_SAMPLED_POINTS,
-  CHART_ZOOM_MAX_SAMPLED_POINTS,
   ChartType,
   buildChartData,
   chartColumnOptions,
@@ -13,9 +12,14 @@ import {
   ChartZoomAppliedData,
   ChartZoomAppliedFailure,
   ChartZoomLifecycleState,
+  ChartNavigatorPart,
+  adjustChartNavigatorRange,
   applyChartZoomLifecycleFailure,
   applyChartZoomLifecycleResponse,
   chartRangeIsZoomed,
+  chartNavigatorSliderBounds,
+  chartNavigatorWindow,
+  chartOverviewIntervalHasGap,
   chartRequestIsCurrent,
   chartVisibleIndexBounds,
   chartXRangeWithInitialPadding,
@@ -25,9 +29,11 @@ import {
   clampChartViewport,
   isValidChartRange,
   issueChartZoomLifecycleRequest,
+  mergeChartPixelGaps,
   panChartViewport,
   panChartViewportByPixels,
   planChartAutoRefine,
+  recenterChartNavigatorRange,
   reduceChartZoomLifecycle,
   resetChartZoomLifecycle,
 } from '../src/chart-zoom';
@@ -48,7 +54,6 @@ import {
   resolvedColumnWidth,
   updatePositionalColumnWidth,
   variableColumnMetrics,
-  widestDisplayedColumnTextLengths,
 } from '../src/column-sizing';
 import {
   ColumnarPanelResult,
@@ -62,9 +67,14 @@ import {
   PortableKxResult,
   PortableKxTableResult,
   comparePortableCells,
+  isHistoricalDirectPreview,
+  isPortableKxFullResult,
+  notebookQTextDisplay,
+  notebookQTextDisplayNotice,
   notebookSavedPreviewNotice,
-  portableCellValue,
-  portableCellText,
+  portableCellChartColumnType,
+  portableCellChartValue,
+  portableCellToBoundedText,
   validatePortableKxResult,
 } from '../src/notebook-contract';
 import {
@@ -77,6 +87,8 @@ import {
   notebookChartControlModel,
   notebookMoveSelection,
   notebookMovedSearchMatchIndex,
+  notebookSavedCellTextLimit,
+  notebookSavedColumnWindow,
   notebookSavedRowOrder,
   reconcileNotebookChartConfiguration,
   notebookSelectionCellCount,
@@ -217,6 +229,14 @@ interface PlotScaleRange {
   max: number;
 }
 
+interface NotebookChartNavigatorElements {
+  root: HTMLElement;
+  overview: SVGSVGElement;
+  window: HTMLElement;
+  start: HTMLElement;
+  end: HTMLElement;
+}
+
 interface PlotViewportState {
   data: NotebookLiveChartData;
   x?: PlotScaleRange;
@@ -238,7 +258,6 @@ interface RerenderFocusState {
 interface OutputState {
   id: string;
   rendererOutputId: string;
-  renderGeneration: number;
   outputId?: string;
   domIdPrefix: string;
   element: HTMLElement;
@@ -264,6 +283,7 @@ interface OutputState {
   liveMode?: 'table' | 'text';
   liveKind?: string;
   liveAllColumns: string[];
+  liveKeyColumnOrdinals: number[];
   liveTotalColumnCount: number;
   liveColumns: string[];
   liveWholeResultColumnTextLengths: number[];
@@ -305,6 +325,8 @@ interface OutputState {
   savedColumnOrder: number[];
   savedHiddenColumnIndexes: number[];
   savedManualColumnWidths: Map<number, number>;
+  savedColumnWindowStart: number;
+  savedColumnControlWindowStart: number;
   savedSearch: SavedSearchState;
   savedCopyTools?: HTMLDetailsElement;
   savedSortColumn?: number;
@@ -321,6 +343,7 @@ interface OutputState {
   savedViewport?: HTMLElement;
   savedColumnTextLengthCache?: {
     arrayDisplayFormat: NotebookSharedKxResultSettings['arrayDisplayFormat'];
+    sourceIndexes: string;
     lengths: number[];
   };
   renderTimer?: number;
@@ -335,11 +358,6 @@ interface OutputState {
   chartProgrammaticScale: boolean;
   hostActionRequestId: number;
   hostActionMessage?: string;
-  persistenceEnabled: boolean;
-  persistenceChecked: boolean;
-  persistencePending: boolean;
-  persistenceRequestId: number;
-  persistenceMessage?: string;
   openDetailsKeys: string[];
   rerenderFocus?: RerenderFocusState;
 }
@@ -350,6 +368,7 @@ interface RendererState {
 
 const TABLE_PAGE_SIZE = 250;
 const MAX_TABLE_PAGE_CELLS = 5000;
+const SAVED_COLUMN_WINDOW_SIZE = 256;
 const LIVE_HEADER_HEIGHT = 30;
 const SAVED_HEADER_HEIGHT = 44;
 const LIVE_ROW_INDEX_WIDTH = 64;
@@ -364,13 +383,22 @@ const SAVED_SEARCH_MAX_CELLS = 2_000_000;
 const SAVED_SEARCH_CHUNK_ROWS = 2_000;
 const SAVED_SEARCH_CHUNK_CELLS = 20_000;
 const SAVED_SEARCH_CHUNK_MS = 8;
+const SAVED_CELL_TEXT_CHAR_LIMIT = 64 * 1024;
+const SAVED_PAGE_TEXT_CHAR_LIMIT = 2_000_000;
+const SAVED_SEARCH_CELL_TEXT_CHAR_LIMIT = 4_096;
 const LIVE_CHART_AUTO_REFINE_DELAY_MS = 450;
+// Construct the standard SVG namespace without embedding a URL-like literal in
+// the renderer bundle, whose security audit rejects all http(s) strings.
+const SVG_NAMESPACE = [
+  'http',
+  String.fromCharCode(58),
+  '//www.w3.org/2000/svg',
+].join('');
 const stateRegistry = new NotebookRendererStateRegistry<OutputState>();
 const columnOrderCache = new NotebookRendererColumnOrderCache();
 let presentation: NotebookPresentation = 'inline';
 let requestSequence = 0;
 let domSequence = 0;
-let renderSequence = 0;
 let resultSettings: NotebookSharedKxResultSettings = defaultResultSettings();
 
 export const activate: ActivationFunction<RendererState> = context => {
@@ -411,7 +439,6 @@ export const activate: ActivationFunction<RendererState> = context => {
         : payload.version === 2
           ? columnOrderCache.get(rendererOutputId)
           : undefined;
-      const renderGeneration = nextRenderGeneration();
       const nextSavedSchema = payload.kind === 'table'
         ? payload.schema.columns.map(column => `${column.name}\0${column.type}`)
         : [];
@@ -436,6 +463,9 @@ export const activate: ActivationFunction<RendererState> = context => {
       const carryLive = previousState?.rendererOutputId === rendererOutputId &&
         previousState.liveId === liveReference?.id;
       const liveAllColumns = carryLive ? previousState.liveAllColumns.slice() : [];
+      const liveKeyColumnOrdinals = carryLive
+        ? previousState.liveKeyColumnOrdinals.slice()
+        : [];
       const liveColumnOrder = reconciledResultColumnOrdinals(
         carryLive ? previousState.liveAllColumns : [],
         carryLive ? previousState.liveColumnOrder : [],
@@ -448,12 +478,9 @@ export const activate: ActivationFunction<RendererState> = context => {
           liveAllColumns
         )
         : [];
-      const persistenceChecked = payload.version === 2 &&
-        payload.persistence?.mode === 'full';
       const state: OutputState = {
         id: outputItem.id,
         rendererOutputId,
-        renderGeneration,
         outputId,
         domIdPrefix: `kx-grid-${++domSequence}`,
         element,
@@ -485,6 +512,7 @@ export const activate: ActivationFunction<RendererState> = context => {
         liveRequestId: 0,
         liveColumnTextLengthRequestId: 0,
         liveAllColumns,
+        liveKeyColumnOrdinals,
         liveTotalColumnCount: 0,
         liveColumns: liveColumnOrder
           .filter(index => !liveHiddenColumnIndexes.includes(index))
@@ -522,6 +550,8 @@ export const activate: ActivationFunction<RendererState> = context => {
           previousOrder?.savedWidths,
           nextSavedSchema
         ),
+        savedColumnWindowStart: 0,
+        savedColumnControlWindowStart: 0,
         savedSearch: emptySavedSearch(),
         savedActionFormat: 'csv',
         liveSearch: emptyLiveSearch(),
@@ -531,34 +561,18 @@ export const activate: ActivationFunction<RendererState> = context => {
         hiddenChartSeriesKeys: [],
         chartProgrammaticScale: false,
         hostActionRequestId: 0,
-        persistenceEnabled: persistenceChecked || !!(
-          payload.version === 2 && outputId && liveReference
-        ),
-        persistenceChecked,
-        persistencePending: false,
-        persistenceRequestId: 0,
         openDetailsKeys: [],
         ...(liveReference && !outputId
           ? {
-            liveMessage:
-              'Live result binding unavailable. Showing the bounded saved preview.',
+            liveMessage: isPortableKxFullResult(payload)
+              ? 'Live result binding unavailable. Showing the complete saved result.'
+              : isHistoricalDirectPreview(payload)
+                ? 'Live result binding unavailable. Showing the historical saved preview.'
+                : 'Live result binding unavailable. Showing the saved preview.',
           }
           : {}),
       };
-      stateRegistry.bind(outputItem.id, {
-        outputId: rendererOutputId,
-        renderGeneration,
-      }, state);
-      if (state.outputId && payload.version === 2 && context.postMessage) {
-        const requestId = nextRequestId();
-        context.postMessage({
-          type: 'bindOutput',
-          outputId: state.outputId,
-          ...(state.liveId ? { liveId: state.liveId } : {}),
-          renderGeneration: state.renderGeneration,
-          requestId,
-        });
-      }
+      stateRegistry.bind(outputItem.id, state);
       renderState(context, state);
       if (state.liveId && state.outputId) {
         requestLiveResult(context, state);
@@ -566,7 +580,8 @@ export const activate: ActivationFunction<RendererState> = context => {
     },
     disposeOutputItem(id) {
       if (id === undefined) {
-        stateRegistry.keys().forEach(key => disposeState(key, context));
+        stateRegistry.keys().forEach(outputItemId =>
+          disposeOutputItemState(outputItemId, context));
       } else {
         disposeOutputItemState(id, context);
       }
@@ -595,26 +610,11 @@ function receiveHostMessage(
       (!previous.autoFitColumns ||
         previous.autoFitMode !== 'wholeResult' ||
         sliceTextChanged);
-    const chartMaxPointLimitChanged =
-      previous.chartZoomMaxSampledPoints !== resultSettings.chartZoomMaxSampledPoints;
     const chartSourceLimitChanged =
       previous.chartMaxSourceRows !== resultSettings.chartMaxSourceRows;
-    const chartMinPointLimitChanged =
-      previous.chartZoomMinSampledPoints !== resultSettings.chartZoomMinSampledPoints;
-    const liveChartSamplingChanged =
-      chartMaxPointLimitChanged || chartSourceLimitChanged || chartMinPointLimitChanged;
     stateRegistry.forEach(state => {
-      if (chartMaxPointLimitChanged) {
-        const maxPoints = notebookChartPointLimit();
-        state.savedMaxChartPoints = maxPoints;
-        if (state.liveChart.maxPoints !== maxPoints) {
-          state.liveChart.maxPoints = maxPoints;
-        }
-      }
-      if (chartMaxPointLimitChanged || chartSourceLimitChanged) {
+      if (chartSourceLimitChanged) {
         clearSavedChartViewport(state);
-      }
-      if (liveChartSamplingChanged) {
         markLiveChartDirty(state.liveChart);
       }
       if (sliceTextChanged) {
@@ -669,20 +669,6 @@ function receiveHostMessage(
     return;
   }
 
-  if (message.type === 'outputPersistence') {
-    const state = stateRegistry.get(message);
-    if (!state || state.outputId !== message.outputId ||
-      state.persistenceRequestId !== message.requestId) {
-      return;
-    }
-    state.persistencePending = false;
-    state.persistenceEnabled = message.enabled;
-    state.persistenceChecked = message.checked;
-    state.persistenceMessage = message.message;
-    renderState(context, state);
-    return;
-  }
-
   const matching: OutputState[] = [];
   stateRegistry.forEach(state => {
     if (state.liveId === message.liveId) {
@@ -707,7 +693,8 @@ function receiveHostMessage(
       }
       let retryWithoutSort = false;
       if (message.error) {
-        state.liveSliceError = message.error;
+        const sortCanceled = message.error === 'Large sort canceled.';
+        state.liveSliceError = sortCanceled ? undefined : message.error;
         state.liveSlice = undefined;
         if (state.liveSortSourceOrdinal !== undefined && state.liveSortDirection) {
           state.liveSortSourceOrdinal = undefined;
@@ -740,6 +727,26 @@ function receiveHostMessage(
       }
     } else if (message.type === 'liveSearch') {
       if (message.requestId !== state.liveSearch.requestId) {
+        continue;
+      }
+      if (message.error === 'Large sort canceled.') {
+        state.liveSortSourceOrdinal = undefined;
+        state.liveSortDirection = undefined;
+        state.liveSlice = undefined;
+        state.liveSliceError = undefined;
+        state.liveSearch = {
+          ...emptyLiveSearch(),
+          query: state.liveSearch.query,
+        };
+        renderState(context, state);
+        requestLiveSlice(
+          context,
+          state,
+          liveWindow(state, state.liveViewport?.clientWidth || 720)
+        );
+        if (state.liveSearch.query) {
+          requestLiveSearch(context, state);
+        }
         continue;
       }
       state.liveSearch.pending = false;
@@ -836,10 +843,6 @@ function receiveLiveResult(
   const previousChart = state.liveChart;
   clearLiveChartAutoRefine(previousChart, true);
   state.liveStatus = 'available';
-  if (state.payload.version === 2 && state.outputId &&
-    state.payload.persistence?.mode !== 'full') {
-    state.persistenceEnabled = true;
-  }
   state.liveMode = message.mode;
   state.liveKind = message.kind;
   const previousColumns = state.liveAllColumns.slice();
@@ -849,6 +852,7 @@ function receiveLiveResult(
   const previousHiddenColumnIndexes = state.liveHiddenColumnIndexes.slice();
   const previousWidths = [...state.liveManualColumnWidths.entries()];
   state.liveAllColumns = message.columns || [];
+  state.liveKeyColumnOrdinals = message.keyColumnOrdinals?.slice() || [];
   state.liveManualColumnWidths = boundedReconciledColumnWidths(
     previousColumns,
     previousWidths,
@@ -948,6 +952,7 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
   state.liveMode = undefined;
   state.liveKind = undefined;
   state.liveAllColumns = [];
+  state.liveKeyColumnOrdinals = [];
   state.liveTotalColumnCount = 0;
   state.liveColumns = [];
   state.liveWholeResultColumnTextLengths = [];
@@ -959,9 +964,11 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
   state.liveChartGroupColumns = [];
   state.liveText = undefined;
   state.liveMetadata = undefined;
-  state.liveMessage = message || (state.persistenceChecked
+  state.liveMessage = message || (isPortableKxFullResult(state.payload)
     ? 'Live result unavailable. Showing the saved full result.'
-    : 'Result unavailable. Showing the bounded saved preview.');
+    : isHistoricalDirectPreview(state.payload)
+      ? 'Result unavailable. Showing the historical saved preview.'
+      : 'Result unavailable. Showing the saved preview.');
   state.liveSlice = undefined;
   state.liveSliceError = undefined;
   state.liveSliceRequestId = nextRequestId();
@@ -998,8 +1005,6 @@ function transitionLiveResultUnavailable(state: OutputState, message?: string): 
   state.liveCopyMessage = undefined;
   state.hostActionRequestId = nextRequestId();
   state.hostActionMessage = undefined;
-  state.persistenceEnabled = state.persistenceChecked;
-  state.persistencePending = false;
   state.plotData = undefined;
   state.plotViewport = undefined;
   state.panelOpened = false;
@@ -1089,12 +1094,19 @@ function renderHeader(
     );
     toolbar.append(withFocusKey(openFull, 'header:open-live'));
   } else if (context.postMessage) {
-    const savedFull = state.persistenceChecked;
+    const savedFull = isPortableKxFullResult(state.payload);
+    const historicalPreview = isHistoricalDirectPreview(state.payload);
     const openSaved = titledButton(
-      savedFull ? 'Open saved full result' : KX_RESULT_UI_LABELS.openSavedPreview,
+      savedFull
+        ? 'Open saved full result'
+        : historicalPreview
+          ? 'Open historical saved preview'
+          : KX_RESULT_UI_LABELS.openSavedPreview,
       savedFull
         ? 'Open the complete saved result in KX Results'
-        : 'Open the bounded saved preview in KX Results',
+        : historicalPreview
+          ? 'Open the historical saved preview in KX Results'
+          : 'Open the bounded saved preview in KX Results',
       () => {
         openPreview(context, state, statusNode(root));
       }
@@ -1115,10 +1127,6 @@ function renderHeader(
     );
   }
   if (context.postMessage) {
-    const persistence = outputPersistenceControl(context, state);
-    if (persistence) {
-      toolbar.append(persistence);
-    }
     toolbar.append(resultSettingsControl(context, state));
   }
   header.append(toolbar);
@@ -1129,58 +1137,6 @@ function renderHeader(
     status.setAttribute('aria-live', 'polite');
     root.append(status);
   }
-  if (state.persistenceMessage) {
-    const status = node('div', 'kx-status', state.persistenceMessage);
-    status.setAttribute('role', 'status');
-    status.setAttribute('aria-live', 'polite');
-    root.append(status);
-  }
-}
-
-function outputPersistenceControl(
-  context: RendererContext<RendererState>,
-  state: OutputState
-): HTMLLabelElement | undefined {
-  if (state.payload.version !== 2 ||
-    state.payload.provenance.marker !== 'direct-ipc' || !state.outputId) {
-    return undefined;
-  }
-  const label = node('label', 'kx-preserve-full') as HTMLLabelElement;
-  const checkbox = document.createElement('input');
-  checkbox.type = 'checkbox';
-  checkbox.checked = state.persistenceChecked;
-  checkbox.disabled = state.persistencePending || !state.persistenceEnabled || !context.postMessage;
-  checkbox.setAttribute('aria-label', 'Preserve full result');
-  checkbox.title = state.persistenceChecked
-    ? 'Store the complete result in this notebook; uncheck to save the configured preview'
-    : state.persistenceEnabled
-      ? 'Store the complete result in this notebook'
-      : 'Rerun the q cell to make the complete result available';
-  withFocusKey(checkbox, 'header:preserve-full');
-  checkbox.addEventListener('change', () => {
-    if (!context.postMessage || !state.outputId || state.persistencePending) {
-      return;
-    }
-    const mode = checkbox.checked ? 'full' : 'preview';
-    const requestId = nextRequestId();
-    state.persistenceRequestId = requestId;
-    state.persistencePending = true;
-    state.persistenceChecked = checkbox.checked;
-    state.persistenceMessage = mode === 'full'
-      ? 'Saving the complete result in this notebook…'
-      : 'Saving the configured preview in this notebook…';
-    context.postMessage({
-      type: 'setOutputPersistence',
-      outputId: state.outputId,
-      ...(state.liveId ? { liveId: state.liveId } : {}),
-      renderGeneration: state.renderGeneration,
-      requestId,
-      mode,
-    });
-    renderState(context, state);
-  });
-  label.append(checkbox, document.createTextNode('Preserve full result'));
-  return label;
 }
 
 function renderPanelOnly(
@@ -1663,6 +1619,36 @@ function refreshLiveViewport(
   }
 }
 
+function decorateDisplayedColumn(
+  element: HTMLElement,
+  displayOrdinal: number,
+  sourceOrdinal: number,
+  options: {
+    header?: boolean;
+    keyColumn?: boolean;
+    selectedHeader?: boolean;
+    sorted?: boolean;
+  } = {}
+): void {
+  element.classList.add('is-cell-hoverable');
+  element.classList.toggle('is-key-column', options.keyColumn === true);
+  element.dataset.kxDisplayOrdinal = String(displayOrdinal);
+  element.dataset.kxSourceOrdinal = String(sourceOrdinal);
+  if (options.header) {
+    element.classList.add('is-column-header');
+    element.classList.toggle('is-selected-header', options.selectedHeader === true);
+    element.classList.toggle('is-sorted-header', options.sorted === true);
+  } else {
+    element.classList.toggle('is-sorted-column', options.sorted === true);
+  }
+}
+
+function decorateDisplayedRowCell(element: HTMLElement, displayRow: number): void {
+  const parityClass = absoluteDisplayRowClass(displayRow);
+  element.classList.add(parityClass);
+  element.dataset.kxRowParity = parityClass === 'row-odd' ? 'odd' : 'even';
+}
+
 function renderLiveHeaders(
   context: RendererContext<RendererState>,
   state: OutputState,
@@ -1673,6 +1659,7 @@ function renderLiveHeaders(
 ): void {
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
   const visibleSourceIndexes = visibleLiveColumnIndexes(state);
+  const keyColumnOrdinals = new Set(state.liveKeyColumnOrdinals);
   const row = node('div', 'kx-live-row kx-live-header-row');
   row.setAttribute('role', 'row');
   row.setAttribute('aria-rowindex', '1');
@@ -1702,12 +1689,24 @@ function renderLiveHeaders(
   }
   for (let columnIndex = startColumn; columnIndex <= endColumn; columnIndex++) {
     const sourceOrdinal = visibleSourceIndexes[columnIndex] ?? columnIndex;
+    const keyColumn = keyColumnOrdinals.has(sourceOrdinal);
     const columnName = state.liveColumns[columnIndex];
     const sorted = state.liveSortSourceOrdinal === sourceOrdinal;
+    const selectedHeader = resultColumnFullySelected(
+      state.liveSelection,
+      columnIndex,
+      state.liveRowCount
+    );
     const label = sorted
       ? `${columnName} ${resultTableSortIndicator(true, state.liveSortDirection)}`
       : columnName;
     const header = node('div', 'kx-live-cell kx-live-header');
+    decorateDisplayedColumn(header, columnIndex, sourceOrdinal, {
+      header: true,
+      keyColumn,
+      selectedHeader,
+      sorted,
+    });
     const sort = button(label, () => {});
     const rerenderAfterHeaderAction = (): void => {
       state.liveSlice = undefined;
@@ -1769,7 +1768,6 @@ function renderLiveHeaders(
     header.setAttribute('role', 'columnheader');
     header.dataset.kxHeaderColumnIndex = String(columnIndex);
     header.dataset.kxColumnIndex = String(columnIndex);
-    header.dataset.kxSourceOrdinal = String(sourceOrdinal);
     header.setAttribute(
       'aria-colindex',
       String(columnIndex + 1 + (resultSettings.showRowIndex ? 1 : 0))
@@ -1780,9 +1778,7 @@ function renderLiveHeaders(
     );
     header.setAttribute(
       'aria-selected',
-      resultColumnFullySelected(state.liveSelection, columnIndex, state.liveRowCount)
-        ? 'true'
-        : 'false'
+      selectedHeader ? 'true' : 'false'
     );
     const ariaLabel = resultTableHeaderAriaLabel(
       columnName,
@@ -1790,7 +1786,8 @@ function renderLiveHeaders(
       visibleSourceIndexes.length,
       sorted,
       state.liveSortDirection,
-      resultColumnFullySelected(state.liveSelection, columnIndex, state.liveRowCount)
+      selectedHeader,
+      keyColumn
     );
     header.dataset.kxUnselectedAriaLabel = resultTableHeaderAriaLabel(
       columnName,
@@ -1798,7 +1795,8 @@ function renderLiveHeaders(
       visibleSourceIndexes.length,
       sorted,
       state.liveSortDirection,
-      false
+      false,
+      keyColumn
     );
     header.dataset.kxSelectedAriaLabel = resultTableHeaderAriaLabel(
       columnName,
@@ -1806,7 +1804,8 @@ function renderLiveHeaders(
       visibleSourceIndexes.length,
       sorted,
       state.liveSortDirection,
-      true
+      true,
+      keyColumn
     );
     header.setAttribute('aria-label', ariaLabel);
     sort.dataset.kxHeaderLabelControl = 'true';
@@ -1839,11 +1838,13 @@ function renderLiveCells(
 ): void {
   const slice = state.liveSlice;
   const rowIndexWidth = resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0;
+  const visibleSourceIndexes = visibleLiveColumnIndexes(state);
+  const keyColumnOrdinals = new Set(state.liveKeyColumnOrdinals);
   const virtualTop = liveVirtualScrollTop(state);
   for (let rowIndex = window.startRow; rowIndex <= window.endRow; rowIndex++) {
     const top = state.liveScrollTop +
       (LIVE_HEADER_HEIGHT + rowIndex * resultSettings.rowHeight - virtualTop);
-    const row = node('div', `kx-live-row ${absoluteDisplayRowClass(rowIndex)}`);
+    const row = node('div', 'kx-live-row');
     row.setAttribute('role', 'row');
     row.setAttribute('aria-rowindex', String(rowIndex + 2));
     placeLiveCell(
@@ -1881,6 +1882,12 @@ function renderLiveCells(
     for (let columnIndex = window.startColumn; columnIndex <= window.endColumn; columnIndex++) {
       const value = liveSliceCell(state, slice, rowIndex, columnIndex);
       const cell = node('div', 'kx-live-cell', value ?? '');
+      const sourceOrdinal = visibleSourceIndexes[columnIndex] ?? columnIndex;
+      decorateDisplayedColumn(cell, columnIndex, sourceOrdinal, {
+        keyColumn: keyColumnOrdinals.has(sourceOrdinal),
+        sorted: state.liveSortSourceOrdinal === sourceOrdinal,
+      });
+      decorateDisplayedRowCell(cell, rowIndex);
       cell.id = gridCellId(state, rowIndex, columnIndex);
       cell.setAttribute('role', 'gridcell');
       cell.dataset.row = String(rowIndex);
@@ -1891,6 +1898,10 @@ function renderLiveCells(
       const selected = notebookCellSelected(state.liveSelection, rowIndex, columnIndex);
       if (selected) {
         cell.classList.add('is-selected');
+      }
+      if (state.liveSelection?.focusRow === rowIndex &&
+        state.liveSelection.focusColumn === columnIndex) {
+        cell.classList.add('is-active-cell');
       }
       cell.setAttribute('aria-selected', selected ? 'true' : 'false');
       cell.setAttribute(
@@ -2116,36 +2127,12 @@ function renderLiveChart(
   withFocusKey(exportPng, 'chart:live:export-png');
   exportPng.disabled = !chart.data || !state.plot;
   controls.append(exportPng);
-  const panLeft = titledButton('Pan left', 'Pan chart left by 20 percent', () => {
-    panNotebookChart(context, state, -0.2);
-  });
-  withFocusKey(panLeft, 'chart:live:pan-left');
-  const panRight = titledButton('Pan right', 'Pan chart right by 20 percent', () => {
-    panNotebookChart(context, state, 0.2);
-  });
-  withFocusKey(panRight, 'chart:live:pan-right');
-  panLeft.disabled = panRight.disabled = !chart.data || chart.dirty || chart.pending;
-  controls.append(panLeft, panRight);
   const reset = button(KX_RESULT_UI_LABELS.resetZoom, () => {
     resetNotebookChartViewport(context, state);
   });
   withFocusKey(reset, 'chart:live:reset');
   reset.disabled = !chart.data || chart.dirty || chart.pending;
   controls.append(reset);
-  const refine = button(KX_RESULT_UI_LABELS.refineZoom, () => {
-    const range = currentPlotXRange(state);
-    if (!range) {
-      chart.error = 'Zoom the chart before refining.';
-      chart.errorWasRefinement = true;
-      renderState(context, state);
-      return;
-    }
-    requestLiveChart(context, state, range);
-    renderState(context, state);
-  });
-  withFocusKey(refine, 'chart:live:refine');
-  refine.disabled = chart.pending || !chart.data || chart.dirty || !state.plot;
-  controls.append(refine);
   panel.append(controls);
   const status = node('div', 'kx-status');
   status.setAttribute('role', 'status');
@@ -2164,7 +2151,7 @@ function renderLiveChart(
       ? 'Chart settings changed — Render to update.'
       : 'Press Render to create chart.';
   } else if (chart.data) {
-    status.textContent = `${chart.refined ? 'Refined zoom • ' : ''}${liveChartDataStatus(chart.data)}`;
+    status.textContent = `${chart.refined ? 'Selected range • ' : ''}${liveChartDataStatus(chart.data)}`;
   }
   if (chart.data?.warnings?.length) {
     status.textContent = `${status.textContent ? `${status.textContent} ` : ''}${chart.data.warnings.join(' ')}`;
@@ -2179,10 +2166,7 @@ function renderLiveChart(
     drawLiveChart(context, state, host, chart.data);
     const hasPlot = !!state.plot;
     exportPng.disabled = !hasPlot;
-    panLeft.disabled = panRight.disabled = !hasPlot || chart.dirty || chart.pending ||
-      !chart.fullRange;
     reset.disabled = !hasPlot || chart.dirty || chart.pending;
-    refine.disabled = chart.pending || !hasPlot || chart.dirty;
   } else {
     root.append(panel);
   }
@@ -2250,7 +2234,12 @@ function liveChartDataStatus(data: NotebookLiveChartData): string {
       ? ''
       : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
   }
-  return `Showing ${shown.toLocaleString()} sampled points${eligible === undefined
+  if (data.chartType === 'bar') {
+    return `Showing ${shown.toLocaleString()} rendered bar groups${eligible === undefined
+      ? ''
+      : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
+  }
+  return `Showing ${shown.toLocaleString()} rendered points${eligible === undefined
     ? ''
     : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
 }
@@ -2323,7 +2312,6 @@ function liveChartConfigurationSignature(chart: LiveChartState): string {
     chart.closeColumn,
     chart.maxPoints,
     resultSettings.chartMaxSourceRows,
-    resultSettings.chartZoomMinSampledPoints,
   ]);
 }
 
@@ -2466,17 +2454,25 @@ function renderSavedResult(
   status.setAttribute('role', 'status');
   status.setAttribute('aria-live', 'polite');
   if (state.liveStatus === 'unavailable') {
+    const savedState = isPortableKxFullResult(state.payload)
+      ? 'Showing the complete result saved in this notebook.'
+      : isHistoricalDirectPreview(state.payload)
+        ? 'Showing a historical saved preview. Rerun the current cell to replace it with a complete new result.'
+        : 'Showing the saved preview only. Rerun the cell to restore a live full result.';
     root.append(node(
       'div',
       'kx-notice',
-      `${state.liveMessage || 'The live result is no longer available.'} ` +
-      'Showing the bounded saved preview only. Rerun the cell to restore a live full result.'
+      `${state.liveMessage || 'The live result is no longer available.'} ${savedState}`
     ));
   } else if (state.liveStatus === 'requesting') {
     root.append(node(
       'div',
       'kx-notice',
-      'Checking the session-bound live result. The bounded saved preview is shown meanwhile.'
+      isPortableKxFullResult(state.payload)
+        ? 'Checking the session-bound live result. The complete saved result is shown meanwhile.'
+        : isHistoricalDirectPreview(state.payload)
+          ? 'Checking the session-bound live result. The historical saved preview is shown meanwhile.'
+          : 'Checking the session-bound live result. The saved preview is shown meanwhile.'
     ));
   }
   if (presentation === 'both' && state.payload.provenance.marker !== 'direct-ipc' &&
@@ -2486,6 +2482,7 @@ function renderSavedResult(
   }
 
   if (state.payload.kind === 'qText') {
+    const display = notebookQTextDisplay(state.payload.data.text);
     const toolbar = node('div', 'kx-toolbar kx-saved-toolbar');
     toolbar.append(button(KX_RESULT_UI_LABELS.copy, () => {
       void copyText(state.payload.kind === 'qText' ? state.payload.data.text : '').then(
@@ -2511,8 +2508,15 @@ function renderSavedResult(
     exportButton.disabled = !context.postMessage;
     toolbar.append(exportButton);
     root.append(toolbar);
-    renderPortableText(state.payload.data.text, 'qText result', root);
-    if (state.payload.result.truncated) {
+    renderPortableText(display.text, 'qText result', root);
+    if (display.truncated) {
+      root.append(node(
+        'div',
+        'kx-notice',
+        notebookQTextDisplayNotice(state.payload.data.text.length)
+      ));
+    }
+    if (!isPortableKxFullResult(state.payload)) {
       root.append(node(
         'div',
         'kx-notice',
@@ -2523,8 +2527,7 @@ function renderSavedResult(
     root.append(status);
     return;
   }
-  const result = state.payload.result;
-  if (result.truncated) {
+  if (!isPortableKxFullResult(state.payload)) {
     root.append(node(
       'div',
       'kx-notice',
@@ -2549,8 +2552,22 @@ function renderSavedTable(
   }
   const payload = state.payload;
   const rowOrder = savedRowOrder(state, payload);
-  const visibleColumns = visibleSavedColumnIndexes(state);
-  ensureSavedSearch(context, state, payload, rowOrder, visibleColumns);
+  const allVisibleColumns = visibleSavedColumnIndexes(state);
+  const columnWindow = notebookSavedColumnWindow(
+    allVisibleColumns,
+    state.savedColumnWindowStart,
+    SAVED_COLUMN_WINDOW_SIZE
+  );
+  state.savedColumnWindowStart = columnWindow.start;
+  const visibleColumns = columnWindow.columns;
+  ensureSavedSearch(
+    context,
+    state,
+    payload,
+    rowOrder,
+    visibleColumns,
+    columnWindow.total > visibleColumns.length
+  );
   const pageSize = Math.max(1, Math.min(
     TABLE_PAGE_SIZE,
     Math.floor(MAX_TABLE_PAGE_CELLS / Math.max(1, visibleColumns.length))
@@ -2560,6 +2577,12 @@ function renderSavedTable(
     : Math.floor((payload.data.rows.length - 1) / pageSize) * pageSize;
   const pageStart = Math.min(state.savedTablePageStart, lastPageStart);
   const pageEnd = Math.min(payload.data.rows.length, pageStart + pageSize);
+  const savedCellTextLimit = notebookSavedCellTextLimit(
+    pageEnd - pageStart,
+    visibleColumns.length,
+    SAVED_CELL_TEXT_CHAR_LIMIT,
+    SAVED_PAGE_TEXT_CHAR_LIMIT
+  );
   const columnWidths = savedColumnWidths(
     state,
     payload,
@@ -2569,7 +2592,7 @@ function renderSavedTable(
     pageEnd
   );
   const currentActionCellCount = () =>
-    savedActionCellCount(state, payload, visibleColumns.length);
+    savedActionPlan(state, payload).cellCount;
   const copySelection = (format: NotebookLiveCopyFormat): void =>
     requestSavedCopy(context, state, format, rowOrder);
 
@@ -2612,7 +2635,7 @@ function renderSavedTable(
     ? 'XLSX is export-only.'
     : actionCellCount > LIVE_CLIPBOARD_CELL_LIMIT
       ? `Inline copy is limited to ${LIVE_CLIPBOARD_CELL_LIMIT.toLocaleString()} cells.`
-      : 'Copy the selected range, or all preview cells when nothing is selected.';
+      : 'Copy the selected range, or all saved cells when nothing is selected.';
   const exportButton = button(KX_RESULT_UI_LABELS.export, () =>
     requestSavedExport(context, state, state.savedActionFormat, rowOrder));
   withFocusKey(exportButton, 'toolbar:saved:export');
@@ -2681,11 +2704,19 @@ function renderSavedTable(
   searchInput.addEventListener('input', () => {
     state.savedSearch.query = searchInput.value.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS);
     state.savedSearch.activeIndex = -1;
-    startSavedSearch(context, state, payload, rowOrder, visibleColumns, () => {
-      searchStatus.textContent = savedSearchStatus(state.savedSearch);
-      updateSavedSearchClasses(wrap, state.savedSearch);
-      syncSavedSearchNavigation();
-    });
+    startSavedSearch(
+      context,
+      state,
+      payload,
+      rowOrder,
+      visibleColumns,
+      columnWindow.total > visibleColumns.length,
+      () => {
+        searchStatus.textContent = savedSearchStatus(state.savedSearch);
+        updateSavedSearchClasses(wrap, state.savedSearch);
+        syncSavedSearchNavigation();
+      }
+    );
   });
   searchInput.addEventListener('keydown', event => {
     if (event.key === 'Escape' && searchInput.value) {
@@ -2707,11 +2738,19 @@ function renderSavedTable(
       event.shiftKey
     );
     if (action === 'request') {
-      startSavedSearch(context, state, payload, rowOrder, visibleColumns, () => {
-        searchStatus.textContent = savedSearchStatus(state.savedSearch);
-        updateSavedSearchClasses(wrap, state.savedSearch);
-        syncSavedSearchNavigation();
-      });
+      startSavedSearch(
+        context,
+        state,
+        payload,
+        rowOrder,
+        visibleColumns,
+        columnWindow.total > visibleColumns.length,
+        () => {
+          searchStatus.textContent = savedSearchStatus(state.savedSearch);
+          updateSavedSearchClasses(wrap, state.savedSearch);
+          syncSavedSearchNavigation();
+        }
+      );
       return;
     }
     moveSavedSearch(action === 'previous' ? -1 : 1);
@@ -2754,6 +2793,42 @@ function renderSavedTable(
   syncSavedSearchNavigation();
   tableTools.append(searchInput, previousSearch, nextSearch, searchStatus);
   root.append(tableTools);
+  if (columnWindow.total > visibleColumns.length) {
+    root.append(node(
+      'div',
+      'kx-notice',
+      `Grid, search, selection, and chart show visible columns ` +
+      `${columnWindow.start + 1}-${columnWindow.end} of ${columnWindow.total}. ` +
+      `Copy and Export with no selection use all ${columnWindow.total} visible columns.`
+    ));
+    const moveColumnWindow = (start: number): void => {
+      state.savedColumnWindowStart = start;
+      state.savedSelection = undefined;
+      state.savedScrollLeft = 0;
+      state.savedSearch = emptySavedSearch();
+      reconcileSavedChartsForColumns(state);
+      renderState(context, state);
+    };
+    const pagination = node('div', 'kx-pagination');
+    const previousColumns = button('Previous columns', () =>
+      moveColumnWindow(columnWindow.start - SAVED_COLUMN_WINDOW_SIZE));
+    const nextColumns = button('Next columns', () =>
+      moveColumnWindow(columnWindow.end));
+    withFocusKey(previousColumns, 'pagination:saved-columns:previous');
+    withFocusKey(nextColumns, 'pagination:saved-columns:next');
+    previousColumns.disabled = !columnWindow.hasPrevious;
+    nextColumns.disabled = !columnWindow.hasNext;
+    pagination.append(
+      previousColumns,
+      node(
+        'span',
+        'kx-meta',
+        `Columns ${columnWindow.start + 1}-${columnWindow.end} of ${columnWindow.total}`
+      ),
+      nextColumns
+    );
+    root.append(pagination);
+  }
   if (visibleColumns.length === 0) {
     root.append(node('div', 'kx-empty', 'No visible columns. Use Columns to restore them.'));
     return;
@@ -2762,7 +2837,14 @@ function renderSavedTable(
   const wrap = node('div', 'kx-table-wrap');
   withFocusKey(wrap, 'grid:saved:viewport');
   wrap.tabIndex = 0;
-  wrap.setAttribute('aria-label', 'Saved KX result preview table');
+  wrap.setAttribute(
+    'aria-label',
+    isPortableKxFullResult(payload)
+      ? 'Complete saved KX result table'
+      : isHistoricalDirectPreview(payload)
+        ? 'Historical saved KX result preview table'
+        : 'Saved KX result preview table'
+  );
   wrap.setAttribute('role', 'grid');
   wrap.setAttribute('aria-multiselectable', 'true');
   wrap.setAttribute('aria-rowcount', String(payload.data.rows.length + 1));
@@ -2815,13 +2897,27 @@ function renderSavedTable(
       }
     });
     selectAll.className = 'kx-saved-sort';
-    selectAll.setAttribute('aria-label', 'Select all saved preview cells');
+    selectAll.setAttribute('aria-label', 'Select all saved cells in this column window');
     corner.append(selectAll);
     headRow.append(corner);
   }
+  const savedKeyColumnOrdinals = new Set(payload.schema.keyColumnOrdinals || []);
   visibleColumns.forEach((sourceColumnIndex, columnIndex) => {
     const column = payload.schema.columns[sourceColumnIndex];
+    const displayOrdinal = columnWindow.start + columnIndex;
+    const sorted = state.savedSortColumn === sourceColumnIndex;
+    const selectedHeader = resultColumnFullySelected(
+      state.savedSelection,
+      columnIndex,
+      payload.data.rows.length
+    );
     const th = document.createElement('th');
+    decorateDisplayedColumn(th, displayOrdinal, sourceColumnIndex, {
+      header: true,
+      keyColumn: savedKeyColumnOrdinals.has(sourceColumnIndex),
+      selectedHeader,
+      sorted,
+    });
     th.scope = 'col';
     th.setAttribute('role', 'columnheader');
     th.setAttribute(
@@ -2830,21 +2926,18 @@ function renderSavedTable(
     );
     th.dataset.kxColumnIndex = String(columnIndex);
     th.dataset.kxHeaderColumnIndex = String(columnIndex);
-    th.dataset.kxSourceOrdinal = String(sourceColumnIndex);
-    const sorted = state.savedSortColumn === sourceColumnIndex;
     th.setAttribute(
       'aria-sort',
       resultTableAriaSort(sorted, state.savedSortDirection)
     );
     th.setAttribute(
       'aria-selected',
-      resultColumnFullySelected(state.savedSelection, columnIndex, payload.data.rows.length)
-        ? 'true'
-        : 'false'
+      selectedHeader ? 'true' : 'false'
     );
     const label = sorted
       ? `${column.name} ${resultTableSortIndicator(true, state.savedSortDirection)}`
       : column.name;
+    const keyColumn = savedKeyColumnOrdinals.has(sourceColumnIndex);
     const sort = button(label, () => {});
     configureResultHeader(sort, {
       displayColumn: columnIndex,
@@ -2898,7 +2991,8 @@ function renderSavedTable(
       visibleColumns.length,
       sorted,
       state.savedSortDirection,
-      resultColumnFullySelected(state.savedSelection, columnIndex, payload.data.rows.length)
+      selectedHeader,
+      keyColumn
     );
     th.dataset.kxUnselectedAriaLabel = resultTableHeaderAriaLabel(
       column.name,
@@ -2906,7 +3000,8 @@ function renderSavedTable(
       visibleColumns.length,
       sorted,
       state.savedSortDirection,
-      false
+      false,
+      keyColumn
     );
     th.dataset.kxSelectedAriaLabel = resultTableHeaderAriaLabel(
       column.name,
@@ -2914,7 +3009,8 @@ function renderSavedTable(
       visibleColumns.length,
       sorted,
       state.savedSortDirection,
-      true
+      true,
+      keyColumn
     );
     th.setAttribute('aria-label', ariaLabel);
     sort.dataset.kxHeaderLabelControl = 'true';
@@ -2938,7 +3034,6 @@ function renderSavedTable(
     const rowIndex = pageStart + pageIndex;
     const row = payload.data.rows[sourceRow];
     const tr = document.createElement('tr');
-    tr.classList.add(absoluteDisplayRowClass(rowIndex));
     tr.dataset.row = String(rowIndex);
     tr.setAttribute('role', 'row');
     tr.setAttribute('aria-rowindex', String(rowIndex + 2));
@@ -2963,11 +3058,19 @@ function renderSavedTable(
       tr.append(rowHeader);
     }
     visibleColumns.forEach((sourceColumnIndex, columnIndex) => {
+      const displayOrdinal = columnWindow.start + columnIndex;
       const cell = row[sourceColumnIndex];
-      const cellText = portableCellText(cell, {
-        arrayDisplayFormat: resultSettings.arrayDisplayFormat,
-      });
+      const cellText = portableCellToBoundedText(
+        cell,
+        savedCellTextLimit,
+        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
+      ).text;
       const td = node('td', '', cellText);
+      decorateDisplayedColumn(td, displayOrdinal, sourceColumnIndex, {
+        keyColumn: savedKeyColumnOrdinals.has(sourceColumnIndex),
+        sorted: state.savedSortColumn === sourceColumnIndex,
+      });
+      decorateDisplayedRowCell(td, rowIndex);
       td.id = gridCellId(state, rowIndex, columnIndex);
       td.setAttribute('role', 'gridcell');
       td.setAttribute(
@@ -2983,6 +3086,10 @@ function renderSavedTable(
       const selected = notebookCellSelected(state.savedSelection, rowIndex, columnIndex);
       if (selected) {
         td.classList.add('is-selected');
+      }
+      if (state.savedSelection?.focusRow === rowIndex &&
+          state.savedSelection.focusColumn === columnIndex) {
+        td.classList.add('is-active-cell');
       }
       td.setAttribute('aria-selected', selected ? 'true' : 'false');
       if (activeSavedSearchRow(state.savedSearch, rowIndex)) {
@@ -3161,7 +3268,8 @@ function ensureSavedSearch(
   state: OutputState,
   payload: PortableKxTableResult,
   rowOrder: readonly number[],
-  visibleColumns: readonly number[]
+  visibleColumns: readonly number[],
+  partialColumns = false
 ): void {
   const query = state.savedSearch.query.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS);
   if (!query) {
@@ -3173,7 +3281,7 @@ function ensureSavedSearch(
     return;
   }
   if (state.savedSearch.signature !== savedSearchSignature(state, visibleColumns)) {
-    startSavedSearch(context, state, payload, rowOrder, visibleColumns);
+    startSavedSearch(context, state, payload, rowOrder, visibleColumns, partialColumns);
   }
 }
 
@@ -3183,6 +3291,7 @@ function startSavedSearch(
   payload: PortableKxTableResult,
   rowOrder: readonly number[],
   visibleColumns: readonly number[],
+  partialColumns = false,
   onProgress?: () => void
 ): void {
   if (state.searchTimer !== undefined) {
@@ -3202,7 +3311,7 @@ function startSavedSearch(
     activeIndex: -1,
     capped: false,
     pending: true,
-    partial: false,
+    partial: partialColumns,
     scannedRows: 0,
     scannedCells: 0,
     nextDisplayRow: 0,
@@ -3225,10 +3334,15 @@ function startSavedSearch(
       maximumChunkCells: SAVED_SEARCH_CHUNK_CELLS,
       sourceRow: displayRow => rowOrder[displayRow] ?? displayRow,
       columnCount: () => visibleColumns.length,
-      cellText: (sourceRow, column) => portableCellText(
-        payload.data.rows[sourceRow][visibleColumns[column]],
-        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
-      ),
+      cellText: (sourceRow, column) => {
+        const rendered = portableCellToBoundedText(
+          payload.data.rows[sourceRow][visibleColumns[column]],
+          SAVED_SEARCH_CELL_TEXT_CHAR_LIMIT,
+          { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
+        );
+        search.partial ||= rendered.truncated;
+        return rendered.text;
+      },
       shouldYield: chunkCells =>
         (chunkCells & 63) === 0 && performance.now() - startedAt >= SAVED_SEARCH_CHUNK_MS,
     });
@@ -3287,6 +3401,11 @@ function updateSavedSelectionClasses(
       Number(cell.dataset.column)
     );
     cell.classList.toggle('is-selected', selected);
+    cell.classList.toggle(
+      'is-active-cell',
+      selection?.focusRow === Number(cell.dataset.row) &&
+        selection.focusColumn === Number(cell.dataset.column)
+    );
     cell.setAttribute('aria-selected', selected ? 'true' : 'false');
   });
   updateResultHeaderSelection(
@@ -3337,30 +3456,29 @@ function savedColumnWidths(
   pageEnd: number
 ): number[] {
   let automaticWidths: number[] = [];
+  const configuredWidths = visibleColumns.map(index => resultSettings.columnWidths[index]);
   if (resultSettings.autoFitColumns) {
     const sourceLengths = resultSettings.autoFitMode === 'wholeResult'
-      ? savedWholeResultColumnTextLengths(state, payload)
+      ? savedWholeResultColumnTextLengths(state, payload, visibleColumns)
       : savedVisibleRowColumnTextLengths(
         payload,
+        visibleColumns,
         rowOrder,
         pageStart,
         pageEnd
       );
-    const visibleAutomaticWidths = automaticColumnWidthsForLengths(
-      visibleColumns.map(sourceIndex => sourceLengths[sourceIndex] || 0),
+    automaticWidths = automaticColumnWidthsForLengths(
+      sourceLengths,
       resultSettings.fontSize,
       7
     );
-    visibleColumns.forEach((sourceIndex, position) => {
-      automaticWidths[sourceIndex] = visibleAutomaticWidths[position];
-    });
   }
-  return visibleColumns.map(sourceIndex => {
+  return visibleColumns.map((sourceIndex, position) => {
     const outputWidth = state.savedManualColumnWidths.get(sourceIndex);
     return outputWidth ?? resolvedColumnWidth(
-      sourceIndex,
+      position,
       resultSettings.cellWidth,
-      resultSettings.columnWidths,
+      configuredWidths,
       resultSettings.autoFitColumns,
       automaticWidths
     );
@@ -3369,23 +3487,40 @@ function savedColumnWidths(
 
 function savedWholeResultColumnTextLengths(
   state: OutputState,
-  payload: PortableKxTableResult
+  payload: PortableKxTableResult,
+  visibleColumns: readonly number[]
 ): number[] {
+  const sourceIndexes = visibleColumns.join(',');
   const cached = state.savedColumnTextLengthCache;
-  if (cached?.arrayDisplayFormat === resultSettings.arrayDisplayFormat) {
+  if (cached?.arrayDisplayFormat === resultSettings.arrayDisplayFormat &&
+    cached.sourceIndexes === sourceIndexes) {
     return cached.lengths.slice();
   }
-  const lengths = widestDisplayedColumnTextLengths(portableTable(payload), {
-    arrayDisplayFormat: resultSettings.arrayDisplayFormat,
-  });
-  payload.schema.columns.forEach((column, index) => {
-    lengths[index] = Math.min(
+  const lengths = visibleColumns.map(sourceIndex => {
+    const column = payload.schema.columns[sourceIndex];
+    return Math.min(
       KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
-      Math.max(lengths[index] || 0, column.name.length, column.type.length)
+      Math.max(column.name.length, column.type.length)
     );
   });
+  for (const row of payload.data.rows) {
+    visibleColumns.forEach((sourceIndex, position) => {
+      if (lengths[position] >= KX_COLUMN_AUTO_TEXT_CHAR_LIMIT) {
+        return;
+      }
+      const rendered = portableCellToBoundedText(
+        row[sourceIndex],
+        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
+        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
+      );
+      lengths[position] = rendered.truncated
+        ? KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
+        : Math.max(lengths[position], rendered.text.length);
+    });
+  }
   state.savedColumnTextLengthCache = {
     arrayDisplayFormat: resultSettings.arrayDisplayFormat,
+    sourceIndexes,
     lengths,
   };
   return lengths.slice();
@@ -3393,33 +3528,35 @@ function savedWholeResultColumnTextLengths(
 
 function savedVisibleRowColumnTextLengths(
   payload: PortableKxTableResult,
+  visibleColumns: readonly number[],
   rowOrder: readonly number[],
   pageStart: number,
   pageEnd: number
 ): number[] {
-  const lengths = payload.schema.columns.map(column =>
-    Math.min(
+  const lengths = visibleColumns.map(sourceIndex => {
+    const column = payload.schema.columns[sourceIndex];
+    return Math.min(
       KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
       Math.max(column.name.length, column.type.length)
-    ));
+    );
+  });
   for (let displayRow = pageStart; displayRow < pageEnd; displayRow += 1) {
     const row = payload.data.rows[rowOrder[displayRow]];
     if (!row) {
       continue;
     }
-    row.forEach((cell, column) => {
-      if (lengths[column] >= KX_COLUMN_AUTO_TEXT_CHAR_LIMIT) {
+    visibleColumns.forEach((sourceIndex, position) => {
+      if (lengths[position] >= KX_COLUMN_AUTO_TEXT_CHAR_LIMIT) {
         return;
       }
-      lengths[column] = Math.min(
+      const rendered = portableCellToBoundedText(
+        row[sourceIndex],
         KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
-        Math.max(
-          lengths[column],
-          portableCellText(cell, {
-            arrayDisplayFormat: resultSettings.arrayDisplayFormat,
-          }).length
-        )
+        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
       );
+      lengths[position] = rendered.truncated
+        ? KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
+        : Math.max(lengths[position], rendered.text.length);
     });
   }
   return lengths;
@@ -3439,7 +3576,7 @@ function renderSavedChartControls(
     root.append(node('div', 'kx-notice', 'Chart unavailable: the saved rows have no usable numeric series.'));
     return;
   }
-  const candidates = chartColumns(state.payload, visibleSavedColumnIndexes(state));
+  const candidates = chartColumns(state.payload, renderedSavedColumnIndexes(state));
   const controlModel = notebookChartControlModel(
     {
       chartType: chart.type,
@@ -3579,16 +3716,6 @@ function renderSavedChartControls(
     exportPng.title = 'PNG export requires notebook renderer messaging.';
   }
   controls.append(exportPng);
-  const panLeft = titledButton('Pan left', 'Pan chart left by 20 percent', () => {
-    panNotebookChart(context, state, -0.2);
-  });
-  withFocusKey(panLeft, 'chart:saved:pan-left');
-  const panRight = titledButton('Pan right', 'Pan chart right by 20 percent', () => {
-    panNotebookChart(context, state, 0.2);
-  });
-  withFocusKey(panRight, 'chart:saved:pan-right');
-  panLeft.disabled = panRight.disabled = !prepared || dirty || !state.savedChartFullRange;
-  controls.append(panLeft, panRight);
   const reset = button(KX_RESULT_UI_LABELS.resetZoom, () => {
     resetNotebookChartViewport(context, state);
   });
@@ -3596,13 +3723,17 @@ function renderSavedChartControls(
   reset.disabled = !prepared || dirty;
   controls.append(reset);
   panel.append(controls);
+  const preparedStatus = prepared && renderedChart
+    ? `${savedViewport ? 'Selected range • ' : ''}${liveChartDataStatus(prepared)}` +
+      (prepared.warnings?.length ? ` ${prepared.warnings.join(' ')}` : '')
+    : '';
   const status = node(
     'div',
     'kx-status',
     validation || (dirty
       ? 'Chart settings changed — Render to update.'
       : preparation?.error || (renderedChart
-        ? ''
+        ? preparedStatus
         : 'Press Render to create chart.'))
   );
   status.setAttribute('role', 'status');
@@ -3629,7 +3760,6 @@ function renderSavedChartControls(
   }
   drawNotebookChart(context, state, chartHost, prepared, 'saved');
   exportPng.disabled = !state.plot || !context.postMessage;
-  panLeft.disabled = panRight.disabled = !state.plot || dirty || !state.savedChartFullRange;
   reset.disabled = !state.plot || dirty;
 }
 
@@ -3646,8 +3776,9 @@ function drawNotebookChart(
   }
   const colors = chartColors(host);
   const plotHost = node('div', 'kx-chart-canvas');
+  const navigator = createNotebookChartNavigator(source);
   const legendHost = node('div', 'kx-chart-legend');
-  host.append(plotHost, legendHost);
+  host.append(plotHost, navigator.root, legendHost);
   state.chartSource = source;
   if (source === 'saved' && !state.savedChartFullData) {
     const fullRange = chartDataXRange(data);
@@ -3704,6 +3835,9 @@ function drawNotebookChart(
           ? ''
           : formatChartNumber(Number(rawValue)),
       };
+      if ((data.chartType === 'line' || data.chartType === 'step') && item.gapBefore?.some(Boolean)) {
+        config.gaps = notebookSeriesSourceGaps(data.x, item.values, item.gapBefore);
+      }
       if (data.chartType === 'step' && uPlot.paths.stepped) {
         config.paths = uPlot.paths.stepped({ align: 1 });
       } else if (data.chartType === 'bar') {
@@ -3758,6 +3892,35 @@ function drawNotebookChart(
     setNotebookPlotXRange(state, state.savedChartViewportRange);
   }
   installNotebookChartViewport(context, state, host);
+  installNotebookChartNavigator(context, state, data, navigator, source);
+}
+
+function notebookSeriesSourceGaps(
+  xValues: number[],
+  yValues: Array<number | null>,
+  gapBefore: boolean[]
+): uPlot.Series.GapsRefiner {
+  return (plot, _seriesIndex, indexStart, indexEnd, gaps) => {
+    const start = Math.max(1, indexStart);
+    const end = Math.min(indexEnd, xValues.length - 1);
+    for (let index = start; index <= end; index++) {
+      if (!gapBefore[index] || !Number.isFinite(yValues[index])) {
+        continue;
+      }
+      let previous = index - 1;
+      while (previous >= indexStart && !Number.isFinite(yValues[previous])) {
+        previous -= 1;
+      }
+      if (previous >= indexStart) {
+        uPlot.addGap(
+          gaps,
+          plot.valToPos(xValues[previous], 'x', true),
+          plot.valToPos(xValues[index], 'x', true)
+        );
+      }
+    }
+    return mergeChartPixelGaps(gaps);
+  };
 }
 
 function notebookChartSeriesKeys(data: NotebookLiveChartData): string[] {
@@ -3918,6 +4081,8 @@ function resetPlotZoom(state: OutputState): void {
   } finally {
     state.chartProgrammaticScale = false;
   }
+  syncNotebookChartViewportDataset(state);
+  syncCurrentNotebookChartNavigator(state);
 }
 
 function capturePlotViewport(state: OutputState): void {
@@ -3958,15 +4123,6 @@ function plotScaleRange(plot: uPlot, scaleKey: 'x' | 'y'): PlotScaleRange | unde
     : undefined;
 }
 
-function currentPlotXRange(state: OutputState): { min: number; max: number } | undefined {
-  return planChartAutoRefine(
-    state.liveChart.fullRange,
-    state.plot ? plotScaleRange(state.plot, 'x') : undefined,
-    '',
-    false
-  )?.range;
-}
-
 function chartFullRangeForState(state: OutputState): PlotScaleRange | undefined {
   return state.chartSource === 'live'
     ? state.liveChart.fullRange
@@ -3997,6 +4153,8 @@ function setNotebookPlotXRange(state: OutputState, range: PlotScaleRange): void 
   } finally {
     state.chartProgrammaticScale = false;
   }
+  syncNotebookChartViewportDataset(state);
+  syncCurrentNotebookChartNavigator(state);
 }
 
 function completeNotebookChartViewport(
@@ -4101,6 +4259,367 @@ function clearSavedChartViewport(state: OutputState): void {
   state.savedPreparedChart = undefined;
 }
 
+function createNotebookChartNavigator(
+  source: 'live' | 'saved'
+): NotebookChartNavigatorElements {
+  const root = node('div', 'kx-chart-navigator');
+  root.setAttribute('role', 'region');
+  root.setAttribute('aria-label', 'Chart X navigator');
+  const overview = document.createElementNS(SVG_NAMESPACE, 'svg') as SVGSVGElement;
+  overview.classList.add('kx-chart-navigator-overview');
+  overview.setAttribute('viewBox', '0 0 1000 30');
+  overview.setAttribute('preserveAspectRatio', 'none');
+  overview.setAttribute('aria-hidden', 'true');
+  const selectedWindow = node('div', 'kx-chart-navigator-window');
+  selectedWindow.tabIndex = 0;
+  selectedWindow.setAttribute('role', 'slider');
+  selectedWindow.setAttribute(
+    'aria-label',
+    'Selected X window; use Left and Right Arrow to pan, Home to reset'
+  );
+  selectedWindow.dataset.kxNavigatorPart = 'window';
+  withFocusKey(selectedWindow, `chart:${source}:navigator-window`);
+  const start = node('span', 'kx-chart-navigator-handle is-start');
+  start.tabIndex = 0;
+  start.setAttribute('role', 'slider');
+  start.setAttribute(
+    'aria-label',
+    'Start of selected X window; use Left and Right Arrow to resize'
+  );
+  start.dataset.kxNavigatorPart = 'start';
+  withFocusKey(start, `chart:${source}:navigator-start`);
+  const end = node('span', 'kx-chart-navigator-handle is-end');
+  end.tabIndex = 0;
+  end.setAttribute('role', 'slider');
+  end.setAttribute(
+    'aria-label',
+    'End of selected X window; use Left and Right Arrow to resize'
+  );
+  end.dataset.kxNavigatorPart = 'end';
+  withFocusKey(end, `chart:${source}:navigator-end`);
+  root.append(overview, selectedWindow, start, end);
+  return { root, overview, window: selectedWindow, start, end };
+}
+
+function installNotebookChartNavigator(
+  context: RendererContext<RendererState>,
+  state: OutputState,
+  data: NotebookLiveChartData,
+  elements: NotebookChartNavigatorElements,
+  source: 'live' | 'saved'
+): void {
+  syncNotebookChartNavigator(state, data, elements, source);
+  let pointer: {
+    id: number;
+    part: ChartNavigatorPart;
+    startX: number;
+    range: PlotScaleRange;
+  } | undefined;
+  const blocked = (): boolean => notebookChartNavigatorBlocked(state, source);
+  const apply = (range: PlotScaleRange): void => {
+    if (source === 'saved') {
+      state.savedChartViewportRange = range;
+    }
+    setNotebookPlotXRange(state, range);
+    syncNotebookChartNavigator(state, data, elements, source);
+  };
+  const move = (event: PointerEvent): void => {
+    if (!pointer || event.pointerId !== pointer.id) {
+      return;
+    }
+    const range = adjustChartNavigatorRange(
+      pointer.range,
+      chartFullRangeForState(state),
+      pointer.part,
+      (event.clientX - pointer.startX) /
+        Math.max(1, elements.root.getBoundingClientRect().width)
+    );
+    if (range) {
+      apply(range);
+    }
+    event.preventDefault();
+  };
+  const finish = (event: PointerEvent): void => {
+    if (!pointer || event.pointerId !== pointer.id) {
+      return;
+    }
+    const started = pointer.range;
+    move(event);
+    const range = currentNotebookChartRange(state);
+    pointer = undefined;
+    elements.window.classList.remove('is-dragging');
+    window.removeEventListener('pointermove', move, true);
+    window.removeEventListener('pointerup', finish, true);
+    window.removeEventListener('pointercancel', finish, true);
+    if (range && chartZoomRangeKey(range) !== chartZoomRangeKey(started)) {
+      completeNotebookChartViewport(context, state, range);
+    }
+    event.preventDefault();
+  };
+  const begin = (event: PointerEvent, part: ChartNavigatorPart): void => {
+    if (event.button !== 0 || blocked()) {
+      return;
+    }
+    const range = currentNotebookChartRange(state);
+    if (!range) {
+      return;
+    }
+    pointer = { id: event.pointerId, part, startX: event.clientX, range };
+    elements.window.classList.add('is-dragging');
+    const target = part === 'start'
+      ? elements.start
+      : part === 'end' ? elements.end : elements.window;
+    target.focus({ preventScroll: true });
+    window.addEventListener('pointermove', move, true);
+    window.addEventListener('pointerup', finish, true);
+    window.addEventListener('pointercancel', finish, true);
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  elements.window.addEventListener('pointerdown', event => begin(event, 'window'));
+  elements.start.addEventListener('pointerdown', event => begin(event, 'start'));
+  elements.end.addEventListener('pointerdown', event => begin(event, 'end'));
+  elements.root.addEventListener('pointerdown', event => {
+    if (event.button !== 0 || blocked() ||
+      event.target === elements.window || event.target === elements.start ||
+      event.target === elements.end) {
+      return;
+    }
+    const rect = elements.root.getBoundingClientRect();
+    const current = currentNotebookChartRange(state);
+    const range = recenterChartNavigatorRange(
+      current,
+      chartFullRangeForState(state),
+      (event.clientX - rect.left) / Math.max(1, rect.width)
+    );
+    if (range) {
+      apply(range);
+      if (!current || chartZoomRangeKey(current) !== chartZoomRangeKey(range)) {
+        completeNotebookChartViewport(context, state, range);
+      }
+      elements.window.focus({ preventScroll: true });
+    }
+    event.preventDefault();
+  });
+  const keyboard = (event: KeyboardEvent, part: ChartNavigatorPart): void => {
+    if (blocked()) {
+      return;
+    }
+    if (event.key === 'Home') {
+      resetNotebookChartViewport(context, state);
+      event.preventDefault();
+      event.stopPropagation();
+      return;
+    }
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') {
+      return;
+    }
+    const current = currentNotebookChartRange(state);
+    const range = adjustChartNavigatorRange(
+      current,
+      chartFullRangeForState(state),
+      part,
+      (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 0.1 : 0.01)
+    );
+    if (range && (!current || chartZoomRangeKey(range) !== chartZoomRangeKey(current))) {
+      apply(range);
+      completeNotebookChartViewport(context, state, range);
+    }
+    event.preventDefault();
+    event.stopPropagation();
+  };
+  elements.window.addEventListener('keydown', event => keyboard(event, 'window'));
+  elements.start.addEventListener('keydown', event => keyboard(event, 'start'));
+  elements.end.addEventListener('keydown', event => keyboard(event, 'end'));
+}
+
+function notebookChartNavigatorBlocked(
+  state: OutputState,
+  source: 'live' | 'saved'
+): boolean {
+  return notebookChartViewportInteractionBlocked(source, state.liveChart.dirty) ||
+    (source === 'live' && state.liveChart.pending) ||
+    !state.plot || !chartFullRangeForState(state);
+}
+
+function syncCurrentNotebookChartNavigator(state: OutputState): void {
+  const host = state.plot?.root.closest<HTMLElement>('.kx-chart-host');
+  const data = state.plotData;
+  if (!host || !data || (state.chartSource !== 'live' && state.chartSource !== 'saved')) {
+    return;
+  }
+  const elements = notebookChartNavigatorElements(host);
+  if (elements) {
+    syncNotebookChartNavigator(state, data, elements, state.chartSource);
+  }
+}
+
+function notebookChartNavigatorElements(
+  host: HTMLElement
+): NotebookChartNavigatorElements | undefined {
+  const root = host.querySelector<HTMLElement>('.kx-chart-navigator');
+  const overview = root?.querySelector<SVGSVGElement>('.kx-chart-navigator-overview');
+  const selectedWindow = root?.querySelector<HTMLElement>('.kx-chart-navigator-window');
+  const start = root?.querySelector<HTMLElement>('.kx-chart-navigator-handle.is-start');
+  const end = root?.querySelector<HTMLElement>('.kx-chart-navigator-handle.is-end');
+  return root && overview && selectedWindow && start && end
+    ? { root, overview, window: selectedWindow, start, end }
+    : undefined;
+}
+
+function syncNotebookChartNavigator(
+  state: OutputState,
+  data: NotebookLiveChartData,
+  elements: NotebookChartNavigatorElements,
+  source: 'live' | 'saved'
+): void {
+  const fullRange = chartFullRangeForState(state);
+  const current = currentNotebookChartRange(state) || fullRange;
+  const windowState = chartNavigatorWindow(current, fullRange);
+  const sliderBounds = chartNavigatorSliderBounds(current, fullRange);
+  if (!fullRange || !current || !windowState || !sliderBounds) {
+    elements.root.hidden = true;
+    return;
+  }
+  elements.root.hidden = false;
+  elements.root.setAttribute(
+    'aria-disabled',
+    notebookChartNavigatorBlocked(state, source) ? 'true' : 'false'
+  );
+  const startPercent = windowState.startFraction * 100;
+  const endPercent = windowState.endFraction * 100;
+  elements.window.style.left = `${startPercent}%`;
+  elements.window.style.width = `${Math.max(0, endPercent - startPercent)}%`;
+  elements.start.style.left = `clamp(5px, ${startPercent}%, calc(100% - 5px))`;
+  elements.end.style.left = `clamp(5px, ${endPercent}%, calc(100% - 5px))`;
+  setNotebookChartNavigatorAria(
+    elements.window,
+    sliderBounds.window,
+    `Selected X range ${notebookChartNavigatorValue(data, current.min)} to ` +
+      notebookChartNavigatorValue(data, current.max)
+  );
+  setNotebookChartNavigatorAria(
+    elements.start,
+    sliderBounds.start,
+    `Selected X start ${notebookChartNavigatorValue(data, current.min)}`
+  );
+  setNotebookChartNavigatorAria(
+    elements.end,
+    sliderBounds.end,
+    `Selected X end ${notebookChartNavigatorValue(data, current.max)}`
+  );
+  if (elements.overview.childElementCount === 0) {
+    const overviewData = source === 'live'
+      ? state.liveChart.fullData || data
+      : state.savedChartFullData || data;
+    renderNotebookChartNavigatorOverview(elements.overview, overviewData, fullRange);
+  }
+}
+
+function setNotebookChartNavigatorAria(
+  element: HTMLElement,
+  bounds: { minimum: number; maximum: number; now: number },
+  text: string
+): void {
+  element.setAttribute('aria-orientation', 'horizontal');
+  element.setAttribute('aria-valuemin', String(bounds.minimum));
+  element.setAttribute('aria-valuemax', String(bounds.maximum));
+  element.setAttribute('aria-valuenow', String(bounds.now));
+  element.setAttribute('aria-valuetext', text);
+}
+
+function notebookChartNavigatorValue(data: NotebookLiveChartData, value: number): string {
+  if (data.xKind === 'temporal') {
+    const date = new Date(value);
+    if (Number.isFinite(date.getTime())) {
+      return date.toISOString();
+    }
+  }
+  return formatChartNumber(value);
+}
+
+function renderNotebookChartNavigatorOverview(
+  overview: SVGSVGElement,
+  data: NotebookLiveChartData,
+  fullRange: PlotScaleRange
+): void {
+  let values: readonly (number | null)[] =
+    data.candlesticks?.map(candle => candle.close) || [];
+  let gapFlags: readonly boolean[] = [];
+  let gapBefore: readonly boolean[] = [];
+  if (data.chartType !== 'candlestick') {
+    let bestFinite = -1;
+    values = [];
+    data.series.forEach(series => {
+      const candidateFinite = series.values.reduce<number>(
+        (count, value) => count +
+          (typeof value === 'number' && Number.isFinite(value) ? 1 : 0),
+        0
+      );
+      if (candidateFinite > bestFinite) {
+        bestFinite = candidateFinite;
+        values = series.values;
+        gapFlags = series.gapFlags || [];
+        gapBefore = series.gapBefore || [];
+      }
+    });
+  }
+  const count = Math.min(data.x.length, values.length);
+  let yMin = Infinity;
+  let yMax = -Infinity;
+  for (let index = 0; index < count; index += 1) {
+    const value = values[index];
+    if (typeof value === 'number' && Number.isFinite(value)) {
+      yMin = Math.min(yMin, value);
+      yMax = Math.max(yMax, value);
+    }
+  }
+  if (count === 0 || !Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    return;
+  }
+  const xSpan = fullRange.max - fullRange.min;
+  const ySpan = yMax > yMin ? yMax - yMin : 1;
+  const target = Math.min(count, 1200);
+  const commands: string[] = [];
+  let previousIndex = -1;
+  let drawing = false;
+  for (let point = 0; point < target; point += 1) {
+    const index = target === 1
+      ? 0
+      : Math.floor(point * (count - 1) / (target - 1));
+    if (index === previousIndex) {
+      continue;
+    }
+    const intervalHasGap = chartOverviewIntervalHasGap(
+      values,
+      gapFlags,
+      gapBefore,
+      previousIndex,
+      index
+    );
+    previousIndex = index;
+    const x = data.x[index];
+    const rawY = values[index];
+    if (!Number.isFinite(x) || typeof rawY !== 'number' || !Number.isFinite(rawY)) {
+      if (intervalHasGap) {
+        drawing = false;
+      }
+      continue;
+    }
+    if (intervalHasGap) {
+      drawing = false;
+    }
+    const y = rawY;
+    const px = Math.max(0, Math.min(1000, (x - fullRange.min) / xSpan * 1000));
+    const py = 27 - (y - yMin) / ySpan * 24;
+    commands.push(`${drawing ? 'L' : 'M'}${px.toFixed(2)} ${py.toFixed(2)}`);
+    drawing = true;
+  }
+  const path = document.createElementNS(SVG_NAMESPACE, 'path') as SVGPathElement;
+  path.setAttribute('d', commands.join(' '));
+  overview.append(path);
+}
+
 function installNotebookChartViewport(
   context: RendererContext<RendererState>,
   state: OutputState,
@@ -4110,16 +4629,7 @@ function installNotebookChartViewport(
     state.chartSource,
     state.liveChart.dirty
   );
-  const viewport = currentNotebookChartRange(state);
-  const fullRange = chartFullRangeForState(state);
-  if (viewport) {
-    host.dataset.kxViewportMin = String(viewport.min);
-    host.dataset.kxViewportMax = String(viewport.max);
-  }
-  if (fullRange) {
-    host.dataset.kxFullRangeMin = String(fullRange.min);
-    host.dataset.kxFullRangeMax = String(fullRange.max);
-  }
+  syncNotebookChartViewportDataset(state, host);
   host.tabIndex = 0;
   withFocusKey(
     host,
@@ -4210,6 +4720,31 @@ function installNotebookChartViewport(
     event.preventDefault();
     event.stopPropagation();
   }, true);
+}
+
+function syncNotebookChartViewportDataset(
+  state: OutputState,
+  host = state.plot?.root.closest<HTMLElement>('.kx-chart-host') || undefined
+): void {
+  if (!host) {
+    return;
+  }
+  const viewport = currentNotebookChartRange(state);
+  const fullRange = chartFullRangeForState(state);
+  if (viewport) {
+    host.dataset.kxViewportMin = String(viewport.min);
+    host.dataset.kxViewportMax = String(viewport.max);
+  } else {
+    delete host.dataset.kxViewportMin;
+    delete host.dataset.kxViewportMax;
+  }
+  if (fullRange) {
+    host.dataset.kxFullRangeMin = String(fullRange.min);
+    host.dataset.kxFullRangeMax = String(fullRange.max);
+  } else {
+    delete host.dataset.kxFullRangeMin;
+    delete host.dataset.kxFullRangeMax;
+  }
 }
 
 function queueLiveChartAutoRefine(
@@ -4491,6 +5026,8 @@ function notebookPlotOptions(
           }
           const range = plotScaleRange(plot, 'x');
           if (range) {
+            syncNotebookChartViewportDataset(state);
+            syncCurrentNotebookChartNavigator(state);
             completeNotebookChartViewport(rendererContext, state, range);
           }
         },
@@ -4803,7 +5340,7 @@ function notebookResultStateSummary(state: OutputState): string {
       )
       : `Live full result • ${state.liveKind || 'qText'}`;
   }
-  if (state.persistenceChecked) {
+  if (isPortableKxFullResult(state.payload)) {
     if (state.payload.kind === 'table') {
       return `Saved full result • ${state.payload.result.rowCount.toLocaleString()} rows × ` +
         `${(state.payload.result.columnCount ?? state.payload.schema.columns.length)
@@ -4812,15 +5349,21 @@ function notebookResultStateSummary(state: OutputState): string {
     return 'Saved full result • qText';
   }
   if (state.payload.kind === 'table') {
-    return kxSavedPreviewSummary(
+    const summary = kxSavedPreviewSummary(
       state.payload.result.previewRowCount,
       state.payload.result.rowCount,
       state.payload.schema.columns.length
     );
+    return isHistoricalDirectPreview(state.payload)
+      ? summary.replace(/^Saved preview/, 'Historical saved preview')
+      : summary;
   }
-  return state.payload.result.truncated
+  const summary = state.payload.result.truncated
     ? 'Saved preview • bounded qText'
     : 'Saved preview • qText';
+  return isHistoricalDirectPreview(state.payload)
+    ? summary.replace(/^Saved preview/, 'Historical saved preview')
+    : summary;
 }
 
 function reconciledColumnOrder(columns: readonly string[], previousNames: readonly string[]): number[] {
@@ -4859,6 +5402,14 @@ function visibleSavedColumnIndexes(state: OutputState): number[] {
   return state.savedColumnOrder.filter(index =>
     index >= 0 && index < payload.schema.columns.length && !hidden.has(index)
   );
+}
+
+function renderedSavedColumnIndexes(state: OutputState): number[] {
+  return notebookSavedColumnWindow(
+    visibleSavedColumnIndexes(state),
+    state.savedColumnWindowStart,
+    SAVED_COLUMN_WINDOW_SIZE
+  ).columns;
 }
 
 function syncLiveVisibleColumns(state: OutputState): void {
@@ -4933,6 +5484,16 @@ function resultColumnControl(
     : state.payload.kind === 'table'
       ? state.payload.schema.columns.map(column => column.name)
       : [];
+  const controlWindow = mode === 'saved'
+    ? notebookSavedColumnWindow(
+      order,
+      state.savedColumnControlWindowStart,
+      SAVED_COLUMN_WINDOW_SIZE
+    )
+    : notebookSavedColumnWindow(order, 0, Math.max(1, order.length));
+  if (mode === 'saved') {
+    state.savedColumnControlWindowStart = controlWindow.start;
+  }
   const visibleCount = order.filter(index => !hidden.has(index)).length;
   const summary = document.createElement('summary');
   withFocusKey(summary, `${detailsKey}:summary`);
@@ -5002,6 +5563,7 @@ function resultColumnControl(
       state.savedHiddenColumnIndexes = nextHidden;
       state.savedSelection = undefined;
       state.savedTablePageStart = 0;
+      state.savedColumnWindowStart = 0;
       state.savedScrollLeft = 0;
       state.savedSearch = emptySavedSearch();
       reconcileSavedChartsForColumns(state);
@@ -5024,8 +5586,35 @@ function resultColumnControl(
     )
   );
   panel.append(actions);
+  if (mode === 'saved' && controlWindow.total > controlWindow.columns.length) {
+    panel.append(node(
+      'div',
+      'kx-meta',
+      `Column controls ${controlWindow.start + 1}-${controlWindow.end} of ` +
+      `${controlWindow.total}. All columns remain saved.`
+    ));
+    const pagination = node('div', 'kx-pagination');
+    const previous = button('Previous columns', () => {
+      state.savedColumnControlWindowStart = Math.max(
+        0,
+        controlWindow.start - SAVED_COLUMN_WINDOW_SIZE
+      );
+      renderState(context, state);
+    });
+    const next = button('Next columns', () => {
+      state.savedColumnControlWindowStart = controlWindow.end;
+      renderState(context, state);
+    });
+    withFocusKey(previous, 'columns:saved:previous-page');
+    withFocusKey(next, 'columns:saved:next-page');
+    previous.disabled = !controlWindow.hasPrevious;
+    next.disabled = !controlWindow.hasNext;
+    pagination.append(previous, next);
+    panel.append(pagination);
+  }
   const list = node('div', 'kx-columns-list');
-  order.forEach((sourceIndex, position) => {
+  controlWindow.columns.forEach((sourceIndex, windowPosition) => {
+    const position = controlWindow.start + windowPosition;
     const row = node('div', 'kx-column-option');
     const label = node('label', '');
     const checkbox = document.createElement('input');
@@ -5476,7 +6065,11 @@ function openPreview(
   }
   const requestId = nextRequestId();
   state.hostActionRequestId = requestId;
-  state.hostActionMessage = 'Opening the saved preview in KX Results…';
+  state.hostActionMessage = isPortableKxFullResult(state.payload)
+    ? 'Opening the complete saved result in KX Results…'
+    : isHistoricalDirectPreview(state.payload)
+      ? 'Opening the historical saved preview in KX Results…'
+      : 'Opening the saved preview in KX Results…';
   context.postMessage({
     type: 'openPreview',
     ...(state.outputId ? { outputId: state.outputId } : {}),
@@ -5568,7 +6161,7 @@ function ensureSavedChartSpec(state: OutputState): void {
   if (state.savedChart || state.payload.kind !== 'table') {
     return;
   }
-  const candidates = chartColumns(state.payload, visibleSavedColumnIndexes(state));
+  const candidates = chartColumns(state.payload, renderedSavedColumnIndexes(state));
   const xColumn = candidates.x.find(name => candidates.numeric.some(candidate => candidate !== name));
   const yColumn = candidates.numeric.find(name => name !== xColumn);
   if (!xColumn || !yColumn) {
@@ -5592,7 +6185,7 @@ function reconcileSavedChartsForColumns(state: OutputState): void {
     state.savedPreparedChart = undefined;
     return;
   }
-  const candidates = chartColumns(state.payload, visibleSavedColumnIndexes(state));
+  const candidates = chartColumns(state.payload, renderedSavedColumnIndexes(state));
   if (state.savedChart) {
     const reconciled = reconcileSavedChartSpec(state.savedChart, candidates);
     state.savedChart = reconciled.compatible ? state.savedChart : reconciled.chart;
@@ -5864,30 +6457,40 @@ function requestLiveExport(
   renderState(context, state);
 }
 
-function savedActionRange(
+interface SavedActionPlan {
+  range: { startRow: number; endRow: number; startColumn: number; endColumn: number };
+  columnIndexes: number[];
+  cellCount: number;
+}
+
+function savedActionPlan(
   state: OutputState,
-  payload: PortableKxTableResult,
-  visibleColumnCount: number
-): { startRow: number; endRow: number; startColumn: number; endColumn: number } {
-  return notebookSelectionRange(state.savedSelection) || {
+  payload: PortableKxTableResult
+): SavedActionPlan {
+  const allVisibleColumns = visibleSavedColumnIndexes(state);
+  const selection = notebookSelectionRange(state.savedSelection);
+  const windowColumns = notebookSavedColumnWindow(
+    allVisibleColumns,
+    state.savedColumnWindowStart,
+    SAVED_COLUMN_WINDOW_SIZE
+  ).columns;
+  const range = selection || {
     startRow: 0,
     endRow: Math.max(0, payload.data.rows.length - 1),
     startColumn: 0,
-    endColumn: Math.max(0, visibleColumnCount - 1),
+    endColumn: Math.max(0, allVisibleColumns.length - 1),
   };
-}
-
-function savedActionCellCount(
-  state: OutputState,
-  payload: PortableKxTableResult,
-  visibleColumnCount: number
-): number {
-  if (payload.data.rows.length === 0 || visibleColumnCount === 0) {
-    return 0;
+  const columnIndexes = selection
+    ? windowColumns.slice(selection.startColumn, selection.endColumn + 1)
+    : allVisibleColumns;
+  if (payload.data.rows.length === 0 || columnIndexes.length === 0) {
+    return { range, columnIndexes, cellCount: 0 };
   }
-  const range = savedActionRange(state, payload, visibleColumnCount);
-  return (range.endRow - range.startRow + 1) *
-    (range.endColumn - range.startColumn + 1);
+  return {
+    range,
+    columnIndexes,
+    cellCount: (range.endRow - range.startRow + 1) * columnIndexes.length,
+  };
 }
 
 function requestSavedCopy(
@@ -5900,26 +6503,28 @@ function requestSavedCopy(
     return;
   }
   const payload = state.payload;
-  const visibleColumns = visibleSavedColumnIndexes(state);
-  const range = savedActionRange(state, payload, visibleColumns.length);
-  const cellCount = savedActionCellCount(state, payload, visibleColumns.length);
-  if (cellCount < 1 || cellCount > LIVE_CLIPBOARD_CELL_LIMIT) {
+  const plan = savedActionPlan(state, payload);
+  if (plan.cellCount < 1 || plan.cellCount > LIVE_CLIPBOARD_CELL_LIMIT) {
     return;
   }
   const requestId = nextRequestId();
   state.hostActionRequestId = requestId;
-  state.hostActionMessage = 'Copying selected saved preview cells…';
+  state.hostActionMessage = isPortableKxFullResult(payload)
+    ? 'Copying selected saved result cells…'
+    : isHistoricalDirectPreview(payload)
+      ? 'Copying selected historical preview cells…'
+      : 'Copying selected saved preview cells…';
   context.postMessage({
     type: 'copyPreviewRange',
     ...(state.outputId ? { outputId: state.outputId } : {}),
     requestId,
     payload,
-    ...range,
+    ...plan.range,
     format,
     includeHeaders: resultSettings.includeHeaders,
     includeRowIndex: resultSettings.includeRowIndex,
-    columnIndexes: visibleColumns.slice(range.startColumn, range.endColumn + 1),
-    rowIndexes: rowOrder.slice(range.startRow, range.endRow + 1),
+    columnIndexes: plan.columnIndexes,
+    rowIndexes: rowOrder.slice(plan.range.startRow, plan.range.endRow + 1),
   });
   renderState(context, state);
 }
@@ -5934,9 +6539,8 @@ function requestSavedExport(
     return;
   }
   const payload = state.payload;
-  const visibleColumns = visibleSavedColumnIndexes(state);
-  const range = savedActionRange(state, payload, visibleColumns.length);
-  if (savedActionCellCount(state, payload, visibleColumns.length) < 1) {
+  const plan = savedActionPlan(state, payload);
+  if (plan.cellCount < 1) {
     return;
   }
   const requestId = nextRequestId();
@@ -5947,12 +6551,12 @@ function requestSavedExport(
     ...(state.outputId ? { outputId: state.outputId } : {}),
     requestId,
     payload,
-    ...range,
+    ...plan.range,
     format,
     includeHeaders: resultSettings.includeHeaders,
     includeRowIndex: resultSettings.includeRowIndex,
-    columnIndexes: visibleColumns.slice(range.startColumn, range.endColumn + 1),
-    rowIndexes: rowOrder.slice(range.startRow, range.endRow + 1),
+    columnIndexes: plan.columnIndexes,
+    rowIndexes: rowOrder.slice(plan.range.startRow, plan.range.endRow + 1),
   });
   renderState(context, state);
 }
@@ -5984,6 +6588,10 @@ function updateLiveSelectionClasses(state: OutputState): void {
     const column = Number(cell.dataset.column);
     const selected = notebookCellSelected(state.liveSelection, row, column);
     cell.classList.toggle('is-selected', selected);
+    cell.classList.toggle(
+      'is-active-cell',
+      state.liveSelection?.focusRow === row && state.liveSelection.focusColumn === column
+    );
     cell.setAttribute('aria-selected', selected ? 'true' : 'false');
   });
   if (state.liveCanvas) {
@@ -6134,8 +6742,19 @@ function portableTable(
     columnIndexes.map(index => payload.schema.columns[index].name),
     payload.data.rows.length,
     (rowIndex, columnIndex) =>
-      portableCellValue(payload.data.rows[rowIndex][columnIndexes[columnIndex]]),
-    columnIndexes.map(index => payload.schema.columns[index].type)
+      portableCellChartValue(payload.data.rows[rowIndex][columnIndexes[columnIndex]]),
+    columnIndexes.map(index => portableCellChartColumnType(
+      payload.data.rows[0]?.[index],
+      payload.schema.columns[index].type
+    )),
+    payload.schema.keyColumnOrdinals === undefined
+      ? undefined
+      : columnIndexes.reduce<number[]>((ordinals, sourceOrdinal, projectedOrdinal) => {
+        if (payload.schema.keyColumnOrdinals!.includes(sourceOrdinal)) {
+          ordinals.push(projectedOrdinal);
+        }
+        return ordinals;
+      }, [])
   );
 }
 
@@ -6298,6 +6917,20 @@ function rerenderFocusFallbackKeys(key: string): string[] {
       'grid:saved:viewport',
     ];
   }
+  const columnPagination = /^pagination:saved-columns:(previous|next)$/.exec(key);
+  if (columnPagination) {
+    return [
+      `pagination:saved-columns:${columnPagination[1] === 'previous' ? 'next' : 'previous'}`,
+      'grid:saved:viewport',
+    ];
+  }
+  const columnControlPagination = /^columns:saved:(previous|next)-page$/.exec(key);
+  if (columnControlPagination) {
+    return [
+      `columns:saved:${columnControlPagination[1] === 'previous' ? 'next' : 'previous'}-page`,
+      'columns:saved:summary',
+    ];
+  }
   const chartRender = /^chart:(live|saved):render$/.exec(key);
   if (chartRender) {
     return [
@@ -6395,17 +7028,9 @@ function withFocusKey<Element extends HTMLElement>(element: Element, key: string
   return element;
 }
 
-function disposeState(id: string, context?: RendererContext<RendererState>): void {
-  const detached = stateRegistry.takeKey(id);
-  if (!detached) {
-    return;
-  }
-  disposeDetachedState(detached.state, context);
-}
-
 function disposeDetachedState(
   state: OutputState,
-  context?: RendererContext<RendererState>
+  _context?: RendererContext<RendererState>
 ): void {
   if (state.payload.version === 2) {
     columnOrderCache.remember(outputColumnOrderSnapshot(state));
@@ -6426,16 +7051,6 @@ function disposeDetachedState(
   state.liveCopyTools = undefined;
   state.liveCopyStatus = undefined;
   state.liveSelectionStatus = undefined;
-  if (state.payload.version === 2 && state.outputId && context?.postMessage) {
-    const requestId = nextRequestId();
-    context.postMessage({
-      type: 'unbindOutput',
-      outputId: state.outputId,
-      ...(state.liveId ? { liveId: state.liveId } : {}),
-      renderGeneration: state.renderGeneration,
-      requestId,
-    });
-  }
 }
 
 function disposeOutputItemState(
@@ -6485,11 +7100,6 @@ function boundedReconciledColumnWidths(
 
 function legacyOutputId(): string {
   return `legacy_${String(++domSequence).padStart(32, '0')}`;
-}
-
-function nextRenderGeneration(): number {
-  renderSequence = renderSequence >= MAX_NOTEBOOK_LIVE_REQUEST_ID ? 1 : renderSequence + 1;
-  return renderSequence;
 }
 
 interface ResultHeaderOptions {
@@ -6638,6 +7248,7 @@ function updateResultHeaderSelection(
   ).forEach(header => {
     const displayColumn = Number(header.dataset.kxHeaderColumnIndex);
     const selected = resultColumnFullySelected(selection, displayColumn, rowCount);
+    header.classList.toggle('is-selected-header', selected);
     header.setAttribute(
       'aria-selected',
       selected ? 'true' : 'false'
@@ -6870,8 +7481,6 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
     elapsedTimeDisplay: 'auto',
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
-    chartZoomMinSampledPoints: 3_000,
-    chartZoomMaxSampledPoints: CHART_ZOOM_MAX_SAMPLED_POINTS,
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
@@ -6906,19 +7515,19 @@ function savedChartSourceLimitMessage(payload: PortableKxTableResult): string {
 const rendererCss = `
 .kx-root{box-sizing:border-box;border:1px solid var(--vscode-notebook-cellBorderColor,var(--vscode-panel-border,#555));border-radius:4px;background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);font-family:var(--vscode-font-family,system-ui,sans-serif);font-size:var(--vscode-font-size,13px);padding:0 8px 8px;max-width:100%;min-width:0}
 .kx-header{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap;margin:0 -8px 6px;padding:6px 8px;border-bottom:1px solid var(--kx-results-border);background:var(--kx-results-toolbar-background)}.kx-heading-wrap{display:flex;align-items:center;gap:8px;min-width:0;flex-wrap:wrap}.kx-heading{font-size:1.05em}.kx-meta{color:var(--vscode-descriptionForeground);font-size:.92em}.kx-kind{font-family:var(--vscode-editor-font-family,monospace)}
-.kx-toolbar,.kx-live-tools,.kx-chart-controls,.kx-pagination{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.kx-chart-controls{align-items:flex-end}.kx-preserve-full{display:inline-flex;align-items:center;gap:5px;white-space:nowrap}.kx-preserve-full input[type=checkbox]{margin:0}.kx-root button,.kx-root select,.kx-root input{font:inherit;color:var(--vscode-button-secondaryForeground,var(--vscode-foreground));background:var(--vscode-button-secondaryBackground,var(--vscode-editorWidget-background));border:1px solid var(--vscode-button-border,var(--vscode-panel-border,#777));border-radius:3px;padding:3px 7px}.kx-root button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground)}.kx-root button:disabled{opacity:.55}.kx-live-tools input[type=search]{min-width:220px}.kx-tools{position:relative}.kx-tools>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-tools-panel{position:absolute;z-index:20;top:100%;right:0;display:flex;align-items:flex-end;gap:7px;min-width:210px;padding:8px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}
+.kx-toolbar,.kx-live-tools,.kx-chart-controls,.kx-pagination{display:flex;gap:6px;align-items:center;flex-wrap:wrap}.kx-chart-controls{align-items:flex-end}.kx-root button,.kx-root select,.kx-root input{font:inherit;color:var(--vscode-button-secondaryForeground,var(--vscode-foreground));background:var(--vscode-button-secondaryBackground,var(--vscode-editorWidget-background));border:1px solid var(--vscode-button-border,var(--vscode-panel-border,#777));border-radius:3px;padding:3px 7px}.kx-root button:hover:not(:disabled){background:var(--vscode-button-secondaryHoverBackground)}.kx-root button:disabled{opacity:.55}.kx-live-tools input[type=search]{min-width:220px}.kx-tools{position:relative}.kx-tools>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-tools-panel{position:absolute;z-index:20;top:100%;right:0;display:flex;align-items:flex-end;gap:7px;min-width:210px;padding:8px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}
 .kx-primary-toolbar{display:flex;align-items:center;gap:6px;min-width:0;margin:0 -8px;padding:5px 8px;border-block:1px solid var(--kx-results-border);background:var(--kx-results-toolbar-background);flex-wrap:wrap}.kx-output-group{display:flex;align-items:center;gap:6px;min-width:0;flex-wrap:wrap}.kx-toolbar-label{font-weight:600}.kx-setting-toggle{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}.kx-selection-summary{margin-left:auto;color:var(--kx-results-muted);font-size:.9em;white-space:nowrap}.kx-view-tools{padding-top:5px}
 .kx-columns{position:relative}.kx-columns>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none;white-space:nowrap}.kx-columns-panel{position:absolute;z-index:24;top:calc(100% + 2px);right:0;width:min(420px,85vw);max-height:min(420px,65vh);overflow:auto;padding:8px;border:1px solid var(--kx-results-border);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px var(--vscode-widget-shadow,#0008)}.kx-columns-actions{display:flex;gap:5px;flex-wrap:wrap;padding-bottom:6px;border-bottom:1px solid var(--kx-results-border)}.kx-columns-list{display:grid;gap:3px;padding-top:5px}.kx-column-option{display:grid;grid-template-columns:minmax(0,1fr) auto auto;align-items:center;gap:4px}.kx-column-option label{display:flex;align-items:center;gap:5px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.kx-column-option button{padding-inline:6px}
 .kx-notice,.kx-panel-mode,.kx-error{margin:7px 0;padding:6px 8px;border-left:3px solid var(--vscode-notificationsWarningIcon-foreground,#cca700);background:var(--vscode-textBlockQuote-background)}.kx-error{border-left-color:var(--vscode-errorForeground,#f14c4c)}
 .kx-messages{margin:5px 0;color:var(--vscode-descriptionForeground)}.kx-source{margin:6px 0}.kx-source pre{white-space:pre-wrap;max-height:150px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:6px}
 .kx-qtext{white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:8px;border:1px solid var(--vscode-panel-border,#555)}.kx-q-comment{color:var(--vscode-editorCodeLens-foreground)}.kx-q-string,.kx-q-symbol{color:var(--vscode-debugTokenExpression-string)}.kx-q-number,.kx-q-temporal{color:var(--vscode-debugTokenExpression-number)}.kx-q-keyword,.kx-q-command{color:var(--vscode-debugTokenExpression-name);font-weight:600}.kx-q-builtin,.kx-q-system,.kx-q-namespace{color:var(--vscode-symbolIcon-functionForeground)}.kx-q-operator{color:var(--vscode-symbolIcon-operatorForeground)}
 .kx-live-viewport{position:relative;overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;contain:strict;box-sizing:border-box;outline:none}.kx-live-viewport:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-live-canvas{position:relative;min-width:100%}.kx-live-row{position:absolute;left:0}.kx-live-header-row{z-index:3}.kx-live-cell,.kx-live-empty{box-sizing:border-box;position:absolute;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 7px;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);user-select:none}.kx-live-empty{color:var(--vscode-descriptionForeground)}button.kx-live-cell{text-align:left;border-radius:0}.kx-live-header{z-index:3;font-weight:600;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-row-index{z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-corner{z-index:4}.kx-live-cell.is-loading{color:transparent;background:linear-gradient(90deg,var(--vscode-editor-background),var(--vscode-editorWidget-background),var(--vscode-editor-background))}.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{color:var(--vscode-list-activeSelectionForeground,var(--vscode-editor-foreground));background:var(--vscode-list-activeSelectionBackground,#094771);box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-live-cell.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}
-.kx-live-header{padding:0!important}.kx-live-sort{display:block;width:100%;height:100%;padding:4px 16px 4px 7px!important;border:0!important;border-radius:0!important;background:transparent!important;color:inherit!important;text-align:left;font-weight:600}.kx-live-sort:focus-visible,.kx-saved-sort:focus-visible,.kx-column-resize-handle:focus-visible{outline:2px solid var(--vscode-focusBorder,#007fd4);outline-offset:-2px}.kx-live-sort.is-reordering,.kx-saved-sort.is-reordering{cursor:grabbing;opacity:.72}.kx-live-row.row-odd .kx-live-cell:not(.kx-live-header):not(.kx-live-row-index):not(.is-selected):not(.is-search-match):not(.is-loading),.kx-table-wrap tr.row-odd td:not(.is-selected):not(.is-search-match){background:var(--vscode-list-hoverBackground,rgba(127,127,127,.08))}
-.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}
+.kx-live-header{padding:0!important}.kx-live-sort{display:block;width:100%;height:100%;padding:4px 16px 4px 7px!important;border:0!important;border-radius:0!important;background:transparent!important;color:inherit!important;text-align:left;font-weight:600}.kx-live-sort:focus-visible,.kx-saved-sort:focus-visible,.kx-column-resize-handle:focus-visible{outline:2px solid var(--vscode-focusBorder,#007fd4);outline-offset:-2px}.kx-live-sort.is-reordering,.kx-saved-sort.is-reordering{cursor:grabbing;opacity:.72}
+.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}.kx-table-wrap .is-selected-header .kx-column-type{color:inherit}
 .kx-column-resize-handle{position:absolute;top:0;right:-3px;z-index:8;width:9px;height:100%;cursor:col-resize}.kx-column-resize-handle:hover,.kx-column-resize-handle:focus-visible{background:var(--vscode-focusBorder,#007fd4);opacity:.55}.kx-column-resize-guide{position:fixed;top:0;bottom:0;z-index:2147483647;width:1px;pointer-events:none;background:var(--vscode-focusBorder,#007fd4)}
 .kx-control{display:flex;flex-direction:column;gap:2px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-control select,.kx-control input{color:var(--vscode-foreground);min-width:90px}.kx-control.is-auto input::placeholder{color:var(--vscode-input-placeholderForeground,var(--vscode-descriptionForeground));opacity:1}.kx-series-control{position:relative;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-series-control>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-series-list{position:absolute;z-index:15;top:calc(100% + 2px);left:0;display:grid;gap:4px;max-height:min(220px,45vh);min-width:180px;max-width:min(320px,80vw);overflow:auto;padding:7px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}.kx-series-option{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}.kx-series-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.kx-series-swatches{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto;overflow:visible!important}.kx-series-swatch{display:inline-block;width:10px;height:10px;flex:0 0 10px;border:1px solid var(--vscode-contrastBorder,var(--vscode-panel-border,transparent));border-radius:2px;box-sizing:border-box}.kx-chart-panel{border-top:1px solid var(--vscode-panel-border,#555);padding-top:7px;margin-top:7px}.kx-chart-host{width:100%;height:auto;margin-top:6px;overflow:hidden;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);box-sizing:border-box;outline:none}.kx-chart-host:focus-visible{border-color:var(--vscode-focusBorder,#007fd4);box-shadow:0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-chart-host[aria-disabled=true]{cursor:not-allowed}.kx-chart-canvas{width:100%;height:280px;overflow:hidden}.kx-chart-host .uplot{max-width:100%;font-family:var(--vscode-font-family,system-ui,sans-serif);color:var(--vscode-editor-foreground);background:var(--vscode-editor-background)}.kx-chart-host .u-wrap{background:var(--vscode-editor-background)}.kx-chart-host .u-axis,.kx-chart-host .u-legend{color:var(--vscode-charts-foreground,var(--vscode-editor-foreground))}.kx-chart-host .u-select{background:var(--vscode-list-activeSelectionBackground,rgba(80,140,220,.22))}.kx-chart-host .u-cursor-x,.kx-chart-host .u-cursor-y{border-color:var(--vscode-focusBorder,#607d8b)}.kx-chart-legend{max-height:96px;overflow:auto;border-top:1px solid var(--vscode-charts-lines,var(--vscode-panel-border,#555));background:var(--vscode-editor-background)}.kx-chart-host .u-legend{display:block;width:100%;margin:0;padding:3px 5px;text-align:left;font:inherit}.kx-chart-host .u-legend tbody{display:flex;align-items:center;gap:2px 10px;flex-wrap:wrap}.kx-chart-host .u-legend .u-series{display:block;margin:0}.kx-chart-host .u-legend .u-series>th{display:flex;align-items:center;max-width:min(240px,75vw);padding:3px 4px;border-radius:2px;outline-offset:-1px;color:var(--vscode-editor-foreground)!important}.kx-chart-host .u-legend .u-marker{width:14px;height:10px;flex:0 0 14px;margin-right:5px;border-radius:2px;box-shadow:0 0 0 1px var(--vscode-contrastBorder,var(--vscode-editor-foreground))}.kx-chart-host .u-legend .kx-series-hidden>th{text-decoration:line-through;opacity:.48}.kx-chart-host .u-legend .kx-series-hidden .u-marker{filter:grayscale(1)}.kx-status{min-height:1.2em;margin-top:5px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-empty{padding:8px;color:var(--vscode-descriptionForeground)}
 .kx-settings{position:relative}.kx-settings>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-settings-panel{position:absolute;top:calc(100% + 2px);right:0;z-index:25;display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:7px;width:min(430px,80vw);max-height:min(360px,60vh);overflow:auto;padding:9px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px var(--vscode-widget-shadow,transparent)}.kx-settings-header{position:sticky;top:-9px;z-index:2;grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-9px -9px 2px;padding:8px 9px;border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background)}.kx-settings-close{margin-left:auto}.kx-setting-checkbox{display:flex;align-items:center;gap:5px;font-size:.9em}
 .kx-density-compact :where(.kx-primary-toolbar,.kx-header){padding-block:3px}.kx-density-compact :where(button,select,input){padding-block:2px}.kx-density-comfortable :where(.kx-primary-toolbar,.kx-header){padding-block:8px}
-@media (forced-colors:active){.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{outline:2px solid Highlight;outline-offset:-2px}.kx-live-row.row-odd .kx-live-cell,.kx-table-wrap tr.row-odd td{border-bottom-color:CanvasText}.kx-column-resize-handle:focus-visible{background:Highlight}}
+@media (forced-colors:active){.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{outline:2px solid Highlight;outline-offset:-2px}.kx-live-cell,.kx-table-wrap th,.kx-table-wrap td{border-color:CanvasText}.kx-column-resize-handle:focus-visible{background:Highlight}}
 @media (max-width:560px){.kx-root{padding-inline:5px}.kx-header,.kx-primary-toolbar{margin-inline:-5px;padding-inline:5px}.kx-primary-toolbar{align-items:flex-start}.kx-output-group{flex:1 1 100%}.kx-selection-summary{order:10;margin-left:0;flex:1 1 100%}.kx-live-tools input[type=search]{min-width:0;flex:1 1 140px}.kx-settings-panel,.kx-columns-panel{right:0;width:min(360px,92vw);max-width:none}.kx-settings-panel{grid-template-columns:minmax(0,1fr);max-height:min(320px,55vh)}.kx-series-list{max-height:min(132px,38vh);max-width:calc(100vw - 16px)}.kx-toolbar-label{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}}
 `;

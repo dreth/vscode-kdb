@@ -18,6 +18,67 @@ export interface ChartVisibleIndexBounds {
   readonly end: number;
 }
 
+export type ChartNavigatorPart = 'window' | 'start' | 'end';
+
+export interface ChartNavigatorWindow {
+  readonly startFraction: number;
+  readonly endFraction: number;
+}
+
+export type ChartPixelGap = [number, number];
+
+/** Sort and coalesce native/custom uPlot clip intervals. */
+export function mergeChartPixelGaps(gaps: readonly ChartPixelGap[]): ChartPixelGap[] {
+  if (gaps.length < 2) {
+    return gaps.map(gap => [gap[0], gap[1]]);
+  }
+  const sorted = gaps.map(gap => [gap[0], gap[1]] as ChartPixelGap)
+    .sort((left, right) => left[0] - right[0] || left[1] - right[1]);
+  const merged: ChartPixelGap[] = [];
+  sorted.forEach(gap => {
+    const previous = merged[merged.length - 1];
+    if (previous && gap[0] <= previous[1]) {
+      previous[1] = Math.max(previous[1], gap[1]);
+    } else {
+      merged.push(gap);
+    }
+  });
+  return merged;
+}
+
+/** Detect a real source break across a thinned navigator-overview interval. */
+export function chartOverviewIntervalHasGap(
+  values: readonly (number | null)[],
+  gapFlags: readonly boolean[] | null | undefined,
+  gapBefore: readonly boolean[] | null | undefined,
+  previousIndex: number,
+  currentIndex: number
+): boolean {
+  const start = Math.max(0, Math.floor(previousIndex) + 1);
+  const end = Math.min(values.length - 1, Math.floor(currentIndex));
+  for (let index = start; index <= end; index++) {
+    if (gapBefore?.[index] === true) {
+      return true;
+    }
+    if (values[index] === null && (!gapFlags || gapFlags[index] === true)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+export interface ChartNavigatorSliderRange {
+  readonly minimum: number;
+  readonly maximum: number;
+  readonly now: number;
+}
+
+export interface ChartNavigatorSliderBounds {
+  readonly window: ChartNavigatorSliderRange;
+  readonly start: ChartNavigatorSliderRange;
+  readonly end: ChartNavigatorSliderRange;
+}
+
 export type ChartZoomAutoRefineQueueAction =
   | { readonly type: 'schedule'; readonly range: ChartRange }
   | { readonly type: 'duplicate' }
@@ -595,6 +656,124 @@ export function clampChartViewport(
     min = max - requestedSpan;
   }
   return { min, max };
+}
+
+/** Map an absolute viewport to stable normalized navigator coordinates. */
+export function chartNavigatorWindow(
+  currentRange: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined
+): ChartNavigatorWindow | null {
+  const current = clampChartViewport(currentRange, fullRange);
+  if (!current || !isValidChartRange(fullRange)) {
+    return null;
+  }
+  const span = fullRange.max - fullRange.min;
+  return {
+    startFraction: Math.max(0, Math.min(1, (current.min - fullRange.min) / span)),
+    endFraction: Math.max(0, Math.min(1, (current.max - fullRange.min) / span)),
+  };
+}
+
+/** Expose the actual normalized keyboard bounds for each navigator slider. */
+export function chartNavigatorSliderBounds(
+  currentRange: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined,
+  minimumSpanFraction = 0.001
+): ChartNavigatorSliderBounds | null {
+  const selected = chartNavigatorWindow(currentRange, fullRange);
+  if (!selected || !isValidChartRange(fullRange)) {
+    return null;
+  }
+  const fullSpan = fullRange.max - fullRange.min;
+  const configuredMinimum = Math.max(
+    0,
+    Math.min(1, Number(minimumSpanFraction) || 0)
+  );
+  const numericMinimum = Math.max(
+    Math.abs(fullRange.min),
+    Math.abs(fullRange.max),
+    1
+  ) * Number.EPSILON * 32 / fullSpan;
+  const minimumSpanPercent = Math.max(
+    0,
+    Math.min(100, Math.max(configuredMinimum, numericMinimum) * 100)
+  );
+  const start = Math.max(0, Math.min(100, selected.startFraction * 100));
+  const end = Math.max(start, Math.min(100, selected.endFraction * 100));
+  const halfSpan = (end - start) / 2;
+  return {
+    window: {
+      minimum: halfSpan,
+      maximum: 100 - halfSpan,
+      now: start + halfSpan,
+    },
+    start: {
+      minimum: 0,
+      maximum: Math.max(0, end - minimumSpanPercent),
+      now: start,
+    },
+    end: {
+      minimum: Math.min(100, start + minimumSpanPercent),
+      maximum: 100,
+      now: end,
+    },
+  };
+}
+
+/**
+ * Move or resize the selected X window by a fraction of the immutable full
+ * domain. Handles keep a small deterministic minimum span and never introduce
+ * a second Y viewport.
+ */
+export function adjustChartNavigatorRange(
+  currentRange: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined,
+  part: ChartNavigatorPart,
+  deltaFraction: number,
+  minimumSpanFraction = 0.001
+): ChartRange | null {
+  const current = clampChartViewport(currentRange, fullRange);
+  if (!current || !isValidChartRange(fullRange) || !Number.isFinite(deltaFraction)) {
+    return null;
+  }
+  const fullSpan = fullRange.max - fullRange.min;
+  const delta = deltaFraction * fullSpan;
+  if (part === 'window') {
+    return clampChartViewport({
+      min: current.min + delta,
+      max: current.max + delta,
+    }, fullRange);
+  }
+  const minimumSpan = Math.max(
+    fullSpan * Math.max(0, Math.min(1, Number(minimumSpanFraction) || 0)),
+    Math.max(Math.abs(fullRange.min), Math.abs(fullRange.max), 1) * Number.EPSILON * 32
+  );
+  if (part === 'start') {
+    return {
+      min: Math.max(fullRange.min, Math.min(current.max - minimumSpan, current.min + delta)),
+      max: current.max,
+    };
+  }
+  return {
+    min: current.min,
+    max: Math.min(fullRange.max, Math.max(current.min + minimumSpan, current.max + delta)),
+  };
+}
+
+/** Recenter the existing window on a normalized track position. */
+export function recenterChartNavigatorRange(
+  currentRange: ChartRange | null | undefined,
+  fullRange: ChartRange | null | undefined,
+  centerFraction: number
+): ChartRange | null {
+  const current = clampChartViewport(currentRange, fullRange);
+  if (!current || !isValidChartRange(fullRange) || !Number.isFinite(centerFraction)) {
+    return null;
+  }
+  const fraction = Math.max(0, Math.min(1, centerFraction));
+  const center = fullRange.min + fraction * (fullRange.max - fullRange.min);
+  const halfSpan = (current.max - current.min) / 2;
+  return clampChartViewport({ min: center - halfSpan, max: center + halfSpan }, fullRange);
 }
 
 /** Shift an absolute viewport by a fraction of its span without changing Y. */

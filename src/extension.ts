@@ -10,6 +10,7 @@ import {
   redactDiagnosticText,
 } from './diagnostics';
 import { FeatureControls } from './feature-controls';
+import { configureDataWranglerHandoffDiagnostics } from './data-wrangler-handoff';
 import { emptyColumnarPanelResult } from './kx-results';
 import { KxPanelResult, KxResultsPanel, KxResultsPanelRunMode } from './kx-results-panel';
 import {
@@ -25,6 +26,7 @@ import {
   LiveNotebookResultStore,
   LiveNotebookSlice,
   LiveNotebookSliceRequest,
+  reconcileLiveNotebookCellOutputs,
 } from './notebook-live-results';
 import { configurePerfOutput, configurePerfTrace, endPerfSpan, perfSpan } from './perf';
 import {
@@ -96,6 +98,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
   const diagnostics = new KxDiagnostics(output);
   configurePerfOutput(value => output.appendLine(value));
+  configureDataWranglerHandoffDiagnostics(value => output.appendLine(value));
   const store = new ConnectionStore(context);
   const manager = new ConnectionManager(store, diagnostics);
   const tree = new ConnectionsTreeProvider(store, manager);
@@ -184,8 +187,19 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
           liveNotebookResults.removeCell(notebookUri, cell.document.uri.toString());
         }
       }
+      for (const change of event.cellChanges) {
+        if (change.outputs !== undefined) {
+          reconcileLiveNotebookCellOutputs(
+            liveNotebookResults,
+            notebookUri,
+            change.cell.document.uri.toString(),
+            change.cell.outputs
+          );
+        }
+      }
     }),
     { dispose: () => configurePerfOutput(undefined) },
+    { dispose: () => configureDataWranglerHandoffDiagnostics(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
       runSelectionOrCurrentLine(context, store, manager, diagnostics, features, 'replace')),
     vscode.commands.registerCommand('vscode-kdb.runScript', () =>
@@ -194,6 +208,8 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       runSelectionOrCurrentLine(context, store, manager, diagnostics, features, 'new')),
     vscode.commands.registerCommand('vscode-kdb.copyResultSelection', () =>
       KxResultsPanel.copySelectionFromActivePanel()),
+    vscode.commands.registerCommand('vscode-kdb.openInDataWrangler', () =>
+      KxResultsPanel.openInDataWranglerFromActivePanel()),
     vscode.commands.registerCommand('vscode-kdb.openLocalDataServer', () =>
       KxResultsPanel.openLocalDataServerForActivePanel()),
     vscode.commands.registerCommand('vscode-kdb.stopLocalDataServer', () =>
@@ -282,6 +298,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
 
 export async function deactivate(): Promise<void> {
   configurePerfOutput(undefined);
+  configureDataWranglerHandoffDiagnostics(undefined);
   KxResultsPanel.stopAllLocalDataServers();
   const manager = activeConnectionManager;
   activeConnectionManager = undefined;

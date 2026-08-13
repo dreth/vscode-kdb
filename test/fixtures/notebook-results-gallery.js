@@ -28,9 +28,10 @@ const liveQueries = Object.freeze([
     source: '([] timestamp:(2026.07.27D09:30:00.000000000;0Np;2026.07.27D09:32:00.000000000);price:101.25 0n 103.75;quantity:100 0N 300;sym:`AAPL``MSFT)',
   }),
   Object.freeze({
-    id: 'qtext',
-    title: 'Live qText',
+    id: 'unsupported-function',
+    title: 'Unsupported function persistence',
     source: '{[x;y] x+y}',
+    expectsError: true,
   }),
   Object.freeze({
     id: 'scalar',
@@ -39,8 +40,20 @@ const liveQueries = Object.freeze([
   }),
   Object.freeze({
     id: 'live-full-result',
-    title: 'Live full result with bounded saved preview',
+    title: 'Live result with complete saved output',
     source: '([] row:til 64;sym:64#`AAPL`MSFT`GOOG`IBM;price:100f+.25*til 64;size:100+til 64)',
+  }),
+  Object.freeze({
+    id: 'row-striping-horizontal-window',
+    title: 'Logical-row striping horizontal window',
+    marker: 'striping_horizontal_06',
+    source:
+      '([] striping_horizontal_00:til 64;striping_horizontal_01:1+til 64;' +
+      'striping_horizontal_02:2+til 64;striping_horizontal_03:3+til 64;' +
+      'striping_horizontal_04:4+til 64;striping_horizontal_05:5+til 64;' +
+      'striping_horizontal_06:6+til 64;striping_horizontal_07:7+til 64;' +
+      'striping_horizontal_08:8+til 64;striping_horizontal_09:9+til 64;' +
+      'striping_horizontal_10:10+til 64;striping_horizontal_11:11+til 64)',
   }),
   Object.freeze({
     id: 'native-error',
@@ -231,11 +244,12 @@ const expectedCaseIds = Object.freeze([
   'table',
   'keyed-table',
   'temporal-nulls',
-  'qtext',
+  'unsupported-function',
   'scalar',
   'native-error',
   'truncated-saved-preview',
   'live-full-result',
+  'row-striping-horizontal-window',
   'chart-line',
   'chart-scatter',
   'chart-step',
