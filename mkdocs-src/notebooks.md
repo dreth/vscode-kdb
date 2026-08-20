@@ -1,6 +1,6 @@
 # Jupyter/IPython Notebooks
 
-KX for VS Code 0.2.18 is Python-first by default. Keep the normal Python Jupyter kernel selected, use KX to make only the intended cells q, activate a saved KX profile, and run those q cells through Direct IPC. KX does not register its optional pure-q controller by default, so **KX q (Direct IPC)** is absent from VS Code's kernel candidates. The notebook's top-right Jupyter kernel selector itself remains visible and owned by VS Code/Jupyter.
+KX for VS Code 0.2.20 is Python-first by default. Keep the normal Python Jupyter kernel selected, use KX to make only the intended cells q, activate a saved KX profile, and run those q cells through Direct IPC. KX does not register its optional pure-q controller by default, so **KX q (Direct IPC)** is absent from VS Code's kernel candidates. The notebook's top-right Jupyter kernel selector itself remains visible and owned by VS Code/Jupyter.
 
 | Selected notebook kernel + cell | Use |
 | --- | --- |
@@ -18,7 +18,7 @@ For each intended q cell:
 
 1. Click the leading **Make q Cell (KX)** action. It changes the complete code cell's language to q without changing the selected Python kernel.
 2. Use the visible notebook-level **Active** item or **KX: Activate q Connection** to star one saved KX profile globally.
-3. Use the leading **Run q Cell (KX)** play action, or use focused-cell `Ctrl+Enter` / `Cmd+Enter` to run and stay, `Shift+Enter` to run and move next, or `Alt+Enter` (`Option+Enter` on macOS) to run and insert below.
+3. Use the leading **Run q Cell (KX)** play action, or select the q cell and use `Ctrl+Enter` / `Cmd+Enter` to run and stay, `Shift+Enter` to run and move next, or `Alt+Enter` (`Option+Enter` on macOS) to run and insert below.
 4. Read the route from status: `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS).
 
 The action sends the complete cell source through the starred active connection's direct KX session. It does not require `%%q`, select the KX controller, or mutate the Python controller. **KX: Restore Notebook Cell Language** restores the notebook's declared default language.
@@ -29,9 +29,9 @@ With no active profile the status shows **Activate connection** and prompts for 
 
 Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. **Run q Cell (KX)** leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.
 
-### Focused q-cell shortcuts
+### Selected q-cell shortcuts
 
-While the q cell editor itself has text focus, KX preserves the normal notebook meanings:
+While a tracked q cell is selected or its editor has text focus, KX preserves the normal notebook meanings:
 
 - `Ctrl+Enter` on Windows/Linux or `Cmd+Enter` on macOS runs the complete q cell and stays;
 - `Shift+Enter` runs it and moves to the next cell; and
@@ -39,14 +39,13 @@ While the q cell editor itself has text focus, KX preserves the normal notebook 
 
 Move/insert occurs only after the Direct IPC runner returns an executed result. A canceled, busy, stale, or failed run leaves the cell position unchanged. Every public manifest guard requires all of:
 
-- notebook cell editor and editor text focus;
+- notebook editor focus;
 - notebook type `jupyter-notebook`;
 - code cell type;
-- language exactly `q`;
-- resource scheme `vscode-notebook-cell`; and
+- selected cell resource present in KX's tracked q-cell resource set; and
 - the optional **KX q (Direct IPC)** controller not selected.
 
-They cannot match Python, Markdown, an ordinary source editor, output focus, or a cell container without editor focus. In those other focus states VS Code's normal notebook shortcuts remain in charge; use the visible KX action for q execution. Extension default bindings outrank the built-in notebook rules when these exact guards match, while later user/keymap rules can still override any default shortcut. If a shortcut was customized, use the toolbar/context/Command Palette action or inspect **Developer: Toggle Keyboard Shortcuts Troubleshooting**. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.
+They cannot match Python, Markdown, an ordinary source editor, or output focus. In those other states VS Code's normal notebook shortcuts remain in charge. Extension default bindings outrank the built-in notebook rules when these exact guards match, while later user/keymap rules can still override any default shortcut. If a shortcut was customized, use the toolbar/context/Command Palette action or inspect **Developer: Toggle Keyboard Shortcuts Troubleshooting**. Clicking normal Python Run on a q-language cell remains standard Jupyter behavior and is not secretly duplicated by KX.
 
 ## Optional pure-q Direct IPC controller
 
@@ -86,7 +85,7 @@ The renderer and standard panel consume one KX Results UI contract for toolbar l
 
 Live tables size naturally for small results and use a bounded default for larger results. The viewport can be resized vertically; horizontal and vertical scroll positions remain stable while virtual rows and columns update; headers and row numbers stay fixed without covering cells. Header click cycles source/ascending/descending order, movement of at least 5 CSS pixels reorders without sorting, `Ctrl`/`Cmd`+click or `Ctrl`/`Cmd`+Space selects a column, `Enter`/`Space` sorts, and `Alt`+Left/Right reorders. Accessible labels and `aria-sort` expose the current state. Column identity and order are source-ordinal and stay local to the logical output and valid schema, including duplicate names, live refresh, and saved-output rerender; they never leak when VS Code reuses a renderer item ID for another output.
 
-Bounded Search retains explicit **Prev**/**Next** navigation, and drag/Shift/keyboard body selection remains available. Columns can be shown, hidden, reset, moved, and resized; drag a header edge to set one positional width or double-click it to reset that position. Live slice, search, sort, copy, export, and chart requests honor source ordinals in the visible order. A selected rectangle of at most 20,000 cells can be copied through the owning live record, including rows and more than 128 selected columns outside the currently loaded virtual slice. File export is performed by the extension host and uses the shared copy/export confirmation threshold.
+Bounded Search retains explicit **Prev**/**Next** navigation, and drag/Shift/keyboard body selection remains available. Columns can be shown, hidden, reset, moved, and resized; drag a header edge to set one positional width or double-click it to reset that position. Live slice, search, sort, copy, export, and chart requests honor source ordinals in the visible order. A selected rectangle of at most 20,000 source cells and 2,000,000 realized characters can be copied through the owning extension-host record, including rows and more than 128 selected columns outside the currently loaded virtual slice; the host rechecks both live and saved-preview requests. File export is performed by the extension host and uses the shared advisory confirmation plus the realized hard limits in [Copy & Export](copy-export.md#guardrails).
 
 Grid shading follows alternating logical displayed rows keyed by their absolute displayed-row ordinals, not by DOM position. Virtual scrolling, sort windows, and saved paging therefore retain stable stripes, while headers remain unstriped. The subtle colors come from VS Code theme tokens. Selection, hover, focused cells, sorted columns, search, loading, errors, and high-contrast or forced-colors states remain dominant.
 
@@ -139,7 +138,7 @@ Use VS Code/Jupyter's native **Clear Cell Output** and **Clear All Outputs** act
 
 Every successful first-party Direct IPC execution automatically persists every exactly representable row, column, and cell in portable v2. `maxOutputRows` is used by the optional Tag/Prepare editing aid when it writes a `%%q --max-rows` marker for the separate Python helper; it never limits first-party Direct IPC rich output. `maxOutputBytes` bounds the Direct IPC `text/plain` fallback and the explicitly bounded Python-helper/static output paths; it never silently truncates the authoritative Direct IPC rich payload.
 
-Portable v2 exact q cells use a versioned typed representation for atoms, typed and mixed vectors, vector attributes, null/infinity sentinels, raw long/temporal values, symbols, chars, and nested values. Complete output survives ordinary `.ipynb` JSON save/reload. Its default grid cells use concise familiar text for ordinary scalar booleans, numerics, temporals, GUIDs, nulls, and infinities; syntax remains where needed to distinguish backtick symbols from quoted character vectors, singleton vectors with `enlist`, empty typed vectors, and nested or special values. This presentation does not change the exact cell metadata. qText, copy, and export reconstruct conservative q literals, and nonzero IEEE real subnormals use q's valid `-9!0x...` IPC-deserialize form because q's decimal real parser would otherwise reduce them to zero.
+Portable v2 exact q cells use a versioned typed representation for atoms, typed and mixed vectors, vector attributes, null/infinity sentinels, raw long/temporal values, symbols, chars, and nested values. Complete output survives ordinary `.ipynb` JSON save/reload. Its default grid cells use concise familiar text for ordinary scalar booleans, numerics, temporals, GUIDs, nulls, and infinities; syntax remains where needed to distinguish backtick symbols from quoted character vectors, singleton vectors with `enlist`, empty typed vectors, and nested or special values. qText remains conservative q syntax. Table copy and every data export format instead use the shared analyst conversion described in [Copy & Export](copy-export.md), without changing the exact cell metadata or persisted value.
 
 If a returned q value cannot be represented exactly—currently including a whole-table-column vector attribute or top-level dictionary identity—KX reports a technical failure with q type and bounded value detail. It does not flatten or stringify the value, silently truncate the rich payload, or substitute a preview under a complete label. Direct output excludes extension-managed connection credentials, session objects, and IPC handles; supported user-returned q values remain eligible for exact persistence. Direct output does not add `text/html` or a persisted chart specification; the separate Python companion can add escaped `text/html` and an optional chart specification. The first-party output-binding ID described above is opaque targeting metadata, not an authentication or data-recovery token, and the companion does not emit it.
 
@@ -223,6 +222,6 @@ Focused pure/provider tests cover default non-registration and opt-in controller
 
 The scoped real Extension Host smoke uses isolated VS Code user data and the actual `ConnectionStore` to add two application/global profiles, set active selection, edit the same targeted ID from port `5005` to `5000`, confirm both profiles remain, resolve the notebook target to current port `5000`, verify the optional controller is not registered by default, and clean up its settings, secrets, and global state. It also verifies actual q-language and KX metadata persistence through save, close, and reopen, then restores the notebook default. That smoke remains non-visual and does not automate the connection webview, top-right kernel selector, toolbar/status layout, or target QuickPick.
 
-`npm run test:notebook-results-visual` is the narrower real UI check for this result surface. It starts q, runs a deterministic gallery in an isolated VS Code Extension Host under Xvfb, and keeps 12 validated screenshots. They cover light/dark row-striped tables and charts, visible and hidden color-keyed legends, readable dark axes, selector swatches and narrow containment, the overview navigator, **Auto** font-size and scrollable Settings, opt-in qText readability, tracked-file save/close/reopen rendering, transient live-result state, and all six chart families. Renderer automation also exercises live range selection/search, column and settings menus, saved range selection/search, chart rendering, trusted navigator window/edge drags, bounded navigator keyboard interaction, absence of visible Pan/Refine controls, pointer and keyboard legend toggling, drag zoom, Settings Close/Escape/focus return, settings-rerender persistence, and Reset zoom. Automatic complete persistence, native output clearing, clipboard ownership, save dialogs, panel handoff, and rerun replacement remain focused protocol/runtime evidence rather than screenshot claims.
+`npm run test:notebook-results-visual` is the narrower real UI check for this result surface. It starts q, runs a deterministic gallery in an isolated VS Code Extension Host under Xvfb, and keeps 11 validated screenshots. They cover light/dark row-striped tables and charts, visible and hidden color-keyed legends, readable dark axes, selector swatches and narrow containment, the overview navigator, the absence of notebook per-cell result Settings controls, tracked-file save/close/reopen rendering, transient live-result state, and all six chart families. Renderer automation also exercises live range selection/search, column menus, saved range selection/search, chart rendering, trusted navigator window/edge drags, bounded navigator keyboard interaction, absence of visible Pan/Refine controls, pointer and keyboard legend toggling, drag zoom, settings-rerender persistence, and Reset zoom. Automatic complete persistence, native output clearing, clipboard ownership, save dialogs, panel handoff, and rerun replacement remain focused protocol/runtime evidence rather than screenshot claims.
 
 That acceptance scope is local Linux VS Code Extension Host/Xvfb with the installed q binary reached over loopback. Remote and devcontainer acceptance were not run. The Docker daemon is unavailable on this host, which is a hard blocker for Docker-backed remote/devcontainer coverage.

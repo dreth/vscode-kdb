@@ -5,7 +5,8 @@ import {
   CHART_MAX_SOURCE_ROWS,
   ChartDataError,
   ChartType,
-  buildChartData,
+  TemporalPanChartCache,
+  buildChartDataWithTemporalPanReuse,
   chartColumnOptions,
   normalizeChartType,
 } from './charting';
@@ -66,7 +67,9 @@ import {
 import {
   CHART_PNG_DATA_URL_PREFIX,
   CopyExportEstimate,
+  KxResultExportLimitError,
   chartPngBytesFromDataUrl,
+  columnarToTextBytes,
   columnarToXlsx as sharedColumnarToXlsx,
   estimateCopyExport,
   kxResultExportFileExtension,
@@ -219,7 +222,7 @@ interface KxPanelShowOptions {
   autoChart?: boolean;
 }
 
-const COPY_WARNING_BYTES = 15 * 1024 * 1024;
+const COPY_MAX_BYTES = 15 * 1024 * 1024;
 const LARGE_RESULT_WARNING_CELL_THRESHOLD = 5 * 1000 * 1000;
 const LARGE_RESULT_WARNING_ROW_THRESHOLD = 1000000;
 const LARGE_RESULT_WARNING_COLUMN_THRESHOLD = 500;
@@ -255,10 +258,8 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   qTextSyntaxHighlighting: false,
   qTextDisplayFormatting: false,
   arrayDisplayFormat: 'commaSpace',
-  functionDisplayStrategy: 'qText',
   dictionaryDisplayStrategy: 'grid',
   listDisplayStrategy: 'grid',
-  objectDisplayStrategy: 'grid',
 };
 const DEFAULT_DENSITY_SIZE_SETTINGS: { [density in KxPanelDensity]: Pick<KxPanelSettings, 'cellWidth' | 'rowHeight' | 'fontSize'> } = {
   compact: {
@@ -347,6 +348,7 @@ export class KxResultsPanel {
   private selectionRange: CellRange | undefined;
   private selectionVersion = 0;
   private activeChartRequestId = 0;
+  private temporalPanChartCache: TemporalPanChartCache | undefined;
   private chartPanelOpen = false;
   private chartPanelRendered = false;
   private pendingAutoChart = false;
@@ -1167,7 +1169,11 @@ export class KxResultsPanel {
       }
       const xMin = Number.isFinite(Number(message.xMin)) ? Number(message.xMin) : undefined;
       const xMax = Number.isFinite(Number(message.xMax)) ? Number(message.xMax) : undefined;
-      const data = buildChartData(table, {
+      const temporalBucketIntervalMs = Number.isFinite(Number(message.temporalBucketIntervalMs)) &&
+        Number(message.temporalBucketIntervalMs) > 0
+        ? Number(message.temporalBucketIntervalMs)
+        : undefined;
+      const built = buildChartDataWithTemporalPanReuse(table, {
         chartType: normalizeChartType(message.chartType),
         version: requestVersion,
         requestId,
@@ -1182,7 +1188,13 @@ export class KxResultsPanel {
         xMax,
         width: Number(message.width) || 0,
         maxSourceRows: chartMaxSourceRowsSetting(),
-      });
+        samplingStrategy: temporalBucketIntervalMs === undefined
+          ? 'temporal-auto'
+          : 'temporal-fixed',
+        temporalBucketIntervalMs,
+      }, this.temporalPanChartCache);
+      const data = built.data;
+      this.temporalPanChartCache = built.cache;
       if (this.version !== requestVersion || this.activeChartRequestId !== requestId) {
         return;
       }
@@ -1890,16 +1902,30 @@ export class KxResultsPanel {
       return;
     }
 
-    const text = table.toText(format, clamped, {
-      includeHeaders,
-      includeRowIndex,
-      arrayDisplayFormat: cellTextOptions.arrayDisplayFormat,
-    });
-    if (Buffer.byteLength(text, 'utf8') > COPY_WARNING_BYTES) {
+    let textBytes: Uint8Array;
+    try {
+      textBytes = columnarToTextBytes(
+        table,
+        clamped,
+        format,
+        includeHeaders,
+        includeRowIndex,
+        { maxBytes: COPY_MAX_BYTES },
+        cellTextOptions
+      );
+    } catch (error) {
+      const detail = clipboardCopyErrorMessage(format, error);
+      if (!(error instanceof KxResultExportLimitError) || error.kind !== 'textBytes') {
+        await vscode.window.showErrorMessage(detail);
+        if (this.isCurrentVersion(requestVersion)) {
+          this.post({ type: 'copySkipped', version: requestVersion, format });
+        }
+        return;
+      }
       const choice = await vscode.window.showWarningMessage(
-        `Copy output is ${formatBytes(Buffer.byteLength(text, 'utf8'))}. Export instead?`,
+        `${detail} Export this selection to a file instead?`,
         'Export',
-        'Copy Anyway'
+        'Cancel'
       );
       if (!this.isCurrentVersion(requestVersion)) {
         return;
@@ -1908,12 +1934,18 @@ export class KxResultsPanel {
         await this.exportRange(requestVersion, clamped, format, includeHeaders, includeRowIndex);
         return;
       }
-      if (choice !== 'Copy Anyway') {
-        this.post({ type: 'copySkipped', version: requestVersion, format });
-        return;
-      }
+      this.post({ type: 'copySkipped', version: requestVersion, format });
+      return;
     }
 
+    const text = Buffer.from(
+      textBytes.buffer,
+      textBytes.byteOffset,
+      textBytes.byteLength
+    ).toString('utf8');
+    if (!this.isCurrentVersion(requestVersion)) {
+      return;
+    }
     await vscode.env.clipboard.writeText(text);
     if (!this.isCurrentVersion(requestVersion)) {
       return;
@@ -1981,13 +2013,27 @@ export class KxResultsPanel {
       return;
     }
 
-    const content = format === 'xlsx'
-      ? await columnarToXlsx(table, clamped, includeHeaders, includeRowIndex, cellTextOptions)
-      : Buffer.from(table.toText(format, clamped, {
-        includeHeaders,
-        includeRowIndex,
-        arrayDisplayFormat: cellTextOptions.arrayDisplayFormat,
-      }), 'utf8');
+    let content: Uint8Array;
+    try {
+      content = format === 'xlsx'
+        ? await columnarToXlsx(table, clamped, includeHeaders, includeRowIndex, cellTextOptions)
+        : columnarToTextBytes(
+          table,
+          clamped,
+          format,
+          includeHeaders,
+          includeRowIndex,
+          {},
+          cellTextOptions
+        );
+    } catch (error) {
+      const detail = toError(error).message;
+      await vscode.window.showErrorMessage(detail);
+      if (this.isCurrentVersion(requestVersion)) {
+        this.post({ type: 'exportSkipped', version: requestVersion, format });
+      }
+      return;
+    }
     if (!this.isCurrentVersion(requestVersion)) {
       return;
     }
@@ -3119,10 +3165,7 @@ export class KxResultsPanel {
           </select></label>
           <label class="checkbox" title="Result-webview qText only; source-editor highlighting is unchanged"><input id="settingsQTextSyntaxHighlighting" type="checkbox">Highlight qText output</label>
           <label class="checkbox" title="Display-only; unsupported, ambiguous, or malformed qText remains unchanged"><input id="settingsQTextDisplayFormatting" type="checkbox">Format supported qText output</label>
-          <label class="settings-row"><span>Functions</span><select id="settingsFunctionDisplayStrategy">
-            <option value="grid">Grid</option>
-            <option value="qText">qText</option>
-          </select></label>
+
           <label class="settings-row"><span>Dictionaries</span><select id="settingsDictionaryDisplayStrategy">
             <option value="grid">Grid</option>
             <option value="qText">qText</option>
@@ -3131,10 +3174,7 @@ export class KxResultsPanel {
             <option value="grid">Grid</option>
             <option value="qText">qText</option>
           </select></label>
-          <label class="settings-row"><span>Objects</span><select id="settingsObjectDisplayStrategy">
-            <option value="grid">Grid</option>
-            <option value="qText">qText</option>
-          </select></label>
+
           <label class="settings-row"><span>Density</span><select id="settingsDensity">
             <option value="compact">Compact</option>
             <option value="standard">Standard</option>
@@ -3199,6 +3239,7 @@ export class KxResultsPanel {
       <button id="renderChart" disabled>${KX_RESULT_UI_LABELS.renderChart}</button>
       <button id="exportChart" hidden disabled>${KX_RESULT_UI_LABELS.exportChartPng}</button>
       <button id="resetChartZoom" disabled>${KX_RESULT_UI_LABELS.resetZoom}</button>
+      <button id="chartDragMode" type="button" title="Chart drag mode: Zoom. Activate Pan mode.">Pan mode</button>
       <button id="closeChart">${KX_RESULT_UI_LABELS.closeChart}</button>
       <span id="chartStatus" class="status"></span>
     </div>
@@ -3305,10 +3346,10 @@ export class KxResultsPanel {
       const settingsArrayDisplayFormat = document.getElementById('settingsArrayDisplayFormat');
       const settingsQTextSyntaxHighlighting = document.getElementById('settingsQTextSyntaxHighlighting');
       const settingsQTextDisplayFormatting = document.getElementById('settingsQTextDisplayFormatting');
-      const settingsFunctionDisplayStrategy = document.getElementById('settingsFunctionDisplayStrategy');
+
       const settingsDictionaryDisplayStrategy = document.getElementById('settingsDictionaryDisplayStrategy');
       const settingsListDisplayStrategy = document.getElementById('settingsListDisplayStrategy');
-      const settingsObjectDisplayStrategy = document.getElementById('settingsObjectDisplayStrategy');
+
       const settingsDensity = document.getElementById('settingsDensity');
       const settingsCellWidth = document.getElementById('settingsCellWidth');
       const settingsRowHeight = document.getElementById('settingsRowHeight');
@@ -3355,6 +3396,7 @@ export class KxResultsPanel {
       const renderChart = document.getElementById('renderChart');
       const exportChart = document.getElementById('exportChart');
       const resetChartZoomButton = document.getElementById('resetChartZoom');
+      const chartDragModeButton = document.getElementById('chartDragMode');
       const closeChart = document.getElementById('closeChart');
       const chartStatus = document.getElementById('chartStatus');
       const chartCanvasWrap = document.getElementById('chartCanvasWrap');
@@ -3410,12 +3452,14 @@ export class KxResultsPanel {
       let chartAutoRefineScheduledRange = null;
       let chartLastAutoRefineKey = '';
       let chartPanState = null;
+      let chartDragMode = 'zoom';
       let chartNavigatorPointerState = null;
       let chartNavigatorOverviewData = null;
       const CHART_PNG_DATA_URL_PREFIX = '${CHART_PNG_DATA_URL_PREFIX}';
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
       const CHART_AUTO_REFINE_DELAY_MS = 450;
+      const CHART_AUTO_REFINE_MIN_VISIBLE_POINTS = 3000;
       ${isValidChartRange.toString()}
       ${clampChartViewport.toString()}
       ${chartNavigatorWindow.toString()}
@@ -3588,10 +3632,10 @@ export class KxResultsPanel {
       settingsArrayDisplayFormat.addEventListener('change', () => updateSetting('arrayDisplayFormat', normalizeArrayDisplayFormat(settingsArrayDisplayFormat.value)));
       settingsQTextSyntaxHighlighting.addEventListener('change', () => updateSetting('qTextSyntaxHighlighting', !!settingsQTextSyntaxHighlighting.checked));
       settingsQTextDisplayFormatting.addEventListener('change', () => updateSetting('qTextDisplayFormatting', !!settingsQTextDisplayFormatting.checked));
-      settingsFunctionDisplayStrategy.addEventListener('change', () => updateSetting('functionDisplayStrategy', normalizeQResultDisplayStrategy(settingsFunctionDisplayStrategy.value, 'qText')));
+
       settingsDictionaryDisplayStrategy.addEventListener('change', () => updateSetting('dictionaryDisplayStrategy', normalizeQResultDisplayStrategy(settingsDictionaryDisplayStrategy.value, 'grid')));
       settingsListDisplayStrategy.addEventListener('change', () => updateSetting('listDisplayStrategy', normalizeQResultDisplayStrategy(settingsListDisplayStrategy.value, 'grid')));
-      settingsObjectDisplayStrategy.addEventListener('change', () => updateSetting('objectDisplayStrategy', normalizeQResultDisplayStrategy(settingsObjectDisplayStrategy.value, 'grid')));
+
       settingsDensity.addEventListener('change', () => updateDensitySetting(String(settingsDensity.value || 'standard')));
       settingsCellWidth.addEventListener('change', () => updateNumberSetting('cellWidth', settingsCellWidth, 80, 600));
       settingsRowHeight.addEventListener('change', () => updateNumberSetting('rowHeight', settingsRowHeight, 20, 80));
@@ -3639,6 +3683,19 @@ export class KxResultsPanel {
       exportChart.addEventListener('click', exportChartPng);
       resetChartZoomButton.addEventListener('click', resetChartZoom);
       closeChart.addEventListener('click', closeChartPanel);
+      chartDragModeButton.addEventListener('click', () => {
+        chartDragMode = chartDragMode === 'zoom' ? 'pan' : 'zoom';
+        chartDragModeButton.textContent = chartDragMode === 'zoom' ? 'Pan mode' : 'Zoom mode';
+        chartDragModeButton.title = chartDragMode === 'zoom'
+          ? 'Chart drag mode: Zoom. Activate Pan mode.'
+          : 'Chart drag mode: Pan. Activate Zoom mode.';
+        chartCanvasWrap.setAttribute(
+          'aria-label',
+          chartDragMode === 'pan'
+            ? 'Chart plot. Drag to pan x. Switch to zoom mode to drag-zoom. Arrow keys pan. Home resets zoom.'
+            : 'Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.'
+        );
+      });
       chartNavigatorWindowElement.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'window'));
       chartNavigatorStart.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'start'));
       chartNavigatorEnd.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'end'));
@@ -4697,7 +4754,7 @@ export class KxResultsPanel {
         requestChartDataForRange(null, 'Sampling chart data...');
       }
 
-      function requestChartDataForRange(xRange, messageText) {
+      function requestChartDataForRange(xRange, messageText, retainTemporalLevel = false) {
         if (!chartCanRender()) {
           chartStatus.textContent = chartControlStatusMessage();
           return;
@@ -4726,6 +4783,10 @@ export class KxResultsPanel {
           closeColumn: selectedCandlestickColumns().close,
           width: Math.max(320, Math.floor(chartCanvasWrap.clientWidth || 800))
         };
+        if (retainTemporalLevel && chartData &&
+          Number.isFinite(chartData.temporalBucketIntervalMs) && chartData.temporalBucketIntervalMs > 0) {
+          message.temporalBucketIntervalMs = chartData.temporalBucketIntervalMs;
+        }
         chartZoomLifecycle = issueChartZoomLifecycleRequest(
           chartZoomLifecycle,
           latestChartRequestId,
@@ -5210,7 +5271,8 @@ export class KxResultsPanel {
               stroke: axisColor,
               grid: { stroke: gridColor, width: 1 },
               ticks: { stroke: gridColor, width: 1 },
-              values: (_self, splits) => splits.map(value => formatChartNumber(value))
+              values: (_self, splits) => splits.map(value => formatChartNumber(value)),
+              size: (self, values) => chartYAxisSize(self, values)
             }
           ],
           cursor: {
@@ -6264,7 +6326,8 @@ export class KxResultsPanel {
           event.stopPropagation();
           return;
         }
-        if (!event.shiftKey || event.button !== 0 || !chartUPlot || chartControlsDirty) {
+        if ((chartDragMode !== 'pan' && !event.shiftKey) ||
+          event.button !== 0 || !chartUPlot || chartControlsDirty) {
           return;
         }
         const range = currentChartViewportRange();
@@ -6328,6 +6391,18 @@ export class KxResultsPanel {
         if (!clamped || !chartRangeIsZoomed(chartZoomLifecycle.fullRange, clamped)) {
           return;
         }
+        const sampledX = chartData && Array.isArray(chartData.x) ? chartData.x : [];
+        const visibleSampledPoints = sampledX.reduce((count, x) =>
+          Number.isFinite(x) && x >= clamped.min && x <= clamped.max ? count + 1 : count, 0);
+        const sampledPointCount = Number(chartData && chartData.sampledPointCount || sampledX.length);
+        const eligibleRowCount = Number(chartData && chartData.eligibleRowCount || Infinity);
+        const sampledDomain = chartData && chartData.xDomain;
+        const extendsBeyondSampledDomain = sampledDomain &&
+          (clamped.min < sampledDomain.min || clamped.max > sampledDomain.max);
+        if (visibleSampledPoints >= CHART_AUTO_REFINE_MIN_VISIBLE_POINTS ||
+          (eligibleRowCount <= sampledPointCount && !extendsBeyondSampledDomain)) {
+          return;
+        }
         const key = chartZoomRangeKey(clamped);
         if (chartZoomRangeMatchesRequest(chartZoomLifecycle, clamped) ||
           key === chartLastAutoRefineKey) {
@@ -6341,7 +6416,8 @@ export class KxResultsPanel {
               ? 'Auto-refining zoom range...'
               : reason === 'navigator'
                 ? 'Loading selected navigator range...'
-                : 'Resampling panned chart range...'
+                : 'Resampling panned chart range...',
+            reason === 'pan'
           );
         };
         const action = chartZoomAutoRefineQueueAction(chartAutoRefineScheduledRange, clamped);
@@ -6655,6 +6731,13 @@ export class KxResultsPanel {
         });
       }
 
+      function chartYAxisSize(plot, values) {
+        const ratio = window.devicePixelRatio || 1;
+        const maxLabelWidth = (values || []).reduce((width, value) =>
+          Math.max(width, plot.ctx.measureText(String(value || '')).width / ratio), 0);
+        return Math.max(48, Math.min(220, Math.ceil(maxLabelWidth + 18)));
+      }
+
       function formatChartTemporalValue(value) {
         const date = new Date(value);
         if (!Number.isFinite(date.getTime())) {
@@ -6783,10 +6866,10 @@ export class KxResultsPanel {
         settingsArrayDisplayFormat.value = settings.arrayDisplayFormat;
         settingsQTextSyntaxHighlighting.checked = settings.qTextSyntaxHighlighting;
         settingsQTextDisplayFormatting.checked = settings.qTextDisplayFormatting;
-        settingsFunctionDisplayStrategy.value = settings.functionDisplayStrategy;
+
         settingsDictionaryDisplayStrategy.value = settings.dictionaryDisplayStrategy;
         settingsListDisplayStrategy.value = settings.listDisplayStrategy;
-        settingsObjectDisplayStrategy.value = settings.objectDisplayStrategy;
+
         settingsDensity.value = settings.density;
         settingsCellWidth.value = String(settings.cellWidth);
         settingsRowHeight.value = String(settings.rowHeight);
@@ -8644,10 +8727,8 @@ function panelSettings(): KxPanelSettings {
       DEFAULT_PANEL_SETTINGS.qTextDisplayFormatting
     ),
     arrayDisplayFormat: panelArrayDisplayFormat(config.get<string>('viewer.arrayDisplayFormat')),
-    functionDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.functionDisplayStrategy'), 'qText'),
     dictionaryDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.dictionaryDisplayStrategy'), 'grid'),
     listDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.listDisplayStrategy'), 'grid'),
-    objectDisplayStrategy: panelQResultDisplayStrategy(config.get<string>('viewer.objectDisplayStrategy'), 'grid'),
   };
 }
 
@@ -8671,10 +8752,8 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
     qTextDisplayFormatting: settings.qTextDisplayFormatting,
     arrayDisplayFormat: settings.arrayDisplayFormat,
-    functionDisplayStrategy: settings.functionDisplayStrategy,
     dictionaryDisplayStrategy: settings.dictionaryDisplayStrategy,
     listDisplayStrategy: settings.listDisplayStrategy,
-    objectDisplayStrategy: settings.objectDisplayStrategy,
   };
 }
 
@@ -8800,10 +8879,8 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
     key === 'autoFitMode' ||
     key === 'chartMaxSourceRows' ||
     key === 'chartDecimalPlaces' ||
-    key === 'functionDisplayStrategy' ||
     key === 'dictionaryDisplayStrategy' ||
-    key === 'listDisplayStrategy' ||
-    key === 'objectDisplayStrategy'
+    key === 'listDisplayStrategy'
   ) {
     return `viewer.${key}`;
   }
@@ -8864,10 +8941,8 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   chartDecimalPlaces: value => numberSettingUpdate(value, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX),
   chartMaxSourceRows: positiveIntegerSettingUpdate,
   arrayDisplayFormat: arrayDisplayFormatSettingUpdate,
-  functionDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'qText'),
   dictionaryDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
   listDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
-  objectDisplayStrategy: value => qResultDisplayStrategySettingUpdate(value, 'grid'),
   qTextSyntaxHighlighting: booleanSettingUpdate,
   qTextDisplayFormatting: booleanSettingUpdate,
 };
@@ -9281,8 +9356,17 @@ function defaultChartExportUri(): vscode.Uri {
   return vscode.Uri.file(path.join(folder, 'kx-chart.png'));
 }
 
-function formatBytes(bytes: number): string {
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+function clipboardCopyErrorMessage(
+  format: TextExportFormat,
+  error: unknown
+): string {
+  return toError(error).message
+    .replace(
+      `${format.toUpperCase()} file export`,
+      `${format.toUpperCase()} clipboard copy`
+    )
+    .replace('Export a smaller row/column range', 'Copy a smaller row/column range')
+    .replace('No partial file was written.', 'Nothing was copied.');
 }
 
 function formatCount(count: number): string {

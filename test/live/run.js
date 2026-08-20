@@ -588,22 +588,42 @@ async function runExactQAssertions(client) {
       'timestamp:enlist "p"$123j)'
   );
   assert.strictEqual(exactTable.qtype, 'table');
-  const exactTexts = [
-    '`hello',
-    '"hello"',
-    '`hello`world',
-    'enlist 42i',
-    '1 2i',
-    'enlist 1b',
-    '101b',
-    'enlist ("p"$123j)',
-    '"p"$(0j;123j)',
-    '(`hello;"hello";enlist 42i)',
+  const analystTexts = [
+    'hello',
+    'hello',
+    'hello, world',
+    '42',
+    '1, 2',
+    'true',
+    'true, false, true',
+    '2000-01-01T00:00:00.000000123Z',
+    '2000-01-01T00:00:00.000000000Z, 2000-01-01T00:00:00.000000123Z',
+    'hello, hello, [42]',
     '9007199254740993',
-    '0Ni',
-    '0Wi',
-    '-0Wi',
-    '"p"$123j',
+    '',
+    'Infinity',
+    '-Infinity',
+    '2000-01-01T00:00:00.000000123Z',
+  ];
+  const analystValues = [
+    'hello',
+    'hello',
+    ['hello', 'world'],
+    [42],
+    [1, 2],
+    [true],
+    [true, false, true],
+    ['2000-01-01T00:00:00.000000123Z'],
+    [
+      '2000-01-01T00:00:00.000000000Z',
+      '2000-01-01T00:00:00.000000123Z',
+    ],
+    ['hello', 'hello', [42]],
+    '9007199254740993',
+    null,
+    null,
+    null,
+    '2000-01-01T00:00:00.000000123Z',
   ];
   const displayTexts = [
     '`hello',
@@ -685,16 +705,16 @@ async function runExactQAssertions(client) {
   };
   assert.strictEqual(
     reopenedPanel.toText('tsv', range, false),
-    exactTexts.join('\t'),
-    'reopened copy text must retain exact q literals'
+    analystTexts.join('\t'),
+    'reopened copy text must use analyst values without changing persisted q cells'
   );
   assert.deepStrictEqual(
     JSON.parse(reopenedPanel.toText('json', range, false)),
     [Object.fromEntries(reopened.schema.columns.map((column, index) => [
       column.name,
-      exactTexts[index],
+      analystValues[index],
     ]))],
-    'reopened JSON export must retain exact q literals'
+    'reopened JSON export must retain useful analyst types without changing persisted q cells'
   );
 }
 

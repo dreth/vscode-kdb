@@ -27,10 +27,8 @@ export interface SharedKxResultSettings {
   qTextSyntaxHighlighting: boolean;
   qTextDisplayFormatting: boolean;
   arrayDisplayFormat: ArrayDisplayFormat;
-  functionDisplayStrategy: KxQResultDisplayStrategy;
   dictionaryDisplayStrategy: KxQResultDisplayStrategy;
   listDisplayStrategy: KxQResultDisplayStrategy;
-  objectDisplayStrategy: KxQResultDisplayStrategy;
 }
 
 export type SharedKxResultSettingKey = keyof SharedKxResultSettings;
@@ -171,15 +169,7 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
   },
   { key: 'qTextSyntaxHighlighting', label: 'Highlight qText output', control: 'checkbox' },
   { key: 'qTextDisplayFormatting', label: 'Format supported qText output', control: 'checkbox' },
-  {
-    key: 'functionDisplayStrategy',
-    label: 'Functions',
-    control: 'select',
-    values: [
-      { value: 'grid', label: 'Grid' },
-      { value: 'qText', label: 'qText' },
-    ],
-  },
+
   {
     key: 'dictionaryDisplayStrategy',
     label: 'Dictionaries',
@@ -198,18 +188,10 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
       { value: 'qText', label: 'qText' },
     ],
   },
-  {
-    key: 'objectDisplayStrategy',
-    label: 'Objects',
-    control: 'select',
-    values: [
-      { value: 'grid', label: 'Grid' },
-      { value: 'qText', label: 'qText' },
-    ],
-  },
+
   {
     key: 'chartDecimalPlaces',
-    label: 'Chart decimals',
+    label: 'Chart decimal places',
     control: 'number',
     minimum: 0,
     maximum: 12,

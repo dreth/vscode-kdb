@@ -88,6 +88,7 @@ const {
   chartZoomRequestedRenderRange,
   chartRangeIsZoomed,
   chartVisibleIndexBounds,
+  chartVisibleSampledPointCount,
   chartXRangeWithInitialPadding,
   chartYRangeForVisibleX,
   chartZoomAutoRefineQueueAction,
@@ -102,7 +103,11 @@ const {
   reduceChartZoomLifecycle,
   resetChartZoomLifecycle,
 } = requireOut('chart-zoom');
-const { buildChartData, chartColumnOptions } = requireOut('charting');
+const {
+  buildChartData,
+  buildChartDataWithTemporalPanReuse,
+  chartColumnOptions,
+} = requireOut('charting');
 const {
   chartLegendToggleKey,
   chartSeriesColorIndexes,
@@ -187,6 +192,8 @@ const {
   perfMark,
 } = requireOut('perf');
 const {
+  cellValueToAnalystValue,
+  cellValueToBoundedExportText,
   cellValueToBoundedText,
   compareColumnarCellText,
   createColumnarPanelResult,
@@ -203,8 +210,15 @@ const {
   CHART_EXPORT_MAX_BYTES,
   CHART_PNG_DATA_URL_PREFIX,
   COPY_EXPORT_CONFIRM_BYTES,
+  KX_RESULT_FILE_EXPORT_MAX_CELLS,
+  KX_RESULT_FILE_EXPORT_MAX_COLUMNS,
+  KX_RESULT_TEXT_EXPORT_MAX_BYTES,
+  KX_RESULT_TEXT_EXPORT_MAX_CELL_CHARACTERS,
+  KX_RESULT_XLSX_EXPORT_MAX_CELLS,
+  KX_RESULT_XLSX_WORKSHEET_XML_MAX_BYTES,
   KX_RESULT_EXPORT_FORMATS,
   chartPngBytesFromDataUrl,
+  columnarToTextBytes,
   columnarToXlsx,
   estimateCopyExport,
   kxResultExportFileExtension,
@@ -362,10 +376,13 @@ const {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
   MAX_NOTEBOOK_LIVE_SLICE_TEXT_CHARS,
+  MAX_NOTEBOOK_KX_OUTPUT_ITEMS,
   NOTEBOOK_LIVE_RESULT_METADATA_KEY,
   NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
+  inspectNotebookKxOutputIdentity,
   notebookRendererSettingsMessage,
   parseNotebookLiveResultReference,
+  parseNotebookKxOutputIdentity,
   parseNotebookOutputBindingFromMetadata,
   parseNotebookOutputBindingReference,
   parseNotebookPortableOutputBinding,
@@ -944,6 +961,22 @@ function testChartZoomLifecycle() {
     planChartAutoRefine(full, full, '', false),
     null,
     'the full original domain must not request refinement'
+  );
+  const sampledX = Array.from({ length: 7_000 }, (_, index) => index);
+  assert.strictEqual(
+    chartVisibleSampledPointCount(sampledX, { min: 2_000, max: 5_000 }),
+    3_001,
+    'visible sample counts include both viewport boundaries'
+  );
+  assert.strictEqual(
+    planChartAutoRefine(full, { min: 20, max: 80 }, '', false, 3_000),
+    null,
+    '3,000 visible sampled points remain locally zoomable without refinement'
+  );
+  assert.deepStrictEqual(
+    planChartAutoRefine(full, { min: 20, max: 80 }, '', false, 2_999)?.range,
+    { min: 20, max: 80 },
+    'refinement starts only after the visible sample count drops below 3,000'
   );
   const firstAutoRefine = planChartAutoRefine(full, { min: 20, max: 80 }, '', false);
   assert.deepStrictEqual(firstAutoRefine, {
@@ -1785,7 +1818,7 @@ function testChartZoomLifecycle() {
   assert.match(optionsSource, /if \(!chartRendered\) \{[\s\S]*?clearChartZoomBaseline\(\);[\s\S]*?\}/);
   assert.ok(!/clearChartZoomBaseline\(\);\s*chartXColumn/.test(optionsSource), 'option refresh must preserve a rendered chart baseline');
 
-  const requestSource = sourceSection(panelSource, '      function requestChartDataForRange(xRange, messageText) {', '      function exportChartPng() {');
+  const requestSource = sourceSection(panelSource, '      function requestChartDataForRange(xRange, messageText, retainTemporalLevel = false) {', '      function exportChartPng() {');
   assert.match(
     requestSource,
     /issueChartZoomLifecycleRequest\(\s*chartZoomLifecycle,\s*latestChartRequestId,\s*xRange,/
@@ -2463,10 +2496,15 @@ async function testQIpc() {
       qValueToGridCellText(decodedExact[name]),
       `${name} panel cell display must omit routine type annotation`
     );
+    const semanticExport = createColumnarPanelResult(
+      ['value'],
+      1,
+      () => cellValueToAnalystValue(decodedExact[name])
+    );
     assert.strictEqual(
       panel.result.toText('tsv', { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 }, false),
-      expectedText,
-      `${name} copy/export must retain its outer q vector identity`
+      semanticExport.toText('tsv', { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 }, false),
+      `${name} copy/export must use analyst values while qValueToLiteral retains ${expectedText}`
     );
   }
   const temporalLiterals = {
@@ -2626,6 +2664,11 @@ async function testQIpc() {
     ipcType: 100,
     source: '{x+y}',
   };
+  assert.deepStrictEqual(
+    qValueToColumnarPanel(decodedFunction, { functionDisplayStrategy: 'grid' }),
+    { mode: 'text', text: '{x+y}', kind: 'function', rowsMaterialized: true },
+    'top-level q functions must always render as qText even when stale settings request a grid'
+  );
   const losslessFunction = qValueToLosslessPortablePanel(decodedFunction);
   assert.strictEqual(losslessFunction.mode, 'grid');
   assert.deepStrictEqual(losslessFunction.result.cellValue(0, 0), decodedFunction);
@@ -2639,6 +2682,23 @@ async function testQIpc() {
     sourceUnavailableFunction,
     'source-unavailable decoded functions must retain their exact available structure'
   );
+  for (const numericAtom of [
+    qAtom('byte', 42),
+    qAtom('short', 42),
+    qAtom('int', 42),
+    qAtom('long', '42'),
+    qAtom('real', 42.5),
+    qAtom('float', 42.5),
+  ]) {
+    assert.strictEqual(qValuePrefersQText(numericAtom), true);
+    assert.strictEqual(
+      qValueToColumnarPanel(numericAtom).mode,
+      'text',
+      `${numericAtom.type} atoms must default to qText only when returned standalone`
+    );
+  }
+  assert.strictEqual(qValuePrefersQText(qAtom('date', 42)), false);
+  assert.strictEqual(qValueToColumnarPanel(qAtom('date', 42)).mode, 'grid');
   assert.strictEqual(qValuePrefersQText(42), false);
   assert.strictEqual(qValueToColumnarPanel(42).mode, 'grid');
 
@@ -2670,8 +2730,8 @@ async function testQIpc() {
       startColumn: 0,
       endColumn: 1,
     }, false),
-    '`AAPL\t100i\n`MSFT\t250i',
-    'table copy/export must retain the exact typed q literals'
+    'AAPL\t100\nMSFT\t250',
+    'table copy/export must use analyst-friendly values instead of q literals'
   );
   assert.strictEqual(qValueRowsMaterialized(table), false, 'viewer conversion must stay columnar/lazy');
 
@@ -2764,6 +2824,474 @@ async function testQIpc() {
     temporalOptions.yColumns.map(option => option.columnName),
     ['price', 'open', 'high', 'low', 'close']
   );
+  const fixedTemporalBuckets = buildChartData(temporalPanel.result, {
+    chartType: 'line',
+    xColumn: 'timestamp',
+    yColumns: ['price'],
+    samplingStrategy: 'temporal-fixed',
+    temporalBucketIntervalMs: 60_000,
+    width: 640,
+    version: 1,
+    requestId: 7,
+  });
+  assert.strictEqual(fixedTemporalBuckets.samplingStrategy, 'temporal-fixed');
+  assert.strictEqual(fixedTemporalBuckets.temporalBucketIntervalMs, 60_000);
+  assert.strictEqual(fixedTemporalBuckets.temporalBucketOrigin, 0);
+  assert.match(fixedTemporalBuckets.algorithm, /^temporal-minmax\/60000ms@0$/);
+  for (const x of fixedTemporalBuckets.x) {
+    assert.strictEqual(Math.floor(x / 60_000), Math.floor(x / fixedTemporalBuckets.temporalBucketIntervalMs));
+  }
+
+  let temporalXReads = 0;
+  let temporalYReads = 0;
+  const temporalPanTable = {
+    columns: ['timestamp', 'price'],
+    columnTypes: ['timestamp', 'float'],
+    rowCount: 20_000,
+    cellValue(rowIndex, columnIndex) {
+      if (columnIndex === 0) {
+        temporalXReads += 1;
+        return new Date(qTimestampEpochMs + rowIndex);
+      }
+      temporalYReads += 1;
+      return Math.sin(rowIndex / 17) * 100 + (rowIndex % 31);
+    },
+  };
+  const temporalPanBaseRequest = {
+    chartType: 'line',
+    xColumn: 'timestamp',
+    yColumns: ['price'],
+    samplingStrategy: 'temporal-fixed',
+    temporalBucketIntervalMs: 10,
+    width: 800,
+    version: 9,
+  };
+  const qTimestampEpochMs = Date.UTC(2000, 0, 1);
+  const firstTemporalPan = buildChartDataWithTemporalPanReuse(temporalPanTable, {
+    ...temporalPanBaseRequest,
+    requestId: 1,
+    xMin: qTimestampEpochMs,
+    xMax: qTimestampEpochMs + 9_999,
+  });
+  const tinyIntervalRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 99,
+    temporalBucketIntervalMs: 0.001,
+    xMin: qTimestampEpochMs,
+    xMax: qTimestampEpochMs + 19_999,
+  };
+  const tinyIntervalTemporal = buildChartData(temporalPanTable, tinyIntervalRequest);
+  assert.ok(tinyIntervalTemporal.sampledPointCount <= 7_000);
+  assert.match(tinyIntervalTemporal.algorithm, /\+minmax-bucket\/7000$/);
+  const tinyIntervalCached = buildChartDataWithTemporalPanReuse(
+    temporalPanTable,
+    tinyIntervalRequest
+  );
+  assert.strictEqual(
+    tinyIntervalCached.cache,
+    undefined,
+    'a second-stage capped temporal sample is not a complete bucket summary and must not enter the pan cache'
+  );
+  temporalXReads = 0;
+  temporalYReads = 0;
+  const reusedTemporalPan = buildChartDataWithTemporalPanReuse(temporalPanTable, {
+    ...temporalPanBaseRequest,
+    requestId: 2,
+    xMin: qTimestampEpochMs + 1_000,
+    xMax: qTimestampEpochMs + 10_999,
+  }, firstTemporalPan.cache);
+  const reuseYReads = temporalYReads;
+  assert.ok(reusedTemporalPan.data.temporalReusedPointCount > 0);
+  assert.ok(reusedTemporalPan.data.temporalBuiltPointCount > 0);
+  assert.match(reusedTemporalPan.data.algorithm, /\+overlap-cache$/);
+  assert.ok(
+    reusedTemporalPan.data.sampledPointCount <= 7_000,
+    'the retained temporal pan cache must stay bounded by one sampled viewport'
+  );
+  temporalXReads = 0;
+  temporalYReads = 0;
+  const freshTemporalPan = buildChartData(temporalPanTable, {
+    ...temporalPanBaseRequest,
+    requestId: 3,
+    xMin: qTimestampEpochMs + 1_000,
+    xMax: qTimestampEpochMs + 10_999,
+  });
+  const freshYReads = temporalYReads;
+  assert.ok(
+    reuseYReads < freshYReads / 2,
+    `overlap reuse must process fewer newly exposed y values (${reuseYReads} versus ${freshYReads})`
+  );
+  const temporalKeys = data => data.x.map((x, index) =>
+    JSON.stringify([x, data.series[0].values[index]])).sort();
+  const temporalCleanEquivalence = data => ({
+    chartType: data.chartType,
+    xColumn: data.xColumn,
+    groupByColumn: data.groupByColumn,
+    xKind: data.xKind,
+    x: data.x,
+    xText: data.xText,
+    xDomain: data.xDomain,
+    series: data.series.map(series => ({
+      name: series.name,
+      values: series.values,
+      gapFlags: series.gapFlags,
+      gapBefore: series.gapBefore,
+    })),
+    sourceRowCount: data.sourceRowCount,
+    eligibleRowCount: data.eligibleRowCount,
+    sampledPointCount: data.sampledPointCount,
+    sorted: data.sorted,
+    warnings: data.warnings,
+  });
+  assert.deepStrictEqual(
+    temporalKeys(reusedTemporalPan.data),
+    temporalKeys(freshTemporalPan),
+    'incremental pan reuse must exactly match a full viewport rebuild'
+  );
+  const changedGuardrailReuse = buildChartDataWithTemporalPanReuse(temporalPanTable, {
+    ...temporalPanBaseRequest,
+    requestId: 31,
+    maxSourceRows: 20_000,
+    xMin: qTimestampEpochMs + 1_000,
+    xMax: qTimestampEpochMs + 10_999,
+  }, firstTemporalPan.cache);
+  assert.strictEqual(
+    changedGuardrailReuse.data.temporalReusedPointCount,
+    undefined,
+    'temporal overlap must not be reused across different source guardrails'
+  );
+  const nonAlignedRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 4,
+    xMin: qTimestampEpochMs + 1_003,
+    xMax: qTimestampEpochMs + 11_002,
+  };
+  const nonAlignedReuse = buildChartDataWithTemporalPanReuse(
+    temporalPanTable,
+    nonAlignedRequest,
+    firstTemporalPan.cache
+  ).data;
+  const nonAlignedFresh = buildChartData(temporalPanTable, nonAlignedRequest);
+  assert.deepStrictEqual(
+    temporalKeys(nonAlignedReuse),
+    temporalKeys(nonAlignedFresh),
+    'non-bucket-aligned overlap reuse must exactly match a fresh build'
+  );
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(nonAlignedReuse),
+    temporalCleanEquivalence(nonAlignedFresh),
+    'non-bucket-aligned overlap reuse must preserve the exact clean-build domain and payload'
+  );
+
+  const nonAlignedThreeYPatterns = [
+    [4, 1, 8, 2, 9, 3, 7, 5, 6, 0],
+    [6, 9, 2, 8, 1, 7, 3, 10, 4, 5],
+    [5, 0, 9, 1, 8, 2, 10, 3, 7, 4],
+  ];
+  const nonAlignedThreeYTable = {
+    columns: ['timestamp', 'price', 'bid', 'ask'],
+    columnTypes: ['timestamp', 'float', 'float', 'float'],
+    rowCount: 20_000,
+    cellValue(rowIndex, columnIndex) {
+      if (columnIndex === 0) {
+        return new Date(qTimestampEpochMs + rowIndex);
+      }
+      const bucket = Math.floor(rowIndex / 10);
+      const offset = rowIndex % 10;
+      if (columnIndex === 1) {
+        return 118.56061568514026 - 4 + (bucket - 1299) * 0.01 + nonAlignedThreeYPatterns[0][offset];
+      }
+      if (columnIndex === 2) {
+        return 39.288704453151624 - 6 - (bucket - 1299) * 0.02 + nonAlignedThreeYPatterns[1][offset];
+      }
+      return -71.537964483964 - 5 + (bucket - 1299) * 0.03 + nonAlignedThreeYPatterns[2][offset];
+    },
+  };
+  const nonAlignedThreeYBaseRequest = {
+    ...temporalPanBaseRequest,
+    yColumns: ['price', 'bid', 'ask'],
+    requestId: 41,
+    xMin: qTimestampEpochMs + 1_000,
+    xMax: qTimestampEpochMs + 12_999,
+  };
+  const nonAlignedThreeYFirst = buildChartDataWithTemporalPanReuse(
+    nonAlignedThreeYTable,
+    nonAlignedThreeYBaseRequest
+  );
+  const nonAlignedThreeYRequest = {
+    ...temporalPanBaseRequest,
+    yColumns: ['price', 'bid', 'ask'],
+    requestId: 42,
+    xMin: qTimestampEpochMs + 2_503,
+    xMax: qTimestampEpochMs + 14_502,
+  };
+  const nonAlignedThreeYReuse = buildChartDataWithTemporalPanReuse(
+    nonAlignedThreeYTable,
+    nonAlignedThreeYRequest,
+    nonAlignedThreeYFirst.cache
+  ).data;
+  const nonAlignedThreeYFresh = buildChartData(nonAlignedThreeYTable, nonAlignedThreeYRequest);
+  const nonAlignedThreeYBoundary = qTimestampEpochMs + 12_990;
+  assert.strictEqual(
+    nonAlignedThreeYFresh.x.indexOf(nonAlignedThreeYBoundary),
+    -1,
+    'the regression fixture must keep the reported internal boundary point out of the clean full-viewport sample'
+  );
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(nonAlignedThreeYReuse),
+    temporalCleanEquivalence(nonAlignedThreeYFresh),
+    'three-y-series non-aligned temporal pan reuse must match clean payload, domain, warnings, and counts'
+  );
+
+  const subBucketRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 5,
+    xMin: qTimestampEpochMs + 55,
+    xMax: qTimestampEpochMs + 56,
+  };
+  const subBucketReuse = buildChartDataWithTemporalPanReuse(
+    temporalPanTable,
+    subBucketRequest,
+    firstTemporalPan.cache
+  ).data;
+  const subBucketFresh = buildChartData(temporalPanTable, subBucketRequest);
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(subBucketReuse),
+    temporalCleanEquivalence(subBucketFresh),
+    'sub-bucket overlap through the actual temporal pan cache must not retain points or domain outside the requested range'
+  );
+
+  const boundaryTable = {
+    columns: ['timestamp', 'price'],
+    columnTypes: ['timestamp', 'float'],
+    rowCount: 64,
+    cellValue(rowIndex, columnIndex) {
+      if (columnIndex === 0) {
+        return new Date(qTimestampEpochMs + rowIndex);
+      }
+      return rowIndex % 10 === 0 || rowIndex % 10 === 9 ? 10 : rowIndex % 10;
+    },
+  };
+  const boundaryBaseRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 6,
+    xMin: qTimestampEpochMs + 10,
+    xMax: qTimestampEpochMs + 39,
+  };
+  const boundaryFirst = buildChartDataWithTemporalPanReuse(boundaryTable, boundaryBaseRequest);
+  const boundaryRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 7,
+    xMin: qTimestampEpochMs + 15,
+    xMax: qTimestampEpochMs + 36,
+  };
+  const boundaryReuse = buildChartDataWithTemporalPanReuse(
+    boundaryTable,
+    boundaryRequest,
+    boundaryFirst.cache
+  ).data;
+  const boundaryFresh = buildChartData(boundaryTable, boundaryRequest);
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(boundaryReuse),
+    temporalCleanEquivalence(boundaryFresh),
+    'overlap reuse must exactly match clean boundary points that are not bucket extrema'
+  );
+
+  const sparseBoundaryPattern = [9, 8, 7, 5, 0, 10, 6, 4, 3, 2];
+  const sparseBoundaryTable = {
+    columns: ['timestamp', 'price'],
+    columnTypes: ['timestamp', 'float'],
+    rowCount: 600,
+    cellValue(rowIndex, columnIndex) {
+      if (columnIndex === 0) {
+        return new Date(qTimestampEpochMs + 1 + rowIndex * 3);
+      }
+      return sparseBoundaryPattern[rowIndex % sparseBoundaryPattern.length];
+    },
+  };
+  const sparseBoundaryBaseRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 51,
+    xMin: qTimestampEpochMs + 250,
+    xMax: qTimestampEpochMs + 1_500,
+  };
+  const sparseBoundaryFirst = buildChartDataWithTemporalPanReuse(
+    sparseBoundaryTable,
+    sparseBoundaryBaseRequest
+  );
+  const sparseLeftBoundaryRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 52,
+    xMin: qTimestampEpochMs + 308,
+    xMax: qTimestampEpochMs + 1_400,
+  };
+  const sparseLeftBoundaryReuse = buildChartDataWithTemporalPanReuse(
+    sparseBoundaryTable,
+    sparseLeftBoundaryRequest,
+    sparseBoundaryFirst.cache
+  ).data;
+  const sparseLeftBoundaryFresh = buildChartData(sparseBoundaryTable, sparseLeftBoundaryRequest);
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(sparseLeftBoundaryReuse),
+    temporalCleanEquivalence(sparseLeftBoundaryFresh),
+    'sparse 3ms temporal pan reuse must retain the clean request-global first point at a reusable boundary'
+  );
+
+  const sparseRightBoundaryRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 53,
+    xMin: qTimestampEpochMs + 300,
+    xMax: qTimestampEpochMs + 1_491,
+  };
+  const sparseRightBoundaryReuse = buildChartDataWithTemporalPanReuse(
+    sparseBoundaryTable,
+    sparseRightBoundaryRequest,
+    sparseBoundaryFirst.cache
+  ).data;
+  const sparseRightBoundaryFresh = buildChartData(sparseBoundaryTable, sparseRightBoundaryRequest);
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(sparseRightBoundaryReuse),
+    temporalCleanEquivalence(sparseRightBoundaryFresh),
+    'sparse 3ms temporal pan reuse must retain the clean request-global last point at a reusable boundary'
+  );
+
+  const duplicateEndpointYByPair = [1, 1, 2, 3, 4, 7, 3, 4, 3, 0, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5];
+  const duplicateEndpointTable = {
+    columns: ['timestamp', 'y1', 'y2'],
+    columnTypes: ['timestamp', 'float', 'float'],
+    rowCount: 40,
+    cellValue(rowIndex, columnIndex) {
+      const pairIndex = Math.floor(rowIndex / 2);
+      const y1 = duplicateEndpointYByPair[pairIndex];
+      if (columnIndex === 0) {
+        return new Date(qTimestampEpochMs + pairIndex * 2);
+      }
+      if (columnIndex === 1) {
+        return y1;
+      }
+      return y1 * y1;
+    },
+  };
+  const duplicateEndpointBase = {
+    ...temporalPanBaseRequest,
+    yColumns: ['y1', 'y2'],
+    requestId: 61,
+    xMin: qTimestampEpochMs,
+    xMax: qTimestampEpochMs + 30,
+  };
+  const duplicateEndpointFirst = buildChartDataWithTemporalPanReuse(
+    duplicateEndpointTable,
+    duplicateEndpointBase
+  );
+  const duplicateEndpointRequest = {
+    ...temporalPanBaseRequest,
+    yColumns: ['y1', 'y2'],
+    requestId: 62,
+    xMin: qTimestampEpochMs + 3,
+    xMax: qTimestampEpochMs + 24,
+  };
+  const duplicateEndpointReuse = buildChartDataWithTemporalPanReuse(
+    duplicateEndpointTable,
+    duplicateEndpointRequest,
+    duplicateEndpointFirst.cache
+  ).data;
+  const duplicateEndpointFresh = buildChartData(duplicateEndpointTable, duplicateEndpointRequest);
+  const temporalPointPayload = data => data.x.map((x, index) => ({
+    x,
+    xText: data.xText[index],
+    values: data.series.map(series => series.values[index]),
+  }));
+  assert.deepStrictEqual(
+    duplicateEndpointFresh.x.map(x => x - qTimestampEpochMs),
+    [4, 8, 10, 18, 20, 24, 24],
+    'the duplicate endpoint fixture must make the clean build retain both identical endpoint samples'
+  );
+  assert.deepStrictEqual(
+    temporalPointPayload(duplicateEndpointFresh).map(point => ({
+      ...point,
+      x: point.x - qTimestampEpochMs,
+    })),
+    [
+      { x: 4, xText: '2000-01-01T00:00:00.004Z', values: [2, 4] },
+      { x: 8, xText: '2000-01-01T00:00:00.008Z', values: [4, 16] },
+      { x: 10, xText: '2000-01-01T00:00:00.010Z', values: [7, 49] },
+      { x: 18, xText: '2000-01-01T00:00:00.018Z', values: [0, 0] },
+      { x: 20, xText: '2000-01-01T00:00:00.020Z', values: [2, 4] },
+      { x: 24, xText: '2000-01-01T00:00:00.024Z', values: [4, 16] },
+      { x: 24, xText: '2000-01-01T00:00:00.024Z', values: [4, 16] },
+    ],
+    'the clean duplicate endpoint payload must preserve x/xText/value multiplicity'
+  );
+  assert.strictEqual(duplicateEndpointFresh.sampledPointCount, 7);
+  assert.deepStrictEqual(
+    {
+      xDomain: duplicateEndpointFresh.xDomain,
+      sourceRowCount: duplicateEndpointFresh.sourceRowCount,
+      eligibleRowCount: duplicateEndpointFresh.eligibleRowCount,
+      warnings: duplicateEndpointFresh.warnings,
+    },
+    {
+      xDomain: { min: qTimestampEpochMs + 4, max: qTimestampEpochMs + 24 },
+      sourceRowCount: 40,
+      eligibleRowCount: 22,
+      warnings: ['18 rows outside the selected x range were skipped.'],
+    }
+  );
+  assert.match(duplicateEndpointReuse.algorithm, /\+overlap-cache$/);
+  assert.deepStrictEqual(
+    temporalPointPayload(duplicateEndpointReuse),
+    temporalPointPayload(duplicateEndpointFresh),
+    'overlap reuse must preserve legitimate duplicate timestamp/value endpoint multiplicity'
+  );
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(duplicateEndpointReuse),
+    temporalCleanEquivalence(duplicateEndpointFresh),
+    'duplicate endpoint temporal pan reuse must match clean payload, domain, warnings, and counts'
+  );
+  assert.strictEqual(duplicateEndpointReuse.temporalReusedPointCount, 2);
+  assert.strictEqual(duplicateEndpointReuse.temporalBuiltPointCount, 5);
+
+  const wideTable = {
+    columns: ['timestamp', 'price'],
+    columnTypes: ['timestamp', 'float'],
+    rowCount: 300_001,
+    cellValue(rowIndex, columnIndex) {
+      if (columnIndex === 0) {
+        return new Date(qTimestampEpochMs + rowIndex);
+      }
+      return Math.sin(rowIndex / 13) * 100 + (rowIndex % 17);
+    },
+  };
+  const widePrevious = buildChartDataWithTemporalPanReuse(wideTable, {
+    ...temporalPanBaseRequest,
+    requestId: 8,
+    maxSourceRows: 300_001,
+    xMin: qTimestampEpochMs + 100_000,
+    xMax: qTimestampEpochMs + 110_000,
+  });
+  const wideRequest = {
+    ...temporalPanBaseRequest,
+    requestId: 9,
+    maxSourceRows: 300_001,
+    xMin: qTimestampEpochMs,
+    xMax: qTimestampEpochMs + 300_000,
+  };
+  const wideReuse = buildChartDataWithTemporalPanReuse(
+    wideTable,
+    wideRequest,
+    widePrevious.cache
+  ).data;
+  const wideFresh = buildChartData(wideTable, wideRequest);
+  assert.ok(
+    wideReuse.x.length <= 10_000,
+    'wide side expansion through temporal pan cache must respect the notebook live chart hard cap'
+  );
+  assert.deepStrictEqual(
+    temporalCleanEquivalence(wideReuse),
+    temporalCleanEquivalence(wideFresh),
+    'wide side expansion through temporal pan cache must exactly match a clean capped build'
+  );
+
   for (const chartType of ['line', 'scatter', 'step', 'bar', 'box']) {
     const chart = buildChartData(temporalPanel.result, {
       chartType,
@@ -3726,6 +4254,22 @@ async function testQTextResultPanelSettings() {
     'space',
     'a notebook-originated shared setting update must round-trip to the common configuration source'
   );
+  const updatesBeforeRetiredSettings = harness.updates.length;
+  assert.strictEqual(
+    await updateSharedKxResultSetting('functionDisplayStrategy', 'grid'),
+    false,
+    'retired Function display strategy writes from stale panels must be ignored'
+  );
+  assert.strictEqual(
+    await updateSharedKxResultSetting('objectDisplayStrategy', 'qText'),
+    false,
+    'retired Object display strategy writes from stale panels must be ignored'
+  );
+  assert.strictEqual(
+    harness.updates.length,
+    updatesBeforeRetiredSettings,
+    'ignored retired display strategy writes must not update user configuration'
+  );
 
   harness.setSetting('vscode-kdb.results.qText.syntaxHighlighting', false);
   harness.setSetting('vscode-kdb.results.qText.displayFormatting', false);
@@ -4017,6 +4561,38 @@ async function testDuplicateOrdinalResultsPanel() {
   assert.deepStrictEqual(await requestAllCells(metadata), [
     ['beta-value', 'alpha-value', 'tail-value'],
   ], 'legacy unique-name messages must retain hide/show/reorder behavior');
+
+  const analystPanelChars = qVector(
+    [...'a,\t"b\n'].map(character => character.charCodeAt(0)),
+    'char'
+  );
+  showTable(createColumnarPanelResult(
+    ['sym', 'chars', 'int'],
+    1,
+    (_rowIndex, columnIndex) => [
+      qAtom('symbol', 'AAPL'),
+      analystPanelChars,
+      qAtom('int', 42),
+    ][columnIndex],
+    ['symbol', 'char', 'int']
+  ));
+  metadata = latestMetadata();
+  assert.deepStrictEqual(await requestAllCells(metadata), [
+    ['`AAPL', '"a,\\t\\"b\\n"', '42'],
+  ], 'the main panel grid must retain q-aware display formatting');
+  await harness.emitMessage(0, {
+    type: 'copyRange',
+    version: metadata.version,
+    range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 2 },
+    format: 'json',
+    includeHeaders: true,
+    includeRowIndex: false,
+  });
+  assert.strictEqual(
+    harness.clipboard.at(-1),
+    '[{"sym":"AAPL","chars":"a,\\t\\"b\\n","int":42}]',
+    'the main KX Results panel must copy analyst values through the shared boundary'
+  );
 
   const decodedKeyed = qValueToColumnarPanel(
     deserializeQPayload(multiKeyedTableIdentityValue())
@@ -9699,10 +10275,8 @@ async function createHostedNotebookChartAdapter() {
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
-    functionDisplayStrategy: 'qText',
     dictionaryDisplayStrategy: 'grid',
     listDisplayStrategy: 'grid',
-    objectDisplayStrategy: 'grid',
   };
   const { NotebookIntegration } = requireOutWithMocks('notebook-integration', {
     vscode: runtime.vscode,
@@ -9957,8 +10531,272 @@ function testColumnarResults() {
     qMarkdown.toText('markdown', {
       startRow: 0, endRow: 0, startColumn: 0, endColumn: 0,
     }, true),
-    '| symbol |\n| --- |\n| \\`hello\\`world |',
-    'Markdown export must escape q symbol backticks instead of rendering them as code spans'
+    '| symbol |\n| --- |\n| hello, world |',
+    'Markdown export must use analyst-friendly symbol text instead of q backtick syntax'
+  );
+  const markdownLiteralText = createColumnarPanelResult(
+    ['value'],
+    1,
+    () => '<b>& raw</b>\nnext'
+  );
+  assert.strictEqual(
+    markdownLiteralText.toText('markdown', {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+    }, true),
+    '| value |\n| --- |\n| &lt;b&gt;&amp; raw&lt;/b&gt;<br>next |',
+    'Markdown export must preserve analyst text instead of interpreting embedded HTML markup'
+  );
+
+  const boundedAnalystVector = qVector(new Array(10_000).fill(1), 'int');
+  Object.defineProperty(boundedAnalystVector, 20, {
+    configurable: true,
+    get() {
+      throw new Error('bounded analyst conversion walked the unneeded q-vector tail');
+    },
+  });
+  let boundedAnalystText;
+  assert.doesNotThrow(() => {
+    boundedAnalystText = cellValueToBoundedExportText(boundedAnalystVector, 12);
+  }, 'bounded analyst rendering must stop before converting a complete q vector');
+  assert.strictEqual(boundedAnalystText.truncated, true);
+  assert.ok(boundedAnalystText.text.length <= 12);
+  assert.doesNotThrow(() => {
+    assert.strictEqual(
+      kxResultJsonCharacterLength(boundedAnalystVector, 12),
+      undefined,
+      'bounded JSON sizing must stop once the q-vector cell exceeds its limit'
+    );
+  });
+
+  const qCharCodes = text => [...text].map(char => char.charCodeAt(0));
+  const analystExportTable = createColumnarPanelResult(
+    [
+      'sym',
+      'chars',
+      'int',
+      'long',
+      'flag',
+      'guid',
+      'date',
+      'timestamp',
+      'vector',
+      'nullInt',
+      'posInf',
+      'negInf',
+      'note',
+    ],
+    1,
+    (_rowIndex, columnIndex) => [
+      qAtom('symbol', 'AAPL'),
+      qVector(qCharCodes('alpha,\t"line\n'), 'char'),
+      qAtom('int', 42),
+      qAtom('long', '9007199254740993'),
+      qAtom('boolean', true),
+      qAtom('guid', '01234567-89ab-cdef-0123-456789abcdef'),
+      qAtom('date', 1),
+      qAtom('timestamp', '1'),
+      qVector([1, qSpecial('null'), qSpecial('positiveInfinity')], 'int'),
+      qAtom('int', qSpecial('null')),
+      qAtom('float', qSpecial('positiveInfinity')),
+      qAtom('long', qSpecial('negativeInfinity')),
+      'plain, "quoted"\nSnowman ☃',
+    ][columnIndex],
+    [
+      'symbol',
+      'char',
+      'int',
+      'long',
+      'boolean',
+      'guid',
+      'date',
+      'timestamp',
+      'int',
+      'int',
+      'float',
+      'long',
+      'string',
+    ]
+  );
+  assert.strictEqual(
+    analystExportTable.cellWindow(
+      { start: 0, end: 0 },
+      { start: 0, end: 1 }
+    ).cells[0][0],
+    '`AAPL',
+    'grid display must keep q-native symbol syntax'
+  );
+  const analystRange = {
+    startRow: 0,
+    endRow: 0,
+    startColumn: 0,
+    endColumn: analystExportTable.columns.length - 1,
+  };
+  assert.deepStrictEqual(
+    JSON.parse(analystExportTable.toText('json', analystRange, {
+      includeHeaders: true,
+      includeRowIndex: false,
+    })),
+    [{
+      sym: 'AAPL',
+      chars: 'alpha,\t"line\n',
+      int: 42,
+      long: '9007199254740993',
+      flag: true,
+      guid: '01234567-89ab-cdef-0123-456789abcdef',
+      date: '2000-01-02',
+      timestamp: '2000-01-01T00:00:00.000000001Z',
+      vector: [1, null, null],
+      nullInt: null,
+      posInf: null,
+      negInf: null,
+      note: 'plain, "quoted"\nSnowman ☃',
+    }],
+    'JSON export must emit analyst values with numbers, booleans, nulls, strings, arrays, and ISO temporals'
+  );
+  assert.strictEqual(
+    analystExportTable.toText('ndjson', analystRange, {
+      includeHeaders: true,
+      includeRowIndex: true,
+    }),
+    '{"#":1,"sym":"AAPL","chars":"alpha,\\t\\"line\\n","int":42,' +
+      '"long":"9007199254740993","flag":true,' +
+      '"guid":"01234567-89ab-cdef-0123-456789abcdef",' +
+      '"date":"2000-01-02","timestamp":"2000-01-01T00:00:00.000000001Z",' +
+      '"vector":[1,null,null],"nullInt":null,"posInf":null,"negInf":null,' +
+      '"note":"plain, \\"quoted\\"\\nSnowman ☃"}',
+    'NDJSON export must share the same analyst conversion and row-index semantics'
+  );
+  const numericWidthTable = createColumnarPanelResult(
+    ['byte', 'short', 'int', 'safeLong', 'real', 'float'],
+    1,
+    (_rowIndex, columnIndex) => [
+      qAtom('byte', 255),
+      qAtom('short', -123),
+      qAtom('int', 42),
+      qAtom('long', '9007199254740991'),
+      qAtom('real', 1.25),
+      qAtom('float', 2.5),
+    ][columnIndex]
+  );
+  assert.deepStrictEqual(
+    JSON.parse(numericWidthTable.toText('json', {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 5,
+    }, false)),
+    [{ byte: 255, short: -123, int: 42, safeLong: 9007199254740991, real: 1.25, float: 2.5 }],
+    'every q numeric width must export as a plain number while exactly representable'
+  );
+  assert.strictEqual(
+    analystExportTable.toText('csv', analystRange, {
+      includeHeaders: true,
+      includeRowIndex: false,
+    }),
+    'sym,chars,int,long,flag,guid,date,timestamp,vector,nullInt,posInf,negInf,note\n' +
+      'AAPL,"alpha,\t""line\n",42,9007199254740993,true,' +
+      '01234567-89ab-cdef-0123-456789abcdef,2000-01-02,' +
+      '2000-01-01T00:00:00.000000001Z,"1, , Infinity",,Infinity,-Infinity,' +
+      '"plain, ""quoted""\nSnowman ☃"',
+    'CSV export must use ordinary textual cells with standard escaping'
+  );
+  assert.strictEqual(
+    analystExportTable.toText('tsv', analystRange, {
+      includeHeaders: true,
+      includeRowIndex: false,
+    }),
+    'sym\tchars\tint\tlong\tflag\tguid\tdate\ttimestamp\tvector\tnullInt\tposInf\tnegInf\tnote\n' +
+      'AAPL\t"alpha,\t""line\n"\t42\t9007199254740993\ttrue\t' +
+      '01234567-89ab-cdef-0123-456789abcdef\t2000-01-02\t' +
+      '2000-01-01T00:00:00.000000001Z\t1, , Infinity\t\tInfinity\t-Infinity\t' +
+      '"plain, ""quoted""\nSnowman ☃"',
+    'TSV export must quote and preserve tabs/newlines/quotes in ordinary analyst values'
+  );
+  assert.strictEqual(
+    analystExportTable.toText('html', {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 2,
+    }, true),
+    '<table><thead><tr><th>sym</th><th>chars</th><th>int</th></tr></thead>' +
+      '<tbody><tr><td>AAPL</td><td>alpha,\t&quot;line\n</td><td>42</td></tr></tbody></table>',
+    'HTML export must HTML-escape ordinary analyst text without q literal syntax'
+  );
+  const keyedQExport = qValueToLosslessPortablePanel(
+    deserializeQPayload(multiKeyedTableIdentityValue())
+  ).result;
+  assert.strictEqual(
+    keyedQExport.toText('csv', {
+      startRow: 0,
+      endRow: 1,
+      startColumn: 0,
+      endColumn: 2,
+    }, true),
+    'sym,venue,price\nAAPL,XNAS,101\nMSFT,XNYS,202',
+    'keyed-table CSV export must preserve key columns while using analyst cell values'
+  );
+  const duplicateColumnExport = createColumnarPanelResult(
+    ['dup', 'dup', '__proto__', 'dup_2'],
+    1,
+    (_rowIndex, columnIndex) => ['first', 'second', 'prototype', 'preexisting'][columnIndex]
+  );
+  assert.strictEqual(
+    duplicateColumnExport.toText('json', {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 3,
+    }, false),
+    '[{"dup":"first","dup_2":"second","__proto__":"prototype","dup_2_2":"preexisting"}]',
+    'JSON export must preserve duplicate and prototype-like column occurrences with deterministic names'
+  );
+  assert.strictEqual(
+    duplicateColumnExport.toText('ndjson', {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 3,
+    }, { includeRowIndex: true }),
+    '{"#":1,"dup":"first","dup_2":"second","__proto__":"prototype","dup_2_2":"preexisting"}',
+    'NDJSON export must use the same collision-safe analyst column names'
+  );
+  assert.strictEqual(
+    cellValueToAnalystValue(qAtom('timestamp', '-1')),
+    '1999-12-31T23:59:59.999999999Z',
+    'negative q timestamps must retain nanosecond precision in portable ISO form'
+  );
+  assert.strictEqual(
+    cellValueToAnalystValue(qAtom('timespan', '123')),
+    'PT0.000000123S',
+    'q timespans must use portable ISO-8601 duration text'
+  );
+  const extremeDate = cellValueToAnalystValue(qAtom('date', 2147483646));
+  assert.match(
+    extremeDate,
+    /^\+\d{6,}-\d{2}-\d{2}$/,
+    'out-of-range q dates must remain deterministic expanded ISO dates, not q cast syntax'
+  );
+  const extremeDatetime = cellValueToAnalystValue(qAtom('datetime', 1e12));
+  assert.strictEqual(
+    extremeDatetime,
+    'datetime-days-since-2000:1000000000000',
+    'out-of-range q datetimes must use an explicit stable analyst value, not q cast syntax'
+  );
+  const prototypeNamedValue = JSON.parse('{"__proto__":"nested","normal":1}');
+  const convertedPrototypeNamedValue = cellValueToAnalystValue(prototypeNamedValue);
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(convertedPrototypeNamedValue, '__proto__'),
+    true,
+    'analyst conversion must preserve a nested own property named __proto__'
+  );
+  assert.deepStrictEqual(
+    JSON.parse(JSON.stringify(convertedPrototypeNamedValue)),
+    prototypeNamedValue,
+    'nested analyst objects must preserve prototype-like names and ordinary values'
   );
 
   const stableSort = values => createColumnarPanelResult(
@@ -11104,10 +11942,8 @@ function testKxResultsUiParityContract() {
     'arrayDisplayFormat',
     'qTextSyntaxHighlighting',
     'qTextDisplayFormatting',
-    'functionDisplayStrategy',
     'dictionaryDisplayStrategy',
     'listDisplayStrategy',
-    'objectDisplayStrategy',
     'chartDecimalPlaces',
     'chartMaxSourceRows',
   ]);
@@ -11138,6 +11974,10 @@ function testKxResultsUiParityContract() {
     { value: 'wholeResult', label: 'Whole result' },
     { value: 'visibleRows', label: 'Visible rows' },
   ]);
+  assert.strictEqual(
+    KX_RESULT_SETTING_DEFINITIONS.find(definition => definition.key === 'chartDecimalPlaces')?.label,
+    'Chart decimal places'
+  );
   assert.strictEqual(kxResultSelectionSummary(undefined), 'No cells selected');
   assert.strictEqual(
     kxResultSelectionSummary({
@@ -11358,12 +12198,19 @@ function testKxResultsUiParityContract() {
       new RegExp(`KX_RESULT_UI_LABELS\\.${label}\\b`),
       `the panel must consume the shared ${label} label`
     );
-    assert.match(
-      rendererSource,
-      new RegExp(`KX_RESULT_UI_LABELS\\.${label}\\b`),
-      `the notebook renderer must consume the shared ${label} label`
-    );
+    if (label !== 'settings') {
+      assert.match(
+        rendererSource,
+        new RegExp(`KX_RESULT_UI_LABELS\\.${label}\\b`),
+        `the notebook renderer must consume the shared ${label} label`
+      );
+    }
   }
+  assert.doesNotMatch(
+    rendererSource,
+    /KX_RESULT_UI_LABELS\.settings\b/,
+    'settings remain global but notebook cells must not expose a settings entry point'
+  );
   assert.match(panelSource, /KX_RESULT_EXPORT_FORMATS\s*\n?\s*\.map\(/);
   assert.match(rendererSource, /KX_RESULT_EXPORT_FORMATS\.forEach\(/);
   assert.match(panelSource, /KX_RESULT_CHART_TYPE_OPTIONS\s*\n?\s*\.map\(/);
@@ -11578,7 +12425,11 @@ function testKxResultsUiParityContract() {
   );
   assert.match(panelNumberSettingSource, /const value = Number\(input\.value\)/);
   assert.match(panelNumberSettingSource, /updateSetting\(key, clampInteger\(value, min, max\)\)/);
-  assert.match(rendererSource, /KX_RESULT_SETTING_DEFINITIONS\.forEach\(/);
+  assert.doesNotMatch(
+    rendererSource,
+    /resultSettingsControl\(context, state\)|KX_RESULT_SETTING_DEFINITIONS\.forEach\(/,
+    'notebook outputs must consume global result settings without exposing cell-level settings controls'
+  );
   assert.match(messageSource, /NotebookSharedKxResultSettings = SharedKxResultSettings/);
   assert.match(panelSource, /qTextRenderModel\(/);
   assert.match(rendererSource, /qTextRenderModel\(/);
@@ -11869,6 +12720,7 @@ function testKxResultsUiParityContract() {
 async function testKxResultsExport() {
   const exportSource = readSource('kx-results-export.ts');
   const panelSource = readSource('kx-results-panel.ts');
+  const notebookIntegrationSource = readSource('notebook-integration.ts');
   assert.ok(!/from ['"]vscode['"]|require\(['"]vscode['"]\)/.test(exportSource));
   assert.match(panelSource, /return sharedColumnarToXlsx\(result, range, includeHeaders, includeRowIndex, cellTextOptions\);/);
   assert.ok(!/\bnew JSZip\b/.test(panelSource), 'the panel must not retain a second XLSX implementation');
@@ -11904,6 +12756,12 @@ async function testKxResultsExport() {
 
   assert.strictEqual(CHART_EXPORT_MAX_BYTES, 50 * 1024 * 1024);
   assert.strictEqual(COPY_EXPORT_CONFIRM_BYTES, 50 * 1024 * 1024);
+  assert.strictEqual(KX_RESULT_FILE_EXPORT_MAX_CELLS, 5_000_000);
+  assert.strictEqual(KX_RESULT_FILE_EXPORT_MAX_COLUMNS, 100_000);
+  assert.strictEqual(KX_RESULT_TEXT_EXPORT_MAX_BYTES, 128 * 1024 * 1024);
+  assert.strictEqual(KX_RESULT_TEXT_EXPORT_MAX_CELL_CHARACTERS, 8 * 1024 * 1024);
+  assert.strictEqual(KX_RESULT_XLSX_EXPORT_MAX_CELLS, 1_000_000);
+  assert.strictEqual(KX_RESULT_XLSX_WORKSHEET_XML_MAX_BYTES, 64 * 1024 * 1024);
   assert.strictEqual(CHART_PNG_DATA_URL_PREFIX, 'data:image/png;base64,');
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
   const pngDataUrl = CHART_PNG_DATA_URL_PREFIX + png.toString('base64');
@@ -11925,7 +12783,7 @@ async function testKxResultsExport() {
   );
 
   const table = rowsToColumnarPanelResult([
-    { '#': 'first', note: 'x\u0001<&>"\'' },
+    { '#': 'first', note: 'x\u0001\r\n\t_x000A_<&>"\'' },
     { '#': 'second', note: null },
   ], ['#', 'note']);
   const range = { startRow: 0, endRow: 1, startColumn: 0, endColumn: 1 };
@@ -11956,8 +12814,72 @@ async function testKxResultsExport() {
   const sheet = await zip.file('xl/worksheets/sheet1.xml').async('string');
   assert.match(sheet, /<dimension ref="A1:C3"\/>/);
   assert.match(sheet, /<t xml:space="preserve">#_1<\/t>/);
-  assert.match(sheet, /x&lt;&amp;&gt;&quot;&apos;/);
-  assert.strictEqual(sheet.includes('\u0001'), false, 'invalid XML control characters must be removed');
+  assert.match(sheet, /x_x0001__x000D_\n\t_x005F_x000A_&lt;&amp;&gt;&quot;&apos;/);
+  assert.strictEqual(
+    sheet.includes('\u0001'),
+    false,
+    'invalid raw XML controls must be represented through SpreadsheetML Xstring escapes'
+  );
+
+  for (const format of ['csv', 'tsv', 'json', 'ndjson', 'html', 'markdown']) {
+    const expected = table.toText(format, range, {
+      includeHeaders: true,
+      includeRowIndex: true,
+    });
+    const realized = columnarToTextBytes(
+      table,
+      range,
+      format,
+      true,
+      true
+    );
+    assert.strictEqual(
+      Buffer.from(realized).toString('utf8'),
+      expected,
+      `${format} bounded file serialization must remain byte-identical to the shared analyst export contract`
+    );
+  }
+  assert.strictEqual(
+    Buffer.from(columnarToTextBytes(
+      createColumnarPanelResult(['vector'], 1, () => [1, 2, 3]),
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+      'csv',
+      false,
+      false,
+      {},
+      { arrayDisplayFormat: 'space' }
+    )).toString('utf8'),
+    '1 2 3',
+    'bounded file serialization must retain the configured analyst array format'
+  );
+
+  const collisionOrderTable = createColumnarPanelResult(
+    ['2', '1', '01', '__proto__', '2'],
+    2,
+    (rowIndex, columnIndex) => `${rowIndex}:${columnIndex}`
+  );
+  const collisionOrderRange = {
+    startRow: 0,
+    endRow: 1,
+    startColumn: 0,
+    endColumn: 4,
+  };
+  for (const format of ['json', 'ndjson']) {
+    assert.strictEqual(
+      Buffer.from(columnarToTextBytes(
+        collisionOrderTable,
+        collisionOrderRange,
+        format,
+        true,
+        true
+      )).toString('utf8'),
+      collisionOrderTable.toText(format, collisionOrderRange, {
+        includeHeaders: true,
+        includeRowIndex: true,
+      }),
+      `${format} must preserve JSON property ordering and collision-safe duplicate/prototype keys byte-for-byte`
+    );
+  }
 
   const exactQXlsxTable = createColumnarPanelResult(
     ['atom', 'vector'],
@@ -11977,8 +12899,81 @@ async function testKxResultsExport() {
     false
   ));
   const exactQSheet = await exactQXlsx.file('xl/worksheets/sheet1.xml').async('string');
-  assert.match(exactQSheet, /<t xml:space="preserve">42i<\/t>/);
-  assert.match(exactQSheet, /<t xml:space="preserve">enlist 42i<\/t>/);
+  assert.match(
+    exactQSheet,
+    /<c r="A1"><v>42<\/v><\/c>/,
+    'safe q integral atoms must be numeric XLSX cells'
+  );
+  assert.match(
+    exactQSheet,
+    /<c r="B1" t="inlineStr"><is><t xml:space="preserve">42<\/t><\/is><\/c>/,
+    'q vectors must remain analyst-readable textual XLSX cells'
+  );
+  assert.doesNotMatch(exactQSheet, /42i|enlist 42i/);
+
+  const typedXlsxTable = createColumnarPanelResult(
+    [
+      'int',
+      'float',
+      'flag',
+      'missing',
+      'unsafeLong',
+      'timestamp',
+      'infinity',
+      'sym',
+      'chars',
+      'subnormal',
+      'largeSafeLong',
+      'highPrecisionFloat',
+    ],
+    1,
+    (_rowIndex, columnIndex) => [
+      qAtom('int', 42),
+      qAtom('float', 1.5),
+      qAtom('boolean', true),
+      qAtom('int', qSpecial('null')),
+      qAtom('long', '9007199254740993'),
+      qAtom('timestamp', '1'),
+      qAtom('float', qSpecial('positiveInfinity')),
+      qAtom('symbol', 'AAPL'),
+      qVector([...'a,"b\n'].map(character => character.charCodeAt(0)), 'char'),
+      qAtom('float', Number.MIN_VALUE),
+      qAtom('long', '9007199254740991'),
+      qAtom('float', 1.234567890123456),
+    ][columnIndex]
+  );
+  const typedXlsx = await JSZip.loadAsync(await columnarToXlsx(
+    typedXlsxTable,
+    { startRow: 0, endRow: 0, startColumn: 0, endColumn: 11 },
+    false,
+    false
+  ));
+  const typedSheet = await typedXlsx.file('xl/worksheets/sheet1.xml').async('string');
+  assert.match(typedSheet, /<c r="A1"><v>42<\/v><\/c>/);
+  assert.match(typedSheet, /<c r="B1"><v>1\.5<\/v><\/c>/);
+  assert.match(typedSheet, /<c r="C1" t="b"><v>1<\/v><\/c>/);
+  assert.match(typedSheet, /<c r="D1"\/>/);
+  assert.match(typedSheet, /<c r="E1" t="inlineStr">[\s\S]*?9007199254740993[\s\S]*?<\/c>/);
+  assert.match(typedSheet, /<c r="F1" t="inlineStr">[\s\S]*?2000-01-01T00:00:00\.000000001Z[\s\S]*?<\/c>/);
+  assert.match(typedSheet, /<c r="G1" t="inlineStr">[\s\S]*?Infinity[\s\S]*?<\/c>/);
+  assert.match(typedSheet, /<c r="H1" t="inlineStr">[\s\S]*?>AAPL<[\s\S]*?<\/c>/);
+  assert.doesNotMatch(typedSheet, /`AAPL|0Wf|9007199254740993j/);
+  assert.match(typedSheet, /<c r="I1" t="inlineStr">[\s\S]*?a,&quot;b\n[\s\S]*?<\/c>/);
+  assert.match(
+    typedSheet,
+    /<c r="J1" t="inlineStr">[\s\S]*?>5e-324<[\s\S]*?<\/c>/,
+    'Excel-underflowing finite q floats must fall back to exact analyst text'
+  );
+  assert.match(
+    typedSheet,
+    /<c r="K1" t="inlineStr">[\s\S]*?>9007199254740991<[\s\S]*?<\/c>/,
+    'safe JavaScript longs beyond Excel numeric precision must remain exact analyst text'
+  );
+  assert.match(
+    typedSheet,
+    /<c r="L1" t="inlineStr">[\s\S]*?>1\.234567890123456<[\s\S]*?<\/c>/,
+    'finite values beyond Excel significant-digit precision must remain analyst text'
+  );
 
   const largeTextTable = createColumnarPanelResult(
     ['payload'],
@@ -12051,6 +13046,206 @@ async function testKxResultsExport() {
     'control-heavy JSON keys must saturate the warning estimate without materialization'
   );
 
+  const expansionColumns = Array.from({ length: 13 }, (_, index) => `c${index}`);
+  const expansionValue = '\u0000'.repeat(96);
+  const underestimatedExpansionTable = createColumnarPanelResult(
+    expansionColumns,
+    4,
+    (_rowIndex, columnIndex) => columnIndex === 12 ? expansionValue : 'ok'
+  );
+  const underestimatedExpansionRange = {
+    startRow: 0,
+    endRow: 3,
+    startColumn: 0,
+    endColumn: 12,
+  };
+  const underestimatedExpansion = estimateCopyExport(
+    underestimatedExpansionTable,
+    underestimatedExpansionRange,
+    'json',
+    false,
+    false
+  );
+  assert.ok(
+    underestimatedExpansion.estimatedBytes < 1_500,
+    'the sampled advisory estimate intentionally misses the unsampled control-heavy final column'
+  );
+  const rowwiseOnlyToText = underestimatedExpansionTable.toText.bind(
+    underestimatedExpansionTable
+  );
+  let aggregateToTextCalls = 0;
+  underestimatedExpansionTable.toText = (format, requestedRange, options) => {
+    aggregateToTextCalls++;
+    if (requestedRange.endRow > requestedRange.startRow) {
+      throw new Error('aggregate multirow table.toText must not be called');
+    }
+    return rowwiseOnlyToText(format, requestedRange, options);
+  };
+  assert.throws(
+    () => columnarToTextBytes(
+      underestimatedExpansionTable,
+      underestimatedExpansionRange,
+      'json',
+      false,
+      false,
+      { maxBytes: 1_500 }
+    ),
+    /JSON file export exceeds the hard 0\.0 MB realized UTF-8 limit.*smaller row\/column range.*No partial file was written/,
+    'realized JSON escaping expansion must be bounded independently of the advisory sample'
+  );
+  const expandedJson = Buffer.from(columnarToTextBytes(
+    underestimatedExpansionTable,
+    underestimatedExpansionRange,
+    'json',
+    false,
+    false,
+    { maxBytes: 8_192 }
+  )).toString('utf8');
+  assert.deepStrictEqual(
+    JSON.parse(expandedJson).map(row => row.c12),
+    Array(4).fill(expansionValue),
+    'the realized bound must never truncate or corrupt control-heavy JSON'
+  );
+  assert.strictEqual(
+    aggregateToTextCalls,
+    0,
+    'bounded file serialization must never materialize even a whole output row through table.toText'
+  );
+  assert.strictEqual(
+    Buffer.from(columnarToTextBytes(
+      createColumnarPanelResult(['value'], 1, () => true),
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+      'json',
+      true,
+      false,
+      { maxOutputCells: 1 }
+    )).toString('utf8'),
+    '[{"value":true}]',
+    'JSON includeHeaders must not consume a fictitious output row in the hard cell bound'
+  );
+
+  let overCellLimitReads = 0;
+  const overCellLimitTable = createColumnarPanelResult(
+    Array.from({ length: 10 }, (_, index) => `wide${index}`),
+    3,
+    () => {
+      overCellLimitReads++;
+      return 'unreachable';
+    }
+  );
+  assert.throws(
+    () => columnarToTextBytes(
+      overCellLimitTable,
+      { startRow: 0, endRow: 2, startColumn: 0, endColumn: 9 },
+      'csv',
+      true,
+      false,
+      { maxOutputCells: 29 }
+    ),
+    /CSV file export exceeds the hard 29-cell limit.*smaller row\/column range.*No partial file was written/
+  );
+  assert.strictEqual(
+    overCellLimitReads,
+    0,
+    'the hard output-cell bound must reject a wide export before reading or materializing cells'
+  );
+
+  let overColumnLimitReads = 0;
+  const overColumnLimitTable = createColumnarPanelResult(
+    Array.from({ length: 10 }, (_, index) => `wide${index}`),
+    1,
+    () => {
+      overColumnLimitReads++;
+      return 'unreachable';
+    }
+  );
+  assert.throws(
+    () => columnarToTextBytes(
+      overColumnLimitTable,
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 9 },
+      'json',
+      false,
+      true,
+      { maxOutputColumns: 10 }
+    ),
+    /JSON file export exceeds the hard 10-column limit \(11 output columns requested\).*smaller column range.*No partial file was written/
+  );
+  assert.strictEqual(
+    overColumnLimitReads,
+    0,
+    'the hard output-column bound must count the row index and reject before reading cells'
+  );
+
+  let overCharacterSerializerCalls = 0;
+  const overCharacterTable = createColumnarPanelResult(
+    ['payload'],
+    1,
+    () => 'x'.repeat(101)
+  );
+  overCharacterTable.toText = () => {
+    overCharacterSerializerCalls++;
+    throw new Error('whole-row serialization must not run past the per-cell preflight');
+  };
+  assert.throws(
+    () => columnarToTextBytes(
+      overCharacterTable,
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+      'csv',
+      false,
+      false,
+      { maxCellCharacters: 100 }
+    ),
+    /CSV file export cell at displayed row 1, column 1 exceeds the hard 100-character analyst-text limit.*No partial file was written/
+  );
+  assert.strictEqual(overCharacterSerializerCalls, 0);
+
+  let controlKeyCellReads = 0;
+  const controlKeyTable = createColumnarPanelResult(
+    Array(3).fill('\u0000'.repeat(100)),
+    1,
+    () => {
+      controlKeyCellReads++;
+      return true;
+    }
+  );
+  controlKeyTable.toText = () => {
+    throw new Error('wide control-heavy keys must not reach aggregate table serialization');
+  };
+  assert.throws(
+    () => columnarToTextBytes(
+      controlKeyTable,
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 2 },
+      'json',
+      false,
+      false,
+      { maxBytes: 500, maxCellCharacters: 1_000 }
+    ),
+    /JSON file export exceeds the hard 0\.0 MB realized UTF-8 limit.*No partial file was written/,
+    'control-heavy collision-safe JSON keys must hit the encoded bound before values or aggregate strings are materialized'
+  );
+  assert.strictEqual(controlKeyCellReads, 0);
+
+  let overKeyLimitReads = 0;
+  assert.throws(
+    () => columnarToTextBytes(
+      createColumnarPanelResult(['k'.repeat(11)], 1, () => {
+        overKeyLimitReads++;
+        return true;
+      }),
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+      'ndjson',
+      false,
+      false,
+      { maxCellCharacters: 10 }
+    ),
+    /NDJSON file export key at displayed column 1 exceeds the hard 10-character analyst-text limit/
+  );
+  assert.strictEqual(
+    overKeyLimitReads,
+    0,
+    'JSON/NDJSON keys must honor the per-cell hard limit even when includeHeaders is false'
+  );
+
   const hugeEstimateItem = ['x'.repeat(100), { nested: true }];
   const hugeEstimateValues = [
     'x'.repeat(1_000_000),
@@ -12112,6 +13307,127 @@ async function testKxResultsExport() {
     ),
     /row 1, column 1 exceeds Excel's 32767-character cell limit/
   );
+  let xlsxOverCellLimitReads = 0;
+  await assert.rejects(
+    () => columnarToXlsx(
+      createColumnarPanelResult(
+        ['a', 'b'],
+        2,
+        () => {
+          xlsxOverCellLimitReads++;
+          return 'unreachable';
+        }
+      ),
+      { startRow: 0, endRow: 1, startColumn: 0, endColumn: 1 },
+      true,
+      false,
+      {},
+      { maxOutputCells: 5 }
+    ),
+    /XLSX file export exceeds the hard 5-cell limit.*smaller row\/column range.*No partial file was written/
+  );
+  assert.strictEqual(xlsxOverCellLimitReads, 0);
+
+  await assert.rejects(
+    () => columnarToXlsx(
+      createColumnarPanelResult(
+        ['payload'],
+        1,
+        () => '\u0001'.repeat(100)
+      ),
+      { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 },
+      false,
+      false,
+      {},
+      { maxWorksheetXmlBytes: 512 }
+    ),
+    /XLSX file export exceeds the hard 0\.0 MB uncompressed worksheet XML limit.*smaller row\/column range.*No partial file was written/,
+    'SpreadsheetML control escaping must count against the exact XML hard limit before ZIP generation'
+  );
+
+  const panelExportRangeSource = sourceSection(
+    panelSource,
+    '  private async exportRange(',
+    '  private async copyText('
+  );
+  assert.match(panelExportRangeSource, /columnarToTextBytes\(/);
+  assert.doesNotMatch(
+    panelExportRangeSource,
+    /Buffer\.from\(table\.toText/,
+    'ordinary panel file export must use the realized bounded serializer'
+  );
+  const panelCopyRangeSource = sourceSection(
+    panelSource,
+    '  private async copyRange(',
+    '  private async exportRange('
+  );
+  assert.match(panelCopyRangeSource, /columnarToTextBytes\(/);
+  assert.match(panelCopyRangeSource, /\{ maxBytes: COPY_MAX_BYTES \}/);
+  assert.doesNotMatch(panelCopyRangeSource, /table\.toText|Copy Anyway/);
+  assert.match(
+    panelCopyRangeSource,
+    /error instanceof KxResultExportLimitError[\s\S]*?error\.kind !== 'textBytes'/,
+    'only the clipboard aggregate-byte limit may offer file export as a viable fallback'
+  );
+  const notebookTableExportSource = sourceSection(
+    notebookIntegrationSource,
+    'async function saveNotebookTableExport(',
+    'async function confirmNotebookCopyExport('
+  );
+  assert.match(notebookTableExportSource, /columnarToTextBytes\(/);
+  assert.doesNotMatch(
+    notebookTableExportSource,
+    /TextEncoder\(\)\.encode\(table\.toText/,
+    'notebook file export must use the same realized bounded serializer as the panel'
+  );
+  const notebookCopyRangeSource = sourceSection(
+    notebookIntegrationSource,
+    'async function copyNotebookTableRange(',
+    'async function saveNotebookTableExport('
+  );
+  assert.match(notebookCopyRangeSource, /MAX_LIVE_NOTEBOOK_COPY_CELLS/);
+  assert.match(notebookCopyRangeSource, /columnarToTextBytes\(/);
+  assert.doesNotMatch(notebookCopyRangeSource, /table\.toText/);
+
+  const copyHarness = createQTextResultsPanelHarness();
+  copyHarness.setWarningResponse('Cancel');
+  const copyPanelModule = requireOutWithVscode('kx-results-panel', copyHarness.vscode);
+  const clipboardExpansion = '\u0000'.repeat(
+    Math.floor(15 * 1024 * 1024 / 6) + 1
+  );
+  const copyColumns = Array.from({ length: 13 }, (_, index) => `copy${index}`);
+  copyPanelModule.KxResultsPanel.showResult(copyHarness.context, {
+    mode: 'table',
+    table: createColumnarPanelResult(
+      copyColumns,
+      1,
+      (_rowIndex, columnIndex) => columnIndex === 12 ? clipboardExpansion : 'ok'
+    ),
+    query: 'clipboard hard limit regression',
+    connectionName: 'test',
+    elapsedMs: 1,
+    messages: [],
+  });
+  await copyHarness.emitMessage(0, { type: 'ready' });
+  const copyMetadata = copyHarness.panels[0].posted
+    .filter(message => message.type === 'resultMeta').at(-1).result;
+  await copyHarness.emitMessage(0, {
+    type: 'copyRange',
+    version: copyMetadata.version,
+    range: { startRow: 0, endRow: 0, startColumn: 0, endColumn: 12 },
+    format: 'json',
+    includeHeaders: false,
+    includeRowIndex: false,
+  });
+  assert.strictEqual(copyHarness.clipboard.length, 0);
+  assert.match(
+    copyHarness.warnings.at(-1).message,
+    /JSON clipboard copy exceeds the hard 15\.0 MB realized UTF-8 limit.*Nothing was copied.*Export this selection to a file instead/
+  );
+  assert.deepStrictEqual(copyHarness.warnings.at(-1).items, ['Export', 'Cancel']);
+  assert.ok(copyHarness.panels[0].posted.some(message =>
+    message.type === 'copySkipped' && message.version === copyMetadata.version));
+  copyHarness.panels[0].dispose();
 }
 
 async function testLocalDataServerConcurrency() {
@@ -12715,15 +14031,15 @@ function testNotebookContract() {
     [exactCellGridTexts],
     'panel and live-notebook grid slices must use the concise exact-q cell display'
   );
-  assert.strictEqual(
+  assert.match(
     liveExactDisplayPanel.result.toText('tsv', {
       startRow: 0,
       endRow: 0,
       startColumn: 0,
       endColumn: exactCellLiterals.length - 1,
     }, false),
-    exactCellLiterals.join('\t'),
-    'panel and live-notebook copy must retain exact q literals'
+    /^hello\thello\t42\t9007199254740993\t2000-01-01T00:00:00.000000001Z\t2000-01-02\t\t-Infinity\tInfinity\t1, 2\thello, world\t/,
+    'panel and live-notebook copy must use analyst values while qValueToLiteral retains exact q syntax'
   );
   const reopenedStaticHtml = notebookResultStaticHtml(reopenedExact);
   assert.match(reopenedStaticHtml, /2000\.01\.01D00:00:00\.000000001/);
@@ -12742,17 +14058,37 @@ function testNotebookContract() {
     startColumn: 0,
     endColumn: reopenedExact.schema.columns.length - 1,
   };
+  const reopenedAnalystJson = JSON.parse(
+    reopenedExactPanel.toText('json', reopenedExactRange, false)
+  )[0];
   assert.deepStrictEqual(
-    JSON.parse(reopenedExactPanel.toText('json', reopenedExactRange, false)),
-    [Object.fromEntries(reopenedExact.schema.columns.map((column, index) => [
-        column.name,
-        exactCellLiterals[index],
-      ]))],
-    'reopened JSON export must carry unambiguous q literals instead of collapsing symbols/typed vectors'
+    {
+      symbol: reopenedAnalystJson.sym,
+      charVector: reopenedAnalystJson.chars,
+      int: reopenedAnalystJson.safeLong,
+      long: reopenedAnalystJson.bigLong,
+      timestamp: reopenedAnalystJson.timestamp,
+      date: reopenedAnalystJson.date,
+      nullInt: reopenedAnalystJson.intNull,
+      intVector: reopenedAnalystJson.typed,
+      symbolVector: reopenedAnalystJson.symbols,
+    },
+    {
+      symbol: 'hello',
+      charVector: 'hello',
+      int: 42,
+      long: '9007199254740993',
+      timestamp: '2000-01-01T00:00:00.000000001Z',
+      date: '2000-01-02',
+      nullInt: null,
+      intVector: [1, 2],
+      symbolVector: ['hello', 'world'],
+    },
+    'reopened JSON export must use analyst-friendly values without collapsing saved q identity'
   );
   assert.match(
     reopenedExactPanel.toText('tsv', reopenedExactRange, false),
-    /^`hello\t"hello"\t42\t9007199254740993\t/,
+    /^hello\thello\t42\t9007199254740993\t/,
     'reopened copy/export must distinguish a symbol atom from a char vector'
   );
   const exactPreview = createPortableKxResultV2({
@@ -12858,7 +14194,7 @@ function testNotebookContract() {
     assert.strictEqual(
       qValueToLiteral(portableCellValue(reopenedVector.value.data.rows[0][0])),
       expectedText,
-      `${name} saved-v2 value must retain its exact q literal for copy/export`
+      `${name} saved-v2 value must retain its exact q literal independently of analyst export`
     );
     assert.strictEqual(reopenedVector.value.data.rows[0][0].kind, 'q');
     assert.strictEqual(reopenedVector.value.data.rows[0][0].value.form, 'vector');
@@ -12893,15 +14229,15 @@ function testNotebookContract() {
     [temporalGridTexts],
     'the KX Results panel must show concise temporals while retaining typed source cells'
   );
-  assert.strictEqual(
+  assert.match(
     temporalDisplayPanel.result.toText('tsv', {
       startRow: 0,
       endRow: 0,
       startColumn: 0,
       endColumn: temporalLiterals.length - 1,
     }, false),
-    temporalLiterals.join('\t'),
-    'temporal copy/export must retain exact q literals despite concise grid cells'
+    /^2000-02\t2000-01-02\t2000-01-02T12:00:00.000Z\tPT0.000000123S\t01:01\t00:01:01\t00:00:01.234\t/,
+    'temporal copy/export must use analyst values while qValueToLiteral retains exact temporal syntax'
   );
   const temporalPanel = qValueToLosslessPortablePanel(decodedTemporalTable);
   assert.strictEqual(temporalPanel.mode, 'grid');
@@ -13238,6 +14574,18 @@ function testNotebookContract() {
   assert.strictEqual(fullTextV2.value.data.text.length, 40_000);
   assert.strictEqual(fullTextV2.value.result.truncated, false);
   assert.strictEqual(validatePortableKxResult(fullTextV2.value).ok, true);
+  const previewTextV2 = createPortableKxTextResultV2({
+    text: '🙂'.repeat(MIN_NOTEBOOK_BYTE_LIMIT),
+    rowLimit: 1,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  }, { outputId: `preview-text-${'p'.repeat(40)}`, persistenceMode: 'preview' });
+  assert.strictEqual(previewTextV2.ok, true);
+  assert.strictEqual(previewTextV2.value.persistence.mode, 'preview');
+  assert.strictEqual(previewTextV2.value.result.truncated, true);
+  assert.ok(previewTextV2.value.result.truncationReasons.includes('byteLimit'));
+  assert.ok(previewTextV2.serializedBytes <= MIN_NOTEBOOK_BYTE_LIMIT);
+  assert.strictEqual(validatePortableKxResult(previewTextV2.value).ok, true);
   const fullLongTextV2 = createPortableKxTextResultV2({
     text: `${'x'.repeat(MAX_NOTEBOOK_QTEXT_CHARS)}FULL_TAIL`,
     rowLimit: 1,
@@ -13444,7 +14792,7 @@ function testNotebookContract() {
   );
   const sharedResultSettings = {
     density: 'standard',
-    functionDisplayStrategy: 'qText',
+    dictionaryDisplayStrategy: 'grid',
   };
   assert.deepStrictEqual(notebookRendererSettingsMessage({
     presentation: 'inline',
@@ -13497,6 +14845,135 @@ function testNotebookContract() {
       data: new TextEncoder().encode(JSON.stringify(previewV2.value)),
     }]
   ), outputReference, 'outer v2 identity must match the one portable MIME payload');
+  const boundOutputItem = {
+    mime: KX_NOTEBOOK_MIME,
+    data: new TextEncoder().encode(JSON.stringify(previewV2.value)),
+  };
+  assert.deepStrictEqual(
+    parseNotebookKxOutputIdentity({
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+      metadata: { [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference },
+    }, [boundOutputItem]),
+    {
+      binding: outputReference,
+      live: { version: 1, id: liveId },
+      payload: previewV2.value,
+    },
+    'the canonical KX output identity parser must accept direct live plus durable nested binding'
+  );
+  assert.deepStrictEqual(
+    parseNotebookKxOutputIdentity({
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
+      metadata: { [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId } },
+    }, [boundOutputItem]),
+    {
+      binding: outputReference,
+      live: { version: 1, id: liveId },
+      payload: previewV2.value,
+    },
+    'the canonical KX output identity parser must accept serializer-normalized nested live metadata'
+  );
+  assert.deepStrictEqual(
+    inspectNotebookKxOutputIdentity({
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
+      metadata: { [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId } },
+    }, [boundOutputItem]),
+    {
+      status: 'valid',
+      identity: {
+        binding: outputReference,
+        live: { version: 1, id: liveId },
+        payload: previewV2.value,
+      },
+    },
+    'canonical inspection must expose the same nested-normalized identity to every consumer'
+  );
+  assert.deepStrictEqual(
+    inspectNotebookKxOutputIdentity({}, [boundOutputItem]),
+    { status: 'invalid', bindingIds: [] },
+    'an unbound v2 KX payload must be classified as invalid rather than legacy'
+  );
+  assert.deepStrictEqual(
+    inspectNotebookKxOutputIdentity({
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+        version: 2,
+        id: outputReference.id,
+      },
+    }, [boundOutputItem]),
+    { status: 'invalid', bindingIds: [outputReference.id] },
+    'a malformed binding must retain its syntactically valid claimed id for fail-closed lookup'
+  );
+  const maxKxOutputItems = MAX_NOTEBOOK_KX_OUTPUT_ITEMS;
+  assert.strictEqual(maxKxOutputItems, 2_000);
+  const oversizedOutputItems = Array.from(
+    { length: maxKxOutputItems + 1 },
+    (_value, index) => index === 0
+      ? boundOutputItem
+      : { mime: 'text/plain', value: `fallback-${index}` }
+  );
+  Object.defineProperty(oversizedOutputItems, maxKxOutputItems, {
+    configurable: true,
+    get() {
+      throw new Error('canonical output inspection read beyond its item bound');
+    },
+  });
+  let oversizedInspection;
+  assert.doesNotThrow(() => {
+    oversizedInspection = inspectNotebookKxOutputIdentity({
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
+    }, oversizedOutputItems);
+  });
+  assert.deepStrictEqual(
+    oversizedInspection,
+    { status: 'invalid', bindingIds: [outputReference.id] },
+    'oversized output item lists must fail closed without scanning an unbounded tail'
+  );
+  const foreignOutputReference = { version: 1, id: `foreign-${'f'.repeat(32)}` };
+  assert.deepStrictEqual(
+    inspectNotebookKxOutputIdentity({
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
+      metadata: { [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: foreignOutputReference },
+    }, [boundOutputItem]),
+    {
+      status: 'invalid',
+      bindingIds: [outputReference.id, foreignOutputReference.id],
+    },
+    'invalid conflicting metadata must retain every individually valid binding declaration'
+  );
+  assert.strictEqual(
+    parseNotebookKxOutputIdentity({
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+    }, [boundOutputItem]),
+    undefined,
+    'first-party KX outputs must require durable output-binding metadata'
+  );
+  assert.strictEqual(
+    parseNotebookKxOutputIdentity({
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
+      metadata: {
+        [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: `live_${'c'.repeat(32)}` },
+      },
+    }, [boundOutputItem]),
+    undefined,
+    'conflicting direct and nested live metadata must fail closed'
+  );
+  assert.strictEqual(
+    parseNotebookKxOutputIdentity({
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: `foreign-${'f'.repeat(32)}` },
+    }, [boundOutputItem]),
+    undefined,
+    'foreign KX payload/output binding pairs must fail closed'
+  );
+  assert.strictEqual(
+    parseNotebookKxOutputIdentity({
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
+    }, [boundOutputItem, boundOutputItem]),
+    undefined,
+    'outputs with multiple owned KX MIME payloads must fail closed'
+  );
   assert.strictEqual(
     parseNotebookOutputBindingReference({ version: 1, id: 'not-public-output-id' }),
     undefined
@@ -13873,10 +15350,8 @@ function testNotebookContract() {
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
-    functionDisplayStrategy: 'qText',
     dictionaryDisplayStrategy: 'grid',
     listDisplayStrategy: 'grid',
-    objectDisplayStrategy: 'grid',
   };
   const completeSettingsMessage = notebookRendererSettingsMessage({
     presentation: 'inline',
@@ -13885,6 +15360,19 @@ function testNotebookContract() {
     parseNotebookRendererHostMessage(completeSettingsMessage),
     completeSettingsMessage,
     'shared durable KX result settings must survive the validated host-to-renderer path'
+  );
+  const staleDisplayStrategySettings = {
+    ...completeSettingsMessage,
+    resultSettings: {
+      ...completeResultSettings,
+      functionDisplayStrategy: 'grid',
+      objectDisplayStrategy: 'grid',
+    },
+  };
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage(staleDisplayStrategySettings),
+    completeSettingsMessage,
+    'removed Function/Object display settings must be ignored during rolling upgrades'
   );
   assert.strictEqual(parseNotebookRendererHostMessage({
     ...completeSettingsMessage,
@@ -14474,7 +15962,7 @@ function testNotebookContract() {
   assert.match(rendererSource, /notebookMovedSearchMatchIndex\(/);
   assert.match(rendererSource, /activeSavedSearchRow\(state\.savedSearch, rowIndex\)/);
   assert.match(rendererSource, /notebookSelectionToolsState\(/);
-  assert.match(rendererSource, /summary\.textContent = KX_RESULT_UI_LABELS\.settings/);
+  assert.doesNotMatch(rendererSource, /summary\.textContent = KX_RESULT_UI_LABELS\.settings/);
   assert.match(rendererSource, /function drawNotebookBoxes\(/);
   assert.match(rendererSource, /function drawNotebookCandlesticks\(/);
   assert.match(rendererSource, /capturePlotSeriesVisibility\(state\)/);
@@ -14777,7 +16265,7 @@ function testNotebookContract() {
   const columnControlSource = sourceSection(
     rendererSource,
     'function resultColumnControl(',
-    'function resultSettingsControl('
+    'function columnResizeHandle('
   );
   assert.match(columnControlSource, /refined: reconciled\.compatible \? state\.liveChart\.refined : false/);
   assert.match(columnControlSource, /reconcileSavedChartsForColumns\(state\)/);
@@ -14796,11 +16284,6 @@ function testNotebookContract() {
     columnControlSource,
     /persistentDetails\(state,[\s\S]*?detailsKey[\s\S]*?withFocusKey\(checkbox,[\s\S]*?:visible/,
     'column menus must preserve open state and per-column keyboard focus across rerenders'
-  );
-  assert.match(
-    rendererSource,
-    /function resultSettingsControl\([\s\S]*?persistentDetails\(state,[\s\S]*?'settings'[\s\S]*?withFocusKey\(summary, 'settings:summary'\)/,
-    'settings must preserve open state and keyboard focus across host-driven rerenders'
   );
   assert.match(
     rendererSource,
@@ -14982,8 +16465,13 @@ function testNotebookContract() {
   }
   assert.match(
     rendererSource,
-    /parseNotebookOutputBindingFromMetadata\(outputItem\.metadata\)/,
-    'the renderer must read immediate and durable Jupyter KX output identity metadata'
+    /inspectNotebookKxOutputIdentity\(\s*outputItem\.metadata,[\s\S]{0,100}mime: outputItem\.mime,[\s\S]{0,60}value: payload/,
+    'the renderer must derive binding and nested-normalized live metadata from the canonical identity contract'
+  );
+  assert.doesNotMatch(
+    rendererSource,
+    /parseNotebookLiveResultReference\(outputItem\.metadata\[NOTEBOOK_LIVE_RESULT_METADATA_KEY\]\)/,
+    'the renderer must not authorize live state from only the immediate metadata shape'
   );
   assert.doesNotMatch(
     rendererSource,
@@ -15156,43 +16644,6 @@ function testNotebookContract() {
     'the saved Y selector must receive swatches from the shared projection'
   );
 
-  const notebookSettingsSource = sourceSection(
-    rendererSource,
-    'function resultSettingsControl(',
-    'function settingCheckbox('
-  );
-  assert.match(notebookSettingsSource, /panel\.setAttribute\('aria-label', 'Results Settings'\)/);
-  assert.match(
-    notebookSettingsSource,
-    /const dismiss = \(\): void => \{[\s\S]*?details\.open = false;[\s\S]*?summary\.focus\(\{ preventScroll: true \}\)/,
-    'both settings dismissal paths must close the overlay and restore focus to its toggle'
-  );
-  assert.match(notebookSettingsSource, /const close = button\('Close', dismiss\)/);
-  assert.match(notebookSettingsSource, /close\.setAttribute\('aria-label', 'Close Results Settings'\)/);
-  assert.match(notebookSettingsSource, /withFocusKey\(close, 'settings:close'\)/);
-  assert.match(
-    notebookSettingsSource,
-    /details\.addEventListener\('keydown', event => \{[\s\S]*?event\.key === 'Escape'[\s\S]*?event\.preventDefault\(\);[\s\S]*?dismiss\(\)/,
-    'Escape must dismiss Results Settings without losing keyboard focus'
-  );
-  assert.match(notebookSettingsSource, /keepDetailsPanelInsideResult\(details, panel\)/);
-
-  const notebookNumberSettingSource = sourceSection(
-    rendererSource,
-    'function settingNumber(',
-    'function updateResultSetting('
-  );
-  assert.match(
-    notebookNumberSettingSource,
-    /const auto = autoValue !== undefined && value === autoValue;[\s\S]*?input\.value = auto \? '' : String\(value\)/
-  );
-  assert.match(notebookNumberSettingSource, /input\.placeholder = autoLabel/);
-  assert.match(notebookNumberSettingSource, /input\.setAttribute\('aria-valuetext', autoLabel\)/);
-  assert.match(
-    notebookNumberSettingSource,
-    /input\.value\.trim\(\) === '' && autoValue !== undefined[\s\S]*?\? autoValue[\s\S]*?: Number\(input\.value\)/,
-    'an empty Auto presentation must still post the numeric zero-compatible value'
-  );
 
   const notebookContainmentSource = sourceSection(
     rendererSource,
@@ -15202,14 +16653,8 @@ function testNotebookContract() {
   assert.match(
     notebookContainmentSource,
     /panel\.style\.maxHeight = ''[\s\S]*?window\.innerHeight[\s\S]*?availableHeight[\s\S]*?panel\.style\.maxHeight =/,
-    'settings and selector overlays must be vertically bounded as well as horizontally contained'
+    'selector overlays must be vertically bounded as well as horizontally contained'
   );
-  assert.match(
-    rendererSource,
-    /\.kx-settings-panel\{[^}]*max-height:min\(360px,60vh\)[^}]*overflow:auto/,
-    'Results Settings must remain scrollable within notebook output height'
-  );
-  assert.match(rendererSource, /\.kx-settings-header\{[^}]*position:sticky/);
   assert.match(
     rendererSource,
     /\.kx-series-list\{[^}]*max-height:min\(220px,45vh\)[^}]*overflow:auto/
@@ -15813,21 +17258,69 @@ async function testLiveNotebookResultStore() {
       includeRowIndex: false,
     }),
     [
-      '`hello',
-      '"hello"',
+      'hello',
+      'hello',
       '42',
       '9007199254740993',
-      '"p"$1j',
-      '"d"$1i',
-      '0Ni',
-      '-0Wi',
-      '0Wi',
-      '1 2i',
-      '`hello`world',
-      '(`hello;"hello";9007199254740993;0Wp;0Ni)',
+      '2000-01-01T00:00:00.000000001Z',
+      '2000-01-02',
+      '',
+      '-Infinity',
+      'Infinity',
+      '1, 2',
+      'hello, world',
+      'hello, hello, 9007199254740993, Infinity, ',
     ].join('\t'),
-    'live notebook copy must use exact typed q literals, not concise grid text'
+    'live notebook copy must use analyst-friendly values, not q literals or concise grid text'
   );
+
+  const escapedQChars = qVector(
+    [...'comma,\ttab "quote"\nline é'].map(character => character.charCodeAt(0)),
+    'char'
+  );
+  const escapedCopyId = store.register({
+    notebookUri,
+    cellUri: 'vscode-notebook-cell:///analysis/escaped-copy',
+    outputId: `escaped-copy-output-${'c'.repeat(32)}`,
+    query: 'escapedCopy[]',
+    connectionName: 'Local q',
+    elapsedMs: 1,
+    value: {
+      qtype: 'table',
+      columns: ['chars'],
+      columnTypes: ['mixed'],
+      rows: [],
+      columnData: [qVector([escapedQChars], 'mixed')],
+      rowCount: 1,
+    },
+  });
+  const escapedCopyTable = createColumnarPanelResult(
+    ['chars'],
+    1,
+    () => escapedQChars,
+    ['mixed']
+  );
+  for (const format of ['csv', 'tsv', 'html', 'markdown']) {
+    const escapedRange = {
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+    };
+    assert.strictEqual(
+      store.copyText(escapedCopyId, notebookUri, {
+        ...escapedRange,
+        format,
+        includeHeaders: true,
+        includeRowIndex: false,
+      }),
+      escapedCopyTable.toText(format, escapedRange, {
+        includeHeaders: true,
+        includeRowIndex: false,
+      }),
+      `live ${format} copy must apply format escaping after the shared analyst conversion`
+    );
+  }
 
   const warningCellUri = 'vscode-notebook-cell:///analysis/sort-warning';
   const warningId = store.register({
@@ -15941,10 +17434,8 @@ async function testLiveNotebookResultStore() {
   );
   const hostDisplayOptions = liveNotebookDisplayOptions({
     arrayDisplayFormat: 'commaSpace',
-    functionDisplayStrategy: 'qText',
     dictionaryDisplayStrategy: 'grid',
     listDisplayStrategy: 'grid',
-    objectDisplayStrategy: 'grid',
   });
   const keyedLiveId = store.register({
     notebookUri,
@@ -16328,7 +17819,7 @@ async function testLiveNotebookResultStore() {
   });
   assert.ok(boundedCsv.length <= MAX_LIVE_NOTEBOOK_COPY_TEXT_CHARS);
   assert.ok(boundedCsv.length < largeCsvValue.length);
-  assert.match(boundedCsv, /^raw\n"""quoted"", /);
+  assert.match(boundedCsv, /^raw\n"""quoted"",\n/);
   assert.match(boundedCsv, /\u2026 \[cell truncated; open KX Results\]"$/);
   const longHeader = `long-${'h'.repeat(70_000)}`;
   const longHeaderId = store.register({
@@ -17233,6 +18724,7 @@ async function testDirectQNotebookController() {
     KX_Q_NOTEBOOK_TYPE,
     KxQNotebookController,
     directQPortableResult,
+    notebookCellHasExpectedKxIdentity,
   } = requireOutWithMocks('notebook-controller', { vscode: runtime.vscode });
   let liveId = 0;
   const liveResults = new LiveNotebookResultStore(
@@ -17460,16 +18952,17 @@ async function testDirectQNotebookController() {
     'the durable rich output need not duplicate cell source into persisted provenance'
   );
   assert.strictEqual(portableTableItem.value.result.rowCount, 3);
+  assert.strictEqual(portableTableItem.value.result.previewRowCount, 3);
   assert.strictEqual(
     portableTableItem.value.data.rows.length,
     3,
-    'first-party Direct IPC rich output must persist every row despite the configured preview limit'
+    'first-party Direct IPC rich output must preserve every exactly representable row'
   );
   assert.strictEqual(portableTableItem.value.result.truncated, false);
   assert.deepStrictEqual(
-    portableTableItem.value.data.rows[2].map(cell => portableCellText(cell)),
+    portableTableItem.value.data.rows.at(-1).map(cell => portableCellText(cell)),
     ['IBM', '300'],
-    'the authoritative saved rich output must include rows beyond maxOutputRows'
+    'the saved rich output must remain complete when maxOutputRows is smaller than the result'
   );
   assert.ok(notebookOutputItem(tableOutput, 'text/plain'));
   const liveMetadata = tableOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY];
@@ -17512,6 +19005,77 @@ async function testDirectQNotebookController() {
     liveResults.has(liveMetadata.id, 'file:///workspace/unrelated.ipynb'),
     false,
     'live output metadata must remain scoped to its owning notebook'
+  );
+
+  const scalarFull = directQPortableResult(
+    2,
+    { rowLimit: 20, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT },
+    {},
+    connection,
+    2,
+    `scalar-one-plus-one-${'s'.repeat(32)}`
+  );
+  assert.strictEqual(scalarFull.ok, true, scalarFull.ok ? undefined : scalarFull.error);
+  assert.strictEqual(scalarFull.value.persistence.mode, 'full');
+  assert.strictEqual(scalarFull.value.kind, 'table');
+  assert.strictEqual(scalarFull.value.result.rowCount, 1);
+  assert.strictEqual(scalarFull.value.result.truncated, false);
+  assert.strictEqual(portableCellText(scalarFull.value.data.rows[0][0]), '2');
+
+  const largeRows = Array.from({ length: 60_000 }, (_value, index) => ({
+    sym: ['AAPL', 'MSFT', 'IBM', 'KX'][index % 4],
+    price: 100 + (index % 10_000) / 100,
+    size: 100 + (index % 900),
+    venue: ['XNAS', 'XNYS', 'BATS'][index % 3],
+  }));
+  const largePortableFull = createPortableKxResultV2({
+    columns: [
+      { name: 'sym', type: 'symbol' },
+      { name: 'price', type: 'float' },
+      { name: 'size', type: 'int' },
+      { name: 'venue', type: 'symbol' },
+    ],
+    rows: largeRows.map(row => [row.sym, row.price, row.size, row.venue]),
+    rowCount: largeRows.length,
+    rowLimit: 20,
+    byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  }, {
+    outputId: `large-full-measure-${'m'.repeat(32)}`,
+    persistenceMode: 'full',
+  });
+  assert.strictEqual(largePortableFull.ok, true);
+  assert.ok(
+    largePortableFull.serializedBytes > DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    `the 60,000-row full Direct IPC fixture should exceed the configured byte limit; measured ${largePortableFull.serializedBytes} bytes`
+  );
+  const largePortable = directQPortableResult(
+    modelQTable(['sym', 'price', 'size', 'venue'], largeRows),
+    { rowLimit: 20, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT },
+    {},
+    connection,
+    49,
+    `large-bounded-controller-${'b'.repeat(32)}`
+  );
+  assert.strictEqual(
+    largePortable.ok,
+    true,
+    largePortable.ok ? undefined : largePortable.error
+  );
+  assert.strictEqual(
+    largePortable.value.persistence.mode,
+    'full',
+    `a 60,000-row Direct IPC output measured ${largePortableFull.serializedBytes} bytes and must remain exact`
+  );
+  assert.strictEqual(largePortable.value.outputId, `large-bounded-controller-${'b'.repeat(32)}`);
+  assert.strictEqual(largePortable.value.result.rowCount, 60_000);
+  assert.strictEqual(largePortable.value.result.columnCount, 4);
+  assert.strictEqual(largePortable.value.result.previewRowCount, 60_000);
+  assert.strictEqual(largePortable.value.data.rows.length, 60_000);
+  assert.strictEqual(largePortable.value.result.truncated, false);
+  assert.ok(
+    largePortable.serializedBytes > DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    `exact 60,000-row Direct IPC payload must exercise the large-output path; measured ${largePortable.serializedBytes} bytes`
   );
 
   bridge.executeImpl = async (_connection, _source, onIssued) => {
@@ -17699,11 +19263,469 @@ async function testDirectQNotebookController() {
     'direct-ipc'
   );
   const mixedLiveId = mixedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
+  const mixedPayload = notebookOutputItem(mixedOutput, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(
+    notebookCellHasExpectedKxIdentity(mixedReplacement, [mixedOutput]),
+    true,
+    'the complete live/binding/payload identity must recognize the committed owner'
+  );
+  const reusedLiveForeignOutputId = `reused-live-foreign-${'f'.repeat(32)}`;
+  const reusedLiveForeignOutput = new runtime.vscode.NotebookCellOutput(
+    mixedOutput.items.map(item => item.mime === KX_NOTEBOOK_MIME
+      ? {
+        ...item,
+        value: { ...mixedPayload, outputId: reusedLiveForeignOutputId },
+      }
+      : item),
+    {
+      [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
+        version: 1,
+        id: mixedLiveId,
+      },
+      [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+        version: 1,
+        id: reusedLiveForeignOutputId,
+      },
+      metadata: {
+        [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+          version: 1,
+          id: reusedLiveForeignOutputId,
+        },
+      },
+    }
+  );
+  assert.strictEqual(
+    notebookCellHasExpectedKxIdentity(
+      { outputs: [reusedLiveForeignOutput] },
+      [mixedOutput]
+    ),
+    false,
+    'a foreign binding/payload must not pass by reusing the expected live id'
+  );
   assert.strictEqual(
     liveResults.view(mixedLiveId, notebook.uri.toString()).query,
     mixedFullSource
   );
 
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 20);
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputBytes', DEFAULT_NOTEBOOK_BYTE_LIMIT);
+  bridge.executeImpl = async (_target, source, onIssued) => {
+    assert.strictEqual(source, 'largeTable[]');
+    onIssued();
+    return modelQTable(['sym', 'price', 'size', 'venue'], largeRows);
+  };
+  const largeMixedCell = runtime.cell({
+    languageId: 'q',
+    source: 'largeTable[]',
+    uri: 'vscode-notebook-cell:///native-q/large-table',
+  });
+  largeMixedCell.notebook = notebook;
+  let largeMimeBytes = 0;
+  runtime.controls.beforeApplyEdit = edit => {
+    largeMimeBytes = workspaceEditKxMimeByteLength(edit);
+  };
+  let largeMixedRun;
+  try {
+    largeMixedRun = await directController.runCell(largeMixedCell, secondConnection.id);
+  } finally {
+    runtime.controls.beforeApplyEdit = undefined;
+  }
+  assert.strictEqual(
+    largeMixedRun,
+    'executed',
+    `a 60,000-row exact q table must commit through the mixed-cell path; measured ${largeMimeBytes} KX MIME bytes`
+  );
+  const largeReplacement = runtime.replacementFor(largeMixedCell);
+  assert.ok(largeReplacement);
+  const largeMixedOutput = runtime.outputFor(largeReplacement);
+  const largeMixedPayload = notebookOutputItem(largeMixedOutput, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(largeMixedPayload.outputId, largeMixedOutput.metadata[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY].id);
+  assert.strictEqual(largeMixedPayload.persistence.mode, 'full');
+  assert.strictEqual(largeMixedPayload.result.rowCount, 60_000);
+  assert.strictEqual(largeMixedPayload.result.previewRowCount, 60_000);
+  assert.strictEqual(largeMixedPayload.data.rows.length, 60_000);
+  assert.strictEqual(largeMixedPayload.result.truncated, false);
+  assert.ok(
+    largeMimeBytes > DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    `the regression must exercise a genuinely large exact WorkspaceEdit payload; measured ${largeMimeBytes} bytes`
+  );
+  const largeMixedLiveId = largeMixedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
+  assert.strictEqual(liveResults.view(largeMixedLiveId, notebook.uri.toString()).rowCount, 60_000);
+  assert.deepStrictEqual(
+    liveResults.slice(largeMixedLiveId, notebook.uri.toString(), {
+      startRow: 59_999,
+      endRow: 59_999,
+      startColumn: 0,
+      endColumn: 3,
+    }).cells,
+    [['KX', '199.99', '699', 'BATS']],
+    'live paging/export state must retain rows omitted from the saved preview'
+  );
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 2);
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputBytes', 4096);
+
+  bridge.executeImpl = async (target, source, onIssued) => {
+    assert.strictEqual(target, connection);
+    assert.strictEqual(source, 'serializerNormalize[]');
+    onIssued();
+    return modelQTable(['value'], [{ value: 314 }]);
+  };
+  bridge.connection = connection;
+  bridge.connectionList = [connection];
+  bridge.fireState();
+  const normalizedMixedCell = runtime.cell({
+    languageId: 'q',
+    source: 'serializerNormalize[]',
+    uri: 'vscode-notebook-cell:///native-q/serializer-normalize',
+  });
+  normalizedMixedCell.notebook = notebook;
+  const normalizedCommits = [];
+  runtime.controls.deferNotebookCommit = true;
+  runtime.controls.deferNotebookEvent = true;
+  runtime.controls.normalizeNotebookOutput = output => {
+    const live = output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY];
+    const binding = output.metadata?.[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY];
+    normalizedCommits.push({
+      binding,
+      live,
+      mimes: output.items.map(item => item.mime),
+      nestedBinding: output.metadata?.metadata?.[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY],
+    });
+    return new runtime.vscode.NotebookCellOutput(
+      [...output.items].reverse(),
+      {
+        metadata: {
+          [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+            version: 1,
+            id: binding?.id,
+          },
+          [KX_NOTEBOOK_LIVE_METADATA_KEY]: { version: 1, id: live?.id },
+          normalizedBy: 'jupyter-serializer',
+        },
+        harmlessHostMetadata: { order: ['text/plain', KX_NOTEBOOK_MIME] },
+      }
+    );
+  };
+  let normalizedRun;
+  try {
+    normalizedRun = await directController.runCell(normalizedMixedCell, connection.id);
+  } finally {
+    runtime.controls.deferNotebookCommit = false;
+    runtime.controls.deferNotebookEvent = false;
+    runtime.controls.normalizeNotebookOutput = undefined;
+  }
+  assert.strictEqual(
+    normalizedRun,
+    'executed',
+    'mixed q output verification must accept harmless serializer-normalized metadata and item order'
+  );
+  assert.strictEqual(normalizedCommits.length, 1);
+  assert.deepStrictEqual(normalizedCommits[0].mimes, [KX_NOTEBOOK_MIME, 'text/plain']);
+  assert.deepStrictEqual(normalizedCommits[0].nestedBinding, normalizedCommits[0].binding);
+  const normalizedReplacement = runtime.replacementFor(normalizedMixedCell);
+  assert.ok(normalizedReplacement);
+  assert.notStrictEqual(
+    normalizedReplacement.document.uri.toString(),
+    normalizedMixedCell.document.uri.toString()
+  );
+  const normalizedOutput = runtime.outputFor(normalizedReplacement);
+  assert.deepStrictEqual(
+    Object.keys(normalizedOutput.metadata).sort(),
+    ['harmlessHostMetadata', 'metadata'].sort(),
+    'the regression fixture must commit nested-only normalized host metadata rather than the original output object'
+  );
+  const normalizedPayload = notebookOutputItem(normalizedOutput, KX_NOTEBOOK_MIME).value;
+  const normalizedLiveId =
+    normalizedOutput.metadata.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
+  assert.strictEqual(normalizedPayload.outputId, normalizedCommits[0].binding.id);
+  assert.strictEqual(
+    liveResults.hasForOutput(
+      normalizedLiveId,
+      notebook.uri.toString(),
+      normalizedReplacement.document.uri.toString(),
+      normalizedPayload.outputId
+    ),
+    true,
+    'the staged live result must bind to the actual serializer-created replacement cell URI'
+  );
+  assert.strictEqual(
+    liveResults.view(normalizedLiveId, notebook.uri.toString()).query,
+    'serializerNormalize[]'
+  );
+
+  bridge.executeImpl = async (_target, source, onIssued) => {
+    assert.strictEqual(source, 'serializerSettlesIdentity[]');
+    onIssued();
+    return modelQTable(['value'], [{ value: 5772 }]);
+  };
+  const settlingIdentityCell = runtime.cell({
+    languageId: 'q',
+    source: 'serializerSettlesIdentity[]',
+    uri: 'vscode-notebook-cell:///native-q/serializer-settles-identity',
+  });
+  settlingIdentityCell.notebook = notebook;
+  const settlingIdentityStates = [];
+  runtime.controls.normalizeNotebookOutput = output => {
+    const live = output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY];
+    const binding = output.metadata?.[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY];
+    const foreignOutputId = `transient-foreign-${'f'.repeat(32)}`;
+    const canonicalOutput = new runtime.vscode.NotebookCellOutput(
+      [...output.items].reverse(),
+      {
+        metadata: {
+          [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: binding,
+          [KX_NOTEBOOK_LIVE_METADATA_KEY]: live,
+          normalizedBy: 'jupyter-serializer-settled',
+        },
+      }
+    );
+    const conflictingOutput = new runtime.vscode.NotebookCellOutput(
+      output.items,
+      {
+        [KX_NOTEBOOK_LIVE_METADATA_KEY]: live,
+        [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: binding,
+        metadata: {
+          [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+            version: 1,
+            id: foreignOutputId,
+          },
+        },
+      }
+    );
+    const foreignOutput = new runtime.vscode.NotebookCellOutput(
+      output.items.map(item => item.mime === KX_NOTEBOOK_MIME
+        ? {
+          ...item,
+          value: { ...item.value, outputId: foreignOutputId },
+        }
+        : item),
+      {
+        [KX_NOTEBOOK_LIVE_METADATA_KEY]: live,
+        metadata: {
+          [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+            version: 1,
+            id: foreignOutputId,
+          },
+        },
+      }
+    );
+    setTimeout(() => {
+      const replacement = runtime.replacementFor(settlingIdentityCell);
+      runtime.emitNotebookCellOutputs(replacement, [conflictingOutput]);
+      settlingIdentityStates.push('conflicting');
+      setTimeout(() => {
+        runtime.emitNotebookCellOutputs(replacement, [foreignOutput]);
+        settlingIdentityStates.push('foreign');
+        setTimeout(() => {
+          runtime.emitNotebookCellOutputs(replacement, [canonicalOutput]);
+          settlingIdentityStates.push('canonical');
+        }, 0);
+      }, 0);
+    }, 0);
+    settlingIdentityStates.push('missing');
+    return new runtime.vscode.NotebookCellOutput(
+      output.items,
+      {
+        [KX_NOTEBOOK_LIVE_METADATA_KEY]: live,
+        metadata: {
+          normalizedBy: 'jupyter-serializer-incomplete',
+        },
+      }
+    );
+  };
+  let settlingIdentityRun;
+  try {
+    settlingIdentityRun = await directController.runCell(
+      settlingIdentityCell,
+      connection.id
+    );
+  } finally {
+    runtime.controls.normalizeNotebookOutput = undefined;
+  }
+  assert.strictEqual(
+    settlingIdentityRun,
+    'executed',
+    'transient incomplete or foreign serializer metadata must not fail before the canonical identity settles'
+  );
+  assert.deepStrictEqual(
+    settlingIdentityStates,
+    ['missing', 'conflicting', 'foreign', 'canonical']
+  );
+  const settlingIdentityReplacement = runtime.replacementFor(settlingIdentityCell);
+  const settlingIdentityOutput = runtime.outputFor(settlingIdentityReplacement);
+  const settlingIdentityPayload = notebookOutputItem(
+    settlingIdentityOutput,
+    KX_NOTEBOOK_MIME
+  ).value;
+  const settlingIdentityLiveId =
+    settlingIdentityOutput.metadata.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
+  assert.strictEqual(
+    liveResults.hasForOutput(
+      settlingIdentityLiveId,
+      notebook.uri.toString(),
+      settlingIdentityReplacement.document.uri.toString(),
+      settlingIdentityPayload.outputId
+    ),
+    true,
+    'the staged live result must survive transient foreign metadata and bind only to the canonical owner'
+  );
+  assert.strictEqual(
+    liveResults.view(settlingIdentityLiveId, notebook.uri.toString()).table.cellValue(0, 0),
+    5772
+  );
+  assert.strictEqual(directController.lastRunFailure(settlingIdentityCell), undefined);
+
+  bridge.executeImpl = async (_target, source, onIssued) => {
+    assert.strictEqual(source, 'missingBindingMetadata[]');
+    onIssued();
+    return modelQTable(['value'], [{ value: 1234 }]);
+  };
+  const missingBindingCell = runtime.cell({
+    languageId: 'q',
+    source: 'missingBindingMetadata[]',
+    uri: 'vscode-notebook-cell:///native-q/missing-binding-metadata',
+  });
+  missingBindingCell.notebook = notebook;
+  const liveIdBeforeMissingBinding = liveId;
+  runtime.controls.normalizeNotebookOutput = output => new runtime.vscode.NotebookCellOutput(
+    output.items,
+    {
+      [KX_NOTEBOOK_LIVE_METADATA_KEY]: output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY],
+      metadata: {
+        normalizedBy: 'jupyter-serializer-missing-binding',
+      },
+    }
+  );
+  try {
+    assert.strictEqual(
+      await directController.runCell(missingBindingCell, connection.id),
+      'write-failed',
+      'mixed q output verification must reject a committed KX MIME payload without durable binding metadata'
+    );
+  } finally {
+    runtime.controls.normalizeNotebookOutput = undefined;
+  }
+  const missingBindingStagedLiveId =
+    `controller-live-${String(liveIdBeforeMissingBinding + 1).padStart(24, '0')}`;
+  assert.strictEqual(liveId, liveIdBeforeMissingBinding + 1);
+  assert.strictEqual(
+    liveResults.has(missingBindingStagedLiveId, notebook.uri.toString()),
+    false,
+    'rejecting missing binding metadata must remove the staged live result'
+  );
+
+  bridge.executeImpl = async (_target, source, onIssued) => {
+    assert.strictEqual(source, 'foreignOutput[]');
+    onIssued();
+    return modelQTable(['value'], [{ value: 2718 }]);
+  };
+  const foreignMixedCell = runtime.cell({
+    languageId: 'q',
+    source: 'foreignOutput[]',
+    uri: 'vscode-notebook-cell:///native-q/foreign-output',
+  });
+  foreignMixedCell.notebook = notebook;
+  const liveIdBeforeForeign = liveId;
+  const foreignOutputId = `foreign-output-${'f'.repeat(32)}`;
+  runtime.controls.normalizeNotebookOutput = output => {
+    const foreignItems = output.items.map(item => {
+      if (item.mime !== KX_NOTEBOOK_MIME) {
+        return item;
+      }
+      return {
+        ...item,
+        value: {
+          ...item.value,
+          outputId: foreignOutputId,
+        },
+      };
+    });
+    return new runtime.vscode.NotebookCellOutput(
+      foreignItems,
+      {
+        [KX_NOTEBOOK_LIVE_METADATA_KEY]: output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY],
+        metadata: {
+          [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+            version: 1,
+            id: foreignOutputId,
+          },
+        },
+      }
+    );
+  };
+  try {
+    assert.strictEqual(
+      await directController.runCell(foreignMixedCell, connection.id),
+      'write-failed',
+      'mixed q output verification must reject a committed foreign KX output identity'
+    );
+  } finally {
+    runtime.controls.normalizeNotebookOutput = undefined;
+  }
+  const foreignStagedLiveId =
+    `controller-live-${String(liveIdBeforeForeign + 1).padStart(24, '0')}`;
+  assert.strictEqual(liveId, liveIdBeforeForeign + 1);
+  assert.strictEqual(
+    liveResults.has(foreignStagedLiveId, notebook.uri.toString()),
+    false,
+    'rejecting a foreign committed output must remove the staged live result'
+  );
+
+  bridge.executeImpl = async (_target, source, onIssued) => {
+    assert.strictEqual(source, 'missingReplacementEvent[]');
+    onIssued();
+    return modelQTable(['value'], [{ value: 1618 }]);
+  };
+  const missingCommitCell = runtime.cell({
+    languageId: 'q',
+    source: 'missingReplacementEvent[]',
+    uri: 'vscode-notebook-cell:///native-q/missing-replacement-event',
+  });
+  missingCommitCell.notebook = notebook;
+  const liveIdBeforeMissingCommit = liveId;
+  runtime.controls.deferNotebookCommit = true;
+  runtime.controls.skipDeferredNotebookCommit = true;
+  try {
+    assert.strictEqual(
+      await directController.runCell(missingCommitCell, connection.id),
+      'write-failed',
+      'a successful applyEdit without a matching replacement event must fail after the bounded verification timeout'
+    );
+  } finally {
+    runtime.controls.deferNotebookCommit = false;
+    runtime.controls.skipDeferredNotebookCommit = false;
+  }
+  assert.strictEqual(runtime.replacementFor(missingCommitCell), undefined);
+  const missingCommitLiveId =
+    `controller-live-${String(liveIdBeforeMissingCommit + 1).padStart(24, '0')}`;
+  assert.strictEqual(liveId, liveIdBeforeMissingCommit + 1);
+  assert.strictEqual(
+    liveResults.has(missingCommitLiveId, notebook.uri.toString()),
+    false,
+    'a timed-out replacement verification must remove the staged live result'
+  );
+  assert.deepStrictEqual(
+    directController.lastRunFailure(missingCommitCell),
+    {
+      stage: 'verify',
+      detail: 'VS Code reported the notebook edit was applied, but the replacement cell did not expose the expected KX output identity within 1000 ms.',
+      issued: true,
+    }
+  );
+
+  bridge.connection = secondConnection;
+  bridge.connectionList = [connection, secondConnection];
+  bridge.fireState();
+  bridge.executeImpl = async (target, source, onIssued) => {
+    assert.strictEqual(target, secondConnection);
+    assert.strictEqual(source, mixedContinuationSource);
+    onIssued();
+    if (mixedSessionValue !== 41) {
+      throw new Error(`unexpected mixed q session value: ${mixedSessionValue}`);
+    }
+    mixedSessionValue += 1;
+    return mixedSessionValue;
+  };
   const continuationCell = runtime.cell({
     languageId: 'q',
     source: mixedContinuationSource,
@@ -18040,6 +20062,7 @@ async function testDirectQNotebookController() {
   const noValueExecution = runtime.executionFor(noValueCell);
   const noValuePayload = notebookOutputItem(noValueExecution.output, KX_NOTEBOOK_MIME).value;
   assert.strictEqual(noValuePayload.kind, 'qText');
+  assert.strictEqual(noValuePayload.persistence.mode, 'full');
   assert.strictEqual(noValuePayload.data.text, '::');
   assert.strictEqual(notebookTextOutput(noValueExecution.output), '::');
   const noValueLiveView = liveResults.view(
@@ -18224,6 +20247,49 @@ async function testDirectQNotebookController() {
   assert.deepStrictEqual(retainedCell.outputs, [retainedOutput]);
   assert.strictEqual(runtime.replacementFor(retainedCell), undefined);
 
+  bridge.executeImpl = async () => {
+    throw new Error('connection failed before q issue');
+  };
+  const preIssueErrorCell = runtime.cell({
+    languageId: 'q',
+    source: 'preIssueFailure[]',
+    uri: 'vscode-notebook-cell:///native-q/pre-issue-error-write-failure',
+  });
+  preIssueErrorCell.notebook = notebook;
+  runtime.controls.applyEditResult = false;
+  assert.strictEqual(
+    await directController.runCell(preIssueErrorCell, connection.id),
+    'write-failed',
+    'failure applying a pre-issue error output must retain issue certainty'
+  );
+  assert.deepStrictEqual(directController.lastRunFailure(preIssueErrorCell), {
+    stage: 'applyEdit',
+    detail: 'VS Code rejected the notebook cell replacement.',
+    issued: false,
+  });
+
+  const preIssueEmptyCell = runtime.cell({
+    languageId: 'q',
+    source: '   ',
+    uri: 'vscode-notebook-cell:///native-q/pre-issue-empty-write-failure',
+  });
+  preIssueEmptyCell.notebook = notebook;
+  assert.strictEqual(
+    await directController.runCell(preIssueEmptyCell, connection.id),
+    'write-failed',
+    'failure applying an empty no-query output must retain issue certainty'
+  );
+  assert.deepStrictEqual(directController.lastRunFailure(preIssueEmptyCell), {
+    stage: 'applyEdit',
+    detail: 'VS Code rejected the notebook cell replacement.',
+    issued: false,
+  });
+  runtime.controls.applyEditResult = true;
+  bridge.executeImpl = async (_connection, _source, onIssued) => {
+    onIssued();
+    return 99;
+  };
+
   const pythonRaceOutput = { owner: 'python-controller', value: 'newer output' };
   const raceCell = runtime.cell({
     languageId: 'q',
@@ -18271,6 +20337,38 @@ async function testDirectQNotebookController() {
   const canceledStagedId = `controller-live-${String(liveId).padStart(24, '0')}`;
   assert.strictEqual(liveId, stagedIdBeforeCommitCancel + 1);
   assert.strictEqual(liveResults.has(canceledStagedId, notebook.uri.toString()), false);
+
+  const cancelDuringApplyCell = runtime.cell({
+    languageId: 'q',
+    source: 'cancelDuringApply[]',
+    uri: 'vscode-notebook-cell:///native-q/cancel-during-apply',
+  });
+  cancelDuringApplyCell.notebook = notebook;
+  runtime.controls.beforeApplyEdit = async () => {
+    runtime.progressRuns.at(-1).token.cancel();
+    await eventLoopTurn();
+  };
+  assert.strictEqual(
+    await directController.runCell(cancelDuringApplyCell, connection.id),
+    'executed',
+    'once VS Code accepts the versioned output edit, an in-flight cancel must not misreport or roll back the committed result'
+  );
+  runtime.controls.beforeApplyEdit = undefined;
+  const cancelDuringApplyReplacement = runtime.replacementFor(cancelDuringApplyCell);
+  assert.ok(cancelDuringApplyReplacement);
+  const cancelDuringApplyOutput = runtime.outputFor(cancelDuringApplyReplacement);
+  const cancelDuringApplyLiveId =
+    cancelDuringApplyOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY].id;
+  assert.strictEqual(
+    liveResults.hasForOutput(
+      cancelDuringApplyLiveId,
+      notebook.uri.toString(),
+      cancelDuringApplyReplacement.document.uri.toString(),
+      notebookOutputItem(cancelDuringApplyOutput, KX_NOTEBOOK_MIME).value.outputId
+    ),
+    true,
+    'the committed output must retain its exact live owner after an in-flight cancel'
+  );
 
   const closeIssued = deferred();
   const closeResult = deferred();
@@ -18717,6 +20815,7 @@ async function testMixedQNotebookCommandIntegration() {
     RUN_Q_NOTEBOOK_CELL_COMMAND,
     RUN_Q_NOTEBOOK_CELL_AND_SELECT_BELOW_COMMAND,
     RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND,
+    RUN_NOTEBOOK_PREVIEW_LIVE_COMMAND,
     SELECT_NOTEBOOK_Q_TARGET_COMMAND,
     SET_NOTEBOOK_CELL_LANGUAGE_Q_COMMAND,
     RESTORE_NOTEBOOK_CELL_LANGUAGE_COMMAND,
@@ -18767,6 +20866,7 @@ async function testMixedQNotebookCommandIntegration() {
   const stateChanged = new runtime.vscode.EventEmitter();
   let directSelected = false;
   let nextRunResult = 'executed';
+  let nextRunFailure;
   const runCalls = [];
   const profiles = [
     {
@@ -18786,6 +20886,7 @@ async function testMixedQNotebookCommandIntegration() {
     onDidChangeState: stateChanged.event,
     isSelected: target => target === notebook && directSelected,
     connectionProfiles: () => profiles.map(profile => ({ ...profile })),
+    lastRunFailure: () => nextRunFailure,
     async runCell(cell, connectionId) {
       runCalls.push({
         cell,
@@ -18817,9 +20918,13 @@ async function testMixedQNotebookCommandIntegration() {
   const commandAndInsertBelow = runtime.commands.get(
     RUN_Q_NOTEBOOK_CELL_AND_INSERT_BELOW_COMMAND
   );
+  const runNotebookPreviewLive = runtime.commands.get(
+    RUN_NOTEBOOK_PREVIEW_LIVE_COMMAND
+  );
   assert.strictEqual(typeof command, 'function');
   assert.strictEqual(typeof commandAndSelectBelow, 'function');
   assert.strictEqual(typeof commandAndInsertBelow, 'function');
+  assert.strictEqual(typeof runNotebookPreviewLive, 'function');
   assert.strictEqual(runtime.statusProviders.length, 1);
   const provider = runtime.statusProviders[0].provider;
 
@@ -18865,9 +20970,44 @@ async function testMixedQNotebookCommandIntegration() {
   assert.strictEqual(qCell.document.languageId, 'q');
   assert.strictEqual(pythonCell.document.languageId, 'python');
 
+  const selectedShortcutCell = runtime.cell(notebook, notebook.cellCount, 'q', 'b:99\nb+1');
+  notebook.cells.push(selectedShortcutCell);
+  notebook.cellCount = notebook.cells.length;
+  editor.selections = [{ start: selectedShortcutCell.index, end: selectedShortcutCell.index + 1 }];
+  runtime.vscode.window.activeTextEditor = {
+    document: {
+      ...qCell.document,
+      uri: {
+        scheme: 'vscode-notebook-cell',
+        toString: () => qCell.document.uri.toString(),
+      },
+    },
+  };
+  const runsBeforeSelectedShortcut = runCalls.length;
+  const navigationBeforeSelectedShortcut = runtime.executedCommands.length;
+  await command();
+  await commandAndSelectBelow();
+  editor.selections = [{ start: selectedShortcutCell.index, end: selectedShortcutCell.index + 1 }];
+  await commandAndInsertBelow();
+  assert.deepStrictEqual(
+    runCalls.slice(runsBeforeSelectedShortcut).map(call => call.cell),
+    [selectedShortcutCell, selectedShortcutCell, selectedShortcutCell],
+    'no-argument q notebook shortcuts must execute the selected command-mode cell over a stale active text cell'
+  );
+  assert.deepStrictEqual(
+    runtime.executedCommands.slice(navigationBeforeSelectedShortcut).map(call => call.id),
+    ['notebook.focusNextEditor', 'notebook.cell.insertCodeCellBelow'],
+    'successful no-argument q notebook follow-up actions must be relative to the selected cell'
+  );
+  notebook.cells.pop();
+  notebook.cellCount = notebook.cells.length;
+  editor.selections = [{ start: qCell.index, end: qCell.index + 1 }];
+  runtime.vscode.window.activeTextEditor = { document: qCell.document };
+
   const warningsBeforePython = runtime.warnings.length;
+  const runsBeforePython = runCalls.length;
   await command(pythonCell);
-  assert.strictEqual(runCalls.length, 1);
+  assert.strictEqual(runCalls.length, runsBeforePython);
   assert.strictEqual(runtime.warnings.length, warningsBeforePython + 1);
   assert.match(runtime.warnings.at(-1), /q-language code cell/i);
   assert.deepStrictEqual(pythonCell.outputs, [{ owner: 'python-controller' }]);
@@ -19063,12 +21203,93 @@ async function testMixedQNotebookCommandIntegration() {
   assert.match(runtime.warnings.at(-1), /did not overwrite/i);
 
   nextRunResult = 'write-failed';
+  nextRunFailure = {
+    stage: 'verify',
+    detail: 'VS Code reported the notebook edit was applied, but the replacement cell did not expose the expected KX output identity within 1000 ms.',
+    issued: true,
+  };
   await command(qCell);
-  assert.match(runtime.errors.at(-1), /could not apply its inline output/i);
+  nextRunFailure = undefined;
+  assert.match(runtime.errors.at(-1), /could not apply or verify its inline output/i);
+  assert.match(runtime.errors.at(-1), /\(verify: VS Code reported the notebook edit was applied/i);
+  assert.match(runtime.errors.at(-1), /q code already ran/i);
+  assert.doesNotMatch(runtime.errors.at(-1), /Retry the cell/i);
+
+  nextRunResult = 'write-failed';
+  nextRunFailure = {
+    stage: 'applyEdit',
+    detail: 'VS Code rejected the notebook cell replacement before issue certainty was recorded.',
+    issued: false,
+  };
+  await command(qCell);
+  nextRunFailure = undefined;
+  assert.match(runtime.errors.at(-1), /could not apply or verify its inline output/i);
+  assert.match(runtime.errors.at(-1), /may already have run/i);
+  assert.doesNotMatch(runtime.errors.at(-1), /q code already ran/i);
+  assert.doesNotMatch(runtime.errors.at(-1), /Retry the cell/i);
 
   nextRunResult = 'unavailable';
   await command(qCell);
   assert.match(runtime.errors.at(-1), /notebook or KX direct IPC runner closed/i);
+
+  const helperCell = runtime.cell(
+    notebook,
+    notebook.cellCount,
+    'python',
+    '%%q\nselect from helperTrade'
+  );
+  notebook.cells.push(helperCell);
+  notebook.cellCount = notebook.cells.length;
+  editor.selections = [{ start: helperCell.index, end: helperCell.index + 1 }];
+  runtime.vscode.window.activeTextEditor = { document: helperCell.document };
+  runtime.setWarningResponse('Run via Direct IPC');
+
+  nextRunResult = 'busy';
+  await runNotebookPreviewLive(helperCell);
+  assert.match(
+    runtime.warnings.at(-1),
+    /already running/i,
+    'the direct %%q toolbar command must report a busy post-dispatch outcome'
+  );
+
+  nextRunResult = 'stale';
+  await runNotebookPreviewLive(helperCell);
+  assert.match(
+    runtime.warnings.at(-1),
+    /changed before.*output could be applied/i,
+    'the direct %%q toolbar command must report a stale post-dispatch outcome'
+  );
+
+  nextRunResult = 'write-failed';
+  nextRunFailure = {
+    stage: 'verify',
+    detail: 'The issued helper result could not be verified.',
+    issued: true,
+  };
+  await runNotebookPreviewLive(helperCell);
+  assert.match(runtime.errors.at(-1), /could not apply or verify its output/i);
+  assert.match(runtime.errors.at(-1), /q code already ran/i);
+  assert.doesNotMatch(runtime.errors.at(-1), /may already have run|retry/i);
+
+  nextRunFailure = {
+    stage: 'applyEdit',
+    detail: 'The helper output was rejected before issue certainty was recorded.',
+    issued: false,
+  };
+  await runNotebookPreviewLive(helperCell);
+  assert.match(runtime.errors.at(-1), /may already have run/i);
+  assert.doesNotMatch(runtime.errors.at(-1), /q code already ran|retry/i);
+
+  nextRunResult = 'unavailable';
+  nextRunFailure = undefined;
+  await runNotebookPreviewLive(helperCell);
+  assert.match(
+    runtime.errors.at(-1),
+    /runner.*unavailable|notebook.*closed/i,
+    'the direct %%q toolbar command must report post-dispatch unavailability'
+  );
+  notebook.cells.pop();
+  notebook.cellCount = notebook.cells.length;
 
   statusSubscription.dispose();
   integration.dispose();
@@ -19225,7 +21446,11 @@ async function testDirectQNotebookRendererReruns() {
     const response = runtime.postedMessages.find(entry =>
       entry.message.type === 'actionResult' && entry.message.requestId === requestId
     )?.message;
-    assert.strictEqual(response?.ok, true, response?.message);
+    assert.strictEqual(
+      response?.ok,
+      true,
+      `${response?.message || 'missing rerun response'} ${JSON.stringify(runner.lastRunFailure(cell))}`
+    );
   };
 
   try {
@@ -19235,11 +21460,13 @@ async function testDirectQNotebookRendererReruns() {
     const firstLiveId = firstOutput.metadata[NOTEBOOK_LIVE_RESULT_METADATA_KEY].id;
     assert.strictEqual(firstPayload.persistence.mode, 'full');
     assert.strictEqual(firstPayload.data.rows.length, 30);
+    assert.strictEqual(firstPayload.result.previewRowCount, 30);
+    assert.strictEqual(firstPayload.result.rowCount, 30);
     assert.strictEqual(firstPayload.result.truncated, false);
     assert.strictEqual(
       portableCellText(firstPayload.data.rows[29][1]),
       'fresh-tail-1',
-      'rerunning a historical preview must persist the complete fresh result'
+      'rerunning a historical preview must save the complete fresh result'
     );
     assert.strictEqual(bridge.calls.length, 1, 'the first renderer rerun must make one bridge call');
     assert.strictEqual(liveResults.hasForOutput(
@@ -19260,7 +21487,7 @@ async function testDirectQNotebookRendererReruns() {
         endColumn: 1,
       }).cells,
       [['29', 'fresh-tail-1']],
-      'the first live result must match the complete fresh persisted output'
+      'the first live result must retain complete fresh data beyond the saved preview'
     );
 
     await rerun(firstPayload, firstPayload.outputId, 802);
@@ -19277,15 +21504,20 @@ async function testDirectQNotebookRendererReruns() {
     assert.strictEqual(bridge.calls.some(call => call.source === stalePreviewSource), false);
     assert.notStrictEqual(secondPayload.outputId, firstPayload.outputId);
     assert.notStrictEqual(secondLiveId, firstLiveId);
-    assert.notDeepStrictEqual(secondPayload.data.rows, firstPayload.data.rows);
+    assert.notDeepStrictEqual(
+      secondPayload.data.rows,
+      firstPayload.data.rows,
+      'complete reruns must retain fresh changes outside the historical preview boundary'
+    );
     assert.strictEqual(secondPayload.persistence.mode, 'full');
     assert.strictEqual(secondPayload.data.rows.length, 30);
+    assert.strictEqual(secondPayload.result.previewRowCount, 30);
     assert.strictEqual(secondPayload.result.rowCount, 30);
     assert.strictEqual(secondPayload.result.truncated, false);
     assert.strictEqual(
       portableCellText(secondPayload.data.rows[29][1]),
       'fresh-tail-2',
-      'the second rerun must replace the complete saved result with fresh IPC data'
+      'the second rerun must replace the saved result with a complete new output identity'
     );
     assert.strictEqual(liveResults.has(firstLiveId, notebook.uri.toString()), false);
     assert.strictEqual(liveResults.hasForOutput(
@@ -19306,7 +21538,7 @@ async function testDirectQNotebookRendererReruns() {
         endColumn: 1,
       }).cells,
       [['29', 'fresh-tail-2']],
-      'the second live result must match the complete replacement output'
+      'the second live result must retain complete replacement data beyond the saved preview'
     );
   } finally {
     integration.dispose();
@@ -19339,10 +21571,8 @@ async function testNotebookRendererHostActions() {
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
-    functionDisplayStrategy: 'qText',
     dictionaryDisplayStrategy: 'grid',
     listDisplayStrategy: 'grid',
-    objectDisplayStrategy: 'grid',
   };
   const {
     NotebookIntegration,
@@ -19404,8 +21634,10 @@ async function testNotebookRendererHostActions() {
 
   const liveId = `host-live-${'a'.repeat(32)}`;
   const qTextLiveId = `host-qtext-${'c'.repeat(32)}`;
+  const largeLiveId = `host-large-live-${'l'.repeat(32)}`;
   const firstBindingId = liveId;
   const secondBindingId = `host-binding-${'b'.repeat(32)}`;
+  const largeBindingId = `host-large-binding-${'g'.repeat(32)}`;
   const portableInput = {
     columns: ['n', 'value', 'sym'],
     rows: [[1, 10, 'A'], [2, 20, 'B'], [3, 30, 'C']],
@@ -19427,8 +21659,59 @@ async function testNotebookRendererHostActions() {
   assert.strictEqual(secondPayloadResult.ok, true);
   const payload = firstPayload.value;
   const secondPayload = secondPayloadResult.value;
+  const savedQBindingId = `host-saved-q-${'q'.repeat(32)}`;
+  const savedQPayloadResult = createPortableKxResultV2({
+    columns: [
+      { name: 'qSym', type: 'symbol' },
+      { name: 'qChars', type: 'char' },
+      { name: 'qLong', type: 'long' },
+      { name: 'qDate', type: 'date' },
+      { name: 'qNull', type: 'int' },
+      { name: 'qInf', type: 'float' },
+    ],
+    rows: [],
+    cellValue: (_rowIndex, columnIndex) => [
+      qAtom('symbol', 'SAVED'),
+      qVector([115, 97, 118, 101, 100, 44, 34], 'char'),
+      qAtom('long', '9007199254740993'),
+      qAtom('date', 1),
+      qAtom('int', qSpecial('null')),
+      qAtom('float', qSpecial('positiveInfinity')),
+    ][columnIndex],
+    rowCount: 1,
+    rowLimit: 1,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  }, {
+    outputId: savedQBindingId,
+    persistenceMode: 'full',
+  });
+  assert.strictEqual(savedQPayloadResult.ok, true);
+  const savedQPayload = savedQPayloadResult.value;
+  const largeHostRowCount = 60_000;
+  const largeHostPayloadResult = createPortableKxResultV2({
+    columns: [
+      { name: 'row', type: 'int' },
+      { name: 'sym', type: 'symbol' },
+    ],
+    rows: [],
+    cellValue: (rowIndex, columnIndex) => columnIndex === 0
+      ? qAtom('int', rowIndex)
+      : qAtom('symbol', rowIndex === largeHostRowCount - 1 ? 'TAIL' : 'KX'),
+    rowCount: largeHostRowCount,
+    rowLimit: largeHostRowCount,
+    byteLimit: MAX_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  }, {
+    outputId: largeBindingId,
+    persistenceMode: 'full',
+  });
+  assert.strictEqual(largeHostPayloadResult.ok, true);
+  const largeHostPayload = largeHostPayloadResult.value;
   const encodedPayload = new TextEncoder().encode(JSON.stringify(payload));
   const encodedSecondPayload = new TextEncoder().encode(JSON.stringify(secondPayload));
+  const encodedSavedQPayload = new TextEncoder().encode(JSON.stringify(savedQPayload));
+  const encodedLargeHostPayload = new TextEncoder().encode(JSON.stringify(largeHostPayload));
   const legacyPayload = createPortableKxResult({
     columns: ['sym'],
     rows: [['LEGACY']],
@@ -19459,9 +21742,31 @@ async function testNotebookRendererHostActions() {
     metadata: {},
     items: [{ mime: KX_NOTEBOOK_MIME, data: encodedLegacyPayload }],
   }];
+  const savedQCell = runtime.cell(notebook, 3, 'q', 'saved q export');
+  savedQCell.outputs = [{
+    metadata: {
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: savedQBindingId },
+    },
+    items: [{ mime: KX_NOTEBOOK_MIME, data: encodedSavedQPayload }],
+  }];
+  notebook.cells.push(savedQCell);
+  const largeHostCell = runtime.cell(notebook, 4, 'q', 'select from largeHostResult');
+  largeHostCell.outputs = [{
+    metadata: {
+      [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: largeLiveId },
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: largeBindingId },
+      metadata: {
+        [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: largeBindingId },
+      },
+    },
+    items: [{ mime: KX_NOTEBOOK_MIME, data: encodedLargeHostPayload }],
+  }];
+  notebook.cells.push(largeHostCell);
+  notebook.cellCount = notebook.cells.length;
 
   const pendingLiveIds = [
     liveId,
+    largeLiveId,
     qTextLiveId,
   ];
   const liveResults = new LiveNotebookResultStore(8, () => pendingLiveIds.shift());
@@ -19472,12 +21777,64 @@ async function testNotebookRendererHostActions() {
     query: 'select from trade',
     connectionName: 'Connection one',
     elapsedMs: 4,
-    value: modelQTable(
-      ['n', 'value', 'sym', 'values', 'nullable', 'flag'],
+      value: modelQTable(
       [
-        { n: 1, value: 10, sym: 'A', values: [1, 2], nullable: null, flag: true },
-        { n: 2, value: 20, sym: 'B', values: [3, null], nullable: 'ok', flag: false },
-        { n: 3, value: 30, sym: 'C', values: [4, 5], nullable: null, flag: true },
+        'n',
+        'value',
+        'sym',
+        'values',
+        'nullable',
+        'flag',
+        'qSym',
+        'qChars',
+        'qLong',
+        'qDate',
+        'qNull',
+        'qInf',
+      ],
+      [
+        {
+          n: 1,
+          value: 10,
+          sym: 'A',
+          values: [1, 2],
+          nullable: null,
+          flag: true,
+          qSym: qAtom('symbol', 'LIVE'),
+          qChars: qVector([108, 105, 118, 101, 44, 34], 'char'),
+          qLong: qAtom('long', '9007199254740993'),
+          qDate: qAtom('date', 1),
+          qNull: qAtom('int', qSpecial('null')),
+          qInf: qAtom('float', qSpecial('positiveInfinity')),
+        },
+        {
+          n: 2,
+          value: 20,
+          sym: 'B',
+          values: [3, null],
+          nullable: 'ok',
+          flag: false,
+          qSym: qAtom('symbol', 'BETA'),
+          qChars: qVector([98, 101, 116, 97], 'char'),
+          qLong: qAtom('long', '42'),
+          qDate: qAtom('date', 2),
+          qNull: qAtom('int', 7),
+          qInf: qAtom('float', qSpecial('negativeInfinity')),
+        },
+        {
+          n: 3,
+          value: 30,
+          sym: 'C',
+          values: [4, 5],
+          nullable: null,
+          flag: true,
+          qSym: qAtom('symbol', 'GAMMA'),
+          qChars: qVector([103, 97, 109, 109, 97], 'char'),
+          qLong: qAtom('long', '84'),
+          qDate: qAtom('date', 3),
+          qNull: qAtom('int', qSpecial('null')),
+          qInf: qAtom('float', qSpecial('positiveInfinity')),
+        },
       ]
     ),
   }), liveId);
@@ -19491,8 +21848,31 @@ async function testNotebookRendererHostActions() {
     undefined,
     'store access must reject the same handle from a different cell'
   );
+  assert.strictEqual(liveResults.register({
+    notebookUri: notebook.uri.toString(),
+    cellUri: largeHostCell.document.uri.toString(),
+    outputId: largeBindingId,
+    query: 'select from largeHostResult',
+    connectionName: 'Connection one',
+    elapsedMs: 40,
+    value: {
+      qtype: 'table',
+      columns: ['row', 'sym'],
+      columnTypes: ['int', 'symbol'],
+      columnData: [
+        qVector(Array.from({ length: largeHostRowCount }, (_value, index) => index), 'int'),
+        qVector(Array.from(
+          { length: largeHostRowCount },
+          (_value, index) => index === largeHostRowCount - 1 ? 'TAIL' : 'KX'
+        ), 'symbol'),
+      ],
+      rows: [],
+      rowCount: largeHostRowCount,
+    },
+  }), largeLiveId);
 
   let nextRunResult = 'executed';
+  let nextRunFailure;
   let directControllerSelected = false;
   const runCalls = [];
   const directController = {
@@ -19504,6 +21884,7 @@ async function testNotebookRendererHostActions() {
       active: true,
       connected: true,
     }],
+    lastRunFailure: () => nextRunFailure,
     async runCell(cell, connectionId, options) {
       runCalls.push({ cell, connectionId, options });
       return nextRunResult;
@@ -19559,7 +21940,32 @@ async function testNotebookRendererHostActions() {
     assert.strictEqual(liveResultMessages[0].available, true);
     assert.strictEqual(liveResultMessages[0].rowCount, 3);
     assert.strictEqual(liveResultMessages[1].requestId, 202);
-    assert.strictEqual(liveResultMessages[1].lengths.length, 6);
+    assert.strictEqual(liveResultMessages[1].lengths.length, 12);
+
+    firstCell.outputs[0].metadata = {
+      [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: firstBindingId },
+      metadata: {
+        [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: firstBindingId },
+        [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: { version: 1, id: liveId },
+      },
+    };
+    const nestedLiveMessageStart = runtime.postedMessages.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'requestLiveResult',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 242,
+    });
+    const nestedLiveMessages = runtime.postedMessages
+      .slice(nestedLiveMessageStart)
+      .map(entry => entry.message);
+    assert.deepStrictEqual(
+      nestedLiveMessages.map(message => message.type),
+      ['liveResult', 'liveColumnTextLengths'],
+      'live renderer authorization must accept serializer-normalized nested live metadata'
+    );
+    assert.strictEqual(nestedLiveMessages[0].available, true);
+    assert.strictEqual(nestedLiveMessages[0].rowCount, 3);
 
     await runtime.emitRendererMessage(editor, {
       type: 'requestLiveColumnTextLengths',
@@ -19835,6 +22241,112 @@ async function testNotebookRendererHostActions() {
       ok: true,
     });
 
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyLiveRange',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 243,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 6,
+      endColumn: 11,
+      columnIndexes: [6, 7, 8, 9, 10, 11],
+      format: 'json',
+      includeHeaders: true,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      '[{"qSym":"LIVE","qChars":"live,\\"","qLong":"9007199254740993",' +
+        '"qDate":"2000-01-02","qNull":null,"qInf":null}]',
+      'live notebook JSON copy must use analyst q values and JSON null for q infinities'
+    );
+
+    runtime.setSaveDialogUri(testUri('file:///workspace/live-q.csv'));
+    const liveQExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportLiveRange',
+      outputId: firstBindingId,
+      liveId,
+      requestId: 244,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 6,
+      endColumn: 11,
+      columnIndexes: [6, 7, 8, 9, 10, 11],
+      format: 'csv',
+      includeHeaders: true,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      new TextDecoder().decode(runtime.savedFiles[liveQExportIndex].content),
+      'qSym,qChars,qLong,qDate,qNull,qInf\nLIVE,"live,""",9007199254740993,2000-01-02,,Infinity',
+      'live notebook CSV export must use analyst q values with ordinary CSV escaping'
+    );
+
+    runtime.setWarningResponse('Continue');
+    runtime.setSaveDialogUri(testUri('file:///workspace/live-large-60000.csv'));
+    const largeHostExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportLiveRange',
+      outputId: largeBindingId,
+      liveId: largeLiveId,
+      requestId: 249,
+      startRow: 0,
+      endRow: largeHostRowCount - 1,
+      startColumn: 0,
+      endColumn: 1,
+      columnIndexes: [0, 1],
+      format: 'csv',
+      includeHeaders: true,
+      includeRowIndex: false,
+    });
+    const largeHostCsv = new TextDecoder().decode(
+      runtime.savedFiles[largeHostExportIndex].content
+    );
+    assert.strictEqual(largeHostCsv.startsWith('row,sym\n0,KX\n'), true);
+    assert.strictEqual(largeHostCsv.endsWith('\n59999,TAIL'), true);
+    assert.strictEqual(
+      largeHostCsv.split('\n').length,
+      largeHostRowCount + 1,
+      'live notebook file export must include every host-side row plus its header'
+    );
+    assert.strictEqual(
+      runtime.postedMessages.at(-1).message.ok,
+      true,
+      'the exact full-result host export must complete successfully'
+    );
+
+    const clipboardBeforeForgedLargePreviewCopy = runtime.clipboardWrites.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: largeBindingId,
+      requestId: 250,
+      payload: largeHostPayload,
+      startRow: 0,
+      endRow: MAX_LIVE_NOTEBOOK_COPY_CELLS,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: false,
+      includeRowIndex: false,
+      columnIndexes: [0],
+    });
+    assert.strictEqual(
+      runtime.clipboardWrites.length,
+      clipboardBeforeForgedLargePreviewCopy,
+      'the host must reject a forged saved-preview copy above the renderer cell cap'
+    );
+    assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
+      type: 'actionResult',
+      requestId: 250,
+      action: 'copy',
+      ok: false,
+      canceled: false,
+      message: `Inline copy is limited to ` +
+        `${MAX_LIVE_NOTEBOOK_COPY_CELLS.toLocaleString()} cells.`,
+    });
+
     runtime.setSaveDialogUri(testUri('file:///workspace/saved.csv'));
     const savedExportIndex = runtime.savedFiles.length;
     await runtime.emitRendererMessage(editor, {
@@ -19857,6 +22369,47 @@ async function testNotebookRendererHostActions() {
       '#,sym\n2,C\n3,A'
     );
     assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
+
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: savedQBindingId,
+      requestId: 245,
+      payload: savedQPayload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 5,
+      format: 'json',
+      includeHeaders: true,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      runtime.clipboardWrites.at(-1),
+      '[{"qSym":"SAVED","qChars":"saved,\\"","qLong":"9007199254740993",' +
+        '"qDate":"2000-01-02","qNull":null,"qInf":null}]',
+      'saved notebook JSON copy must use analyst q values without changing persisted q cells'
+    );
+
+    runtime.setSaveDialogUri(testUri('file:///workspace/saved-q.tsv'));
+    const savedQExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'exportPreviewRange',
+      outputId: savedQBindingId,
+      requestId: 246,
+      payload: savedQPayload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 5,
+      format: 'tsv',
+      includeHeaders: true,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(
+      new TextDecoder().decode(runtime.savedFiles[savedQExportIndex].content),
+      'qSym\tqChars\tqLong\tqDate\tqNull\tqInf\nSAVED\t"saved,"""\t9007199254740993\t2000-01-02\t\tInfinity',
+      'saved notebook TSV export must quote analyst text and use blank q nulls'
+    );
 
     runtime.setSaveDialogUri(testUri('file:///workspace/bound-chart.png'));
     const boundChartExportIndex = runtime.savedFiles.length;
@@ -20054,6 +22607,40 @@ async function testNotebookRendererHostActions() {
     assert.strictEqual(panelCalls.length, 2);
     assert.strictEqual(runtime.postedMessages.at(-1).message.ok, true);
 
+    const unboundV2Cell = runtime.cell(
+      notebook,
+      notebook.cellCount,
+      'q',
+      'unbound v2 output must not authorize actions'
+    );
+    unboundV2Cell.outputs = [{
+      metadata: {},
+      items: [{ mime: KX_NOTEBOOK_MIME, data: encodedSecondPayload }],
+    }];
+    notebook.cells.push(unboundV2Cell);
+    notebook.cellCount = notebook.cells.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'openPreview',
+      requestId: 247,
+      payload: secondPayload,
+    });
+    assert.strictEqual(
+      panelCalls.length,
+      2,
+      'a v2 KX payload without durable output-binding metadata must not use legacy fallback'
+    );
+    assert.strictEqual(runtime.postedMessages.at(-1).message.ok, false);
+    editor.selections = [{ start: unboundV2Cell.index, end: unboundV2Cell.index + 1 }];
+    await runtime.vscode.commands.executeCommand('vscode-kdb.openNotebookPreviewInResults');
+    assert.strictEqual(
+      panelCalls.length,
+      2,
+      'the selected-output command must apply the same durable v2 ownership contract'
+    );
+    editor.selections = [{ start: 0, end: 1 }];
+    notebook.cells.pop();
+    notebook.cellCount = notebook.cells.length;
+
     runtime.setWarningResponse('Run via Direct IPC');
     const commandsBeforeHelperLiveRun = runtime.executedCommands.length;
     await runtime.emitRendererMessage(editor, {
@@ -20084,6 +22671,26 @@ async function testNotebookRendererHostActions() {
       canceled: false,
       message: 'The new KX Direct IPC execution finished; see its replacement output for success or error details.',
     });
+
+    nextRunResult = 'write-failed';
+    nextRunFailure = {
+      stage: 'applyEdit',
+      detail: 'VS Code rejected the helper output before issue certainty was recorded.',
+      issued: false,
+    };
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      payload: legacyPayload,
+      requestId: 249,
+    });
+    const uncertainHelperFailure = runtime.postedMessages.at(-1).message;
+    assert.strictEqual(uncertainHelperFailure.ok, false);
+    assert.match(uncertainHelperFailure.message, /\(applyedit:/i);
+    assert.match(uncertainHelperFailure.message, /may already have run/i);
+    assert.doesNotMatch(uncertainHelperFailure.message, /Direct IPC completed|execution finished/i);
+    assert.doesNotMatch(uncertainHelperFailure.message, /q code already ran|retry/i);
+    nextRunResult = 'executed';
+    nextRunFailure = undefined;
 
     runtime.setSaveDialogUri(testUri('file:///workspace/unbound-chart.png'));
     const unboundChartExportIndex = runtime.savedFiles.length;
@@ -20202,6 +22809,43 @@ async function testNotebookRendererHostActions() {
       message: 'Rerun canceled.',
     });
 
+    nextRunResult = 'write-failed';
+    nextRunFailure = {
+      stage: 'applyEdit',
+      detail: 'VS Code rejected the output before issue certainty was recorded.',
+      issued: false,
+    };
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      outputId: firstBindingId,
+      payload,
+      requestId: 250,
+    });
+    const uncertainDirectFailure = runtime.postedMessages.at(-1).message;
+    assert.strictEqual(uncertainDirectFailure.ok, false);
+    assert.match(uncertainDirectFailure.message, /\(applyedit:/i);
+    assert.match(uncertainDirectFailure.message, /may already have run/i);
+    assert.doesNotMatch(uncertainDirectFailure.message, /rerun finished|rerun completed/i);
+    assert.doesNotMatch(uncertainDirectFailure.message, /q code already ran|retry/i);
+
+    nextRunFailure = {
+      stage: 'verify',
+      detail: 'The issued query result could not be verified.',
+      issued: true,
+    };
+    await runtime.emitRendererMessage(editor, {
+      type: 'rerunPreview',
+      outputId: firstBindingId,
+      payload,
+      requestId: 251,
+    });
+    const issuedDirectFailure = runtime.postedMessages.at(-1).message;
+    assert.strictEqual(issuedDirectFailure.ok, false);
+    assert.match(issuedDirectFailure.message, /q code already ran/i);
+    assert.doesNotMatch(issuedDirectFailure.message, /may already have run|retry/i);
+    nextRunResult = 'executed';
+    nextRunFailure = undefined;
+
     directControllerSelected = true;
     const runCallCount = runCalls.length;
     await runtime.emitRendererMessage(editor, {
@@ -20298,6 +22942,52 @@ async function testNotebookRendererHostActions() {
       runtime.postedMessages.at(-1).message.ok,
       false,
       'PNG export must fail closed when an output binding is duplicated'
+    );
+    notebook.cells.pop();
+    notebook.cellCount = notebook.cells.length;
+
+    const conflictingBindingCell = runtime.cell(
+      notebook,
+      notebook.cellCount,
+      'q',
+      'conflicting duplicate binding'
+    );
+    conflictingBindingCell.outputs = [{
+      metadata: {
+        [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+          version: 1,
+          id: firstBindingId,
+        },
+        metadata: {
+          [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: {
+            version: 1,
+            id: `foreign-binding-${'f'.repeat(32)}`,
+          },
+        },
+      },
+      items: [{ mime: KX_NOTEBOOK_MIME, data: encodedPayload }],
+    }];
+    notebook.cells.push(conflictingBindingCell);
+    notebook.cellCount = notebook.cells.length;
+    const beforeConflictingBindingCopy = runtime.clipboardWrites.length;
+    await runtime.emitRendererMessage(editor, {
+      type: 'copyPreviewRange',
+      outputId: firstBindingId,
+      requestId: 248,
+      payload,
+      startRow: 0,
+      endRow: 0,
+      startColumn: 0,
+      endColumn: 0,
+      format: 'csv',
+      includeHeaders: false,
+      includeRowIndex: false,
+    });
+    assert.strictEqual(runtime.clipboardWrites.length, beforeConflictingBindingCopy);
+    assert.strictEqual(
+      runtime.postedMessages.at(-1).message.ok,
+      false,
+      'a malformed conflicting declaration of the requested binding must fail closed'
     );
     notebook.cells.pop();
     notebook.cellCount = notebook.cells.length;
@@ -20484,10 +23174,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.18');
+  assert.strictEqual(manifest.version, '0.2.20');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.18');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.18');
+  assert.strictEqual(packageLock.version, '0.2.20');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.20');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -20618,9 +23308,22 @@ function testManifestAndSources() {
     );
   });
   const mixedRunBindings = mixedRunCommandIds.map(commandId =>
-    keybindings.find(binding => binding.command === commandId));
-  mixedRunBindings.forEach(mixedRunBinding => {
-    assert.ok(mixedRunBinding);
+    keybindings.filter(binding => binding.command === commandId));
+  mixedRunBindings.forEach((bindingsForCommand, index) => {
+    assert.strictEqual(
+      bindingsForCommand.length,
+      2,
+      `${mixedRunCommandIds[index]} must have separate q notebook editor-focus and selected-cell keybindings`
+    );
+    const editorFocusBinding = bindingsForCommand.find(binding =>
+      /notebookCellEditorFocused/.test(String(binding.when || '')));
+    const selectedCellBinding = bindingsForCommand.find(binding =>
+      /notebookCellResource in vscode-kdb\.qNotebookCellResources/.test(String(binding.when || '')));
+    assert.ok(editorFocusBinding, 'mixed q notebook shortcuts must keep the focused q cell editor route');
+    assert.ok(selectedCellBinding, 'mixed q notebook shortcuts must route selected q cells through notebookCellResource');
+    assert.strictEqual(editorFocusBinding.key, selectedCellBinding.key);
+    assert.strictEqual(editorFocusBinding.mac, selectedCellBinding.mac);
+    assert.ok(editorFocusBinding);
     for (const guard of [
       /notebookCellEditorFocused/,
       /editorTextFocus/,
@@ -20632,15 +23335,35 @@ function testManifestAndSources() {
       /!vscode-kdb\.notebookDirectQControllerSelected/,
     ]) {
       assert.match(
-        mixedRunBinding.when,
+        editorFocusBinding.when,
         guard,
         'mixed q notebook shortcuts must be limited to the focused q cell editor while another controller is selected'
       );
     }
     assert.doesNotMatch(
-      mixedRunBinding.when,
+      editorFocusBinding.when,
       /notebookKernel != 'DanielAlonso\.vscode-kdb\/vscode-kdb\.q-notebook-controller'/,
       'a stale persisted KX kernel ID must not disable mixed q shortcuts while the controller is unregistered'
+    );
+    for (const guard of [
+      /notebookEditorFocused/,
+      /notebookType == 'jupyter-notebook'/,
+      /notebookCellType == 'code'/,
+      /notebookCellResource in vscode-kdb\.qNotebookCellResources/,
+      /!notebookCellEditorFocused/,
+      /!editorTextFocus/,
+      /!vscode-kdb\.notebookDirectQControllerSelected/,
+    ]) {
+      assert.match(
+        selectedCellBinding.when,
+        guard,
+        'selected q notebook shortcuts must be scoped to q cell resources while another controller is selected'
+      );
+    }
+    assert.doesNotMatch(
+      selectedCellBinding.when,
+      /editorLangId|resourceScheme/,
+      'selected q notebook shortcuts must not depend on text-editor language or resource-scheme context'
     );
   });
   assert.strictEqual(keybindings.some(binding =>
@@ -22441,18 +25164,19 @@ function createNotebookControllerRuntime() {
     applyEditResult: true,
     applyEditThrows: false,
     beforeApplyEdit: undefined,
+    deferNotebookCommit: false,
     deferNotebookEvent: false,
+    normalizeNotebookOutput: undefined,
     onWorkspaceEditConstruct: undefined,
     preCancelProgress: false,
+    skipDeferredNotebookCommit: false,
   };
   const configuration = new Map([
     ['vscode-kdb.notebook.enableDirectController', false],
     ['vscode-kdb.notebook.maxOutputRows', 2],
     ['vscode-kdb.notebook.maxOutputBytes', 4096],
-    ['vscode-kdb.results.viewer.functionDisplayStrategy', 'qText'],
     ['vscode-kdb.results.viewer.dictionaryDisplayStrategy', 'grid'],
     ['vscode-kdb.results.viewer.listDisplayStrategy', 'grid'],
-    ['vscode-kdb.results.viewer.objectDisplayStrategy', 'grid'],
   ]);
 
   class EventEmitter {
@@ -22670,6 +25394,19 @@ function createNotebookControllerRuntime() {
     return execution;
   }
 
+  function notebookCommittedOutputs(outputs) {
+    return (outputs || []).map(output => {
+      if (typeof controls.normalizeNotebookOutput !== 'function') {
+        return output;
+      }
+      const normalized = controls.normalizeNotebookOutput(output);
+      return new NotebookCellOutput(
+        (normalized.items || []).map(item => cloneNotebookHostValue(item)),
+        cloneNotebookHostValue(normalized.metadata)
+      );
+    });
+  }
+
   const vscode = {
     EventEmitter,
     NotebookCellKind: {
@@ -22713,65 +25450,74 @@ function createNotebookControllerRuntime() {
         if (!controls.applyEditResult) {
           return false;
         }
-        for (const entry of edit.entries) {
-          const notebook = notebooksByUri.get(entry.uri.toString());
-          if (!notebook || notebook.isClosed || notebook.version !== entry.version) {
-            return false;
-          }
-          for (const notebookEdit of entry.edits) {
-            if (notebookEdit.kind !== 'replaceCells') {
-              throw new Error(`unsupported notebook edit ${notebookEdit.kind}`);
+        const commit = () => {
+          for (const entry of edit.entries) {
+            const notebook = notebooksByUri.get(entry.uri.toString());
+            if (!notebook || notebook.isClosed || notebook.version !== entry.version) {
+              return false;
             }
-            const removedCells = notebook.cells.slice(
-              notebookEdit.range.start,
-              notebookEdit.range.end
-            );
-            const addedCells = notebookEdit.newCells.map(data => {
-              const replacement = makeCell({
-                kind: data.kind,
-                languageId: data.languageId,
-                source: data.value,
-                uri: `${removedCells[0]?.document.uri.toString() || 'vscode-notebook-cell:///cell'}` +
-                  `?replacement=${++replacementId}`,
-                metadata: data.metadata,
-                outputs: data.outputs || [],
-                executionSummary: data.executionSummary,
-              });
-              replacement._notebook = notebook;
-              return replacement;
-            });
-            notebook.cells.splice(
-              notebookEdit.range.start,
-              notebookEdit.range.end - notebookEdit.range.start,
-              ...addedCells
-            );
-            removedCells.forEach((removed, removedIndex) => {
-              if (addedCells[removedIndex]) {
-                replacements.set(removed, addedCells[removedIndex]);
+            for (const notebookEdit of entry.edits) {
+              if (notebookEdit.kind !== 'replaceCells') {
+                throw new Error(`unsupported notebook edit ${notebookEdit.kind}`);
               }
-            });
-            for (const removed of removedCells) {
-              removed._notebook = notebook;
-            }
-            notebook.version += 1;
-            const event = {
-              notebook,
-              metadata: undefined,
-              contentChanges: [{
-                range: notebookEdit.range,
-                addedCells,
-                removedCells,
-              }],
-              cellChanges: [],
-            };
-            if (controls.deferNotebookEvent) {
-              setTimeout(() => notebookChanges.fire(event), 0);
-            } else {
-              notebookChanges.fire(event);
+              const removedCells = notebook.cells.slice(
+                notebookEdit.range.start,
+                notebookEdit.range.end
+              );
+              const addedCells = notebookEdit.newCells.map(data => {
+                const replacement = makeCell({
+                  kind: data.kind,
+                  languageId: data.languageId,
+                  source: data.value,
+                  uri: `${removedCells[0]?.document.uri.toString() || 'vscode-notebook-cell:///cell'}` +
+                    `?replacement=${++replacementId}`,
+                  metadata: data.metadata,
+                  outputs: notebookCommittedOutputs(data.outputs),
+                  executionSummary: data.executionSummary,
+                });
+                replacement._notebook = notebook;
+                return replacement;
+              });
+              notebook.cells.splice(
+                notebookEdit.range.start,
+                notebookEdit.range.end - notebookEdit.range.start,
+                ...addedCells
+              );
+              removedCells.forEach((removed, removedIndex) => {
+                if (addedCells[removedIndex]) {
+                  replacements.set(removed, addedCells[removedIndex]);
+                }
+              });
+              for (const removed of removedCells) {
+                removed._notebook = notebook;
+              }
+              notebook.version += 1;
+              const event = {
+                notebook,
+                metadata: undefined,
+                contentChanges: [{
+                  range: notebookEdit.range,
+                  addedCells,
+                  removedCells,
+                }],
+                cellChanges: [],
+              };
+              if (controls.deferNotebookEvent) {
+                setTimeout(() => notebookChanges.fire(event), 0);
+              } else {
+                notebookChanges.fire(event);
+              }
             }
           }
+          return true;
+        };
+        if (controls.deferNotebookCommit) {
+          if (!controls.skipDeferredNotebookCommit) {
+            setTimeout(commit, 0);
+          }
+          return true;
         }
-        return true;
+        return commit();
       },
       getConfiguration(section) {
         return {
@@ -22915,6 +25661,18 @@ function createNotebookControllerRuntime() {
     replacementFor(cell) {
       return replacements.get(cell);
     },
+    emitNotebookCellOutputs(cell, outputs) {
+      if (!cell?.notebook) {
+        throw new Error('cannot emit notebook outputs for a detached cell');
+      }
+      cell.outputs = outputs;
+      notebookChanges.fire({
+        notebook: cell.notebook,
+        metadata: undefined,
+        contentChanges: [],
+        cellChanges: [{ cell, outputs }],
+      });
+    },
     touchCell(cell, changes = {}) {
       if (Object.prototype.hasOwnProperty.call(changes, 'source')) {
         cell._source = changes.source;
@@ -23001,6 +25759,34 @@ function notebookOutputItem(output, mime) {
   return output && Array.isArray(output.items)
     ? output.items.find(item => item.mime === mime)
     : undefined;
+}
+
+function notebookOutputItemJsonByteLength(item) {
+  if (!item) {
+    return 0;
+  }
+  if (item.data instanceof Uint8Array) {
+    return item.data.byteLength;
+  }
+  if (Object.prototype.hasOwnProperty.call(item, 'value')) {
+    return Buffer.byteLength(JSON.stringify(item.value), 'utf8');
+  }
+  return 0;
+}
+
+function workspaceEditKxMimeByteLength(edit) {
+  let maxBytes = 0;
+  for (const entry of edit.entries || []) {
+    for (const notebookEdit of entry.edits || []) {
+      for (const cell of notebookEdit.newCells || []) {
+        for (const output of cell.outputs || []) {
+          const item = notebookOutputItem(output, KX_NOTEBOOK_MIME);
+          maxBytes = Math.max(maxBytes, notebookOutputItemJsonByteLength(item));
+        }
+      }
+    }
+  }
+  return maxBytes;
 }
 
 function notebookErrorText(output) {

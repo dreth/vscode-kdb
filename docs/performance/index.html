@@ -916,7 +916,7 @@
 <p>Open <strong>View &gt; Output</strong> and select <strong>KX</strong>. Lifecycle events are always available there for connection, handshake, query, cancellation, disconnect, and close transitions. They include the phase, effective timeout/disabled state for connect, handshake, and active queries, and direct <code>host:port</code> where useful.</p>
 <p>For safe timing detail, explicitly enable:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;vscode-kdb.performance.trace&quot;</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
+<span class="w">  </span><span class="nt">"vscode-kdb.performance.trace"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
 <span class="p">}</span>
 </code></pre></div>
 <p>Timing records include operation names, durations, sizes/counts, and memory snapshots where implemented. Query text and result values are not logged. Passwords, authentication credentials, SecretStorage values, and local-data-server tokens are omitted or redacted. The extension does not mutate this setting automatically.</p>

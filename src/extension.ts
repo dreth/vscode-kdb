@@ -623,10 +623,8 @@ function toPanelResult(
 function qResultDisplayOptions(): QResultDisplayOptions {
   const configuration = vscode.workspace.getConfiguration('vscode-kdb.results.viewer');
   return {
-    functionDisplayStrategy: configuration.get<string>('functionDisplayStrategy'),
     dictionaryDisplayStrategy: configuration.get<string>('dictionaryDisplayStrategy'),
     listDisplayStrategy: configuration.get<string>('listDisplayStrategy'),
-    objectDisplayStrategy: configuration.get<string>('objectDisplayStrategy'),
   };
 }
 

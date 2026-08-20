@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.18",
+  "version": "0.2.20",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -95,8 +95,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.18.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.18.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.20.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.20.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -338,16 +338,34 @@
         "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
+        "command": "vscode-kdb.runQNotebookCell",
+        "key": "ctrl+enter",
+        "mac": "cmd+enter",
+        "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource in vscode-kdb.qNotebookCellResources && !notebookCellEditorFocused && !editorTextFocus && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
         "command": "vscode-kdb.runQNotebookCellAndSelectBelow",
         "key": "shift+enter",
         "mac": "shift+enter",
         "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
+        "command": "vscode-kdb.runQNotebookCellAndSelectBelow",
+        "key": "shift+enter",
+        "mac": "shift+enter",
+        "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource in vscode-kdb.qNotebookCellResources && !notebookCellEditorFocused && !editorTextFocus && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
         "command": "vscode-kdb.runQNotebookCellAndInsertBelow",
         "key": "alt+enter",
         "mac": "alt+enter",
         "when": "notebookCellEditorFocused && editorTextFocus && notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && editorLangId == q && resourceScheme == vscode-notebook-cell && !vscode-kdb.notebookDirectQControllerSelected"
+      },
+      {
+        "command": "vscode-kdb.runQNotebookCellAndInsertBelow",
+        "key": "alt+enter",
+        "mac": "alt+enter",
+        "when": "notebookEditorFocused && notebookType == 'jupyter-notebook' && notebookCellType == 'code' && notebookCellResource in vscode-kdb.qNotebookCellResources && !notebookCellEditorFocused && !editorTextFocus && !vscode-kdb.notebookDirectQControllerSelected"
       },
       {
         "command": "vscode-kdb.runSelectionOrCurrentLine",
@@ -820,15 +838,6 @@
           ],
           "description": "Array/list cell display format in KX results."
         },
-        "vscode-kdb.results.viewer.functionDisplayStrategy": {
-          "type": "string",
-          "default": "qText",
-          "enum": [
-            "grid",
-            "qText"
-          ],
-          "description": "Display top-level q functions as a grid or q-like text."
-        },
         "vscode-kdb.results.viewer.dictionaryDisplayStrategy": {
           "type": "string",
           "default": "grid",
@@ -846,15 +855,6 @@
             "qText"
           ],
           "description": "Display top-level q lists as a grid or q-like text."
-        },
-        "vscode-kdb.results.viewer.objectDisplayStrategy": {
-          "type": "string",
-          "default": "grid",
-          "enum": [
-            "grid",
-            "qText"
-          ],
-          "description": "Display composite q values as a grid or q-like text."
         },
         "vscode-kdb.results.viewer.autoFitColumns": {
           "type": "boolean",

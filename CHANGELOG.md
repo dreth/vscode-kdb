@@ -2,6 +2,19 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## 0.2.20 - 2026-08-20
+
+- Fixed mixed-notebook q output verification so VS Code/Jupyter metadata normalization and delayed cell reconciliation no longer report a false post-execution write failure. One canonical ownership parser now requires a durable binding, exactly one matching first-party KX MIME payload, and compatible direct/nested live metadata for verification and every downstream action. Write failures report the exact local stage and distinguish issued q from uncertain pre-issue output failures without recommending a blind retry. Real Extension Host coverage commits and reopens a complete exact 60,000-row result.
+- Made `Ctrl+Enter` / `Cmd+Enter`, `Shift+Enter`, and `Alt+Enter` / `Option+Enter` route selected q cells through KX even when the cell text editor is not focused. The bindings remain scoped to tracked q code cells in mixed Jupyter notebooks and stay disabled for Python/Markdown cells and the selected optional KX direct controller.
+- Unified analyst-friendly table copy/export across KX Results and live/saved notebook tables. Symbols and chars export as ordinary strings; safe numerics and booleans retain data types; unsafe longs remain exact decimal strings; timestamps retain nanoseconds; timespans use ISO durations; JSON/NDJSON and XLSX use typed/null-aware cells; duplicate columns remain occurrence-safe; delimiter/Markdown/HTML escaping preserves ordinary text; and XLSX falls back to text when Excel cannot preserve a scalar number exactly. Grid formatting, qText, IPC identity, and complete exact notebook persistence are unchanged.
+- Bounded whole-result copy/export independently of advisory sampling: text files are measured as escaped per-cell fragments before one capped allocation, XLSX worksheet XML streams into ZIP under exact cell/XML limits, and panel clipboard copy now treats 15 MiB as a hard cap with Export/Cancel. Wide or control-heavy data cannot bypass the realized limits, and failures truncate nothing and write no partial file.
+
+## 0.2.19 - 2026-08-18
+
+- Simplified result display behavior: top-level functions and standalone numeric q atoms now always render as type-preserving qText, while nested numeric values remain structured; removed obsolete function/object strategy settings and notebook-cell result settings.
+- Improved chart readability and control with measured Y-axis label width, consistent decimal formatting, and an accessible zoom-default drag-mode toggle immediately before chart close; Shift-drag remains available for panning.
+- Added 3,000/7,000 visible-point refinement hysteresis and epoch-anchored temporal min/max buckets with retained same-level intervals and safe bounded overlap reuse for supported ungrouped temporal line/scatter/step panning.
+
 ## 0.2.18 - 2026-08-13
 
 - Added structural q keyed-table column styling to KX Results and live/saved notebook tables. Theme-safe key backgrounds and accessible headers follow original source ordinals through hide/reorder, sort, paging, and virtualization; complete portable-v2 output preserves validated key ordinals across reopen, while ordinary same-named tables and legacy payloads remain unhighlighted.

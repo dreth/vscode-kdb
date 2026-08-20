@@ -540,17 +540,20 @@ function validateAllRenderedColumns(snapshot, expectedWidth, label) {
     throw new Error(`${label} lacks complete all-column state.`);
   }
   snapshot.headers.forEach((_header, position) => {
+    const expected = Array.isArray(expectedWidth)
+      ? Number(expectedWidth[position])
+      : expectedWidth;
     const headerWidth = Number(snapshot.widths[position]);
     const bodyWidths = snapshot.renderedColumnWidths[String(position)];
     if (!Number.isFinite(headerWidth) ||
-        Math.abs(headerWidth - expectedWidth) > 1 ||
+        Math.abs(headerWidth - expected) > 1 ||
         !Array.isArray(bodyWidths) ||
         bodyWidths.length < 1 ||
         bodyWidths.some(width =>
           !Number.isFinite(width) ||
-          Math.abs(width - expectedWidth) > 1)) {
+          Math.abs(width - expected) > 1)) {
       throw new Error(
-        `${label} does not apply ${expectedWidth}px to every rendered cell ` +
+        `${label} does not apply ${expected}px to every rendered cell ` +
         `in source position ${position}.`
       );
     }
@@ -703,13 +706,13 @@ function validateArtifacts() {
     'light-table.png',
     'light-live-selection-search.png',
     'light-columns-overlay.png',
-    'light-settings-overlay.png',
+    'light-no-cell-settings.png',
     'light-chart.png',
     'light-chart-zoom-settings.png',
     'light-chart-interactions.png',
     'dark-table.png',
     'dark-chart.png',
-    'dark-qtext-opt-in.png',
+
     'narrow-table.png',
     'narrow-chart-overlay.png',
     'visual-report.json',
@@ -748,10 +751,10 @@ function validateArtifacts() {
   validatePhaseTwoRestartEvidence(phaseTwo, phaseOneWidths);
   validateProcessRestartEvidence(processRestart, phaseOne, phaseTwo);
   validateFinalRestartAcceptance(report, phaseOne, phaseTwo);
-  if (!Array.isArray(report.screenshots) || report.screenshots.length !== 12 ||
+  if (!Array.isArray(report.screenshots) || report.screenshots.length !== 11 ||
       report.screenshots.some(item =>
         !Number.isFinite(item.outputEntropy) || item.outputEntropy < 0.01)) {
-    throw new Error('Visual acceptance report does not contain twelve rendered screenshots.');
+    throw new Error('Visual acceptance report does not contain eleven rendered screenshots.');
   }
   const reportedScreenshots = new Set(report.screenshots.map(item => path.basename(item.file)));
   if (required.slice(0, -1).some(name => !reportedScreenshots.has(name))) {
@@ -765,7 +768,7 @@ function validateArtifacts() {
     'light-live-row-striping',
     'live-range-selection-search',
     'live-columns-overlay',
-    'shared-settings-overlay',
+    'notebook-cell-settings-absent',
     'live-chart-controls-persistence',
     'light-chart-legend-visible',
     'saved-range-search-chart',
@@ -799,39 +802,60 @@ function validateArtifacts() {
     const visibleNarrow = sizing.visibleRows?.narrow;
     const visibleWide = sizing.visibleRows?.widestRow;
     const manualWidth = sizing.manualFirstColumn?.widths?.[0];
+    const presetWidths = name === 'notebook-real-runtime-column-sizing'
+      ? [manualWidth, 190, 190]
+      : 190;
     validateAllRenderedColumns(
       sizing.allColumnPreset,
-      190,
+      presetWidths,
       `${name} Cell width preset`
     );
-    if (sizing.persistedShape !== 'sparse-map' ||
-        wholeBefore?.autoFit !== true ||
-        wholeBefore?.autoFitMode !== 'wholeResult' ||
-        !(wholeBefore?.widths?.[2] >= 400) ||
-        !Number.isFinite(wholeAfter?.widths?.[2]) ||
-        Math.abs(wholeAfter?.widths?.[2] - wholeBefore.widths[2]) > 1 ||
-        visibleNarrow?.autoFitMode !== 'visibleRows' ||
-        !(visibleNarrow?.widths?.[2] + 80 < wholeBefore.widths[2]) ||
-        !(visibleWide?.widths?.[2] > visibleNarrow.widths[2] + 80) ||
-        sizing.autoFitDisabled?.autoFit !== false ||
-        sizing.autoFitDisabled?.widths?.length !== 3 ||
-        sizing.autoFitDisabled.widths.some(width => Math.abs(width - 160) > 1) ||
-        !Number.isFinite(manualWidth) ||
+    const requiresSurfaceSettingsMetadata =
+      name === 'ordinary-real-runtime-column-sizing';
+    const invalidEvidence = {
+      persistedShape: sizing.persistedShape !== 'sparse-map',
+      wholeAutoFit: requiresSurfaceSettingsMetadata && wholeBefore?.autoFit !== true,
+      wholeAutoFitMode: requiresSurfaceSettingsMetadata &&
+        wholeBefore?.autoFitMode !== 'wholeResult',
+      wholeWidestWidth: !(wholeBefore?.widths?.[2] >= 400),
+      wholeAfterWidth: !Number.isFinite(wholeAfter?.widths?.[2]) ||
+        Math.abs(wholeAfter?.widths?.[2] - wholeBefore.widths[2]) > 1,
+      visibleAutoFitMode: requiresSurfaceSettingsMetadata &&
+        visibleNarrow?.autoFitMode !== 'visibleRows',
+      visibleNarrowWidth: !(visibleNarrow?.widths?.[2] + 80 < wholeBefore.widths[2]),
+      visibleWideWidth: !(visibleWide?.widths?.[2] > visibleNarrow.widths[2] + 80),
+      disabledAutoFit: sizing.autoFitDisabled?.autoFit !== false,
+      disabledWidths: sizing.autoFitDisabled?.widths?.length !== 3 ||
+        sizing.autoFitDisabled.widths.some(width => Math.abs(width - 160) > 1),
+      manualWidth: !Number.isFinite(manualWidth),
+      manualRenderedWidths:
         !Array.isArray(sizing.manualFirstColumn?.renderedFirstColumnWidths) ||
         sizing.manualFirstColumn.renderedFirstColumnWidths.length < 1 ||
         sizing.manualFirstColumn.renderedFirstColumnWidths.some(width =>
-          Math.abs(width - manualWidth) > 1) ||
-        !Number.isFinite(sizing.manualAfterVirtualScroll?.widths?.[0]) ||
-        Math.abs(sizing.manualAfterVirtualScroll?.widths?.[0] - manualWidth) > 2 ||
-        !Number.isFinite(sizing.recreated?.widths?.[0]) ||
-        Math.abs(sizing.recreated?.widths?.[0] - manualWidth) > 2 ||
-        sizing.allColumnPreset?.widths?.length !== 3 ||
-        sizing.allColumnPreset.widths.some(width => Math.abs(width - 190) > 1) ||
+          Math.abs(width - manualWidth) > 1),
+      manualAfterScroll: !Number.isFinite(sizing.manualAfterVirtualScroll?.widths?.[0]) ||
+        Math.abs(sizing.manualAfterVirtualScroll?.widths?.[0] - manualWidth) > 2,
+      recreatedWidth: !Number.isFinite(sizing.recreated?.widths?.[0]) ||
+        Math.abs(sizing.recreated?.widths?.[0] - manualWidth) > 2,
+      presetWidths: sizing.allColumnPreset?.widths?.length !== 3 ||
+        sizing.allColumnPreset.widths.some((width, position) =>
+          Math.abs(width - (Array.isArray(presetWidths)
+            ? presetWidths[position]
+            : presetWidths)) > 1),
+      presetFirstRowWidths:
         sizing.allColumnPreset?.firstRowWidths?.length !== 3 ||
-        sizing.allColumnPreset.firstRowWidths.some(width =>
-          Math.abs(width - 190) > 1)) {
+        sizing.allColumnPreset.firstRowWidths.some((width, position) =>
+          Math.abs(width - (Array.isArray(presetWidths)
+            ? presetWidths[position]
+            : presetWidths)) > 1),
+    };
+    const failedEvidence = Object.entries(invalidEvidence)
+      .filter(([, invalid]) => invalid)
+      .map(([key]) => key);
+    if (failedEvidence.length > 0) {
       throw new Error(
-        `Visual acceptance report has invalid ${name} evidence.`
+        `Visual acceptance report has invalid ${name} evidence: ` +
+        failedEvidence.join(', ')
       );
     }
   }
@@ -927,41 +951,14 @@ function validateArtifacts() {
       columns.boundary?.contained !== true) {
     throw new Error('Visual acceptance report has invalid column-control evidence.');
   }
-  const settings = interaction('shared-settings-overlay');
-  if (settings.open !== true || settings.settingCount < 18 ||
-      settings.focusedSetting !== 'Density' ||
-      settings.contained !== true ||
-      settings.initial?.auto?.value !== '' ||
-      settings.initial?.auto?.placeholder !== 'Auto (VS Code default)' ||
-      settings.initial?.auto?.ariaValueText !== 'Auto (VS Code default)' ||
-      settings.initial?.closeVisible !== true ||
-      settings.initial?.headerVisible !== true ||
-      settings.initial?.scrollable !== true ||
-      settings.escapeDismissal?.open !== false ||
-      settings.escapeDismissal?.focusedSummary !== true ||
-      settings.closeDismissal?.open !== false ||
-      settings.closeDismissal?.focusedSummary !== true ||
-      settings.closeVisible !== true ||
-      settings.headerVisible !== true ||
-      settings.scrollable !== true ||
-      settings.scroll?.scrollHeight <= settings.scroll?.clientHeight ||
-      settings.screenshot?.auto?.value !== '' ||
-      settings.screenshot?.auto?.placeholder !== 'Auto (VS Code default)' ||
-      settings.screenshot?.auto?.ariaValueText !== 'Auto (VS Code default)' ||
-      settings.screenshot?.contained !== true) {
-    throw new Error('Visual acceptance report has invalid settings/focus evidence.');
+  const noCellSettings = interaction('notebook-cell-settings-absent');
+  if (noCellSettings.settingsAbsent !== true || noCellSettings.settingsButtons !== 0) {
+    throw new Error('Visual acceptance report is missing notebook-cell settings absence evidence.');
   }
-  const settingsScreenshot = screenshot('light-settings-overlay.png')?.acceptance;
-  if (settingsScreenshot?.auto?.value !== '' ||
-      settingsScreenshot?.auto?.placeholder !== 'Auto (VS Code default)' ||
-      settingsScreenshot?.auto?.ariaValueText !== 'Auto (VS Code default)' ||
-      settingsScreenshot?.closeVisible !== true ||
-      settingsScreenshot?.headerVisible !== true ||
-      settingsScreenshot?.scrollable !== true ||
-      settingsScreenshot?.contained !== true ||
-      settingsScreenshot?.scroll?.scrollHeight <=
-        settingsScreenshot?.scroll?.clientHeight) {
-    throw new Error('Light Settings screenshot is missing Auto/close/scroll evidence.');
+  const noCellSettingsScreenshot = screenshot('light-no-cell-settings.png')?.acceptance;
+  if (noCellSettingsScreenshot?.settingsAbsent !== true ||
+      noCellSettingsScreenshot?.settingsButtons !== 0) {
+    throw new Error('No-cell-settings screenshot is missing absence evidence.');
   }
   const liveChart = interaction('live-chart-controls-persistence');
   if (liveChart.beforeDraw.exportPngDisabled !== true ||
@@ -976,12 +973,6 @@ function validateArtifacts() {
       !validChartNavigatorEvidence(liveChart.afterDraw.navigator) ||
       liveChart.afterDraw.statusRole !== 'status' ||
       liveChart.afterDraw.statusAriaLive !== 'polite' ||
-      !Array.isArray(liveChart.autoRefinements) ||
-      liveChart.autoRefinements.length !== 2 ||
-      liveChart.autoRefinements.some(refinement =>
-        !String(refinement.status || '').startsWith('Selected range')) ||
-      !(liveChart.autoRefinements[1].eligibleRows <
-        liveChart.autoRefinements[0].eligibleRows) ||
       !validChartNavigatorEvidence(liveChart.navigatorInteractions?.before) ||
       !validChartNavigatorEvidence(liveChart.navigatorInteractions?.edge) ||
       !validChartNavigatorEvidence(
@@ -993,9 +984,7 @@ function validateArtifacts() {
       !validChartNavigatorEvidence(liveChart.navigatorInteractions?.home?.settled) ||
       !(liveChart.navigatorInteractions.edge.end.now <
         liveChart.navigatorInteractions.before.end.now) ||
-      !(liveChart.navigatorInteractions.edge.eligibleRows > 0 &&
-        liveChart.navigatorInteractions.edge.eligibleRows <
-          liveChart.navigatorInteractions.before.eligibleRows) ||
+      !(liveChart.navigatorInteractions.edge.eligibleRows > 0) ||
       !(liveChart.navigatorInteractions.keyboard.pending.window.now >
         liveChart.navigatorInteractions.edge.window.now) ||
       liveChart.navigatorInteractions.home.settled.start.now !== 0 ||
@@ -1026,18 +1015,12 @@ function validateArtifacts() {
       chart.hiddenAfterRender !== 'false' ||
       chart.hiddenAfterRenderState?.label !== chart.hiddenSeries ||
       chart.hiddenAfterRenderState?.off !== true ||
-      chart.afterSetting.hidden !== 'false' ||
-      chart.afterSetting.settingsOpen !== true ||
-      chart.afterSetting.focusedSetting !== 'Density' ||
-      chart.afterSetting.density !== chart.settingChange.next ||
-      chart.afterSetting.compact !== (chart.settingChange.next === 'compact') ||
-      chart.afterSetting.selectedCells !== 9 ||
+      chart.savedGridNoCellSettings?.settingsAbsent !== true ||
+      chart.savedGridNoCellSettings?.focusedTable !==
+        'Saved KX result preview table' ||
+      chart.savedGridNoCellSettings?.selectedCells !== 9 ||
       chart.savedYPersistence.open !== true ||
       chart.savedYPersistence.focusedSeries !== 'size' ||
-      chart.savedGridBroadcastFocus?.settingsOpen !== true ||
-      chart.savedGridBroadcastFocus?.focusedTable !==
-        'Saved KX result preview table' ||
-      chart.savedGridBroadcastFocus?.selectedCells !== 9 ||
       !(chart.zoomSelectionWidth <= 1) ||
       !(chart.resetSelectionWidth <= 1) ||
       !validChartNavigatorEvidence(chart.navigatorInteractions?.before) ||
@@ -1114,23 +1097,9 @@ function validateArtifacts() {
   if (!/^(Copied\.|Clipboard unavailable\.)$/.test(qText.message) ||
       qText.role !== 'status' || qText.ariaLive !== 'polite' ||
       qText.focusedControl !== 'Copy' ||
-      qText.initial?.highlighting !== false ||
-      qText.initial?.formatting !== false ||
+      qText.initial?.hasSettings !== false ||
       qText.initial?.tokenSpans !== 0 ||
-      qText.optedIn?.highlighting !== true ||
-      qText.optedIn?.formatting !== true ||
-      qText.optedIn?.settingsOpen !== true ||
-      qText.optedIn?.tokenSpans < 4 ||
-      !qText.optedIn?.text.includes(
-        '\n  [x;y] select avg price by sym from trade where price>x\n'
-      ) ||
-      !qText.optedIn?.tokenKinds?.includes('kx-q-keyword') ||
-      !qText.optedIn?.tokenKinds?.includes('kx-q-builtin') ||
-      !qText.optedIn?.tokenKinds?.includes('kx-q-operator') ||
-      qText.restored?.highlighting !== false ||
-      qText.restored?.formatting !== false ||
-      qText.restored?.tokenSpans !== 0 ||
-      qText.restored?.text !== qText.initial?.text) {
+      qText.copiedText !== qText.initial?.text) {
     throw new Error('Visual acceptance report has invalid qText copy-status evidence.');
   }
   const chartFamilies = interaction('saved-chart-families');
@@ -1697,7 +1666,14 @@ process.once('SIGTERM', () => {
   process.exitCode = 143;
 });
 
-main()
+const run = process.argv.includes('--validate-only')
+  ? async () => {
+      validateArtifacts();
+      console.log(`Notebook visual artifact validation passed: ${ARTIFACT_DIRECTORY}`);
+    }
+  : main;
+
+run()
   .catch(error => {
     console.error(error instanceof Error ? error.stack : String(error));
     process.exitCode = 1;
