@@ -264,7 +264,7 @@ function createIpcFixtures() {
       family: 'primitive',
       payload: qIntAtom(42),
       expectedCanonical: canonicalAtom('int', 42),
-      displayCases: [{ options: {}, mode: 'grid', kind: 'scalar' }],
+      displayCases: [{ options: {}, mode: 'text', kind: 'scalar' }],
     },
     {
       id: 'vector-int',
@@ -354,7 +354,7 @@ function createIpcFixtures() {
       expectedCanonical: { $q: 'function', functionType: 'lambda', ipcType: 100, source: '{x+1}' },
       displayCases: [
         { options: {}, mode: 'text', kind: 'function' },
-        { options: { functionDisplayStrategy: 'grid' }, mode: 'grid', kind: 'function' },
+        { options: { functionDisplayStrategy: 'grid' }, mode: 'text', kind: 'function' },
       ],
     },
     {

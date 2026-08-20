@@ -100,6 +100,25 @@ export function chartVisibleIndexBounds(
     : undefined;
 }
 
+export const CHART_AUTO_REFINE_MIN_VISIBLE_POINTS = 3_000;
+
+/** Count the already-sampled X values retained by the current viewport. */
+export function chartVisibleSampledPointCount(
+  xValues: readonly number[] | null | undefined,
+  range: ChartRange | null | undefined
+): number {
+  if (!xValues || !isValidChartRange(range)) {
+    return 0;
+  }
+  let count = 0;
+  for (const x of xValues) {
+    if (Number.isFinite(x) && x >= range.min && x <= range.max) {
+      count += 1;
+    }
+  }
+  return count;
+}
+
 /** Pad discrete glyph families only during initial auto-scale, never an explicit viewport. */
 export function chartXRangeWithInitialPadding(
   min: number,
@@ -607,7 +626,8 @@ export function planChartAutoRefine(
   full: ChartRange | null | undefined,
   current: ChartRange | null | undefined,
   lastRangeKey: string,
-  blocked = false
+  blocked = false,
+  visibleSampledPointCount = 0
 ): ChartAutoRefinePlan | null {
   if (blocked || !isValidChartRange(full) || !isValidChartRange(current)) {
     return null;
@@ -616,7 +636,8 @@ export function planChartAutoRefine(
     min: Math.max(full.min, current.min),
     max: Math.min(full.max, current.max),
   };
-  if (!isValidChartRange(range) || !chartRangeIsZoomed(full, range)) {
+  if (!isValidChartRange(range) || !chartRangeIsZoomed(full, range) ||
+    visibleSampledPointCount >= CHART_AUTO_REFINE_MIN_VISIBLE_POINTS) {
     return null;
   }
   const key = chartZoomRangeKey(range);

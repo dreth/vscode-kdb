@@ -922,7 +922,7 @@
 <h2 id="limits">Limits</h2>
 <p>Full <code>current.*</code> endpoints reject results over <code>vscode-kdb.results.localDataServerFullExportCellLimit</code>, which defaults to 1,000,000 visible cells:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;vscode-kdb.results.localDataServerFullExportCellLimit&quot;</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span>
+<span class="w">  </span><span class="nt">"vscode-kdb.results.localDataServerFullExportCellLimit"</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span>
 <span class="p">}</span>
 </code></pre></div>
 <p>The panel copy/export prompt threshold is separate and does not raise this hard endpoint limit. Slice and selection requests use a fixed 1,000,000-cell ceiling. Prefer slices to raising a limit for a very large result.</p>
@@ -932,15 +932,15 @@
 <h2 id="python-example">Python example</h2>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
 
-<span class="n">url</span> <span class="o">=</span> <span class="s2">&quot;http://127.0.0.1:7742/&lt;token&gt;/current.csv&quot;</span>
+<span class="n">url</span> <span class="o">=</span> <span class="s2">"http://127.0.0.1:7742/&lt;token&gt;/current.csv"</span>
 <span class="n">frame</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
 </code></pre></div>
 <p>For a bounded request:</p>
 <div class="highlight"><pre><span></span><code><span class="kn">import</span><span class="w"> </span><span class="nn">pandas</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="nn">pd</span>
 
 <span class="n">url</span> <span class="o">=</span> <span class="p">(</span>
-    <span class="s2">&quot;http://127.0.0.1:7742/&lt;token&gt;/slice.csv&quot;</span>
-    <span class="s2">&quot;?rowStart=0&amp;rowCount=100000&amp;colStart=0&amp;colCount=10&quot;</span>
+    <span class="s2">"http://127.0.0.1:7742/&lt;token&gt;/slice.csv"</span>
+    <span class="s2">"?rowStart=0&amp;rowCount=100000&amp;colStart=0&amp;colCount=10"</span>
 <span class="p">)</span>
 <span class="n">frame</span> <span class="o">=</span> <span class="n">pd</span><span class="o">.</span><span class="n">read_csv</span><span class="p">(</span><span class="n">url</span><span class="p">)</span>
 </code></pre></div>

@@ -3,7 +3,8 @@ import {
   CHART_MAX_SOURCE_ROWS,
   ChartType,
   LineChartData,
-  buildChartData,
+  TemporalPanChartCache,
+  buildChartDataWithTemporalPanReuse,
   chartColumnOptions,
   normalizeChartType,
 } from './charting';
@@ -13,6 +14,7 @@ import {
   CellTextOptions,
   ColumnarPanelResult,
   TextExportFormat,
+  analystExportColumnNames,
   applyColumnarRowOrder,
   cellValueToBoundedExportText,
   cellValueToBoundedText,
@@ -26,9 +28,7 @@ import {
 import {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
-  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
-  parseNotebookLiveResultReference,
-  parseNotebookPortableOutputBinding,
+  inspectNotebookKxOutputIdentity,
 } from './notebook-message';
 import { widestDisplayedColumnTextLengthsAsync } from './column-sizing';
 import {
@@ -130,6 +130,7 @@ export interface LiveNotebookChartRequest {
   maxSourceRows?: number;
   xMin?: number;
   xMax?: number;
+  temporalBucketIntervalMs?: number;
 }
 
 export interface LiveNotebookRangeRequest {
@@ -176,6 +177,7 @@ interface LiveNotebookRecord extends LiveNotebookResultRegistration {
     key: string;
     promise?: Promise<number[] | undefined>;
   };
+  temporalPanChartCache?: TemporalPanChartCache;
   sortOrders: Map<string, number[]>;
 }
 
@@ -638,13 +640,14 @@ export class LiveNotebookResultStore {
     options: LiveNotebookDisplayOptions = {},
     cellUri?: string
   ): LineChartData | undefined {
+    const record = this.record(id, notebookUri, cellUri);
     const view = this.view(id, notebookUri, options, cellUri);
-    if (!view?.table) {
+    if (!record || !view?.table) {
       return undefined;
     }
     const chartType = normalizeChartType(request.chartType);
-    return buildChartData(view.table, {
-      version: 1,
+    const built = buildChartDataWithTemporalPanReuse(view.table, {
+      version: record.generation,
       requestId: safeRequestId(request.requestId),
       chartType,
       xColumn: request.xColumn,
@@ -659,7 +662,14 @@ export class LiveNotebookResultStore {
       width: 720,
       maxSourceRows: safePositiveInteger(request.maxSourceRows, CHART_MAX_SOURCE_ROWS),
       maxSampledPoints: safePositiveInteger(request.maxPoints, 2_500),
-    });
+      samplingStrategy: Number.isFinite(request.temporalBucketIntervalMs) &&
+        Number(request.temporalBucketIntervalMs) > 0
+        ? 'temporal-fixed'
+        : 'temporal-auto',
+      temporalBucketIntervalMs: request.temporalBucketIntervalMs,
+    }, record.temporalPanChartCache);
+    record.temporalPanChartCache = built.cache;
+    return built.data;
   }
 
   public copyText(
@@ -884,15 +894,12 @@ export function reconcileLiveNotebookCellOutputs(
   outputs: readonly NotebookOutputSnapshot[]
 ): boolean {
   const retainsOwner = outputs.some(output => {
-    const live = parseNotebookLiveResultReference(
-      output.metadata?.[NOTEBOOK_LIVE_RESULT_METADATA_KEY]
-    );
-    const binding = parseNotebookPortableOutputBinding(output.metadata, output.items);
-    return !!live && !!binding && liveResults.hasForOutput(
-      live.id,
+    const inspected = inspectNotebookKxOutputIdentity(output.metadata, output.items);
+    return inspected.status === 'valid' && !!inspected.identity.live && liveResults.hasForOutput(
+      inspected.identity.live.id,
       notebookUri,
       cellUri,
-      binding.id
+      inspected.identity.binding.id
     );
   });
   if (!retainsOwner) {
@@ -1147,20 +1154,15 @@ function structuredLiveCopyColumns(
   range: CellRange
 ): StructuredLiveCopyColumn[] {
   const columns: StructuredLiveCopyColumn[] = [];
-  const positions = new Map<string, number>();
+  const exportNames = analystExportColumnNames(table.columns, range);
   for (let columnIndex = range.startColumn;
     columnIndex <= range.endColumn;
     columnIndex++) {
-    const name = table.columns[columnIndex];
-    const existing = positions.get(name);
-    if (existing !== undefined) {
-      columns[existing].columnIndex = columnIndex;
-      continue;
-    }
-    positions.set(name, columns.length);
     columns.push({
       columnIndex,
-      jsonKeyChars: structuredLiveCopyKeyChars(name),
+      jsonKeyChars: structuredLiveCopyKeyChars(
+        exportNames[columnIndex - range.startColumn]
+      ),
     });
   }
   return columns;

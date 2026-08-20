@@ -2,10 +2,13 @@ import {
   isQAtom,
   isQGeneralNull,
   isQRuntimeValue,
+  isQVector,
+  qVectorAtomAt,
+  qVectorType,
   qValueToBoundedGridCellText,
   qValueToBoundedLiteral,
   qValueToGridCellText,
-  qValueToLiteral,
+  qValueToSemanticPrimitive,
 } from './q-value';
 
 export interface CellPosition {
@@ -876,7 +879,7 @@ export function cellValueToText(value: unknown, options?: CellTextOptions): stri
 }
 
 function cellValueToExactText(value: unknown, options?: CellTextOptions): string {
-  return sanitizeTsvCell(cellValueToExactReadableText(value, options));
+  return escapeTsvCell(cellValueToExactReadableText(value, options));
 }
 
 export interface BoundedCellText {
@@ -890,7 +893,8 @@ interface BoundedReadableTextState {
   limit: number;
   truncated: boolean;
   skipLfAfterCr: boolean;
-  qRenderMode: 'grid' | 'literal';
+  sanitizeWhitespace: boolean;
+  qRenderMode: 'grid' | 'literal' | 'analyst';
   stack: Set<object>;
   options: NormalizedCellTextOptions;
 }
@@ -909,6 +913,7 @@ export function cellValueToBoundedText(
     limit,
     truncated: false,
     skipLfAfterCr: false,
+    sanitizeWhitespace: true,
     qRenderMode: 'grid',
     stack: new Set<object>(),
     options: normalizeCellTextOptions(options),
@@ -935,7 +940,8 @@ export function cellValueToBoundedExportText(
     limit,
     truncated: false,
     skipLfAfterCr: false,
-    qRenderMode: 'literal',
+    sanitizeWhitespace: false,
+    qRenderMode: 'analyst',
     stack: new Set<object>(),
     options: normalizeCellTextOptions(options),
   };
@@ -1236,7 +1242,11 @@ function exactReadableValueText(
   }
 
   if (isQRuntimeValue(value)) {
-    return qValueToLiteral(value);
+    return exactReadableValueText(
+      cellValueToAnalystValue(value),
+      topLevel,
+      options
+    );
   }
 
   if (typeof value === 'string') {
@@ -1267,6 +1277,215 @@ function exactReadableValueText(
   return cellValueToExportText(value);
 }
 
+export function cellValueToAnalystValue(value: unknown): unknown {
+  return analystValue(value, new Set<object>());
+}
+
+function analystValue(value: unknown, stack: Set<object>): unknown {
+  if (isQGeneralNull(value)) {
+    return null;
+  }
+  if (isQAtom(value)) {
+    return qAtomAnalystValue(value);
+  }
+  if (isQVector(value)) {
+    if (stack.has(value)) {
+      return '[Circular]';
+    }
+    stack.add(value);
+    try {
+      const type = qVectorType(value);
+      if (type === 'char') {
+        return qValueToSemanticPrimitive(value);
+      }
+      if (type === 'mixed') {
+        return value.map(item => analystValue(item, stack));
+      }
+      return value.map((_item, index) =>
+        analystValue(qVectorAtomAt(value, index), stack)
+      );
+    } finally {
+      stack.delete(value);
+    }
+  }
+  if (Array.isArray(value)) {
+    if (stack.has(value)) {
+      return '[Circular]';
+    }
+    stack.add(value);
+    try {
+      return value.map(item => analystValue(item, stack));
+    } finally {
+      stack.delete(value);
+    }
+  }
+  if (isPlainObject(value)) {
+    if (stack.has(value)) {
+      return '[Circular]';
+    }
+    stack.add(value);
+    try {
+      const converted: { [key: string]: unknown } = Object.create(null) as {
+        [key: string]: unknown;
+      };
+      for (const key of Object.keys(value)) {
+        converted[key] = analystValue(value[key], stack);
+      }
+      return converted;
+    } finally {
+      stack.delete(value);
+    }
+  }
+  return value;
+}
+
+function qAtomAnalystValue(value: unknown): unknown {
+  const atom = value as { type: string; value: unknown };
+  const special = qExportSpecialKind(atom.value);
+  if (special === 'null') {
+    return null;
+  }
+  if (special === 'positiveInfinity') {
+    return Number.POSITIVE_INFINITY;
+  }
+  if (special === 'negativeInfinity') {
+    return Number.NEGATIVE_INFINITY;
+  }
+  if (atom.type === 'timestamp') {
+    return qTimestampAnalystValue(String(atom.value));
+  }
+  if (atom.type === 'timespan') {
+    return qTimespanAnalystValue(String(atom.value));
+  }
+  if (atom.type === 'month') {
+    return qMonthAnalystValue(Number(atom.value));
+  }
+  if (atom.type === 'date') {
+    return qDateAnalystValue(Number(atom.value));
+  }
+  if (atom.type === 'datetime' && special === undefined) {
+    return qDatetimeAnalystValue(Number(atom.value));
+  }
+  const semantic = qValueToSemanticPrimitive(value);
+  return semantic;
+}
+
+const Q_ANALYST_EPOCH_MS = Date.UTC(2000, 0, 1);
+const Q_ANALYST_EPOCH_UNIX_DAYS = BigInt(10_957);
+const MILLISECONDS_PER_DAY = 86_400_000;
+const Q_NANOSECONDS_PER_SECOND = BigInt(1_000_000_000);
+const Q_NANOSECONDS_PER_MINUTE = BigInt(60) * Q_NANOSECONDS_PER_SECOND;
+const Q_NANOSECONDS_PER_HOUR = BigInt(60) * Q_NANOSECONDS_PER_MINUTE;
+const Q_NANOSECONDS_PER_DAY = BigInt(24) * Q_NANOSECONDS_PER_HOUR;
+
+function qTimestampAnalystValue(raw: string): string {
+  const nanoseconds = BigInt(raw);
+  let seconds = nanoseconds / Q_NANOSECONDS_PER_SECOND;
+  let fraction = nanoseconds % Q_NANOSECONDS_PER_SECOND;
+  if (fraction < BigInt(0)) {
+    seconds -= BigInt(1);
+    fraction += Q_NANOSECONDS_PER_SECOND;
+  }
+  const date = new Date(Q_ANALYST_EPOCH_MS + Number(seconds * BigInt(1_000)));
+  const iso = date.toISOString();
+  return `${iso.slice(0, -5)}.${fraction.toString().padStart(9, '0')}Z`;
+}
+
+function qTimespanAnalystValue(raw: string): string {
+  let nanoseconds = BigInt(raw);
+  const negative = nanoseconds < BigInt(0);
+  if (negative) {
+    nanoseconds = -nanoseconds;
+  }
+  const days = nanoseconds / Q_NANOSECONDS_PER_DAY;
+  nanoseconds %= Q_NANOSECONDS_PER_DAY;
+  const hours = nanoseconds / Q_NANOSECONDS_PER_HOUR;
+  nanoseconds %= Q_NANOSECONDS_PER_HOUR;
+  const minutes = nanoseconds / Q_NANOSECONDS_PER_MINUTE;
+  nanoseconds %= Q_NANOSECONDS_PER_MINUTE;
+  const seconds = nanoseconds / Q_NANOSECONDS_PER_SECOND;
+  const fraction = nanoseconds % Q_NANOSECONDS_PER_SECOND;
+  const parts: string[] = [];
+  if (hours > BigInt(0)) {
+    parts.push(`${hours}H`);
+  }
+  if (minutes > BigInt(0)) {
+    parts.push(`${minutes}M`);
+  }
+  if (seconds > BigInt(0) || fraction > BigInt(0) || parts.length === 0) {
+    const secondsText = fraction > BigInt(0)
+      ? `${seconds}.${fraction.toString().padStart(9, '0')}`
+      : String(seconds);
+    parts.push(`${secondsText}S`);
+  }
+  return `${negative ? '-' : ''}P${days > BigInt(0) ? `${days}D` : ''}T${parts.join('')}`;
+}
+
+function qMonthAnalystValue(raw: number): string {
+  const year = 2000 + Math.floor(raw / 12);
+  const month = ((raw % 12) + 12) % 12 + 1;
+  const yearText = year >= 0 && year <= 9999
+    ? String(year).padStart(4, '0')
+    : `${year < 0 ? '-' : '+'}${Math.abs(year).toString().padStart(6, '0')}`;
+  return `${yearText}-${String(month).padStart(2, '0')}`;
+}
+
+function qDateAnalystValue(raw: number): string {
+  // Howard Hinnant's civil-from-days calculation keeps the whole valid q date
+  // domain deterministic even beyond JavaScript Date's approximately
+  // +/-275,000-year range.
+  const shiftedDays = BigInt(raw) + Q_ANALYST_EPOCH_UNIX_DAYS + BigInt(719_468);
+  const era = floorBigIntDivision(shiftedDays, BigInt(146_097));
+  const dayOfEra = shiftedDays - era * BigInt(146_097);
+  const yearOfEra = (
+    dayOfEra - dayOfEra / BigInt(1_460) +
+    dayOfEra / BigInt(36_524) - dayOfEra / BigInt(146_096)
+  ) / BigInt(365);
+  let year = yearOfEra + era * BigInt(400);
+  const dayOfYear = dayOfEra - (
+    BigInt(365) * yearOfEra + yearOfEra / BigInt(4) -
+    yearOfEra / BigInt(100)
+  );
+  const monthPhase = (BigInt(5) * dayOfYear + BigInt(2)) / BigInt(153);
+  const day = dayOfYear - (
+    BigInt(153) * monthPhase + BigInt(2)
+  ) / BigInt(5) + BigInt(1);
+  const month = monthPhase + (monthPhase < BigInt(10) ? BigInt(3) : BigInt(-9));
+  if (month <= BigInt(2)) {
+    year += BigInt(1);
+  }
+  const yearText = year >= BigInt(0) && year <= BigInt(9_999)
+    ? year.toString().padStart(4, '0')
+    : `${year < BigInt(0) ? '-' : '+'}${absoluteBigInt(year).toString().padStart(6, '0')}`;
+  return `${yearText}-${month.toString().padStart(2, '0')}-${day.toString().padStart(2, '0')}`;
+}
+
+function qDatetimeAnalystValue(raw: number): string {
+  const date = new Date(Q_ANALYST_EPOCH_MS + raw * MILLISECONDS_PER_DAY);
+  return Number.isFinite(date.getTime())
+    ? date.toISOString()
+    : `datetime-days-since-2000:${String(raw)}`;
+}
+
+function floorBigIntDivision(value: bigint, divisor: bigint): bigint {
+  const quotient = value / divisor;
+  return value < BigInt(0) && value % divisor !== BigInt(0)
+    ? quotient - BigInt(1)
+    : quotient;
+}
+
+function absoluteBigInt(value: bigint): bigint {
+  return value < BigInt(0) ? -value : value;
+}
+
+function qExportSpecialKind(value: unknown): string | undefined {
+  return typeof value === 'object' && value !== null &&
+    Object.prototype.hasOwnProperty.call(value, 'special') &&
+    typeof (value as { special?: unknown }).special === 'string'
+    ? (value as { special: string }).special
+    : undefined;
+}
+
 function appendBoundedReadableValue(
   state: BoundedReadableTextState,
   value: unknown,
@@ -1284,6 +1503,22 @@ function appendBoundedReadableValue(
     return;
   }
   if (isQRuntimeValue(value)) {
+    if (state.qRenderMode === 'analyst') {
+      if (isQGeneralNull(value)) {
+        return;
+      }
+      if (isQAtom(value)) {
+        appendBoundedReadableValue(
+          state,
+          qAtomAnalystValue(value),
+          topLevel,
+          depth + 1
+        );
+        return;
+      }
+      appendBoundedAnalystQVector(state, value as unknown[], topLevel, depth);
+      return;
+    }
     const bounded = (state.qRenderMode === 'literal'
       ? qValueToBoundedLiteral
       : qValueToBoundedGridCellText)(value, {
@@ -1327,6 +1562,53 @@ function appendBoundedReadableValue(
     return;
   }
   appendBoundedSanitizedText(state, cellValueToExportText(value));
+}
+
+function appendBoundedAnalystQVector(
+  state: BoundedReadableTextState,
+  value: unknown[],
+  topLevel: boolean,
+  depth: number
+): void {
+  if (state.stack.has(value)) {
+    state.truncated = true;
+    return;
+  }
+  state.stack.add(value);
+  try {
+    const type = qVectorType(value);
+    if (type === 'char') {
+      for (let index = 0; index < value.length && !state.truncated; index++) {
+        const atom = qVectorAtomAt(value, index);
+        const character = isQAtom(atom) && qExportSpecialKind(atom.value) === undefined
+          ? String.fromCharCode(Number(atom.value))
+          : ' ';
+        appendBoundedSanitizedText(state, character);
+      }
+      return;
+    }
+    const bracketed = !topLevel || state.options.arrayDisplayFormat === 'raw';
+    if (bracketed) {
+      appendBoundedSanitizedText(state, '[');
+    }
+    const separator = arrayDisplaySeparator(state.options.arrayDisplayFormat);
+    for (let index = 0; index < value.length && !state.truncated; index++) {
+      if (index > 0) {
+        appendBoundedSanitizedText(state, separator);
+      }
+      appendBoundedReadableValue(
+        state,
+        type === 'mixed' ? value[index] : qVectorAtomAt(value, index),
+        false,
+        depth + 1
+      );
+    }
+    if (bracketed && !state.truncated) {
+      appendBoundedSanitizedText(state, ']');
+    }
+  } finally {
+    state.stack.delete(value);
+  }
 }
 
 function appendBoundedReadableArray(
@@ -1454,6 +1736,10 @@ function appendBoundedSanitizedText(
   if (state.truncated || value.length === 0) {
     return;
   }
+  if (!state.sanitizeWhitespace) {
+    appendBoundedRawText(state, value);
+    return;
+  }
   let index = 0;
   if (state.skipLfAfterCr) {
     state.skipLfAfterCr = false;
@@ -1520,7 +1806,7 @@ function cellValueToExportText(value: unknown): string {
   }
 
   if (isQRuntimeValue(value)) {
-    return qValueToLiteral(value);
+    return cellValueToExportText(cellValueToAnalystValue(value));
   }
 
   if (typeof value === 'string') {
@@ -1549,18 +1835,49 @@ export function rowIndexColumnName(columns: string[], range: CellRange): string 
   return name;
 }
 
+/** Names selected analyst-export columns by occurrence without dropping
+ * duplicate or prototype-like source names. */
+export function analystExportColumnNames(
+  columns: readonly string[],
+  range: CellRange,
+  reserved: readonly string[] = []
+): string[] {
+  const used = new Set(reserved);
+  const names: string[] = [];
+  for (let columnIndex = range.startColumn;
+    columnIndex <= range.endColumn;
+    columnIndex++) {
+    const base = String(columns[columnIndex] ?? '');
+    let name = base;
+    let suffix = 2;
+    while (used.has(name)) {
+      name = `${base}_${suffix}`;
+      suffix += 1;
+    }
+    used.add(name);
+    names.push(name);
+  }
+  return names;
+}
+
 function selectedRows(rows: RowValue[], columns: string[], range: CellRange, includeRowIndex = false): RowValue[] {
   const selected: RowValue[] = [];
   const indexColumn = includeRowIndex ? rowIndexColumnName(columns, range) : '';
+  const exportColumns = analystExportColumnNames(
+    columns,
+    range,
+    includeRowIndex ? [indexColumn] : []
+  );
   for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
     const row = rows[rowIndex] || {};
-    const value: RowValue = {};
+    const value: RowValue = Object.create(null) as RowValue;
     if (includeRowIndex) {
       value[indexColumn] = rowIndex + 1;
     }
     for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
       const column = columns[columnIndex];
-      value[column] = row[column];
+      value[exportColumns[columnIndex - range.startColumn]] =
+        cellValueToAnalystValue(row[column]);
     }
     selected.push(value);
   }
@@ -1570,13 +1887,20 @@ function selectedRows(rows: RowValue[], columns: string[], range: CellRange, inc
 function selectedColumnarRows(result: ColumnarPanelResult, range: CellRange, includeRowIndex = false): RowValue[] {
   const selected: RowValue[] = [];
   const indexColumn = includeRowIndex ? rowIndexColumnName(result.columns, range) : '';
+  const exportColumns = analystExportColumnNames(
+    result.columns,
+    range,
+    includeRowIndex ? [indexColumn] : []
+  );
   for (let rowIndex = range.startRow; rowIndex <= range.endRow; rowIndex++) {
-    const value: RowValue = {};
+    const value: RowValue = Object.create(null) as RowValue;
     if (includeRowIndex) {
       value[indexColumn] = rowIndex + 1;
     }
     for (let columnIndex = range.startColumn; columnIndex <= range.endColumn; columnIndex++) {
-      value[result.columns[columnIndex]] = result.cellValue(rowIndex, columnIndex);
+      value[exportColumns[columnIndex - range.startColumn]] = cellValueToAnalystValue(
+        result.cellValue(rowIndex, columnIndex)
+      );
     }
     selected.push(value);
   }
@@ -1728,7 +2052,7 @@ export function kxResultJsonStringUtf8ByteLength(
 
 function jsonReplacer(_key: string, value: unknown): unknown {
   if (isQRuntimeValue(value)) {
-    return qValueToLiteral(value);
+    return cellValueToAnalystValue(value);
   }
   if (typeof value === 'bigint') {
     return String(value);
@@ -1752,16 +2076,9 @@ function jsonValueCharacterLength(
     throw new RangeError('KX result JSON nesting exceeds the safe depth limit');
   }
   if (isQRuntimeValue(input)) {
-    const bounded = qValueToBoundedLiteral(input, {
-      maxChars: Math.max(0, limit - 2),
-      maxDepth: Math.max(0, 512 - depth),
-    });
-    if (bounded.truncated) {
-      return undefined;
-    }
-    return kxResultJsonStringCharacterLength(bounded.text, limit);
+    return qAnalystJsonCharacterLength(input, limit, stack, depth);
   }
-  let value = input;
+  let value = isQRuntimeValue(input) ? cellValueToAnalystValue(input) : input;
   if ((typeof value === 'object' && value !== null) ||
     typeof value === 'function' ||
     typeof value === 'bigint') {
@@ -1834,6 +2151,86 @@ function jsonValueCharacterLength(
     );
   } finally {
     stack.delete(object);
+  }
+}
+
+function qAnalystJsonCharacterLength(
+  value: unknown,
+  limit: number,
+  stack: Set<object>,
+  depth: number
+): number | undefined {
+  if (isQGeneralNull(value)) {
+    return boundedJsonPrimitiveLength(4, limit);
+  }
+  if (isQAtom(value)) {
+    return jsonValueCharacterLength(
+      qAtomAnalystValue(value),
+      '',
+      limit,
+      stack,
+      depth + 1
+    );
+  }
+  if (!isQVector(value)) {
+    return boundedJsonPrimitiveLength(4, limit);
+  }
+  if (stack.has(value)) {
+    throw new TypeError('Converting circular structure to JSON');
+  }
+  stack.add(value);
+  try {
+    const type = qVectorType(value);
+    if (type === 'char') {
+      let chars = 2;
+      if (chars > limit) {
+        return undefined;
+      }
+      for (let index = 0; index < value.length; index++) {
+        const atom = qVectorAtomAt(value, index);
+        const code = isQAtom(atom) && qExportSpecialKind(atom.value) === undefined
+          ? Number(atom.value)
+          : 0x20;
+        const added = code === 0x22 || code === 0x5c ||
+          code === 0x08 || code === 0x09 || code === 0x0a ||
+          code === 0x0c || code === 0x0d
+          ? 2
+          : code <= 0x1f ? 6 : 1;
+        if (added > limit - chars) {
+          return undefined;
+        }
+        chars += added;
+      }
+      return chars;
+    }
+
+    let chars = 2;
+    if (chars > limit) {
+      return undefined;
+    }
+    for (let index = 0; index < value.length; index++) {
+      if (index > 0) {
+        if (chars >= limit) {
+          return undefined;
+        }
+        chars += 1;
+      }
+      const item = type === 'mixed' ? value[index] : qVectorAtomAt(value, index);
+      const itemChars = jsonValueCharacterLength(
+        item,
+        String(index),
+        limit - chars,
+        stack,
+        depth + 1
+      );
+      if (itemChars === undefined) {
+        return undefined;
+      }
+      chars += itemChars;
+    }
+    return chars;
+  } finally {
+    stack.delete(value);
   }
 }
 
@@ -1945,8 +2342,19 @@ function safeJsonArrayLength(value: number): number {
 }
 
 function escapeCsvCell(value: string): string {
+  return escapeDelimitedCell(value, ',');
+}
+
+function escapeTsvCell(value: string): string {
+  return escapeDelimitedCell(value, '\t');
+}
+
+function escapeDelimitedCell(value: string, delimiter: ',' | '\t'): string {
   const escaped = value.replace(/"/g, '""');
-  return /[",\r\n]/.test(value) ? `"${escaped}"` : escaped;
+  const requiresQuotes = delimiter === ','
+    ? /[",\r\n]/.test(value)
+    : /["\t\r\n]/.test(value);
+  return requiresQuotes ? `"${escaped}"` : escaped;
 }
 
 function escapeHtml(value: string): string {
@@ -1969,6 +2377,9 @@ function escapeHtml(value: string): string {
 
 function escapeMarkdownTableCell(value: unknown, options?: CellTextOptions): string {
   return cellValueToExactReadableText(value, options)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
     .replace(/\\/g, '\\\\')
     .replace(/`/g, '\\`')
     .replace(/\|/g, '\\|')

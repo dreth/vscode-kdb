@@ -13,6 +13,7 @@ import {
   ChartZoomAppliedFailure,
   ChartZoomLifecycleState,
   ChartNavigatorPart,
+  ChartRange,
   adjustChartNavigatorRange,
   applyChartZoomLifecycleFailure,
   applyChartZoomLifecycleResponse,
@@ -22,6 +23,7 @@ import {
   chartOverviewIntervalHasGap,
   chartRequestIsCurrent,
   chartVisibleIndexBounds,
+  chartVisibleSampledPointCount,
   chartXRangeWithInitialPadding,
   chartYRangeForVisibleX,
   chartZoomRequestedRenderRange,
@@ -49,7 +51,7 @@ import {
   KX_COLUMN_MIN_WIDTH,
   VariableColumnMetrics,
   automaticColumnWidthsForLengths,
-  hasPositionalColumnWidths,
+
   normalizePositionalColumnWidths,
   resolvedColumnWidth,
   updatePositionalColumnWidth,
@@ -115,7 +117,6 @@ import {
   MAX_NOTEBOOK_LIVE_SLICE_CELLS,
   MAX_NOTEBOOK_LIVE_SLICE_COLUMNS,
   MAX_NOTEBOOK_LIVE_SLICE_ROWS,
-  NOTEBOOK_LIVE_RESULT_METADATA_KEY,
   NotebookLiveChartData,
   NotebookLiveChartType,
   NotebookLiveCopyFormat,
@@ -123,9 +124,8 @@ import {
   NotebookLiveSortDirection,
   NotebookRendererHostMessage,
   NotebookSharedKxResultSettings,
-  NotebookResultSettingKey,
-  parseNotebookLiveResultReference,
-  parseNotebookOutputBindingFromMetadata,
+
+  inspectNotebookKxOutputIdentity,
   parseNotebookRendererHostMessage,
 } from '../src/notebook-message';
 import { qTextRenderModel } from '../src/q-text';
@@ -148,7 +148,7 @@ import {
 import {
   KX_RESULT_CHART_TYPE_OPTIONS,
   KX_RESULT_EXPORT_FORMATS,
-  KX_RESULT_SETTING_DEFINITIONS,
+
   KX_RESULT_UI_LABELS,
   KX_RESULTS_SHARED_CSS,
   kxLiveResultSummary,
@@ -215,6 +215,7 @@ interface LiveChartState {
   fullData?: NotebookLiveChartData;
   fullRange?: PlotScaleRange;
   requestRange?: { min: number; max: number };
+  completedRequestRange?: { min: number; max: number };
   autoRefineTimer?: number;
   lastAutoRefineRangeKey: string;
   requestedRenderRange?: PlotScaleRange;
@@ -265,6 +266,7 @@ interface OutputState {
   savedChart: NotebookChartSpec | undefined;
   savedRenderedChart: NotebookChartSpec | undefined;
   savedChartVisible: boolean;
+  chartDragMode: 'zoom' | 'pan';
   savedTableVisible: boolean;
   savedTablePageStart: number;
   savedMaxChartPoints: number;
@@ -423,8 +425,15 @@ export const activate: ActivationFunction<RendererState> = context => {
       if (!payload) {
         return;
       }
-      const liveReference = liveResultReference(outputItem);
-      const outputBinding = outputBindingReference(outputItem);
+      const inspectedIdentity = inspectNotebookKxOutputIdentity(
+        outputItem.metadata,
+        [{ mime: outputItem.mime, value: payload }]
+      );
+      const identity = inspectedIdentity.status === 'valid'
+        ? inspectedIdentity.identity
+        : undefined;
+      const liveReference = identity?.live;
+      const outputBinding = identity?.binding;
       const boundOutputId = outputBinding?.id;
       const outputId = payload.version === 2
         ? (boundOutputId === payload.outputId ? boundOutputId : undefined)
@@ -500,6 +509,7 @@ export const activate: ActivationFunction<RendererState> = context => {
           }
           : undefined,
         savedChartVisible: payload.kind === 'table' && payload.chart?.visible === true,
+        chartDragMode: previousState?.chartDragMode ?? 'zoom',
         savedTableVisible: true,
         savedTablePageStart: 0,
         savedMaxChartPoints: notebookChartPointLimit(),
@@ -599,10 +609,8 @@ function receiveHostMessage(
     resultSettings = message.resultSettings;
     context.setState({ presentation });
     const conversionChanged =
-      previous.functionDisplayStrategy !== resultSettings.functionDisplayStrategy ||
       previous.dictionaryDisplayStrategy !== resultSettings.dictionaryDisplayStrategy ||
-      previous.listDisplayStrategy !== resultSettings.listDisplayStrategy ||
-      previous.objectDisplayStrategy !== resultSettings.objectDisplayStrategy;
+      previous.listDisplayStrategy !== resultSettings.listDisplayStrategy;
     const sliceTextChanged = previous.arrayDisplayFormat !== resultSettings.arrayDisplayFormat;
     const wholeResultSizingNeedsRefresh =
       resultSettings.autoFitColumns &&
@@ -765,6 +773,9 @@ function receiveHostMessage(
       }
       const responseWasRefinement = !!state.liveChart.requestRange;
       if (message.data) {
+        if (state.liveChart.requestRange) {
+          state.liveChart.completedRequestRange = { ...state.liveChart.requestRange };
+        }
         state.liveChart.pending = false;
         const applied: {
           value?: ChartZoomAppliedData<NotebookLiveChartData>;
@@ -1126,9 +1137,6 @@ function renderHeader(
       withFocusKey(rerun, 'header:rerun')
     );
   }
-  if (context.postMessage) {
-    toolbar.append(resultSettingsControl(context, state));
-  }
   header.append(toolbar);
   root.append(header);
   if (state.hostActionMessage) {
@@ -1331,6 +1339,17 @@ function renderLiveTableTools(
   const liveChartCandidates = liveChartColumns(state);
   if (state.liveChart.visible ||
     (liveChartCandidates.x.length > 0 && liveChartCandidates.numeric.length > 0)) {
+    if (state.liveChart.visible) {
+      const dragMode = button(state.chartDragMode === 'zoom' ? 'Pan mode' : 'Zoom mode', () => {
+        state.chartDragMode = state.chartDragMode === 'zoom' ? 'pan' : 'zoom';
+        renderState(context, state);
+      });
+      dragMode.title = state.chartDragMode === 'zoom'
+        ? 'Chart drag mode: Zoom. Activate Pan mode.'
+        : 'Chart drag mode: Pan. Activate Zoom mode.';
+      withFocusKey(dragMode, 'toolbar:live:chart-drag-mode');
+      primary.append(dragMode);
+    }
     const chartToggle = button(state.liveChart.visible
       ? KX_RESULT_UI_LABELS.closeChart
       : KX_RESULT_UI_LABELS.chart, () => {
@@ -2263,6 +2282,14 @@ function requestLiveChart(
   chart.error = undefined;
   chart.errorWasRefinement = false;
   const capabilities = chartTypeCapabilities(chart.chartType);
+  const previousRequestedSpan = chart.completedRequestRange
+    ? chart.completedRequestRange.max - chart.completedRequestRange.min
+    : undefined;
+  const requestedSpan = range ? range.max - range.min : undefined;
+  const retainTemporalLevel = previousRequestedSpan !== undefined && requestedSpan !== undefined &&
+    Math.abs(previousRequestedSpan - requestedSpan) <= Math.max(1e-9, Math.abs(previousRequestedSpan) * 1e-9) &&
+    Number.isFinite(chart.data?.temporalBucketIntervalMs) &&
+    Number(chart.data?.temporalBucketIntervalMs) > 0;
   applyLiveChartZoomLifecycle(
     chart,
     issueChartZoomLifecycleRequest(
@@ -2293,6 +2320,9 @@ function requestLiveChart(
           maxPoints: Math.min(MAX_NOTEBOOK_LIVE_CHART_POINTS, Math.max(1, chart.maxPoints)),
           ...(request.range
             ? { xMin: request.range.min, xMax: request.range.max }
+            : {}),
+          ...(retainTemporalLevel
+            ? { temporalBucketIntervalMs: chart.data!.temporalBucketIntervalMs }
             : {}),
         });
       }
@@ -2647,6 +2677,17 @@ function renderSavedTable(
   const chartCandidates = chartColumns(payload, visibleColumns);
   if (state.savedChartVisible ||
     (chartCandidates.numeric.length > 0 && visibleColumns.length > 1)) {
+    if (state.savedChartVisible) {
+      const dragMode = button(state.chartDragMode === 'zoom' ? 'Pan mode' : 'Zoom mode', () => {
+        state.chartDragMode = state.chartDragMode === 'zoom' ? 'pan' : 'zoom';
+        renderState(context, state);
+      });
+      dragMode.title = state.chartDragMode === 'zoom'
+        ? 'Chart drag mode: Zoom. Activate Pan mode.'
+        : 'Chart drag mode: Pan. Activate Zoom mode.';
+      withFocusKey(dragMode, 'toolbar:saved:chart-drag-mode');
+      primary.append(dragMode);
+    }
     const chartToggle = button(
       state.savedChartVisible ? KX_RESULT_UI_LABELS.closeChart : KX_RESULT_UI_LABELS.chart,
       () => {
@@ -3989,7 +4030,8 @@ function createPlot(
         attributeFilter: ['class', 'style', 'data-vscode-theme-id', 'data-vscode-theme-kind'],
       });
     }
-  } catch {
+  } catch (error) {
+    console.error('KX notebook chart rendering failed', error);
     state.chartProgrammaticScale = false;
     destroyPlot(state);
     host.replaceChildren(node('div', 'kx-notice', 'Chart rendering failed; the result table remains available.'));
@@ -4641,7 +4683,9 @@ function installNotebookChartViewport(
     'aria-label',
     blocked
       ? 'Chart plot. Chart settings changed; press Render before changing the view.'
-      : 'Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.'
+      : state.chartDragMode === 'pan'
+        ? 'Chart plot. Drag to pan x. Switch to zoom mode to drag-zoom. Arrow keys pan. Home resets zoom.'
+        : 'Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.'
   );
   host.addEventListener('keydown', event => {
     if (blocked && (event.key === 'Home' || event.key === 'ArrowLeft' ||
@@ -4706,7 +4750,7 @@ function installNotebookChartViewport(
       event.stopPropagation();
       return;
     }
-    if (!event.shiftKey || event.button !== 0) {
+    if ((state.chartDragMode !== 'pan' && !event.shiftKey) || event.button !== 0) {
       return;
     }
     const range = currentNotebookChartRange(state);
@@ -4753,12 +4797,15 @@ function queueLiveChartAutoRefine(
   plot: uPlot
 ): void {
   const chart = state.liveChart;
+  const viewport = plotScaleRange(plot, 'x');
+  const sourceCanRefine = liveChartSourceCanRefine(chart.data, viewport);
   const plan = planChartAutoRefine(
     chart.fullRange,
-    plotScaleRange(plot, 'x'),
+    viewport,
     chart.lastAutoRefineRangeKey,
     state.plot !== plot || chart.pending || chart.dirty || !chart.data ||
-      !!chart.requestedRenderRange
+      !!chart.requestedRenderRange || !sourceCanRefine,
+    chartVisibleSampledPointCount(chart.data?.x, viewport)
   );
   if (!plan) {
     clearLiveChartAutoRefine(chart);
@@ -4767,12 +4814,15 @@ function queueLiveChartAutoRefine(
   clearLiveChartAutoRefine(chart);
   chart.autoRefineTimer = window.setTimeout(() => {
     chart.autoRefineTimer = undefined;
+    const currentViewport = state.plot === plot ? plotScaleRange(plot, 'x') : undefined;
+    const currentCanRefine = liveChartSourceCanRefine(chart.data, currentViewport);
     const current = planChartAutoRefine(
       chart.fullRange,
-      state.plot === plot ? plotScaleRange(plot, 'x') : undefined,
+      currentViewport,
       chart.lastAutoRefineRangeKey,
       state.plot !== plot || chart.pending || chart.dirty || !chart.data ||
-        !!chart.requestedRenderRange
+        !!chart.requestedRenderRange || !currentCanRefine,
+      chartVisibleSampledPointCount(chart.data?.x, currentViewport)
     );
     if (!current || current.key !== plan.key) {
       return;
@@ -4780,6 +4830,21 @@ function queueLiveChartAutoRefine(
     requestLiveChart(context, state, current.range);
     renderState(context, state);
   }, LIVE_CHART_AUTO_REFINE_DELAY_MS);
+}
+
+function liveChartSourceCanRefine(
+  data: NotebookLiveChartData | undefined,
+  viewport: ChartRange | undefined
+): boolean {
+  if (!data) {
+    return false;
+  }
+  const sampledPointCount = data.sampledPointCount ?? data.x.length;
+  if ((data.eligibleRowCount ?? sampledPointCount) > sampledPointCount) {
+    return true;
+  }
+  return !!viewport && !!data.xDomain &&
+    (viewport.min < data.xDomain.min || viewport.max > data.xDomain.max);
 }
 
 function clearLiveChartAutoRefine(chart: LiveChartState, resetRangeKey = false): void {
@@ -4985,6 +5050,8 @@ function notebookPlotOptions(
         stroke: axisColor,
         grid: { stroke: gridColor, width: 0.5 },
         ticks: { stroke: gridColor, width: 0.5 },
+        values: (_plot, splits) => splits.map(value => formatChartNumber(value)),
+        size: (plot, values) => chartYAxisSize(plot, values),
       },
     ],
     cursor: {
@@ -5286,9 +5353,28 @@ function notebookChartYRange(
 }
 
 function formatChartNumber(value: number): string {
-  return Number.isFinite(value)
-    ? value.toFixed(resultSettings.chartDecimalPlaces)
-    : '';
+  if (!Number.isFinite(value)) {
+    return '';
+  }
+  const normalized = Object.is(value, -0) ? 0 : value;
+  const places = Math.max(0, Math.min(12, resultSettings.chartDecimalPlaces));
+  const abs = Math.abs(normalized);
+  return abs !== 0 && (abs >= 1_000_000 || abs < 0.001)
+    ? normalized.toExponential(places)
+    : normalized.toLocaleString(undefined, {
+      minimumFractionDigits: places,
+      maximumFractionDigits: places,
+    });
+}
+
+function chartYAxisSize(plot: uPlot, values: readonly unknown[] | undefined): number {
+  if (!Array.isArray(values) || !plot.ctx) {
+    return 60;
+  }
+  const ratio = window.devicePixelRatio || 1;
+  const maxLabelWidth = values.reduce<number>((width, value) =>
+    Math.max(width, plot.ctx.measureText(String(value ?? '')).width / ratio), 0);
+  return Math.max(48, Math.min(220, Math.ceil(maxLabelWidth + 18)));
 }
 
 function minimumPositiveStep(values: number[]): number | undefined {
@@ -5652,93 +5738,6 @@ function resultColumnControl(
   return details;
 }
 
-function resultSettingsControl(
-  context: RendererContext<RendererState>,
-  state: OutputState
-): HTMLDetailsElement {
-  const details = persistentDetails(state, document.createElement('details'), 'settings');
-  details.className = 'kx-settings';
-  const summary = document.createElement('summary');
-  withFocusKey(summary, 'settings:summary');
-  summary.textContent = KX_RESULT_UI_LABELS.settings;
-  summary.title = 'Result settings';
-  summary.setAttribute('aria-label', 'Result settings');
-  details.append(summary);
-  const panel = node('div', 'kx-settings-panel');
-  panel.setAttribute('role', 'group');
-  panel.setAttribute('aria-label', 'Results Settings');
-  const dismiss = (): void => {
-    details.open = false;
-    summary.focus({ preventScroll: true });
-  };
-  const panelHeader = node('div', 'kx-settings-header');
-  panelHeader.append(node('strong', '', 'Results Settings'));
-  const close = button('Close', dismiss);
-  close.classList.add('kx-settings-close');
-  close.title = 'Close Results Settings';
-  close.setAttribute('aria-label', 'Close Results Settings');
-  withFocusKey(close, 'settings:close');
-  panelHeader.append(close);
-  panel.append(panelHeader);
-  details.addEventListener('keydown', event => {
-    if (details.open && event.key === 'Escape') {
-      event.preventDefault();
-      event.stopPropagation();
-      dismiss();
-    }
-  });
-  KX_RESULT_SETTING_DEFINITIONS.forEach(definition => {
-    const value = resultSettings[definition.key];
-    if (definition.control === 'checkbox' && typeof value === 'boolean') {
-      panel.append(settingCheckbox(
-        context,
-        definition.label,
-        definition.key,
-        value
-      ));
-    } else if (definition.control === 'select' && typeof value === 'string') {
-      panel.append(settingSelect(
-        context,
-        definition.label,
-        definition.key,
-        [...(definition.values || [])],
-        value
-      ));
-    } else if (definition.control === 'number' && typeof value === 'number') {
-      panel.append(settingNumber(
-        context,
-        definition.label,
-        definition.key,
-        value,
-        definition.minimum ?? 0,
-        definition.maximum,
-        definition.autoValue,
-        definition.autoLabel
-      ));
-    }
-  });
-  const resetWidths = button('Reset column widths', () => {
-    resultSettings = { ...resultSettings, columnWidths: {} };
-    stateRegistry.forEach(outputState => {
-      outputState.liveManualColumnWidths.clear();
-      outputState.savedManualColumnWidths.clear();
-    });
-    renderState(context, state);
-    context.postMessage?.({ type: 'resetResultColumnWidths' });
-  });
-  let hasOutputWidths = false;
-  stateRegistry.forEach(outputState => {
-    hasOutputWidths ||= outputState.liveManualColumnWidths.size > 0 ||
-      outputState.savedManualColumnWidths.size > 0;
-  });
-  resetWidths.disabled = !hasPositionalColumnWidths(resultSettings.columnWidths) &&
-    !hasOutputWidths;
-  withFocusKey(resetWidths, 'settings:reset-column-widths');
-  panel.append(resetWidths);
-  details.append(panel);
-  keepDetailsPanelInsideResult(details, panel);
-  return details;
-}
 
 function columnResizeHandle(
   context: RendererContext<RendererState>,
@@ -5863,91 +5862,13 @@ function applyRendererColumnWidth(
   });
 }
 
-function settingCheckbox(
-  context: RendererContext<RendererState>,
-  label: string,
-  key: NotebookResultSettingKey,
-  checked: boolean
-): HTMLLabelElement {
-  const wrapper = node('label', 'kx-setting-checkbox');
-  const input = document.createElement('input');
-  input.type = 'checkbox';
-  input.checked = checked;
-  withFocusKey(input, `settings:${key}`);
-  input.addEventListener('change', () => updateResultSetting(context, key, input.checked));
-  wrapper.append(input, document.createTextNode(label));
-  return wrapper;
-}
-
-function settingSelect(
-  context: RendererContext<RendererState>,
-  label: string,
-  key: NotebookResultSettingKey,
-  values: Array<{ value: string; label: string }>,
-  selected: string
-): HTMLLabelElement {
-  return labelledSelectOptions(
-    label,
-    values,
-    selected,
-    value => updateResultSetting(context, key, value),
-    `settings:${key}`
-  );
-}
-
-function settingNumber(
-  context: RendererContext<RendererState>,
-  label: string,
-  key: NotebookResultSettingKey,
-  value: number,
-  minimum: number,
-  maximum?: number,
-  autoValue?: number,
-  autoLabel?: string
-): HTMLLabelElement {
-  const wrapper = node('label', 'kx-control');
-  wrapper.append(node('span', '', label));
-  const input = document.createElement('input');
-  input.type = 'number';
-  input.min = String(minimum);
-  if (maximum !== undefined) {
-    input.max = String(maximum);
-  }
-  input.step = '1';
-  const auto = autoValue !== undefined && value === autoValue;
-  input.value = auto ? '' : String(value);
-  if (autoValue !== undefined && autoLabel) {
-    input.placeholder = autoLabel;
-    input.title = `${autoLabel}; enter a number from ${minimum}` +
-      `${maximum === undefined ? '' : ` to ${maximum}`}.`;
-    if (auto) {
-      input.setAttribute('aria-valuetext', autoLabel);
-      wrapper.classList.add('is-auto');
-    }
-  }
-  withFocusKey(input, `settings:${key}`);
-  input.addEventListener('change', () => {
-    const next = input.value.trim() === '' && autoValue !== undefined
-      ? autoValue
-      : Number(input.value);
-    if (Number.isSafeInteger(next) && next >= minimum &&
-      (maximum === undefined || next <= maximum)) {
-      updateResultSetting(context, key, next);
-    }
-  });
-  wrapper.append(input);
-  return wrapper;
-}
 
 function updateResultSetting(
   context: RendererContext<RendererState>,
-  key: NotebookResultSettingKey,
-  value: string | number | boolean
+  key: 'includeHeaders' | 'includeRowIndex',
+  value: boolean
 ): void {
-  if (!context.postMessage) {
-    return;
-  }
-  context.postMessage({ type: 'updateResultSetting', key, value });
+  context.postMessage?.({ type: 'updateResultSetting', key, value });
 }
 
 function requestLiveResult(
@@ -6023,17 +5944,6 @@ function portablePayload(outputItem: OutputItem, element: HTMLElement): Portable
     return undefined;
   }
   return validation.value;
-}
-
-function liveResultReference(outputItem: OutputItem): { version: 1; id: string } | undefined {
-  if (!isRecord(outputItem.metadata)) {
-    return undefined;
-  }
-  return parseNotebookLiveResultReference(outputItem.metadata[NOTEBOOK_LIVE_RESULT_METADATA_KEY]);
-}
-
-function outputBindingReference(outputItem: OutputItem): { version: 1; id: string } | undefined {
-  return parseNotebookOutputBindingFromMetadata(outputItem.metadata);
 }
 
 function renderSource(state: OutputState, root: HTMLElement): void {
@@ -7461,10 +7371,6 @@ function isPresentation(value: unknown): value is NotebookPresentation {
   return value === 'inline' || value === 'panel' || value === 'both';
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
-
 function defaultResultSettings(): NotebookSharedKxResultSettings {
   return {
     cellWidth: 160,
@@ -7484,10 +7390,8 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
     qTextSyntaxHighlighting: false,
     qTextDisplayFormatting: false,
     arrayDisplayFormat: 'commaSpace',
-    functionDisplayStrategy: 'qText',
     dictionaryDisplayStrategy: 'grid',
     listDisplayStrategy: 'grid',
-    objectDisplayStrategy: 'grid',
   };
 }
 

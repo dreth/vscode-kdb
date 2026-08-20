@@ -102,11 +102,13 @@ export interface QResultDisplayOptions {
 type QNestedDisplayValue = unknown;
 
 interface NormalizedQResultDisplayOptions {
-  functionDisplayStrategy: QResultDisplayStrategy;
   dictionaryDisplayStrategy: QResultDisplayStrategy;
   listDisplayStrategy: QResultDisplayStrategy;
-  objectDisplayStrategy: QResultDisplayStrategy;
 }
+
+const Q_STANDALONE_NUMERIC_ATOM_TYPES = new Set([
+  'byte', 'short', 'int', 'long', 'real', 'float',
+]);
 
 export interface QTextFormatOptions {
   maxDepth?: number;
@@ -1181,17 +1183,7 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
   }
 
   if (isQFunction(value)) {
-    if (displayOptions.functionDisplayStrategy === 'qText') {
-      return qTextPanelResult(value, 'function');
-    }
-    const result = createColumnarPanelResult(['value'], 1, () => qFunctionDisplayText(value));
-    return {
-      mode: 'grid',
-      cols: result.columns,
-      result,
-      kind: 'function',
-      rowsMaterialized: true,
-    };
+    return qTextPanelResult(value, 'function');
   }
 
   if (isQDict(value)) {
@@ -1265,9 +1257,6 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
   }
 
   if (isPlainObject(value)) {
-    if (displayOptions.objectDisplayStrategy === 'qText') {
-      return qTextPanelResult(value, 'object');
-    }
     const row = normalizePanelPlainObject(value as unknown as { [key: string]: QValue });
     const cols = Object.keys(row);
     return {
@@ -1422,11 +1411,19 @@ export function qValueToLosslessPortablePanel(
     };
   }
 
+  if (isQFunction(value)) {
+    return {
+      mode: 'grid',
+      cols: ['value'],
+      result: createColumnarPanelResult(['value'], 1, () => losslessPortableQCell(value)),
+      kind: 'function',
+      rowsMaterialized: false,
+    };
+  }
+
   const panel = qValueToColumnarPanel(value, {
-    functionDisplayStrategy: 'grid',
     dictionaryDisplayStrategy: 'grid',
     listDisplayStrategy: 'grid',
-    objectDisplayStrategy: 'grid',
   });
   if (panel.mode === 'text') {
     return losslessQTextResult(value) ? panel : undefined;
@@ -1462,15 +1459,6 @@ export function qValueToLosslessPortablePanel(
         value.columnTypes,
         sourceColumnOrdinals(value.keyTable.columns.length)
       ),
-    };
-  }
-  if (isQFunction(value)) {
-    return {
-      mode: 'grid',
-      cols: ['value'],
-      result: createColumnarPanelResult(['value'], 1, () => losslessPortableQCell(value)),
-      kind: 'function',
-      rowsMaterialized: false,
     };
   }
   if (isQDict(value)) {
@@ -1515,7 +1503,8 @@ export function qValuePrefersQText(value: QValue): boolean {
     return true;
   }
   if (isQAtom(value)) {
-    return qValueToSemanticPrimitive(value) === null;
+    return Q_STANDALONE_NUMERIC_ATOM_TYPES.has(value.type) ||
+      qValueToSemanticPrimitive(value) === null;
   }
   if (isQVector(value)) {
     return value.length === 0;
@@ -1531,10 +1520,8 @@ export function qValuePrefersQText(value: QValue): boolean {
 
 export function normalizeQResultDisplayOptions(options?: QResultDisplayOptions): NormalizedQResultDisplayOptions {
   return {
-    functionDisplayStrategy: normalizeQResultDisplayStrategy(options && options.functionDisplayStrategy, 'qText'),
     dictionaryDisplayStrategy: normalizeQResultDisplayStrategy(options && options.dictionaryDisplayStrategy, 'grid'),
     listDisplayStrategy: normalizeQResultDisplayStrategy(options && options.listDisplayStrategy, 'grid'),
-    objectDisplayStrategy: normalizeQResultDisplayStrategy(options && options.objectDisplayStrategy, 'grid'),
   };
 }
 

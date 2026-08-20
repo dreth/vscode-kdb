@@ -461,18 +461,39 @@ async function exerciseDurableMixedNotebook() {
   }
 }
 
-function portableOutput(cell) {
+function portableOutputItem(cell) {
   const item = cell.outputs.flatMap(output => output.items)
     .find(candidate => candidate.mime === KX_NOTEBOOK_MIME);
   assert(item, `notebook cell must contain ${KX_NOTEBOOK_MIME}`);
+  return item;
+}
+
+function portableOutput(cell) {
+  const item = portableOutputItem(cell);
   return JSON.parse(new TextDecoder().decode(item.data));
 }
 
+function portableOutputByteLength(cell) {
+  return portableOutputItem(cell).data.byteLength;
+}
+
 function outputIdentity(output) {
-  const direct = output.metadata?.[KX_OUTPUT_METADATA_KEY];
-  const nested = output.metadata?.metadata?.[KX_OUTPUT_METADATA_KEY];
+  return outputMetadataIdentity(output, KX_OUTPUT_METADATA_KEY, 'output');
+}
+
+function liveOutputIdentity(output) {
+  return outputMetadataIdentity(output, KX_LIVE_METADATA_KEY, 'live-result');
+}
+
+function outputMetadataIdentity(output, key, label) {
+  const direct = output.metadata?.[key];
+  const nested = output.metadata?.metadata?.[key];
   if (direct && nested) {
-    assert.strictEqual(direct.id, nested.id, 'duplicate notebook output identities must agree');
+    assert.deepStrictEqual(
+      direct,
+      nested,
+      `duplicate notebook ${label} identities must agree completely`
+    );
   }
   return direct || nested;
 }
@@ -536,6 +557,16 @@ function repeatedRows(tail) {
   });
 }
 
+function largeNotebookRows() {
+  return Array.from({ length: 60_000 }, (_value, index) => [
+    index,
+    ['AAPL', 'MSFT', 'IBM', 'KX'][index % 4],
+    100 + (index % 10_000) / 100,
+    100 + (index % 900),
+    ['XNAS', 'XNYS', 'BATS'][index % 3],
+  ]);
+}
+
 async function waitForJson(filePath, label, timeoutMs = 60_000) {
   const deadline = Date.now() + timeoutMs;
   let lastError;
@@ -563,8 +594,13 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
   };
   const notebookConfiguration = vscode.workspace.getConfiguration('vscode-kdb.notebook');
   const previousRows = notebookConfiguration.inspect('maxOutputRows')?.globalValue;
+  const previousBytes = notebookConfiguration.inspect('maxOutputBytes')?.globalValue;
   const notebookUri = vscode.Uri.file(path.join(controlDir, 'roundtrip.ipynb'));
+  const largeReopenedUri = vscode.Uri.file(
+    path.join(controlDir, 'roundtrip-large-reopened.ipynb')
+  );
   let notebook;
+  let largeReopenedNotebook;
   let eventSubscription;
   let heldQuery;
   let heldQueryRun;
@@ -579,7 +615,12 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     );
     await notebookConfiguration.update(
       'maxOutputRows',
-      20,
+      30,
+      vscode.ConfigurationTarget.Global
+    );
+    await notebookConfiguration.update(
+      'maxOutputBytes',
+      1_000_000,
       vscode.ConfigurationTarget.Global
     );
 
@@ -620,6 +661,7 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       nbformat_minor: 5,
     };
     await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
+    await vscode.workspace.fs.delete(largeReopenedUri, { useTrash: false }).catch(() => undefined);
     await vscode.workspace.fs.writeFile(
       notebookUri,
       new TextEncoder().encode(`${JSON.stringify(ipynb, null, 2)}\n`)
@@ -698,16 +740,11 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       ['row', 'value', 'metric', 'open', 'high', 'low', 'close'],
       repeatedRows('tail-1')
     );
-    testApi.queueNotebookTable(
-      ['row', 'value', 'metric', 'open', 'high', 'low', 'close'],
-      repeatedRows('tail-2')
-    );
 
     await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, postRaceQCell);
     const afterFirst = notebook.cellAt(0);
     assert.strictEqual(notebook.cellCount, 2);
     assert.strictEqual(afterFirst.outputs.length, 1);
-    const firstCommittedCellUri = afterFirst.document.uri.toString();
     assert.strictEqual(afterFirst.document.getText(), source);
     const firstPayload = portableOutput(afterFirst);
     const firstOutput = afterFirst.outputs[0];
@@ -725,8 +762,167 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     assert.strictEqual(firstPayload.data.rows.length, 30);
     assert.strictEqual(firstPayload.data.rows[29][1].value, 'tail-1');
 
-    const secondRunEventStart = notebookEvents.length;
+    await notebookConfiguration.update(
+      'maxOutputRows',
+      20,
+      vscode.ConfigurationTarget.Global
+    );
+    const largeRows = largeNotebookRows();
+    testApi.queueNotebookTable(
+      ['row', 'sym', 'price', 'size', 'venue'],
+      largeRows
+    );
     await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, afterFirst);
+    const afterLarge = notebook.cellAt(0);
+    assert.strictEqual(afterLarge.outputs.length, 1);
+    assert.strictEqual(afterLarge.document.getText(), source);
+    const largePayload = portableOutput(afterLarge);
+    const largeOutput = afterLarge.outputs[0];
+    const largeOutputId = outputIdentity(largeOutput)?.id;
+    const largeLiveId = largeOutput.metadata?.[KX_LIVE_METADATA_KEY]?.id;
+    assert.strictEqual(largePayload.outputId, largeOutputId);
+    assert.strictEqual(largePayload.version, 2);
+    assert.strictEqual(largePayload.persistence.mode, 'full');
+    assert.strictEqual(largePayload.result.rowCount, 60_000);
+    assert.strictEqual(largePayload.result.previewRowCount, 60_000);
+    assert.strictEqual(largePayload.data.rows.length, 60_000);
+    assert.strictEqual(largePayload.result.truncated, false);
+    assert.ok(
+      portableOutputByteLength(afterLarge) > 1_000_000,
+      `real Extension Host coverage must commit a genuinely large exact KX MIME item; measured ${portableOutputByteLength(afterLarge)} bytes`
+    );
+    assert.deepStrictEqual(testApi.notebookLiveSlice(
+      largeLiveId,
+      notebook.uri.toString(),
+      {
+        startRow: 59_999,
+        endRow: 59_999,
+        startColumn: 0,
+        endColumn: 4,
+        columnOrdinals: [0, 1, 2, 3, 4],
+      }
+    ).cells, [['59999', 'KX', '199.99', '699', 'BATS']]);
+
+    assert.strictEqual(
+      notebook.isDirty,
+      true,
+      'the complete 60,000-row output edit must mark the real .ipynb dirty'
+    );
+    assert.strictEqual(
+      await notebook.save(),
+      true,
+      'the real .ipynb save must accept the complete 60,000-row output'
+    );
+    await waitFor('60,000-row .ipynb clean state', () => !notebook.isDirty);
+    await vscode.workspace.fs.copy(notebookUri, largeReopenedUri, { overwrite: true });
+    largeReopenedNotebook = await vscode.workspace.openNotebookDocument(largeReopenedUri);
+    assert.notStrictEqual(
+      largeReopenedNotebook.uri.toString(),
+      notebook.uri.toString(),
+      'the checkpoint must reopen saved bytes as a distinct notebook document'
+    );
+    assert.strictEqual(largeReopenedNotebook.isDirty, false);
+    await vscode.window.showNotebookDocument(largeReopenedNotebook, {
+      preserveFocus: false,
+      preview: false,
+    });
+    assert.strictEqual(largeReopenedNotebook.cellCount, 2);
+    const reopenedLargeCell = largeReopenedNotebook.cellAt(0);
+    assert.strictEqual(reopenedLargeCell.outputs.length, 1);
+    assert.strictEqual(
+      reopenedLargeCell.outputs[0].items.filter(item => item.mime === KX_NOTEBOOK_MIME).length,
+      1,
+      'the reopened cell must contain exactly one owned KX MIME payload'
+    );
+    const reopenedLargePayload = portableOutput(reopenedLargeCell);
+    const reopenedLargeOutput = reopenedLargeCell.outputs[0];
+    assert.deepStrictEqual(
+      reopenedLargePayload,
+      largePayload,
+      'the saved/reopened 60,000-row payload must remain semantically exact'
+    );
+    assert.strictEqual(reopenedLargePayload.outputId, largeOutputId);
+    assert.deepStrictEqual(
+      outputIdentity(reopenedLargeOutput),
+      { version: 1, id: largeOutputId },
+      'the reopened durable binding must retain the exact canonical reference shape'
+    );
+    assert.strictEqual(reopenedLargePayload.version, 2);
+    assert.strictEqual(reopenedLargePayload.persistence.mode, 'full');
+    assert.strictEqual(reopenedLargePayload.result.rowCount, 60_000);
+    assert.strictEqual(reopenedLargePayload.result.previewRowCount, 60_000);
+    assert.strictEqual(reopenedLargePayload.data.rows.length, 60_000);
+    assert.strictEqual(reopenedLargePayload.result.truncated, false);
+    assert.deepStrictEqual(
+      reopenedLargePayload.data.rows[59_999].map(cell => cell.value),
+      [59_999, 'KX', 199.99, 699, 'BATS'],
+      'the reopened complete payload must retain its final typed row values'
+    );
+    assert.ok(
+      portableOutputByteLength(reopenedLargeCell) > 1_000_000,
+      'the reopened KX MIME item must remain genuinely large'
+    );
+    assert.strictEqual(
+      JSON.stringify(reopenedLargeOutput.metadata).includes(KX_LIVE_METADATA_KEY),
+      false,
+      'session-only live ownership must not be serialized into the reopened output'
+    );
+    assert.strictEqual(
+      testApi.hasLiveNotebookResult(largeLiveId, largeReopenedUri.toString()),
+      false,
+      'opening saved bytes under another URI must not resurrect a transient live owner'
+    );
+    assert.strictEqual(largeReopenedNotebook.cellAt(1).document.languageId, 'python');
+    assert.strictEqual(largeReopenedNotebook.cellAt(1).document.getText(), pythonSource);
+    assert.strictEqual(largeReopenedNotebook.cellAt(1).outputs.length, 0);
+
+    await closeNotebookTabs(largeReopenedNotebook);
+    largeReopenedNotebook = undefined;
+    await vscode.workspace.fs.delete(largeReopenedUri, { useTrash: false });
+    await vscode.window.showNotebookDocument(notebook, {
+      preserveFocus: false,
+      preview: false,
+    });
+    const currentLargeCell = notebook.cellAt(0);
+    assert.strictEqual(currentLargeCell.outputs.length, 1);
+    assert.strictEqual(
+      currentLargeCell.outputs[0].items.filter(item => item.mime === KX_NOTEBOOK_MIME).length,
+      1,
+      'serializer reconciliation must retain exactly one owned KX MIME payload'
+    );
+    assert.deepStrictEqual(
+      portableOutput(currentLargeCell),
+      largePayload,
+      'the original notebook must retain the complete result after serializer reconciliation'
+    );
+    assert.deepStrictEqual(
+      outputIdentity(currentLargeCell.outputs[0]),
+      { version: 1, id: largeOutputId },
+      'serializer reconciliation must retain the exact durable binding reference'
+    );
+    assert.deepStrictEqual(
+      liveOutputIdentity(currentLargeCell.outputs[0]),
+      { version: 1, id: largeLiveId },
+      'the active original output must still canonically reference its transient live owner'
+    );
+    assert.strictEqual(
+      testApi.hasLiveNotebookResult(largeLiveId, notebook.uri.toString()),
+      true,
+      'saving the active original notebook must retain its transient live owner until replacement'
+    );
+    const largeCommittedCellUri = currentLargeCell.document.uri.toString();
+
+    await notebookConfiguration.update(
+      'maxOutputRows',
+      30,
+      vscode.ConfigurationTarget.Global
+    );
+    testApi.queueNotebookTable(
+      ['row', 'value', 'metric', 'open', 'high', 'low', 'close'],
+      repeatedRows('tail-2')
+    );
+    const secondRunEventStart = notebookEvents.length;
+    await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, currentLargeCell);
     const afterSecond = notebook.cellAt(0);
     assert.strictEqual(notebook.cellCount, 2);
     assert.strictEqual(afterSecond.outputs.length, 1);
@@ -757,6 +953,7 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     assert.notStrictEqual(secondOutputId, firstOutputId);
     assert.notStrictEqual(secondLiveId, firstLiveId);
     assert.strictEqual(testApi.hasLiveNotebookResult(firstLiveId, notebook.uri.toString()), false);
+    assert.strictEqual(testApi.hasLiveNotebookResult(largeLiveId, notebook.uri.toString()), false);
     assert.strictEqual(
       testApi.hasLiveNotebookResult(secondLiveId, notebook.uri.toString()),
       true,
@@ -782,11 +979,11 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     const secondRunEvents = notebookEvents.slice(secondRunEventStart);
     const secondCommittedCellUri = afterSecond.document.uri.toString();
     const sawSameUriCellChange = secondRunEvents.some(event =>
-      event.outputChangeUris.includes(firstCommittedCellUri)
+      event.outputChangeUris.includes(largeCommittedCellUri)
     );
     const sawStructuralReplacement = secondRunEvents.some(event =>
       event.contentChanges.some(change =>
-        change.removedUris.includes(firstCommittedCellUri) &&
+        change.removedUris.includes(largeCommittedCellUri) &&
         change.addedUris.includes(secondCommittedCellUri)
       )
     );
@@ -863,6 +1060,8 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       heldQueryRun = undefined;
     }
     eventSubscription?.dispose();
+    await discardNotebookChangesAndClose(largeReopenedNotebook).catch(() => undefined);
+    await vscode.workspace.fs.delete(largeReopenedUri, { useTrash: false }).catch(() => undefined);
     if (!preservedForFreshHost) {
       await discardNotebookChangesAndClose(notebook).catch(() => undefined);
       await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
@@ -871,6 +1070,11 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
     await notebookConfiguration.update(
       'maxOutputRows',
       previousRows,
+      vscode.ConfigurationTarget.Global
+    );
+    await notebookConfiguration.update(
+      'maxOutputBytes',
+      previousBytes,
       vscode.ConfigurationTarget.Global
     );
   }

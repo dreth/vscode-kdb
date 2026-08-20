@@ -114,13 +114,12 @@ const REQUIRED_SCREENSHOTS = Object.freeze([
   'light-table.png',
   'light-live-selection-search.png',
   'light-columns-overlay.png',
-  'light-settings-overlay.png',
+  'light-no-cell-settings.png',
   'light-chart.png',
   'light-chart-zoom-settings.png',
   'light-chart-interactions.png',
   'dark-table.png',
   'dark-chart.png',
-  'dark-qtext-opt-in.png',
   'narrow-table.png',
   'narrow-chart-overlay.png',
 ]);
@@ -363,19 +362,27 @@ async function run() {
           interaction: 'live-column-hide-overlay-focus',
         }
       ));
-      const settingsEvidence = await exerciseSettingsOverlay(liveRenderer);
+      const settingsEvidence = await liveRenderer.evaluate(root => ({
+        name: 'notebook-cell-settings-absent',
+        settingsAbsent: !root.querySelector('details.kx-settings'),
+        settingsButtons: [...root.querySelectorAll('button')]
+          .filter(button => String(button.textContent || '').trim() === 'Results Settings')
+          .length,
+      }));
+      assert.strictEqual(settingsEvidence.settingsAbsent, true);
+      assert.strictEqual(settingsEvidence.settingsButtons, 0);
       interactions.push(settingsEvidence);
-      console.log('Notebook visual interaction: shared Settings passed');
+      console.log('Notebook visual interaction: per-cell Settings absent');
       screenshots.push(await captureScreenshot(
         artifactDirectory,
-        'light-settings-overlay.png',
+        'light-no-cell-settings.png',
         screenSize,
         {
           theme: LIGHT_THEME,
           caseId: 'live-full-result',
           widthMode: 'wide',
-          interaction: 'shared-settings-overlay-focus',
-          acceptance: settingsEvidence.screenshot,
+          interaction: 'notebook-cell-settings-absent',
+          acceptance: settingsEvidence,
         }
       ));
       interactions.push(await exerciseLiveChartControls(liveRenderer));
@@ -526,20 +533,7 @@ async function run() {
     await showNotebookCase(savedQTextNotebook, 0);
     interactions.push(await exerciseSavedQTextPresentation(
       cdpPort,
-      'Saved qText preview',
-      async () => {
-        screenshots.push(await captureScreenshot(
-          artifactDirectory,
-          'dark-qtext-opt-in.png',
-          screenSize,
-          {
-            theme: DARK_THEME,
-            caseId: 'saved-qtext',
-            widthMode: 'wide',
-            interaction: 'qtext-opt-in-highlighting-formatting-and-copy-status',
-          }
-        ));
-      }
+      'Saved qText preview'
     ));
     await discardActiveVisualNotebook();
     darkLiveNotebook = await openLiveGalleryNotebook(
@@ -1716,8 +1710,8 @@ async function exerciseOrdinaryResultChartLifecycle(cdpPort) {
 
     const firstDrag = await dragOrdinaryChartRange(
       renderer,
-      0.05,
-      0.95,
+      0.30,
+      0.70,
       baseline
     );
     const firstExpectedDomain = integerDomainForRange(
@@ -2712,8 +2706,6 @@ async function exerciseNotebookResultColumnSizing(cdpPort, resultConfiguration) 
       notebookColumnSizingSnapshot,
       value => value.headers.join('|') ===
           'acceptance_row|acceptance_label|acceptance_widest_list' &&
-        value.autoFit &&
-        value.autoFitMode === 'wholeResult' &&
         value.widths.length === 3 &&
         value.widths[2] >= 400 &&
         value.firstRowWidths.every((width, index) =>
@@ -2739,8 +2731,7 @@ async function exerciseNotebookResultColumnSizing(cdpPort, resultConfiguration) 
       'notebook visible-row narrow sizing',
       renderer,
       notebookColumnSizingSnapshot,
-      value => value.autoFitMode === 'visibleRows' &&
-        value.renderedRows.includes(0) &&
+      value => value.renderedRows.includes(0) &&
         value.widths[2] + 80 < wholeResult.widths[2]
     );
     await renderer.evaluate(scrollNotebookGridToRow, COLUMN_SIZING_WIDEST_ROW);
@@ -2761,8 +2752,7 @@ async function exerciseNotebookResultColumnSizing(cdpPort, resultConfiguration) 
       'notebook unchecked auto-fit sizing',
       renderer,
       notebookColumnSizingSnapshot,
-      value => !value.autoFit &&
-        value.widths.length === 3 &&
+      value => value.widths.length === 3 &&
         value.widths.every(width => Math.abs(width - 160) <= 1)
     );
 
@@ -2828,25 +2818,28 @@ async function exerciseNotebookResultColumnSizing(cdpPort, resultConfiguration) 
       'notebook output recreation width persistence',
       renderer,
       notebookColumnSizingSnapshot,
-      value => !value.autoFit &&
-        Math.abs(value.widths[0] - expectedManualWidth) <= 2
+      value => Math.abs(value.widths[0] - expectedManualWidth) <= 2
     );
 
-    await renderer.evaluate(setNotebookCellWidth, 190);
+    await resultConfiguration.update(
+      'standard.cellWidth',
+      190,
+      vscode.ConfigurationTarget.Global
+    );
     const allColumnPreset = await waitForRenderer(
       'notebook all-column Cell width preset',
       renderer,
       notebookColumnSizingSnapshot,
-      value => !value.autoFit &&
-        value.widths.length === 3 &&
-        snapshotAllColumnsHaveWidth(value, 190)
+      value => value.widths.length === 3 &&
+        Math.abs(value.widths[0] - expectedManualWidth) <= 2 &&
+        value.widths.slice(1).every(width => Math.abs(width - 190) <= 1)
     );
     await waitFor(
-      'notebook Cell width preset clears sparse overrides',
+      'notebook global Cell width preserves sparse overrides',
       () => {
         const widths = currentResultSetting('viewer.columnWidths');
         return isSparseWidthMap(widths) &&
-          Object.keys(widths).length === 0 &&
+          Math.abs(widths['0'] - expectedManualWidth) <= 2 &&
           currentResultSetting('standard.cellWidth') === 190;
       },
       8_000
@@ -3207,6 +3200,29 @@ function displayedRowStripingSnapshot(root, headerSelector, bodySelector = '') {
   };
 }
 
+function displayedRowStripePair(evidence) {
+  const evenRows = evidence.rows.filter(row => row.even);
+  const oddRows = evidence.rows.filter(row => row.odd);
+  for (const evenRow of evenRows) {
+    for (const evenCell of evenRow.cells) {
+      if (evenCell.selected || evenCell.search || evenCell.loading || evenCell.error ||
+        evenCell.activeCell || evenCell.sortedHeader || evenCell.selectedHeader) {
+        continue;
+      }
+      const oddCell = oddRows.flatMap(row => row.cells).find(candidate =>
+        candidate.sourceOrdinal === evenCell.sourceOrdinal &&
+        candidate.keyColumn === evenCell.keyColumn &&
+        candidate.sortedColumn === evenCell.sortedColumn &&
+        !candidate.selected && !candidate.search && !candidate.loading && !candidate.error &&
+        !candidate.activeCell && !candidate.sortedHeader && !candidate.selectedHeader);
+      if (oddCell) {
+        return { even: evenCell, odd: oddCell };
+      }
+    }
+  }
+  return undefined;
+}
+
 function assertDisplayedRowStriping(evidence, label, options = {}) {
   const minimumColumns = options.minimumColumns || 3;
   const minimumRows = options.minimumRows || 2;
@@ -3252,29 +3268,7 @@ function assertDisplayedRowStriping(evidence, label, options = {}) {
         cell.even === row.even)),
     `${label} must key every visible cell to its logical displayed row: ${JSON.stringify(evidence.rows)}`
   );
-  const rowStripePair = () => {
-    const evenRows = evidence.rows.filter(row => row.even);
-    const oddRows = evidence.rows.filter(row => row.odd);
-    for (const evenRow of evenRows) {
-      for (const evenCell of evenRow.cells) {
-        if (evenCell.selected || evenCell.search || evenCell.loading || evenCell.error ||
-          evenCell.activeCell || evenCell.sortedHeader || evenCell.selectedHeader) {
-          continue;
-        }
-        const oddCell = oddRows.flatMap(row => row.cells).find(candidate =>
-          candidate.sourceOrdinal === evenCell.sourceOrdinal &&
-          candidate.keyColumn === evenCell.keyColumn &&
-          candidate.sortedColumn === evenCell.sortedColumn &&
-          !candidate.selected && !candidate.search && !candidate.loading && !candidate.error &&
-          !candidate.activeCell && !candidate.sortedHeader && !candidate.selectedHeader);
-        if (oddCell) {
-          return { even: evenCell, odd: oddCell };
-        }
-      }
-    }
-    return undefined;
-  };
-  const stripePair = rowStripePair();
+  const stripePair = displayedRowStripePair(evidence);
   if (options.requireDistinctBackground !== false) {
     assert(stripePair,
       `${label} must expose loaded odd and even cells with the same semantic column state`);
@@ -3293,7 +3287,8 @@ async function inspectNotebookRowStripingByMarker(cdpPort, marker) {
       `${marker} logical displayed-row striping`,
       renderer,
       displayedRowStripingSnapshot,
-      value => value.headers.length >= 4 && value.rows.length >= 2,
+      value => value.headers.length >= 4 && value.rows.length >= 2 &&
+        Boolean(displayedRowStripePair(value)),
       8_000,
       [
         '.kx-live-header[role="columnheader"]',
@@ -3318,7 +3313,8 @@ async function inspectOrdinaryRowStripingTheme(cdpPort) {
       'ordinary dark logical displayed-row striping',
       handle.renderer,
       displayedRowStripingSnapshot,
-      value => value.headers.length >= 4 && value.rows.length >= 2,
+      value => value.headers.length >= 4 && value.rows.length >= 2 &&
+        Boolean(displayedRowStripePair(value)),
       8_000,
       [
         '#header [role="columnheader"][data-column]',
@@ -3349,7 +3345,7 @@ async function exerciseLogicalRowStripingWindows(cdpPort) {
       ordinaryHandle.renderer,
       displayedRowStripingSnapshot,
       value => value.headers.length >= 4 && value.headers[0]?.displayOrdinal === 0 &&
-        value.rows.length >= 2,
+        value.rows.length >= 2 && Boolean(displayedRowStripePair(value)),
       8_000,
       [
         '#header [role="columnheader"][data-column]',
@@ -4730,10 +4726,28 @@ async function exerciseColumnsOverlay(renderer) {
     }),
     value => value.selectedHeader && value.selectedCells > 0
   );
-  const striping = await renderer.evaluate(
+  const striping = await waitForRenderer(
+    'live hide/reorder striping readiness',
+    renderer,
     displayedRowStripingSnapshot,
-    '.kx-live-header[role="columnheader"]',
-    '.kx-live-cell[role="gridcell"][data-row]'
+    value => {
+      const evenCells = value.rows.filter(row => row.even).flatMap(row => row.cells);
+      const oddCells = value.rows.filter(row => row.odd).flatMap(row => row.cells);
+      return value.headers.length === 3 && evenCells.some(evenCell =>
+        !evenCell.selected && !evenCell.search && !evenCell.loading && !evenCell.error &&
+        !evenCell.activeCell && !evenCell.sortedHeader && !evenCell.selectedHeader &&
+        oddCells.some(oddCell =>
+          oddCell.sourceOrdinal === evenCell.sourceOrdinal &&
+          oddCell.keyColumn === evenCell.keyColumn &&
+          oddCell.sortedColumn === evenCell.sortedColumn &&
+          !oddCell.selected && !oddCell.search && !oddCell.loading && !oddCell.error &&
+          !oddCell.activeCell && !oddCell.sortedHeader && !oddCell.selectedHeader));
+    },
+    8_000,
+    [
+      '.kx-live-header[role="columnheader"]',
+      '.kx-live-cell[role="gridcell"][data-row]',
+    ]
   );
   assertDisplayedRowStriping(striping, 'live hide/reorder table');
   assert.deepStrictEqual(
@@ -5122,6 +5136,8 @@ async function exerciseLiveChartControls(renderer) {
         statusAriaLive:
           root.querySelector('.kx-chart-panel > .kx-status')
             ?.getAttribute('aria-live') || '',
+        statusText: root.querySelector('.kx-chart-panel > .kx-status')?.textContent?.trim() || '',
+        noticeText: root.querySelector('.kx-chart-canvas .kx-notice')?.textContent?.trim() || '',
       };
     },
     value => value.canvases > 0 &&
@@ -5135,33 +5151,19 @@ async function exerciseLiveChartControls(renderer) {
   );
   afterDraw.navigator = await renderer.evaluate(notebookChartNavigatorSnapshot);
   assertChartNavigatorEvidence(afterDraw.navigator, 'live notebook chart');
-  const autoRefinements = [];
-  for (let zoomIndex = 0; zoomIndex < 2; zoomIndex += 1) {
-    await dragNotebookChartInRenderer(renderer);
-    const previousEligibleRows = autoRefinements.at(-1)?.eligibleRows || 65;
-    autoRefinements.push(await waitForRenderer(
-      `live automatic chart refinement ${zoomIndex + 1}`,
-      renderer,
-      root => {
-        const status = root.querySelector('.kx-chart-panel > .kx-status')?.textContent || '';
-        const match = /from ([\d,]+) eligible rows/.exec(status);
-        return {
-          status,
-          eligibleRows: match ? Number(match[1].replaceAll(',', '')) : 0,
-        };
-      },
-      value => value.status.startsWith('Selected range') &&
-        value.eligibleRows > 0 &&
-        value.eligibleRows < previousEligibleRows,
-      15_000
-    ));
-  }
-  assert(
-    autoRefinements[1].eligibleRows < autoRefinements[0].eligibleRows,
-    'a second narrower live zoom must trigger a second absolute source refinement'
-  );
   const navigatorBefore = await renderer.evaluate(notebookChartNavigatorSnapshot);
   assertChartNavigatorEvidence(navigatorBefore, 'live notebook navigator before interaction');
+  await dragNotebookChartInRenderer(renderer);
+  const navigatorZoomed = await waitForRenderer(
+    'live local chart zoom below refinement threshold',
+    renderer,
+    notebookChartNavigatorSnapshot,
+    value => value.start.now > navigatorBefore.start.now &&
+      value.end.now < navigatorBefore.end.now &&
+      value.eligibleRows === navigatorBefore.eligibleRows,
+    15_000
+  );
+  assertChartNavigatorEvidence(navigatorZoomed, 'live notebook local zoom');
   const edgePoints = await renderer.evaluate(
     chartNavigatorDragPoints,
     '.kx-chart-navigator',
@@ -5179,14 +5181,13 @@ async function exerciseLiveChartControls(renderer) {
     'live navigator trusted end-edge drag refinement',
     renderer,
     notebookChartNavigatorSnapshot,
-    value => value.end.now < navigatorBefore.end.now &&
-      value.status.startsWith('Selected range') &&
-      value.eligibleRows > 0 && value.eligibleRows < navigatorBefore.eligibleRows &&
+    value => value.end.now < navigatorZoomed.end.now &&
+      value.eligibleRows === navigatorBefore.eligibleRows &&
       value.disabled === 'false',
     15_000
   );
-  assert(navigatorEdge.eligibleRows < navigatorBefore.eligibleRows,
-    'live navigator edge resize must automatically refine fewer source rows');
+  assert.strictEqual(navigatorEdge.eligibleRows, navigatorBefore.eligibleRows,
+    'small live result navigation must remain local below the refinement threshold');
   assertChartNavigatorEvidence(navigatorEdge, 'live notebook navigator edge drag');
   const focusedWindow = await renderer.evaluate(
     focusChartNavigatorPart,
@@ -5210,7 +5211,7 @@ async function exerciseLiveChartControls(renderer) {
     renderer,
     notebookChartNavigatorSnapshot,
     value => value.window.valueText === keyboardValueText &&
-      value.status.startsWith('Selected range') &&
+      value.eligibleRows === navigatorBefore.eligibleRows &&
       value.disabled === 'false',
     15_000
   );
@@ -5291,10 +5292,10 @@ async function exerciseLiveChartControls(renderer) {
     yChange,
     yPersistence,
     afterDraw,
-    autoRefinements,
+    localZoom: navigatorZoomed,
     navigatorInteractions: {
       browserPath:
-        'trusted CDP end-handle drag -> automatic selected-range refinement -> focused window ArrowRight -> automatic selected-range refinement -> focused window Home',
+        'trusted CDP end-handle drag -> local viewport update -> focused window ArrowRight -> local pan -> focused window Home',
       before: navigatorBefore,
       edge: navigatorEdge,
       keyboard: {
@@ -5499,55 +5500,25 @@ async function exerciseSavedSelectionSearchAndChart(
     selection.dominance.plainEven.background
   );
   console.log('Notebook visual interaction: saved range selection passed');
-  const savedGridSettingChange = await renderer.evaluate(root => {
+  const savedGridNoCellSettings = await renderer.evaluate(root => {
     const view = root.ownerDocument.defaultView;
     const grid = root.querySelector('[aria-label="Saved KX result preview table"]');
     const details = root.querySelector('details.kx-settings');
-    if (details) {
-      details.open = true;
+    if (!(grid instanceof view.HTMLElement)) {
+      throw new Error('saved grid focus fixture missing');
     }
-    const density = [...(details?.querySelectorAll('label') || [])]
-      .find(label => label.textContent?.trim().startsWith('Density'))
-      ?.querySelector('select');
-    if (!(grid instanceof view.HTMLElement) ||
-        !(density instanceof view.HTMLSelectElement)) {
-      throw new Error('saved grid/settings focus fixture missing');
-    }
-    const previous = density.value;
-    density.value = previous === 'compact' ? 'standard' : 'compact';
-    density.dispatchEvent(new view.Event('change', { bubbles: true }));
     grid.focus();
     return {
-      previous,
-      next: density.value,
+      settingsAbsent: details === null,
       focusedTable: root.ownerDocument.activeElement?.getAttribute('aria-label') || '',
+      selectedCells: root.querySelectorAll('td[aria-selected="true"]').length,
     };
   });
-  const savedGridBroadcastFocus = await waitForRenderer(
-    'saved grid focus after settings broadcast',
-    renderer,
-    root => {
-      const details = root.querySelector('details.kx-settings');
-      const density = [...(details?.querySelectorAll('label') || [])]
-        .find(label => label.textContent?.trim().startsWith('Density'))
-        ?.querySelector('select');
-      return {
-        density: density?.value || '',
-        compact: root.classList.contains('kx-density-compact'),
-        settingsOpen: details?.open === true,
-        focusedTable:
-          root.ownerDocument.activeElement?.getAttribute('aria-label') || '',
-        selectionSummary: root.querySelector('.kx-selection-summary')?.textContent || '',
-        selectedCells: root.querySelectorAll('td[aria-selected="true"]').length,
-      };
-    },
-    value => value.density === savedGridSettingChange.next &&
-      value.compact === (savedGridSettingChange.next === 'compact') &&
-      value.settingsOpen &&
-      value.focusedTable === 'Saved KX result preview table' &&
-      value.selectedCells === 9
-  );
-  console.log('Notebook visual interaction: saved grid focus survived settings broadcast');
+  assert(savedGridNoCellSettings.settingsAbsent,
+    'saved notebook results must not expose per-cell Settings');
+  assert.strictEqual(savedGridNoCellSettings.focusedTable, 'Saved KX result preview table');
+  assert.strictEqual(savedGridNoCellSettings.selectedCells, 9);
+  console.log('Notebook visual interaction: saved per-cell Settings absent');
 
   await renderer.evaluate(root => {
     const details = root.querySelector('.kx-chart-controls details.kx-series-control');
@@ -5770,72 +5741,33 @@ async function exerciseSavedSelectionSearchAndChart(
   );
   console.log('Notebook visual interaction: chart zoom narrowed domain');
 
-  await clearCanvasTextRecorder(renderer);
-  const settingChange = await renderer.evaluate(root => {
-    const view = root.ownerDocument.defaultView;
-    const details = root.querySelector('details.kx-settings');
-    if (details) {
-      details.open = true;
-    }
-    const density = [...(details?.querySelectorAll('label') || [])]
-      .find(label => label.textContent?.trim().startsWith('Density'))
-      ?.querySelector('select');
-    if (!(density instanceof view.HTMLSelectElement)) {
-      throw new Error('chart density setting missing');
-    }
-    const previous = density.value;
-    density.focus();
-    density.value = previous === 'compact' ? 'standard' : 'compact';
-    density.dispatchEvent(new view.Event('change', { bubbles: true }));
-    return { previous, next: density.value };
-  });
-  const afterSetting = await waitForRenderer(
-    'chart settings broadcast rerender',
-    renderer,
-    (root, hiddenLabel) => ({
-      compact: root.classList.contains('kx-density-compact'),
-      settingsOpen: root.querySelector('details.kx-settings')?.open === true,
-      focusedSetting: (() => {
-        const details = root.querySelector('details.kx-settings');
-        const density = [...(details?.querySelectorAll('label') || [])]
-          .find(label => label.textContent?.trim().startsWith('Density'))
-          ?.querySelector('select');
-        return root.ownerDocument.activeElement === density ? 'Density' : '';
-      })(),
-      density: (() => {
-        const details = root.querySelector('details.kx-settings');
-        return [...(details?.querySelectorAll('label') || [])]
-          .find(label => label.textContent?.trim().startsWith('Density'))
-          ?.querySelector('select')?.value || '';
-      })(),
-      hidden: [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
-        .find(legend => legend.getAttribute('aria-label') === hiddenLabel)
-        ?.getAttribute('aria-pressed') || '',
-      canvases: root.querySelectorAll('.kx-chart-host canvas').length,
-      selectionSummary: root.querySelector('.kx-selection-summary')?.textContent || '',
-      selectedCells: root.querySelectorAll('td[aria-selected="true"]').length,
-    }),
-    value => value.density === settingChange.next &&
-      value.compact === (settingChange.next === 'compact') &&
-      value.settingsOpen && value.focusedSetting === 'Density' &&
-      value.hidden === 'false' && value.canvases > 0,
-    8_000,
-    [hidden.label]
-  );
-  assert.strictEqual(afterSetting.selectionSummary, '3 rows × 3 columns (9 cells)');
-  assert.strictEqual(afterSetting.selectedCells, 9);
-  console.log('Notebook visual interaction: Density broadcast preserved chart/selection');
+  const afterNoCellSettings = await renderer.evaluate((root, hiddenLabel) => ({
+    settingsAbsent: root.querySelector('details.kx-settings') === null,
+    hidden: [...root.querySelectorAll('[aria-label^="Toggle chart series "]')]
+      .find(legend => legend.getAttribute('aria-label') === hiddenLabel)
+      ?.getAttribute('aria-pressed') || '',
+    canvases: root.querySelectorAll('.kx-chart-host canvas').length,
+    selectionSummary: root.querySelector('.kx-selection-summary')?.textContent || '',
+    selectedCells: root.querySelectorAll('td[aria-selected="true"]').length,
+  }), hidden.label);
+  assert(afterNoCellSettings.settingsAbsent,
+    'saved chart results must not expose per-cell Settings');
+  assert.strictEqual(afterNoCellSettings.hidden, 'false');
+  assert(afterNoCellSettings.canvases > 0);
+  assert.strictEqual(afterNoCellSettings.selectionSummary, '3 rows × 3 columns (9 cells)');
+  assert.strictEqual(afterNoCellSettings.selectedCells, 9);
+  console.log('Notebook visual interaction: saved chart per-cell Settings absent');
   await installCanvasTextRecorder(renderer);
   await clearCanvasTextRecorder(renderer);
   await forceChartRedraw(renderer);
-  const afterSettingTicks = await waitForCanvasTicks(
-    'zoomed ticks after settings rerender',
+  const afterNoCellSettingsTicks = await waitForCanvasTicks(
+    'zoomed ticks without per-cell settings',
     renderer
   );
   assert(
-    afterSettingTicks.minimum >= zoomDomainTicks.minimum &&
-      afterSettingTicks.maximum <= zoomDomainTicks.maximum,
-    'ordinary settings rerender must preserve the zoomed x-axis domain'
+    afterNoCellSettingsTicks.minimum >= zoomDomainTicks.minimum &&
+      afterNoCellSettingsTicks.maximum <= zoomDomainTicks.maximum,
+    'removing per-cell Settings must preserve the zoomed x-axis domain'
   );
   await scrollNotebookChartIntoView(renderer, cdpPort);
   const hiddenLegendAfterSetting = await captureZoomAfterSetting(hidden.label);
@@ -5872,8 +5804,7 @@ async function exerciseSavedSelectionSearchAndChart(
     name: 'saved-range-search-chart',
     search,
     selection,
-    savedGridSettingChange,
-    savedGridBroadcastFocus,
+    savedGridNoCellSettings,
     savedYChange,
     savedYPersistence,
     rendered,
@@ -5884,9 +5815,8 @@ async function exerciseSavedSelectionSearchAndChart(
     hiddenLegendAfterSetting,
     fullDomainTicks,
     zoomDomainTicks,
-    settingChange,
-    afterSetting,
-    afterSettingTicks,
+    afterNoCellSettings,
+    afterNoCellSettingsTicks,
     zoomSelectionWidth: zoomWidth,
     navigatorInteractions: {
       browserPath: 'trusted CDP selected-window drag -> bounded local saved-data rebuild',
@@ -6788,74 +6718,22 @@ async function assertSavedChartFamilies(cdpPort) {
   };
 }
 
-async function exerciseSavedQTextPresentation(cdpPort, marker, captureOptedIn) {
+async function exerciseSavedQTextPresentation(cdpPort, marker) {
   const renderer = await connectNotebookRenderer(cdpPort, marker);
   try {
     const initial = await renderer.evaluate(root => {
-      const setting = label => [...root.querySelectorAll('.kx-settings-panel label')]
-        .find(candidate => candidate.textContent?.trim() === label)
-        ?.querySelector('input');
       const pre = root.querySelector('[aria-label="qText result"]');
       return {
-        highlighting: setting('Highlight qText output')?.checked,
-        formatting: setting('Format supported qText output')?.checked,
+        hasSettings: Boolean(root.querySelector('details.kx-settings')),
         text: pre?.textContent || '',
         tokenSpans: pre?.querySelectorAll('[class^="kx-q-"]').length || 0,
       };
     });
-    assert.deepStrictEqual(
-      {
-        highlighting: initial.highlighting,
-        formatting: initial.formatting,
-        tokenSpans: initial.tokenSpans,
-      },
-      { highlighting: false, formatting: false, tokenSpans: 0 },
-      'qText visual acceptance must start from default-off presentation settings'
-    );
-    assert(!initial.text.includes('\n'), 'saved qText fixture must begin as one raw line');
-
-    await renderer.evaluate(root => {
-      const settings = root.querySelector('details.kx-settings');
-      if (!settings) {
-        throw new Error('saved qText Settings control missing');
-      }
-      if (!settings.open) {
-        settings.querySelector('summary')?.click();
-      }
-      return true;
-    });
-    await toggleQTextSetting(renderer, 'highlighting', true);
-    await toggleQTextSetting(renderer, 'formatting', true);
-    const optedIn = await waitForRenderer(
-      'opted-in qText highlighting and conservative formatting',
-      renderer,
-      root => {
-        const setting = label => [...root.querySelectorAll('.kx-settings-panel label')]
-          .find(candidate => candidate.textContent?.trim() === label)
-          ?.querySelector('input');
-        const pre = root.querySelector('[aria-label="qText result"]');
-        return {
-          settingsOpen: root.querySelector('details.kx-settings')?.open === true,
-          highlighting: setting('Highlight qText output')?.checked,
-          formatting: setting('Format supported qText output')?.checked,
-          text: pre?.textContent || '',
-          tokenSpans: pre?.querySelectorAll('[class^="kx-q-"]').length || 0,
-          tokenKinds: [...(pre?.querySelectorAll('[class^="kx-q-"]') || [])]
-            .map(span => span.className)
-            .filter((value, index, values) => values.indexOf(value) === index),
-        };
-      },
-      value => value.settingsOpen &&
-        value.highlighting === true &&
-        value.formatting === true &&
-        value.text.includes(
-          '\n  [x;y] select avg price by sym from trade where price>x\n'
-        ) &&
-        value.tokenSpans > 3 &&
-        value.tokenKinds.includes('kx-q-keyword') &&
-        value.tokenKinds.includes('kx-q-builtin') &&
-        value.tokenKinds.includes('kx-q-operator')
-    );
+    assert.strictEqual(initial.hasSettings, false,
+      'saved qText results must not expose notebook-cell Settings');
+    assert.strictEqual(initial.tokenSpans, 0,
+      'saved qText syntax highlighting must follow the global default');
+    assert(initial.text.length > 0, 'saved qText fixture must render raw source text');
 
     await renderer.evaluate(root => {
       const view = root.ownerDocument.defaultView;
@@ -6877,7 +6755,7 @@ async function exerciseSavedQTextPresentation(cdpPort, marker, captureOptedIn) {
       return true;
     });
     const copy = await waitForRenderer(
-      'saved qText copy feedback live region',
+      'saved qText raw copy feedback live region',
       renderer,
       root => {
         const status = [...root.querySelectorAll('.kx-status')]
@@ -6888,8 +6766,7 @@ async function exerciseSavedQTextPresentation(cdpPort, marker, captureOptedIn) {
           role: status?.getAttribute('role') || '',
           ariaLive: status?.getAttribute('aria-live') || '',
           copiedText: root.ownerDocument.defaultView.__kxVisualCopiedText || '',
-          focusedControl:
-            root.ownerDocument.activeElement?.textContent?.trim() || '',
+          focusedControl: root.ownerDocument.activeElement?.textContent?.trim() || '',
         };
       },
       value => /^(Copied\.|Clipboard unavailable\.)$/.test(value.message) &&
@@ -6898,95 +6775,17 @@ async function exerciseSavedQTextPresentation(cdpPort, marker, captureOptedIn) {
         value.copiedText.length > 0 &&
         value.focusedControl === 'Copy'
     );
-    assert.strictEqual(
-      copy.copiedText,
-      initial.text,
-      'qText Copy must preserve the raw source despite opted-in presentation formatting'
-    );
-    await captureOptedIn();
-
-    await toggleQTextSetting(renderer, 'formatting', false);
-    await toggleQTextSetting(renderer, 'highlighting', false);
-    const restored = await waitForRenderer(
-      'qText presentation settings restored to default off',
-      renderer,
-      root => {
-        const setting = label => [...root.querySelectorAll('.kx-settings-panel label')]
-          .find(candidate => candidate.textContent?.trim() === label)
-          ?.querySelector('input');
-        const pre = root.querySelector('[aria-label="qText result"]');
-        return {
-          highlighting: setting('Highlight qText output')?.checked,
-          formatting: setting('Format supported qText output')?.checked,
-          text: pre?.textContent || '',
-          tokenSpans: pre?.querySelectorAll('[class^="kx-q-"]').length || 0,
-        };
-      },
-      value => value.highlighting === false &&
-        value.formatting === false &&
-        value.text === initial.text &&
-        value.tokenSpans === 0
-    );
+    assert.strictEqual(copy.copiedText, initial.text,
+      'qText Copy must preserve the exact raw source');
     return {
       name: 'saved-qtext-copy-status-a11y',
       initial,
-      optedIn,
       copy,
-      restored,
       ...copy,
     };
   } finally {
     renderer.close();
   }
-}
-
-async function toggleQTextSetting(renderer, setting, checked) {
-  const action = setting === 'highlighting'
-    ? root => {
-        const view = root.ownerDocument.defaultView;
-        const input = [...root.querySelectorAll('.kx-settings-panel label')]
-          .find(candidate =>
-            candidate.textContent?.trim() === 'Highlight qText output')
-          ?.querySelector('input');
-        if (!(input instanceof view.HTMLInputElement)) {
-          throw new Error('Highlight qText output setting missing');
-        }
-        input.focus();
-        input.checked = !input.checked;
-        input.dispatchEvent(new view.Event('change', { bubbles: true }));
-        return input.checked;
-      }
-    : root => {
-        const view = root.ownerDocument.defaultView;
-        const input = [...root.querySelectorAll('.kx-settings-panel label')]
-          .find(candidate =>
-            candidate.textContent?.trim() === 'Format supported qText output')
-          ?.querySelector('input');
-        if (!(input instanceof view.HTMLInputElement)) {
-          throw new Error('Format supported qText output setting missing');
-        }
-        input.focus();
-        input.checked = !input.checked;
-        input.dispatchEvent(new view.Event('change', { bubbles: true }));
-        return input.checked;
-      };
-  const next = await renderer.evaluate(action);
-  assert.strictEqual(next, checked);
-  await waitForRenderer(
-    `qText ${setting} setting ${checked ? 'enabled' : 'disabled'}`,
-    renderer,
-    root => ({
-      highlighting: [...root.querySelectorAll('.kx-settings-panel label')]
-        .find(candidate =>
-          candidate.textContent?.trim() === 'Highlight qText output')
-        ?.querySelector('input')?.checked,
-      formatting: [...root.querySelectorAll('.kx-settings-panel label')]
-        .find(candidate =>
-          candidate.textContent?.trim() === 'Format supported qText output')
-        ?.querySelector('input')?.checked,
-    }),
-    value => value[setting] === checked
-  );
 }
 
 async function dragNotebookChartInRenderer(renderer) {
@@ -7046,8 +6845,7 @@ async function assertNarrowLayout(cdpPort) {
         ?.getAttribute('aria-colcount') || '',
       buttons: [...root.querySelectorAll('button')].map(button => button.textContent?.trim())
         .filter(Boolean),
-      settings:
-        root.querySelector('details.kx-settings > summary')?.textContent?.trim() || '',
+      hasSettings: Boolean(root.querySelector('details.kx-settings')),
     }));
     const liveEvidence = await live.evaluate(root => ({
       width: Math.round(root.getBoundingClientRect().width),
@@ -7065,7 +6863,8 @@ async function assertNarrowLayout(cdpPort) {
     for (const label of ['Open historical saved preview', 'Rerun cell']) {
       assert(savedEvidence.buttons.includes(label), `narrow saved preview must retain ${label}`);
     }
-    assert.strictEqual(savedEvidence.settings, 'Settings');
+    assert.strictEqual(savedEvidence.hasSettings, false,
+      'narrow saved previews must not restore removed notebook-cell Settings');
     return {
       name: 'narrow-live-saved-layout',
       saved: savedEvidence,

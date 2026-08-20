@@ -4,6 +4,8 @@ import { connectionEndpoint, KxConnection } from './connection';
 import {
   KX_NOTEBOOK_MIME,
   NotebookV2CreationResult,
+  NotebookTextResultInput,
+  NotebookResultInput,
   PortableKxResult,
   createPortableKxResultV2,
   createPortableKxTextResultV2,
@@ -23,6 +25,7 @@ import {
 import {
   NOTEBOOK_LIVE_RESULT_METADATA_KEY,
   NOTEBOOK_OUTPUT_BINDING_METADATA_KEY,
+  inspectNotebookKxOutputIdentity,
 } from './notebook-message';
 import { NotebookQTargetProfile } from './notebook-q-target';
 import {
@@ -52,6 +55,12 @@ export type DirectQCellRunResult =
   | 'stale'
   | 'write-failed'
   | 'unavailable';
+
+export interface DirectQCellRunFailureDetail {
+  stage: 'applyEdit' | 'verify' | 'live-bind' | 'unexpected';
+  detail: string;
+  issued?: boolean;
+}
 
 export type DirectQCellRunOptions =
   | {
@@ -83,6 +92,7 @@ interface PreparedCellResult {
   live?: PreparedLiveResult;
   canceled?: 'before-issue' | 'after-issue';
   stale?: boolean;
+  issued?: boolean;
 }
 
 interface MixedCellSnapshot {
@@ -98,7 +108,25 @@ interface MixedCellSnapshot {
 interface MixedOutputWriteResult {
   status: 'executed' | 'canceled' | 'stale' | 'write-failed' | 'unavailable';
   cell?: vscode.NotebookCell;
+  failure?: DirectQCellRunFailureDetail;
 }
+
+interface KxOutputIdentity {
+  liveId: string;
+  outputId: string;
+  payload: PortableKxResult;
+}
+
+type ParsedKxOutputIdentity =
+  | { status: 'none' }
+  | { status: 'invalid' }
+  | { status: 'valid'; identity: KxOutputIdentity };
+
+type ExpectedKxOutputIdentity = KxOutputIdentity | 'invalid' | undefined;
+
+type MixedOutputVerificationStatus = 'match' | 'pending' | 'foreign';
+
+const MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS = 1000;
 
 export interface DirectQNotebookBridge {
   activeConnection(): KxConnection | undefined;
@@ -124,6 +152,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
   private readonly stateChanged = new vscode.EventEmitter<void>();
   private readonly selectedNotebooks = new Set<string>();
   private readonly activeExecutions = new Set<string>();
+  private readonly lastRunFailures = new Map<string, DirectQCellRunFailureDetail>();
   private readonly allocatedOutputIds = new Set<string>();
   private controller: vscode.NotebookController | undefined;
   private selectionSubscription: vscode.Disposable | undefined;
@@ -190,6 +219,12 @@ export class KxQNotebookRunner implements vscode.Disposable {
     return this.selectedNotebooks.has(notebook.uri.toString());
   }
 
+  public lastRunFailure(
+    cell: Pick<vscode.NotebookCell, 'notebook' | 'document'>
+  ): DirectQCellRunFailureDetail | undefined {
+    return this.lastRunFailures.get(cellExecutionKey(cell.notebook, cell));
+  }
+
   public isDirectControllerRegistered(): boolean {
     return this.controller !== undefined;
   }
@@ -215,6 +250,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
       return 'not-q';
     }
     const executionKey = cellExecutionKey(cell.notebook, cell);
+    this.lastRunFailures.delete(executionKey);
     if (this.activeExecutions.has(executionKey)) {
       return 'busy';
     }
@@ -244,6 +280,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
     this.unregisterController();
     this.stateChanged.dispose();
     this.activeExecutions.clear();
+    this.lastRunFailures.clear();
   }
 
   private syncControllerRegistration(): void {
@@ -330,6 +367,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
       async (_progress, token) => {
         const cancellation = token.onCancellationRequested(() => abortController.abort());
         let liveResultId: string | undefined;
+        let issued = false;
         try {
           const prepared = await this.prepareCellResult(
             cell,
@@ -342,6 +380,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
             options.source,
             () => matchingMixedSourceCell(snapshot) !== undefined
           );
+          issued = prepared.issued === true;
           if (prepared.stale) {
             return snapshot.notebook.isClosed ? 'unavailable' : 'stale';
           }
@@ -368,7 +407,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
             current,
             materialized.output,
             () => !cancellationPrepared &&
-              (token.isCancellationRequested || abortController.signal.aborted)
+              (token.isCancellationRequested || abortController.signal.aborted),
+            cancellationPrepared ? undefined : abortController.signal
           );
           if (written.status === 'canceled') {
             if (liveResultId) {
@@ -377,32 +417,56 @@ export class KxQNotebookRunner implements vscode.Disposable {
             return 'canceled';
           }
           if (written.status !== 'executed' || !written.cell) {
+            if (written.status === 'write-failed' && written.failure) {
+              this.recordRunFailure(snapshot, { ...written.failure, issued });
+            }
             if (liveResultId) {
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
             }
             return written.status;
           }
           if (liveResultId && materialized.liveRegistration) {
-            if (!cellHasLiveResult(written.cell, liveResultId)) {
+            const expectedOutputs = Array.isArray(materialized.output)
+              ? materialized.output
+              : [materialized.output];
+            if (!notebookCellHasExpectedKxIdentity(written.cell, expectedOutputs)) {
+              this.recordRunFailure(snapshot, {
+                stage: 'live-bind',
+                detail: 'The replacement cell did not expose the expected live KX result identity.',
+                issued,
+              });
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
-              return 'stale';
+              return 'write-failed';
             }
             try {
-              this.liveResults.removeCell(
-                snapshot.notebook.uri.toString(),
-                snapshot.cellUri
-              );
+              const replacementCellUri = written.cell.document.uri.toString();
+              if (replacementCellUri !== snapshot.cellUri) {
+                this.liveResults.removeCell(
+                  snapshot.notebook.uri.toString(),
+                  snapshot.cellUri
+                );
+              }
               this.liveResults.rebind(liveResultId, {
                 ...materialized.liveRegistration,
-                cellUri: written.cell.document.uri.toString(),
+                cellUri: replacementCellUri,
               });
             } catch {
+              this.recordRunFailure(snapshot, {
+                stage: 'live-bind',
+                detail: 'The staged live KX result could not be bound to the replacement cell.',
+                issued,
+              });
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
               return 'write-failed';
             }
           }
           return cancellationPrepared ? 'canceled' : 'executed';
         } catch {
+          this.recordRunFailure(snapshot, {
+            stage: 'unexpected',
+            detail: 'The local notebook output update failed before verification completed.',
+            issued,
+          });
           if (liveResultId) {
             this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
           }
@@ -415,11 +479,19 @@ export class KxQNotebookRunner implements vscode.Disposable {
     );
   }
 
+  private recordRunFailure(
+    snapshot: MixedCellSnapshot,
+    failure: DirectQCellRunFailureDetail
+  ): void {
+    this.lastRunFailures.set(mixedCellExecutionKey(snapshot), failure);
+  }
+
   private async applyMixedCellOutput(
     snapshot: MixedCellSnapshot,
     current: vscode.NotebookCell,
     output: CellOutputReplacement,
-    isCanceled: () => boolean
+    isCanceled: () => boolean,
+    cancellationSignal?: AbortSignal
   ): Promise<MixedOutputWriteResult> {
     if (isCanceled()) {
       return { status: 'canceled' };
@@ -433,6 +505,15 @@ export class KxQNotebookRunner implements vscode.Disposable {
 
     const index = current.index;
     const expectedOutputs = Array.isArray(output) ? [...output] : [output];
+    const expectedKxOutput = expectedKxOutputIdentity(expectedOutputs);
+    const committedOutputStatus = (candidate: vscode.NotebookCell): MixedOutputVerificationStatus =>
+      mixedCellCommittedOutputStatus(
+        candidate,
+        snapshot,
+        index,
+        expectedOutputs,
+        expectedKxOutput
+      );
     const replacement = new vscode.NotebookCellData(
       current.kind,
       current.document.getText(),
@@ -442,31 +523,25 @@ export class KxQNotebookRunner implements vscode.Disposable {
     replacement.outputs = expectedOutputs;
 
     let resolveReplacement: (() => void) | undefined;
-    const replacementEvent = new Promise<void>(resolve => {
+    const nextReplacementEvent = (): Promise<void> => new Promise(resolve => {
       resolveReplacement = resolve;
     });
+    let replacementEvent = nextReplacementEvent();
+    const signalReplacement = (): void => {
+      const resolveCurrent = resolveReplacement;
+      replacementEvent = nextReplacementEvent();
+      resolveCurrent?.();
+    };
     const eventSubscription = vscode.workspace.onDidChangeNotebookDocument(event => {
       if (event.notebook !== snapshot.notebook) {
         return;
       }
-      for (const change of event.contentChanges) {
-        if (change.range.start !== index ||
-          !change.removedCells.some(removed =>
-            removed.document.uri.toString() === snapshot.cellUri)) {
-          continue;
-        }
-        const added = change.addedCells.find(candidate =>
-          mixedCellHasCommittedOutputs(candidate, snapshot, index, expectedOutputs)
-        );
-        if (added) {
-          resolveReplacement?.();
-        }
-      }
-      if (event.cellChanges.some(change =>
-        change.outputs !== undefined &&
-        mixedCellHasCommittedOutputs(change.cell, snapshot, index, expectedOutputs)
-      )) {
-        resolveReplacement?.();
+      if (event.contentChanges.some(change => change.range.start <= index) ||
+        event.cellChanges.some(change =>
+          change.outputs !== undefined &&
+          change.cell.index === index
+        )) {
+        signalReplacement();
       }
     });
 
@@ -491,6 +566,10 @@ export class KxQNotebookRunner implements vscode.Disposable {
             : matchingMixedCell(snapshot)
               ? 'write-failed'
               : 'stale',
+          failure: {
+            stage: 'applyEdit',
+            detail: 'VS Code threw while applying the notebook cell replacement.',
+          },
         };
       }
       if (!applied) {
@@ -500,33 +579,57 @@ export class KxQNotebookRunner implements vscode.Disposable {
             : matchingMixedCell(snapshot)
               ? 'write-failed'
               : 'stale',
+          failure: {
+            stage: 'applyEdit',
+            detail: 'VS Code rejected the notebook cell replacement.',
+          },
         };
       }
       if (snapshot.notebook.isClosed) {
         return { status: 'unavailable' };
       }
 
-      let written = notebookCellAt(snapshot.notebook, index);
-      if (!written || !mixedCellHasCommittedOutputs(
-        written,
-        snapshot,
-        index,
-        expectedOutputs
-      )) {
-        await waitForNotebookReplacement(replacementEvent);
-        written = notebookCellAt(snapshot.notebook, index);
+      const verificationDeadline = Date.now() + MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS;
+      let deadlineExpired = false;
+      let cancellationObserved = false;
+      while (true) {
+        const nextEvent = replacementEvent;
+        if (snapshot.notebook.isClosed) {
+          return { status: 'unavailable' };
+        }
+        const written = notebookCellAt(snapshot.notebook, index);
+        const verification = written
+          ? committedOutputStatus(written)
+          : 'pending';
+        if (written && verification === 'match') {
+          return { status: 'executed', cell: written };
+        }
+        if (cancellationObserved || isCanceled()) {
+          return { status: 'canceled' };
+        }
+        if (!written || !mixedCellSourceAtIndexMatchesSnapshot(written, snapshot, index)) {
+          return { status: 'stale' };
+        }
+        if (expectedKxOutput === 'invalid' ||
+          deadlineExpired || Date.now() >= verificationDeadline) {
+          return {
+            status: 'write-failed',
+            failure: {
+              stage: 'verify',
+              detail: verification === 'foreign'
+                ? 'VS Code committed a replacement cell with a different or invalid KX output identity.'
+                : `VS Code reported the notebook edit was applied, but the replacement cell did not expose the expected ${expectedKxOutput ? 'KX output identity' : 'output'} within ${MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS} ms.`,
+            },
+          };
+        }
+        const waitStatus = await waitForNotebookReplacement(
+          nextEvent,
+          verificationDeadline,
+          cancellationSignal
+        );
+        cancellationObserved = waitStatus === 'canceled';
+        deadlineExpired = waitStatus === 'deadline';
       }
-      if (!written || !mixedCellHasCommittedOutputs(
-        written,
-        snapshot,
-        index,
-        expectedOutputs
-      )) {
-        return {
-          status: snapshot.notebook.isClosed ? 'unavailable' : 'write-failed',
-        };
-      }
-      return { status: 'executed', cell: written };
     } finally {
       eventSubscription.dispose();
     }
@@ -677,6 +780,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
     let issued = false;
     const canceledOutput = (): PreparedCellResult => ({
       success: undefined,
+      issued,
       canceled: issued ? 'after-issue' : 'before-issue',
       output: issued
         ? textOutput(`${runLabel} ${CANCELED_AFTER_ISSUE_SUFFIX}`)
@@ -733,11 +837,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
       if (token.isCancellationRequested || signal.aborted) {
         return canceledOutput();
       }
+      issued = true;
       const elapsedMs = Date.now() - startedAt;
       const settings = directNotebookSettings();
       const outputId = this.uniqueOutputId();
       return {
         success: true,
+        issued,
         live: {
           items: this.directQResultOutputItems(
             value,
@@ -771,6 +877,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
         : '';
       return {
         success: false,
+        issued,
         output: errorOutput(
           `${runLabel} failed${context}: ${detail}. ` +
           'Use KX: Test Connection to verify that profile.'
@@ -930,32 +1037,35 @@ export function directQPortableResult(
       columnCount: panel.mode === 'grid' ? panel.result.columns.length : 0,
     };
   }
-  return panel.mode === 'text'
-    ? createPortableKxTextResultV2({
+  if (panel.mode === 'text') {
+    const input: NotebookTextResultInput = {
       text: panel.text,
       rowLimit: settings.rowLimit,
       byteLimit: settings.byteLimit,
       label: `${connection.name} • Direct IPC • ${connection.database}`,
       elapsedMs,
       marker: 'direct-ipc',
-    }, { outputId, persistenceMode: 'full' })
-    : createPortableKxResultV2({
-      columns: panel.result.columns.map((name, index) => ({
-        name,
-        type: panel.result.columnTypes?.[index] || 'mixed',
-      })),
-      ...(panel.result.keyColumnOrdinals === undefined
-        ? {}
-        : { keyColumnOrdinals: panel.result.keyColumnOrdinals }),
-      rows: [],
-      cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
-      rowCount: panel.result.rowCount,
-      rowLimit: settings.rowLimit,
-      byteLimit: settings.byteLimit,
-      label: `${connection.name} • Direct IPC • ${connection.database}`,
-      elapsedMs,
-      marker: 'direct-ipc',
-    }, { outputId, persistenceMode: 'full' });
+    };
+    return createPortableKxTextResultV2(input, { outputId, persistenceMode: 'full' });
+  }
+  const input: NotebookResultInput = {
+    columns: panel.result.columns.map((name, index) => ({
+      name,
+      type: panel.result.columnTypes?.[index] || 'mixed',
+    })),
+    ...(panel.result.keyColumnOrdinals === undefined
+      ? {}
+      : { keyColumnOrdinals: panel.result.keyColumnOrdinals }),
+    rows: [],
+    cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
+    rowCount: panel.result.rowCount,
+    rowLimit: settings.rowLimit,
+    byteLimit: settings.byteLimit,
+    label: `${connection.name} • Direct IPC • ${connection.database}`,
+    elapsedMs,
+    marker: 'direct-ipc',
+  };
+  return createPortableKxResultV2(input, { outputId, persistenceMode: 'full' });
 }
 
 export function notebookOutputItems(
@@ -977,10 +1087,8 @@ export function notebookOutputItems(
 export function directQResultDisplayOptions(): QResultDisplayOptions {
   const configuration = vscode.workspace.getConfiguration('vscode-kdb.results.viewer');
   return {
-    functionDisplayStrategy: configuration.get<string>('functionDisplayStrategy'),
     dictionaryDisplayStrategy: configuration.get<string>('dictionaryDisplayStrategy'),
     listDisplayStrategy: configuration.get<string>('listDisplayStrategy'),
-    objectDisplayStrategy: configuration.get<string>('objectDisplayStrategy'),
   };
 }
 
@@ -1107,18 +1215,123 @@ function mixedCellMatchesSnapshot(
     executionSummaryKey(cell.executionSummary) === snapshot.executionSummary;
 }
 
-function mixedCellHasCommittedOutputs(
+function mixedCellExecutionKey(snapshot: MixedCellSnapshot): string {
+  return `${snapshot.notebook.uri.toString()}\0${snapshot.cellUri}`;
+}
+
+function mixedCellSourceAtIndexMatchesSnapshot(
   cell: vscode.NotebookCell,
   snapshot: MixedCellSnapshot,
-  index: number,
-  expectedOutputs: readonly vscode.NotebookCellOutput[]
+  index: number
 ): boolean {
   return cell.notebook === snapshot.notebook &&
     cell.index === index &&
     cell.kind === vscode.NotebookCellKind.Code &&
     cell.document.languageId === snapshot.languageId &&
-    cell.document.getText() === snapshot.source &&
-    notebookCellOutputsEqual(cell.outputs, expectedOutputs);
+    cell.document.getText() === snapshot.source;
+}
+
+function mixedCellCommittedOutputStatus(
+  cell: vscode.NotebookCell,
+  snapshot: MixedCellSnapshot,
+  index: number,
+  expectedOutputs: readonly vscode.NotebookCellOutput[],
+  expectedKxOutput: ExpectedKxOutputIdentity
+): MixedOutputVerificationStatus {
+  if (!mixedCellSourceAtIndexMatchesSnapshot(cell, snapshot, index)) {
+    return 'pending';
+  }
+  if (mixedCellMatchesSnapshot(cell, snapshot)) {
+    return 'pending';
+  }
+  if (expectedKxOutput) {
+    return kxOutputsContainExpectedIdentity(
+      cell.outputs,
+      expectedOutputs.length,
+      expectedKxOutput
+    );
+  }
+  return notebookCellOutputsEqual(cell.outputs, expectedOutputs)
+    ? 'match'
+    : 'pending';
+}
+
+function expectedKxOutputIdentity(
+  outputs: readonly vscode.NotebookCellOutput[]
+): ExpectedKxOutputIdentity {
+  let expected: KxOutputIdentity | undefined;
+  for (const output of outputs) {
+    const parsed = notebookOutputKxIdentity(output);
+    if (parsed.status === 'invalid') {
+      return 'invalid';
+    }
+    if (parsed.status !== 'valid') {
+      continue;
+    }
+    if (expected) {
+      return 'invalid';
+    }
+    expected = parsed.identity;
+  }
+  return expected;
+}
+
+function kxOutputsContainExpectedIdentity(
+  outputs: readonly vscode.NotebookCellOutput[],
+  expectedOutputCount: number,
+  expected: ExpectedKxOutputIdentity
+): MixedOutputVerificationStatus {
+  if (expected === 'invalid') {
+    return 'foreign';
+  }
+  if (!expected) {
+    return 'pending';
+  }
+  if (outputs.length !== expectedOutputCount) {
+    return 'pending';
+  }
+  let actual: KxOutputIdentity | undefined;
+  for (const output of outputs) {
+    const parsed = notebookOutputKxIdentity(output);
+    if (parsed.status === 'invalid') {
+      return 'foreign';
+    }
+    if (parsed.status !== 'valid') {
+      continue;
+    }
+    if (actual) {
+      return 'foreign';
+    }
+    actual = parsed.identity;
+  }
+  if (!actual) {
+    return 'pending';
+  }
+  return actual.liveId === expected.liveId &&
+    actual.outputId === expected.outputId &&
+    notebookJsonEqual(actual.payload, expected.payload)
+    ? 'match'
+    : 'foreign';
+}
+
+function notebookOutputKxIdentity(
+  output: vscode.NotebookCellOutput
+): ParsedKxOutputIdentity {
+  const inspected = inspectNotebookKxOutputIdentity(output.metadata, output.items);
+  if (inspected.status === 'valid' && inspected.identity.live) {
+    return {
+      status: 'valid',
+      identity: {
+        liveId: inspected.identity.live.id,
+        outputId: inspected.identity.binding.id,
+        payload: inspected.identity.payload,
+      },
+    };
+  }
+  if (inspected.status === 'none') {
+    return { status: 'none' };
+  }
+  return { status: 'invalid' };
 }
 
 function notebookCellOutputsEqual(
@@ -1199,26 +1412,56 @@ function notebookCellAt(
   return index >= 0 && index < notebook.cellCount ? notebook.cellAt(index) : undefined;
 }
 
-async function waitForNotebookReplacement(event: Promise<void>): Promise<void> {
+async function waitForNotebookReplacement(
+  event: Promise<void>,
+  deadline: number,
+  cancellationSignal?: AbortSignal
+): Promise<'changed' | 'deadline' | 'canceled'> {
+  if (cancellationSignal?.aborted) {
+    return 'canceled';
+  }
   let timer: ReturnType<typeof setTimeout> | undefined;
+  let onCanceled: (() => void) | undefined;
   try {
-    await Promise.race([
-      event,
-      new Promise<void>(resolve => {
-        timer = setTimeout(resolve, 250);
+    // VS Code/Jupyter can settle serializer-owned cell output after applyEdit
+    // resolves, potentially through more than one intermediate state. Each
+    // event prompts another strict identity check; the absolute deadline keeps
+    // even a noisy stream of unrelated changes bounded.
+    return await Promise.race([
+      event.then(() => 'changed' as const),
+      new Promise<'deadline'>(resolve => {
+        timer = setTimeout(
+          () => resolve('deadline'),
+          Math.max(0, deadline - Date.now())
+        );
       }),
+      ...(cancellationSignal
+        ? [new Promise<'canceled'>(resolve => {
+          onCanceled = () => resolve('canceled');
+          cancellationSignal.addEventListener('abort', onCanceled, { once: true });
+          if (cancellationSignal.aborted) {
+            onCanceled();
+          }
+        })]
+        : []),
     ]);
   } finally {
     if (timer) {
       clearTimeout(timer);
     }
+    if (onCanceled) {
+      cancellationSignal?.removeEventListener('abort', onCanceled);
+    }
   }
 }
 
-function cellHasLiveResult(cell: vscode.NotebookCell, id: string): boolean {
-  return cell.outputs.some(output => {
-    const value = output.metadata?.[KX_NOTEBOOK_LIVE_METADATA_KEY];
-    return !!value && typeof value === 'object' &&
-      (value as { id?: unknown }).id === id;
-  });
+export function notebookCellHasExpectedKxIdentity(
+  cell: Pick<vscode.NotebookCell, 'outputs'>,
+  expectedOutputs: readonly vscode.NotebookCellOutput[]
+): boolean {
+  return kxOutputsContainExpectedIdentity(
+    cell.outputs,
+    expectedOutputs.length,
+    expectedKxOutputIdentity(expectedOutputs)
+  ) === 'match';
 }

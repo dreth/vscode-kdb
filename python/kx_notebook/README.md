@@ -11,7 +11,7 @@ but the extension never changes a selected kernel environment automatically.
 
 This package is the separate **Python-controller evaluator route**. Keep the
 normal Python/IPython controller selected and use `%%q` only when Python must
-own the q evaluator inside that kernel. KX for VS Code 0.2.18 defaults to a
+own the q evaluator inside that kernel. KX for VS Code 0.2.20 defaults to a
 different Python-first workflow for Direct IPC: **Make q Cell (KX)** supplies q
 language/highlighting, the globally active saved profile supplies the current target,
 and **Run q Cell (KX)** executes without changing the selected Python kernel.

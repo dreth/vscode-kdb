@@ -321,12 +321,11 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
     );
     assertChartNavigator(edgeResized.navigator, 'saved-chart navigator after edge resize');
     await delay(600);
-    const settledEdgeResize = await notebookState(session.webview);
-    if (!settledEdgeResize || !sameRange(settledEdgeResize.chart, edgeResized.chart)) {
-      throw new Error(
-        `Saved-chart navigator edge settlement did not preserve the native range; state ${JSON.stringify(settledEdgeResize)}`
-      );
-    }
+    await waitState(
+      session.webview,
+      state => validChartRange(state.chart) && sameRange(state.chart, edgeResized.chart),
+      'saved-chart navigator edge settlement'
+    );
 
     await nativeNavigatorDrag(session, 'window', 0.08);
     const windowPanned = await waitState(
@@ -342,12 +341,11 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
     );
     assertChartNavigator(windowPanned.navigator, 'saved-chart navigator after window pan');
     await delay(600);
-    const settledWindowPan = await notebookState(session.webview);
-    if (!settledWindowPan || !sameRange(settledWindowPan.chart, windowPanned.chart)) {
-      throw new Error(
-        `Saved-chart navigator window settlement did not preserve the native range; state ${JSON.stringify(settledWindowPan)}`
-      );
-    }
+    await waitState(
+      session.webview,
+      state => validChartRange(state.chart) && sameRange(state.chart, windowPanned.chart),
+      'saved-chart navigator window settlement'
+    );
 
     await nativeKey(session, '.kx-chart-navigator-window', 'ArrowRight');
     const keyboardPanned = await waitState(
@@ -363,12 +361,11 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
     );
     assertChartNavigator(keyboardPanned.navigator, 'saved-chart navigator after ArrowRight');
     await delay(600);
-    const settledKeyboardPan = await notebookState(session.webview);
-    if (!settledKeyboardPan || !sameRange(settledKeyboardPan.chart, keyboardPanned.chart)) {
-      throw new Error(
-        `Saved-chart navigator keyboard settlement did not preserve the native range; state ${JSON.stringify(settledKeyboardPan)}`
-      );
-    }
+    await waitState(
+      session.webview,
+      state => validChartRange(state.chart) && sameRange(state.chart, keyboardPanned.chart),
+      'saved-chart navigator keyboard settlement'
+    );
     await nativeKey(session, '.kx-chart-navigator-window', 'Home');
     const reset = await waitState(
       session.webview,
@@ -703,7 +700,7 @@ async function notebookState(client) {
       savedSearchFocused: !!savedSearch && active === savedSearch,
       chartPanel: !!root.querySelector('.kx-chart-panel'),
       tableVisible: !!root.querySelector('.kx-table-wrap'),
-      chartReady: !!host && !!host.querySelector('.u-over') && !!host.querySelector('canvas'),
+      chartReady: !!host && !!host.querySelector('.u-over') && !!host.querySelector('.uplot'),
       chartControlType: chartTypeControl ? chartTypeControl.value : '',
       chartControlFocused: !!chartTypeControl && active === chartTypeControl,
       chartRenderFocused: !!chartRender && active === chartRender,

@@ -51,6 +51,8 @@ export interface LineChartRequest {
   requestId: number;
   maxSourceRows?: number;
   maxSampledPoints?: number;
+  samplingStrategy?: 'point-count' | 'temporal-auto' | 'temporal-fixed';
+  temporalBucketIntervalMs?: number;
 }
 
 export interface LineChartSeries {
@@ -128,8 +130,25 @@ export interface LineChartData {
   eligibleRowCount: number;
   sampledPointCount: number;
   algorithm: string;
+  samplingStrategy?: 'point-count' | 'temporal-auto' | 'temporal-fixed';
+  temporalBucketIntervalMs?: number;
+  temporalBucketOrigin?: 0;
+  temporalReusedPointCount?: number;
+  temporalBuiltPointCount?: number;
   sorted: boolean;
   warnings: string[];
+}
+
+export interface TemporalPanChartCache {
+  key: string;
+  min: number;
+  max: number;
+  data: LineChartData;
+}
+
+export interface TemporalPanChartBuild {
+  data: LineChartData;
+  cache?: TemporalPanChartCache;
 }
 
 interface ChartPoint {
@@ -270,6 +289,397 @@ export function buildChartData(table: ColumnarPanelResult, request: LineChartReq
   return buildXyChartData(table, request, chartType);
 }
 
+/** Reuse only the overlapping summaries of one bounded, compatible temporal viewport. */
+export function buildChartDataWithTemporalPanReuse(
+  table: ColumnarPanelResult,
+  request: LineChartRequest,
+  previous?: TemporalPanChartCache
+): TemporalPanChartBuild {
+  const key = temporalPanCacheKey(request);
+  const min = Number(request.xMin);
+  const max = Number(request.xMax);
+  const interval = Number(request.temporalBucketIntervalMs);
+  const chartType = normalizeChartType(request.chartType);
+  const cleanBuild = (): TemporalPanChartBuild => {
+    const data = buildChartData(table, request);
+    const responseKey = data.temporalBucketIntervalMs
+      ? temporalPanCacheKey({ ...request, temporalBucketIntervalMs: data.temporalBucketIntervalMs })
+      : key;
+    return { data, cache: temporalPanCacheForResponse(responseKey, min, max, data) };
+  };
+  const eligible = request.samplingStrategy === 'temporal-fixed' &&
+    Number.isFinite(min) && Number.isFinite(max) && min < max &&
+    Number.isFinite(interval) && interval > 0 &&
+    !String(request.groupByColumn || '').trim() &&
+    (chartType === 'line' || chartType === 'scatter' || chartType === 'step');
+
+  if (!eligible || !previous || previous.key !== key ||
+    previous.data.xKind !== 'temporal' || previous.max < min || previous.min > max) {
+    return cleanBuild();
+  }
+
+  const reusable = temporalReusableBucketRange(min, max, previous.min, previous.max, interval);
+  if (!reusable) {
+    return cleanBuild();
+  }
+  const pieces: Array<{ data: LineChartData; reused: boolean }> = [];
+  try {
+    if (min < reusable.start) {
+      const leftContext = buildChartData(table, { ...request, xMin: min, xMax: reusable.start + interval });
+      if (!leftContext.x.some(x => x >= reusable.start)) {
+        return cleanBuild();
+      }
+      const leftRequestFirstX = leftContext.xDomain?.min;
+      const left = filterTemporalChartData(
+        leftContext,
+        x => x < reusable.start || (Number.isFinite(leftRequestFirstX) && x === leftRequestFirstX)
+      );
+      if (left) {
+        pieces.push({ data: left, reused: false });
+      }
+    }
+    const reused = sliceTemporalChartDataByBuckets(
+      previous.data,
+      reusable.start,
+      reusable.end,
+      interval
+    );
+    if (!reused) {
+      return cleanBuild();
+    }
+    pieces.push({ data: reused, reused: true });
+    if (max > reusable.end) {
+      const rightContext = buildChartData(table, { ...request, xMin: reusable.end - interval, xMax: max });
+      if (!rightContext.x.some(x => x < reusable.end)) {
+        return cleanBuild();
+      }
+      const rightRequestLastX = rightContext.xDomain?.max;
+      const right = filterTemporalChartData(
+        rightContext,
+        x => x >= reusable.end || (Number.isFinite(rightRequestLastX) && x === rightRequestLastX)
+      );
+      if (right) {
+        pieces.push({ data: right, reused: false });
+      }
+    }
+  } catch (error) {
+    if (error instanceof ChartDataError) {
+      return cleanBuild();
+    }
+    throw error;
+  }
+
+  if (!pieces.every(piece => temporalPieceIsUncapped(piece.data))) {
+    return cleanBuild();
+  }
+  const summary = temporalRequestSummary(table, request, previous.data.xKind, pieces);
+  if (!summary) {
+    return cleanBuild();
+  }
+
+  const data = mergeTemporalChartPieces(
+    pieces,
+    request,
+    summary.xDomain,
+    summary.eligibleRowCount,
+    summary.warnings
+  );
+  if (data.sampledPointCount > CHART_ORDINARY_TARGET_POINTS ||
+    data.x.length > CHART_ORDINARY_TARGET_POINTS) {
+    return cleanBuild();
+  }
+  return { data, cache: { key, min, max, data } };
+}
+
+function temporalPanCacheKey(request: LineChartRequest): string {
+  return JSON.stringify([
+    request.version,
+    normalizeChartType(request.chartType),
+    request.xColumn,
+    request.yColumns || [],
+    String(request.groupByColumn || ''),
+    Number(request.temporalBucketIntervalMs) || 0,
+    positiveInteger(request.maxSourceRows, CHART_MAX_SOURCE_ROWS),
+    positiveInteger(request.maxSampledPoints, CHART_MAX_SAMPLED_POINTS),
+  ]);
+}
+
+function temporalPanCacheForResponse(
+  key: string,
+  min: number,
+  max: number,
+  data: LineChartData
+): TemporalPanChartCache | undefined {
+  if (data.xKind !== 'temporal' || data.temporalBucketOrigin !== 0 ||
+    !Number.isFinite(min) || !Number.isFinite(max) || min >= max || data.groupByColumn ||
+    !/^temporal-minmax\/[^+]+$/.test(data.algorithm) ||
+    (data.chartType !== 'line' && data.chartType !== 'scatter' && data.chartType !== 'step')) {
+    return undefined;
+  }
+  return { key, min, max, data };
+}
+
+function temporalReusableBucketRange(
+  min: number,
+  max: number,
+  previousMin: number,
+  previousMax: number,
+  interval: number
+): { start: number; end: number } | undefined {
+  const lower = Math.max(min, previousMin);
+  const upper = Math.min(max, previousMax);
+  const firstStart = Math.floor(lower / interval) * interval + interval;
+  const lastStart = Math.floor(nextDown(upper - interval) / interval) * interval;
+  if (!Number.isFinite(firstStart) || !Number.isFinite(lastStart) || firstStart > lastStart) {
+    return undefined;
+  }
+  return { start: firstStart, end: lastStart + interval };
+}
+
+function nextDown(value: number): number {
+  if (!Number.isFinite(value)) {
+    return value;
+  }
+  if (value === 0) {
+    return -Number.MIN_VALUE;
+  }
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  view.setFloat64(0, value, false);
+  const bits = view.getBigUint64(0, false);
+  view.setBigUint64(0, value > 0 ? bits - 1n : bits + 1n, false);
+  return view.getFloat64(0, false);
+}
+
+function sliceTemporalChartDataByBuckets(
+  data: LineChartData,
+  minBucketStart: number,
+  maxBucketEnd: number,
+  interval: number
+): LineChartData | undefined {
+  return filterTemporalChartData(data, x => {
+    const bucketStart = Math.floor(x / interval) * interval;
+    return bucketStart >= minBucketStart && bucketStart < maxBucketEnd;
+  });
+}
+
+function filterTemporalChartData(data: LineChartData, include: (x: number) => boolean): LineChartData | undefined {
+  const indexes: number[] = [];
+  data.x.forEach((x, index) => {
+    if (include(x)) indexes.push(index);
+  });
+  if (indexes.length === 0) {
+    return undefined;
+  }
+  return {
+    ...data,
+    x: indexes.map(index => data.x[index]),
+    xText: indexes.map(index => data.xText[index]),
+    series: data.series.map(series => ({
+      ...series,
+      values: indexes.map(index => series.values[index]),
+      ...(series.gapFlags ? { gapFlags: indexes.map(index => !!series.gapFlags![index]) } : {}),
+      ...(series.gapBefore ? { gapBefore: indexes.map(index => !!series.gapBefore![index]) } : {}),
+    })),
+    sampledPointCount: indexes.length,
+  };
+}
+
+function temporalPieceIsUncapped(data: LineChartData): boolean {
+  return /^temporal-minmax\/[^+]+$/.test(data.algorithm);
+}
+
+function temporalRequestSummary(
+  table: ColumnarPanelResult,
+  request: LineChartRequest,
+  xKind: ChartColumnKind,
+  pieces: Array<{ data: LineChartData; reused: boolean }>
+): { xDomain: { min: number; max: number }; eligibleRowCount: number; warnings: string[] } | undefined {
+  const sourceWarnings = new Set<string>();
+  for (const piece of pieces) {
+    for (const warning of piece.data.warnings) {
+      if (isTemporalRangeWarning(warning, xKind) || warning === 'x values were sorted for this chart; table order was not changed.') {
+        continue;
+      }
+      if (warning === 'Chart source exceeds the default row guard. Very large chartMaxSourceRows values can make rendering slow or temporarily block the extension host, especially with multiple y columns.') {
+        sourceWarnings.add(warning);
+        continue;
+      }
+      return undefined;
+    }
+  }
+
+  const xColumnIndex = table.columns.indexOf(request.xColumn);
+  if (xColumnIndex === -1) {
+    return undefined;
+  }
+  const xRange = normalizedChartXRange(request);
+  let droppedX = 0;
+  let rangeExcluded = 0;
+  let eligibleRowCount = 0;
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let sorted = false;
+  let previousX = -Infinity;
+  for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex++) {
+    const x = normalizeXValue(table.cellValue(rowIndex, xColumnIndex), xKind);
+    if (!x) {
+      droppedX += 1;
+      continue;
+    }
+    if (xRange && (x.value < xRange.min || x.value > xRange.max)) {
+      rangeExcluded += 1;
+      continue;
+    }
+    eligibleRowCount += 1;
+    minX = Math.min(minX, x.value);
+    maxX = Math.max(maxX, x.value);
+    if (x.value < previousX) {
+      sorted = true;
+    }
+    previousX = x.value;
+  }
+  if (eligibleRowCount === 0 || sorted) {
+    return undefined;
+  }
+
+  const warnings = Array.from(sourceWarnings);
+  if (droppedX > 0) {
+    warnings.push(`${droppedX} row${droppedX === 1 ? '' : 's'} dropped because x was null, non-finite, or not ${xKind}.`);
+  }
+  if (rangeExcluded > 0) {
+    warnings.push(`${rangeExcluded} row${rangeExcluded === 1 ? '' : 's'} outside the selected x range were skipped.`);
+  }
+  return {
+    xDomain: { min: minX, max: maxX },
+    eligibleRowCount,
+    warnings,
+  };
+}
+
+function isTemporalRangeWarning(warning: string, xKind: ChartColumnKind): boolean {
+  return warning === `1 row dropped because x was null, non-finite, or not ${xKind}.` ||
+    new RegExp(`^\\d+ rows dropped because x was null, non-finite, or not ${xKind}\\.$`).test(warning) ||
+    warning === '1 row outside the selected x range was skipped.' ||
+    /^\d+ rows outside the selected x range were skipped\.$/.test(warning);
+}
+
+function mergeTemporalChartPieces(
+  pieces: Array<{ data: LineChartData; reused: boolean }>,
+  request: LineChartRequest,
+  xDomain: { min: number; max: number },
+  eligibleRowCount: number,
+  warnings: string[]
+): LineChartData {
+  interface TemporalMergeRecord {
+    x: number;
+    xText: string;
+    values: Array<number | null>;
+    gapFlags: boolean[];
+    gapBefore: boolean[];
+    reused: boolean;
+    firstOrder: number;
+  }
+
+  const mergeRecordOverlap = (
+    record: TemporalMergeRecord,
+    overlap: TemporalMergeRecord
+  ): TemporalMergeRecord => ({
+    ...record,
+    gapFlags: record.gapFlags.map((value, index) => value || overlap.gapFlags[index]),
+    gapBefore: record.gapBefore.map((value, index) => value || overlap.gapBefore[index]),
+    reused: record.reused || overlap.reused,
+  });
+  const records = new Map<string, {
+    firstOrder: number;
+    occurrences: TemporalMergeRecord[];
+  }>();
+  let nextOrder = 0;
+  pieces.forEach(piece => {
+    const pieceRecords = new Map<string, TemporalMergeRecord[]>();
+    piece.data.x.forEach((x, pointIndex) => {
+      const values = piece.data.series.map(series => series.values[pointIndex]);
+      const key = JSON.stringify([x, values]);
+      const gapFlags = piece.data.series.map(series => !!series.gapFlags?.[pointIndex]);
+      const gapBefore = piece.data.series.map(series => !!series.gapBefore?.[pointIndex]);
+      const occurrences = pieceRecords.get(key);
+      const record = {
+        x,
+        xText: piece.data.xText[pointIndex],
+        values,
+        gapFlags,
+        gapBefore,
+        reused: piece.reused,
+        firstOrder: 0,
+      };
+      if (occurrences) {
+        occurrences.push(record);
+      } else {
+        pieceRecords.set(key, [record]);
+      }
+    });
+    pieceRecords.forEach((occurrences, key) => {
+      const existing = records.get(key);
+      if (!existing) {
+        const firstOrder = nextOrder++;
+        records.set(key, {
+          firstOrder,
+          occurrences: occurrences.map(record => ({ ...record, firstOrder })),
+        });
+        return;
+      }
+      if (occurrences.length > existing.occurrences.length) {
+        existing.occurrences = occurrences.map((record, index) => {
+          const next = { ...record, firstOrder: existing.firstOrder };
+          return existing.occurrences[index]
+            ? mergeRecordOverlap(next, existing.occurrences[index])
+            : next;
+        });
+        return;
+      }
+      occurrences.forEach((record, index) => {
+        existing.occurrences[index] = mergeRecordOverlap(
+          existing.occurrences[index],
+          { ...record, firstOrder: existing.firstOrder }
+        );
+      });
+    });
+  });
+  const merged = Array.from(records.values())
+    .flatMap(record => record.occurrences.map((occurrence, duplicateOrdinal) => ({
+      ...occurrence,
+      duplicateOrdinal,
+    })))
+    .sort((left, right) =>
+      left.x - right.x ||
+      left.firstOrder - right.firstOrder ||
+      left.duplicateOrdinal - right.duplicateOrdinal
+    );
+  const first = pieces[0].data;
+  const reusedPointCount = merged.filter(record => record.reused).length;
+  const builtPointCount = merged.length - reusedPointCount;
+  return {
+    ...first,
+    version: request.version,
+    requestId: request.requestId,
+    x: merged.map(record => record.x),
+    xText: merged.map(record => record.xText),
+    xDomain,
+    series: first.series.map((series, seriesIndex) => ({
+      ...series,
+      values: merged.map(record => record.values[seriesIndex]),
+      ...(series.gapFlags ? { gapFlags: merged.map(record => record.gapFlags[seriesIndex]) } : {}),
+      ...(series.gapBefore ? { gapBefore: merged.map(record => record.gapBefore[seriesIndex]) } : {}),
+    })),
+    eligibleRowCount,
+    sampledPointCount: merged.length,
+    algorithm: `${first.algorithm}+overlap-cache`,
+    temporalReusedPointCount: reusedPointCount,
+    temporalBuiltPointCount: builtPointCount,
+    warnings,
+  };
+}
+
 export function normalizeChartType(value: unknown): ChartType {
   switch (String(value || '').toLowerCase()) {
     case 'scatter':
@@ -330,14 +740,32 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
   const preparedPoints = chartType === 'bar' || !!source.groupColumnName
     ? consolidateChartPointsByX(finiteGroupedPoints, grouped.series, chartType, warnings)
     : finiteGroupedPoints;
+  const temporalSampling = source.xOption.kind === 'temporal' && !source.groupColumnName &&
+    chartType !== 'bar' && request.samplingStrategy !== undefined &&
+    request.samplingStrategy !== 'point-count';
+  const temporalIntervalMs = temporalSampling
+    ? request.samplingStrategy === 'temporal-fixed'
+      ? (Number.isFinite(request.temporalBucketIntervalMs) && request.temporalBucketIntervalMs! > 0
+        ? request.temporalBucketIntervalMs!
+        : 1)
+      : temporalAutoInterval(preparedPoints, grouped.series.length)
+    : undefined;
   const sampled = chartType === 'bar'
     ? downsampleBarClusters(preparedPoints, targetPointCount, warnings)
-    : downsampleMinMax(
-      preparedPoints,
-      grouped.series.length,
-      targetPointCount,
-      chartType === 'line' || chartType === 'step'
-    );
+    : temporalSampling
+      ? downsampleTemporalMinMax(
+        preparedPoints,
+        grouped.series.length,
+        temporalIntervalMs!,
+        chartType === 'line' || chartType === 'step',
+        targetPointCount
+      )
+      : downsampleMinMax(
+        preparedPoints,
+        grouped.series.length,
+        targetPointCount,
+        chartType === 'line' || chartType === 'step'
+      );
   // Keep the navigator on the full valid-X domain. Missing-Y edge rows are
   // not eligible plotted points, but still define the source domain.
   const xDomain = { min: points[0].x, max: points[points.length - 1].x };
@@ -374,6 +802,9 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
     eligibleRowCount,
     sampledPointCount: sampled.points.length,
     algorithm: sampled.algorithm,
+    samplingStrategy: temporalSampling ? request.samplingStrategy : 'point-count',
+    temporalBucketIntervalMs: temporalIntervalMs,
+    temporalBucketOrigin: temporalSampling ? 0 : undefined,
     sorted,
     warnings,
   };
@@ -1636,6 +2067,78 @@ function sourceGapBeforeSampledPoints(
     previousFiniteX = sampled.x;
   }
   return result;
+}
+
+function temporalAutoInterval(points: readonly ChartPoint[], seriesCount: number): number {
+  if (points.length < 2) {
+    return 1;
+  }
+  const span = Math.max(1, points[points.length - 1].x - points[0].x);
+  const picksPerBucket = Math.max(2, seriesCount * 2 + seriesCount);
+  const bucketTarget = Math.max(1, Math.floor((CHART_ORDINARY_TARGET_POINTS - 2) / picksPerBucket));
+  const raw = span / bucketTarget;
+  const magnitude = 10 ** Math.floor(Math.log10(Math.max(1, raw)));
+  const normalized = raw / magnitude;
+  const factor = normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10;
+  return factor * magnitude;
+}
+
+function downsampleTemporalMinMax(
+  points: ChartPoint[],
+  seriesCount: number,
+  intervalMs: number,
+  preserveSourceGaps: boolean,
+  maxPoints: number
+): { points: ChartPoint[]; algorithm: string } {
+  if (points.length <= 2) {
+    return { points, algorithm: `temporal-minmax/${intervalMs}ms@0` };
+  }
+  const selected: boolean[] = [];
+  selected[0] = true;
+  selected[points.length - 1] = true;
+  let start = 0;
+  while (start < points.length) {
+    const bucket = Math.floor(points[start].x / intervalMs);
+    let end = start + 1;
+    while (end < points.length && Math.floor(points[end].x / intervalMs) === bucket) {
+      end += 1;
+    }
+    for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex += 1) {
+      let minIndex = -1;
+      let maxIndex = -1;
+      let gapIndex = -1;
+      let minValue = Infinity;
+      let maxValue = -Infinity;
+      for (let index = start; index < end; index += 1) {
+        const value = points[index].y[seriesIndex];
+        if (Number.isFinite(value)) {
+          if ((value as number) < minValue) {
+            minValue = value as number;
+            minIndex = index;
+          }
+          if ((value as number) > maxValue) {
+            maxValue = value as number;
+            maxIndex = index;
+          }
+        } else if (preserveSourceGaps && gapIndex === -1) {
+          gapIndex = index;
+        }
+      }
+      if (minIndex >= 0) selected[minIndex] = true;
+      if (maxIndex >= 0) selected[maxIndex] = true;
+      if (gapIndex >= 0) selected[gapIndex] = true;
+    }
+    start = end;
+  }
+  const temporalPoints = points.filter((_point, index) => selected[index]);
+  if (temporalPoints.length > maxPoints) {
+    const capped = downsampleMinMax(temporalPoints, seriesCount, maxPoints, preserveSourceGaps);
+    return {
+      points: capped.points,
+      algorithm: `temporal-minmax/${intervalMs}ms@0+${capped.algorithm}`,
+    };
+  }
+  return { points: temporalPoints, algorithm: `temporal-minmax/${intervalMs}ms@0` };
 }
 
 function downsampleMinMax(
