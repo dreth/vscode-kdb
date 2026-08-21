@@ -42,7 +42,7 @@ Cancel stops the extension waiting for a result. It does not reliably interrupt 
 
 Connection profiles are managed in the KX Connections view. A profile contains a name, direct host and port, q namespace, optional username, and optional timeout overrides. `.` is the root namespace. Zero or one profile is starred **Active**, and that profile is the sole route for editor queries, direct notebooks, Server Explorer, result reruns, and previews. `KX: Activate Connection` opens the candidate transport before switching the star; a failed switch leaves the prior active route and transport unchanged. Deactivating or removing the active profile leaves no active route rather than choosing another saved or connected profile.
 
-Profile definitions are stored in `vscode-kdb.connections` at User, Workspace, or Workspace Folder scope. Passwords saved through the connection form use VS Code SecretStorage and are not shown when a profile is edited. Settings may instead include a fallback such as `"password": "<plaintext-password>"`, but it is plaintext and may be committed or synchronized; SecretStorage is safer and takes precedence when it has a value.
+Profile definitions are stored in `vscode-kdb.connections` at User, Workspace, or Workspace Folder scope. Passwords saved through the connection form use VS Code SecretStorage and are not shown when a profile is edited. Settings may instead include a fallback such as `"password": "<plaintext-password>"`, but it is plaintext and may be committed or synchronized; SecretStorage is safer and takes precedence whenever an entry exists, including an empty string.
 
 | Setting | Default | Purpose |
 | --- | ---: | --- |

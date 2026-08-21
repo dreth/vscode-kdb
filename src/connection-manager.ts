@@ -1,3 +1,4 @@
+import * as crypto from 'crypto';
 import * as vscode from 'vscode';
 import {
   ConnectionTimeouts,
@@ -40,6 +41,11 @@ export class ConnectionManager implements vscode.Disposable {
   private readonly clients = new Map<string, KdbIpcClient>();
   private readonly opening = new Map<string, Promise<KdbIpcClient>>();
   private readonly sessionSignatures = new Map<string, string>();
+  private readonly sessionRequestSignatures = new Map<string, string>();
+  private readonly desiredRequestSignatures = new Map<string, string>();
+  private readonly requestGenerations = new Map<string, number>();
+  private nextRequestGeneration = 0;
+  private readonly credentialSignatureKey = crypto.randomBytes(32);
   private readonly stateEmitter = new vscode.EventEmitter<void>();
 
   public readonly onDidChangeState = this.stateEmitter.event;
@@ -77,39 +83,159 @@ export class ConnectionManager implements vscode.Disposable {
     if (!connection) {
       return this.disconnect(connectionId);
     }
-    const current = this.sessionSignatures.get(connectionId);
-    if (current && current !== connectionRuntimeSignature(connection, this.timeoutsFor(connection))) {
-      await this.disconnect(connectionId);
+    const timeouts = this.timeoutsFor(connection);
+    const requestSignature = connectionRuntimeSignature(
+      connection,
+      timeouts,
+      connection.password,
+      this.credentialSignatureKey
+    );
+    const requestGeneration = this.observeRequest(connectionId, requestSignature);
+    const pending = this.opening.get(connectionId);
+    if (pending) {
+      if (this.sessionRequestSignatures.get(connectionId) !== requestSignature) {
+        await this.closeConnection(connectionId);
+      }
+      return;
     }
+
+    const current = this.sessionSignatures.get(connectionId);
+    if (!current) {
+      return;
+    }
+    if (this.sessionRequestSignatures.get(connectionId) === requestSignature) {
+      return;
+    }
+    const password = await this.store.password(connectionId);
+    if (!this.requestIsCurrent(connectionId, requestSignature, requestGeneration) ||
+        this.sessionSignatures.get(connectionId) !== current) {
+      return;
+    }
+    if (current !== connectionRuntimeSignature(
+      connection,
+      timeouts,
+      password,
+      this.credentialSignatureKey
+    )) {
+      await this.closeConnection(connectionId);
+      return;
+    }
+    this.sessionRequestSignatures.set(connectionId, requestSignature);
   }
 
   public async connect(connection: KxConnection, signal?: AbortSignal): Promise<KdbIpcClient> {
     throwIfQueryCanceled(signal);
     const timeouts = this.timeoutsFor(connection);
-    const signature = connectionRuntimeSignature(connection, timeouts);
-    let pending = this.opening.get(connection.id);
-    let existing = this.clients.get(connection.id);
-    if ((pending || existing) && this.sessionSignatures.get(connection.id) !== signature) {
-      await this.disconnect(connection.id);
-      throwIfQueryCanceled(signal);
-      pending = this.opening.get(connection.id);
-      existing = this.clients.get(connection.id);
-    }
+    const requestSignature = connectionRuntimeSignature(
+      connection,
+      timeouts,
+      connection.password,
+      this.credentialSignatureKey
+    );
+    const requestGeneration = this.observeRequest(connection.id, requestSignature);
+    const pending = this.opening.get(connection.id);
     if (pending) {
+      if (this.sessionRequestSignatures.get(connection.id) !== requestSignature) {
+        await this.closeConnection(connection.id);
+        throwIfQueryCanceled(signal);
+        if (!this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
+          throw new Error('KX connection canceled.');
+        }
+        return this.openConnection(
+          connection,
+          timeouts,
+          requestSignature,
+          requestGeneration,
+          signal
+        );
+      }
       return waitForQueryCancellation(pending, signal);
     }
+
+    const existing = this.clients.get(connection.id);
     if (existing) {
-      return existing;
+      if (this.sessionRequestSignatures.get(connection.id) === requestSignature) {
+        return existing;
+      }
+      let password: string | undefined;
+      try {
+        password = await waitForQueryCancellation(this.store.password(connection.id), signal);
+      } catch (error) {
+        if (!(error instanceof KdbQueryCanceledError)) {
+          this.writeConnectFailure(connection, error, false);
+        }
+        throw error;
+      }
+      throwIfQueryCanceled(signal);
+      if (!this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
+        throw new Error('KX connection canceled.');
+      }
+      const newerPending = this.opening.get(connection.id);
+      if (newerPending) {
+        if (this.sessionRequestSignatures.get(connection.id) !== requestSignature) {
+          throw new Error('KX connection canceled.');
+        }
+        return waitForQueryCancellation(newerPending, signal);
+      }
+      if (this.clients.get(connection.id) !== existing) {
+        throw new Error('KX connection canceled.');
+      }
+      const signature = connectionRuntimeSignature(
+        connection,
+        timeouts,
+        password,
+        this.credentialSignatureKey
+      );
+      if (this.sessionSignatures.get(connection.id) === signature) {
+        this.sessionRequestSignatures.set(connection.id, requestSignature);
+        return existing;
+      }
+      await this.closeConnection(connection.id);
+      throwIfQueryCanceled(signal);
+      if (!this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
+        throw new Error('KX connection canceled.');
+      }
+      return this.openConnection(
+        connection,
+        timeouts,
+        requestSignature,
+        requestGeneration,
+        signal
+      );
     }
 
+    return this.openConnection(
+      connection,
+      timeouts,
+      requestSignature,
+      requestGeneration,
+      signal
+    );
+  }
+
+  private openConnection(
+    connection: KxConnection,
+    timeouts: ConnectionTimeouts,
+    requestSignature: string,
+    requestGeneration: number,
+    signal?: AbortSignal
+  ): Promise<KdbIpcClient> {
     let opening!: Promise<KdbIpcClient>;
-    opening = (async () => {
+    opening = Promise.resolve().then(async () => {
       let client: KdbIpcClient | undefined;
       try {
         const password = await this.store.password(connection.id);
-        if (this.opening.get(connection.id) !== opening) {
+        if (this.opening.get(connection.id) !== opening ||
+            !this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
           throw new Error('KX connection canceled.');
         }
+        const signature = connectionRuntimeSignature(
+          connection,
+          timeouts,
+          password,
+          this.credentialSignatureKey
+        );
+        this.sessionSignatures.set(connection.id, signature);
         client = new KdbIpcClient({
           host: connection.host,
           port: connection.port,
@@ -122,10 +248,20 @@ export class ConnectionManager implements vscode.Disposable {
         });
         this.clients.set(connection.id, client);
         await client.connect();
+        if (this.opening.get(connection.id) !== opening ||
+            this.clients.get(connection.id) !== client ||
+            !this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
+          throw new Error('KX connection canceled.');
+        }
         return client;
       } catch (error) {
         if (!client) {
-          this.writeConnectFailure(connection, error, this.opening.get(connection.id) !== opening);
+          this.writeConnectFailure(
+            connection,
+            error,
+            this.opening.get(connection.id) !== opening ||
+              !this.requestIsCurrent(connection.id, requestSignature, requestGeneration)
+          );
         }
         if (client) {
           const shouldCancel = this.clients.get(connection.id) === client;
@@ -140,17 +276,23 @@ export class ConnectionManager implements vscode.Disposable {
           this.opening.delete(connection.id);
           if (!this.clients.has(connection.id)) {
             this.sessionSignatures.delete(connection.id);
+            this.sessionRequestSignatures.delete(connection.id);
           }
           this.stateEmitter.fire();
         }
       }
-    })();
+    });
     this.opening.set(connection.id, opening);
-    this.sessionSignatures.set(connection.id, signature);
+    this.sessionRequestSignatures.set(connection.id, requestSignature);
     return waitForQueryCancellation(opening, signal);
   }
 
   public async disconnect(connectionId: string): Promise<void> {
+    this.invalidateRequest(connectionId);
+    await this.closeConnection(connectionId);
+  }
+
+  private async closeConnection(connectionId: string): Promise<void> {
     const client = this.clients.get(connectionId);
     const opening = this.opening.get(connectionId);
     if (!client && !opening) {
@@ -160,6 +302,7 @@ export class ConnectionManager implements vscode.Disposable {
     this.clients.delete(connectionId);
     this.opening.delete(connectionId);
     this.sessionSignatures.delete(connectionId);
+    this.sessionRequestSignatures.delete(connectionId);
     this.stateEmitter.fire();
 
     if (opening) {
@@ -335,6 +478,10 @@ export class ConnectionManager implements vscode.Disposable {
     this.clients.clear();
     this.opening.clear();
     this.sessionSignatures.clear();
+    this.sessionRequestSignatures.clear();
+    this.desiredRequestSignatures.clear();
+    this.requestGenerations.clear();
+    this.credentialSignatureKey.fill(0);
     clients.forEach(client => client.cancel(new Error('KX extension deactivated.')));
     this.stateEmitter.dispose();
   }
@@ -346,7 +493,32 @@ export class ConnectionManager implements vscode.Disposable {
     this.clients.delete(connectionId);
     this.opening.delete(connectionId);
     this.sessionSignatures.delete(connectionId);
+    this.sessionRequestSignatures.delete(connectionId);
     this.stateEmitter.fire();
+  }
+
+  private observeRequest(connectionId: string, requestSignature: string): number {
+    if (this.desiredRequestSignatures.get(connectionId) === requestSignature) {
+      return this.requestGenerations.get(connectionId)!;
+    }
+    const generation = ++this.nextRequestGeneration;
+    this.desiredRequestSignatures.set(connectionId, requestSignature);
+    this.requestGenerations.set(connectionId, generation);
+    return generation;
+  }
+
+  private requestIsCurrent(
+    connectionId: string,
+    requestSignature: string,
+    requestGeneration: number
+  ): boolean {
+    return this.desiredRequestSignatures.get(connectionId) === requestSignature &&
+      this.requestGenerations.get(connectionId) === requestGeneration;
+  }
+
+  private invalidateRequest(connectionId: string): void {
+    this.desiredRequestSignatures.delete(connectionId);
+    this.requestGenerations.delete(connectionId);
   }
 
   private writeConnectFailure(connection: KxConnection, error: unknown, canceled: boolean): void {
@@ -369,13 +541,23 @@ function toError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
 
-function connectionRuntimeSignature(connection: KxConnection, timeouts: ConnectionTimeouts): string {
+function connectionRuntimeSignature(
+  connection: KxConnection,
+  timeouts: ConnectionTimeouts,
+  password: string | undefined,
+  credentialSignatureKey: Buffer
+): string {
   return JSON.stringify({
     host: connection.host,
     port: connection.port,
     username: connection.username,
     connectTimeoutMs: timeouts.connectTimeoutMs,
     queryTimeoutMs: timeouts.queryTimeoutMs,
+    credential: password === undefined
+      ? 'absent'
+      : `present:${crypto.createHmac('sha256', credentialSignatureKey)
+        .update(password, 'utf8')
+        .digest('hex')}`,
   });
 }
 

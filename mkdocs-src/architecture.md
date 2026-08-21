@@ -4,7 +4,7 @@ KX for VS Code connects directly to q over IPC. The extension owns connection pr
 
 ## Main components
 
-- **Connection layer:** saved profile metadata lives in VS Code settings; passwords use SecretStorage. Each profile has an independent q IPC client and request queue.
+- **Connection layer:** saved profiles live in VS Code settings. Passwords entered through the connection form use SecretStorage; an optional plaintext password may be configured in settings as a lower-precedence fallback, including for portable workspace/devcontainer profiles. Each profile has an independent q IPC client and request queue.
 - **Execution layer:** editor commands and direct notebook actions send q text through the selected profile. Namespace wrappers restore the previous q namespace after success or error.
 - **Result layer:** IPC values are decoded once into shared result models used by the KX Results panel and notebook renderer. Large operations apply explicit limits or confirmation prompts.
 - **Notebook layer:** the default mixed-notebook path leaves the Python controller selected and runs marked q cells through an explicit KX action. The optional pure-q controller uses the same direct IPC path.

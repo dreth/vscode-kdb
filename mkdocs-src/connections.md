@@ -111,13 +111,9 @@ When editing, **Delete Connection** is also available. It asks for explicit conf
 
 ### Password edits
 
-A stored password is never read back into or reflected by the webview. On Edit, the password field is empty:
+A password value is never read back into or reflected by the webview. On Edit, the password field is empty. A SecretStorage entry offers **Clear saved password**; clearing removes only that entry and reveals any configured plaintext fallback. With only a configured fallback, blank keeps it, Clear is not offered because SecretStorage has nothing to remove, Settings JSON is the removal path, and entering a new password creates a SecretStorage override. With neither source, entering a password stores it in SecretStorage.
 
-- leave it blank to keep the saved password;
-- enter a new password to replace it; or
-- select **Clear saved password** to remove it. The control appears only when a saved password exists.
-
-The same rules apply to testing: a blank edit can use the saved secret only when the extension host retrieves it from SecretStorage, and status discloses only that a saved secret was used. A new password remains in memory for the test; Clear means do not use the saved secret. No password is reflected into the webview, logs, settings, history, or test status.
+Testing follows the prospective save: blank uses the current effective source, while Clear tests the configured fallback that removing SecretStorage would reveal, if any. Status identifies only **SecretStorage**, **VS Code settings**, the current form, or no password; it never reflects the value into the webview, logs, settings, history, or test status.
 
 Connection changes are serialized and use rollback handling so a rejected settings or secret write does not intentionally leave half-written state. A resolved scoped `WorkspaceConfiguration.update` or active-profile `Memento.update` is success; KX does not reject or roll back solely because a same-turn configuration read is still stale. Immediate optimistic state supports following add/edit/remove/move operations while propagation catches up, then reconciles the merged scoped configuration. An external value causally observed after KX's target, or outside the outstanding acknowledgement ledger, supersedes optimistic state immediately.
 
@@ -151,7 +147,7 @@ Legacy mixed-notebook target ID/name metadata is retained for compatibility but 
 
 The optional **KX q (Direct IPC)** controller uses the active profile only when `vscode-kdb.notebook.enableDirectController` is enabled and the controller is selected. It is disabled and unregistered by default, so KX is absent from the kernel candidates while mixed Make/Activate/Run remains available. The separately installed `kx-notebook==0.1.0` / `%%q` companion is also separate: its built-in direct IPC connection, profiles, callback, optional PyKX, or loopback broker belong to that Python process and never borrow this extension's profiles, client, live record, or output binding. A first-party direct notebook result can open its decoded live value in KX Results while its bound extension-host record exists. New first-party output automatically saves every exactly representable row in its complete v2 payload; only historical or Python-helper output can remain a bounded preview whose omitted rows require rerunning q.
 
-Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection, including a notebook run that resolves the same stable target ID.
+Saving is persisted-first. Name or namespace-only edits do not recycle a healthy connected client. If host, port, username, effective password, connect timeout, or query timeout changes, safe metadata and the requested SecretStorage operation are committed first; an existing connected client is then disconnected and reconnected with the saved values. Editing a configured fallback while SecretStorage still takes precedence, including with an empty entry, keeps the authenticated client because its effective credential is unchanged. If reconnect fails, the new profile remains saved, the client remains disconnected, and KX shows a warning instead of silently using stale settings. A disconnected edited profile simply uses the new values on its next connection, including a notebook run that resolves the same stable target ID.
 
 ## Storage and secrets
 

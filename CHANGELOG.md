@@ -2,7 +2,11 @@
 
 All notable changes to KX for VS Code are documented here.
 
-## 0.2.21 - 2026-08-22
+## 0.2.22 - 2026-08-21
+
+- Recycled connected sessions when their effective configured credential changes, retained sessions when SecretStorage (including an empty entry) still takes precedence, restored empty secrets exactly on rollback, and made connection-form password source, Clear behavior, and copy accurate. This release supersedes 0.2.21 before use.
+
+## 0.2.21 - 2026-08-21
 
 - Allowed an optional validated plaintext `password` in `vscode-kdb.connections` as a fallback when SecretStorage has no value. SecretStorage remains preferred and takes precedence; empty strings remain valid, KX does not display or log password values, and ordinary extension-managed edits preserve the configured fallback.
 

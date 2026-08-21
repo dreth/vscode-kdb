@@ -7206,6 +7206,7 @@ async function testConnectionFormPanelLifecycle() {
     globalConnectTimeoutMs: 30000,
     globalQueryTimeoutMs: 15000,
     hasStoredPassword: true,
+    hasConfiguredPassword: false,
     reservedNames: ['Reserved q'],
     scopeKey: 'global',
     scopes: [{
@@ -7214,6 +7215,26 @@ async function testConnectionFormPanelLifecycle() {
       description: 'Shared across projects in this VS Code environment.',
     }],
   });
+
+  const configuredFallback = ['configured', 'panel', 'fallback'].join('-');
+  const fallbackInitial = initialConnectionFormValues(
+    'edit',
+    { ...connection, password: configuredFallback },
+    30000,
+    15000,
+    false,
+    []
+  );
+  assert.strictEqual(fallbackInitial.hasStoredPassword, false);
+  assert.strictEqual(
+    fallbackInitial.hasConfiguredPassword,
+    true,
+    'the form needs a source-only flag for configured plaintext fallback copy'
+  );
+  assert.ok(
+    !JSON.stringify(fallbackInitial).includes(configuredFallback),
+    'configured plaintext must never be posted to the webview initialization payload'
+  );
 
   const submitted = [];
   let rejectFirstSave = true;
@@ -7325,7 +7346,7 @@ async function testConnectionFormPanelLifecycle() {
       onProgress({
         phase: 'connect',
         endpoint: 'unsaved.example.test:6100',
-        usedSavedPassword: true,
+        passwordSource: 'secretStorage',
       });
       return pending.promise;
     },
@@ -7355,7 +7376,7 @@ async function testConnectionFormPanelLifecycle() {
     connectTimeoutMs: 1250,
     queryTimeoutMs: 2500,
     namespaceTested: true,
-    usedSavedPassword: true,
+    passwordSource: 'secretStorage',
   });
   await secondRun;
   testAttempts[0].pending.resolve({
@@ -7363,7 +7384,7 @@ async function testConnectionFormPanelLifecycle() {
     connectTimeoutMs: 1,
     queryTimeoutMs: 1,
     namespaceTested: false,
-    usedSavedPassword: false,
+    passwordSource: 'none',
   });
   await firstRun;
   const successfulStatuses = testHarness.posted.filter(message =>
@@ -7374,6 +7395,43 @@ async function testConnectionFormPanelLifecycle() {
   assert.match(successfulStatuses[0].message, /saved password from VS Code SecretStorage was used/i);
   assert.ok(!JSON.stringify(testHarness.posted).includes(panelSecret), 'the extension must never reflect a form password');
   assert.ok(!JSON.stringify(testHarness.posted).includes('stale.example.test'), 'stale completions must not post diagnostics');
+
+  const configuredStatusHarness = createVscodePanelHarness();
+  const { ConnectionFormPanel: ConfiguredStatusFormPanel } = requireOutWithVscode(
+    'connection-form-panel',
+    configuredStatusHarness.vscode
+  );
+  const configuredStatusPanel = new ConfiguredStatusFormPanel(fallbackInitial, {
+    async onSave() {},
+    async onTest(_payload, _signal, onProgress) {
+      onProgress({
+        phase: 'connect',
+        endpoint: 'configured.example.test:5000',
+        passwordSource: 'configuration',
+      });
+      return {
+        endpoint: 'configured.example.test:5000',
+        connectTimeoutMs: 30000,
+        queryTimeoutMs: 15000,
+        namespaceTested: false,
+        passwordSource: 'configuration',
+      };
+    },
+  });
+  await configuredStatusPanel.onMessage({
+    type: 'test',
+    session: configuredStatusPanel.session,
+    payload: {},
+  });
+  const configuredSuccess = configuredStatusHarness.posted.find(message =>
+    message.type === 'testStatus' && message.state === 'success'
+  );
+  assert.match(configuredSuccess.message, /plaintext password from VS Code settings was used/i);
+  assert.doesNotMatch(
+    configuredSuccess.message,
+    /SecretStorage/i,
+    'configured fallback-only status must never claim SecretStorage'
+  );
 
   const explicitCancelRun = testPanel.onMessage({
     type: 'test',
@@ -7493,10 +7551,10 @@ async function testConnectionFormHostTesting() {
   const forbiddenMutations = [];
   const store = {
     connections: () => [editing],
-    async password(id) {
+    async resolvePassword(id) {
       passwordReads++;
       assert.strictEqual(id, editing.id);
-      return savedSecret;
+      return { password: savedSecret, source: 'secretStorage' };
     },
     async add() { forbiddenMutations.push('add'); },
     async update() { forbiddenMutations.push('update'); },
@@ -7535,7 +7593,6 @@ async function testConnectionFormHostTesting() {
     payload,
     editing.id,
     editing,
-    true,
     controller.signal,
     value => progress.push(value)
   );
@@ -7552,54 +7609,176 @@ async function testConnectionFormHostTesting() {
   assert.strictEqual(temporaryTests[0].options.password, savedSecret);
   assert.strictEqual(temporaryTests[0].options.signal, controller.signal);
   assert.deepStrictEqual(progress.map(item => item.phase), ['connect', 'handshake', 'namespace', 'query']);
-  assert.ok(progress.every(item => item.usedSavedPassword === true));
+  assert.ok(progress.every(item => item.passwordSource === 'secretStorage'));
   assert.deepStrictEqual(result, {
     endpoint: 'unsaved.example.test:6100',
     connectTimeoutMs: 0,
     queryTimeoutMs: 9876,
     namespaceTested: true,
-    usedSavedPassword: true,
+    passwordSource: 'secretStorage',
   });
   assert.strictEqual(passwordReads, 1);
   assert.deepStrictEqual(forbiddenMutations, []);
   assert.strictEqual(treeRefreshes, 0);
   assert.ok(!JSON.stringify(result).includes(savedSecret), 'saved secrets must not be returned to the renderer');
 
-  await commands.testConnectionForm(
+  const enteredResult = await commands.testConnectionForm(
     { ...payload, password: enteredSecret },
     editing.id,
     editing,
-    true,
     new AbortController().signal,
     () => undefined
   );
   assert.strictEqual(temporaryTests.at(-1).options.password, enteredSecret);
-  assert.strictEqual(passwordReads, 1, 'an entered password must not read or combine with the saved secret');
+  assert.strictEqual(enteredResult.passwordSource, 'entered');
+  assert.strictEqual(passwordReads, 1, 'an entered password must not read SecretStorage');
 
-  await commands.testConnectionForm(
+  const clearedResult = await commands.testConnectionForm(
     { ...payload, clearPassword: true },
     editing.id,
     editing,
-    true,
     new AbortController().signal,
     () => undefined
   );
   assert.strictEqual(temporaryTests.at(-1).options.password, undefined);
-  assert.strictEqual(passwordReads, 1, 'explicit Clear must not fetch the saved secret for testing');
+  assert.strictEqual(clearedResult.passwordSource, 'none');
+  assert.strictEqual(passwordReads, 2, 'Clear must validate current SecretStorage presence');
+
+  const configuredFallback = ['configured', 'host', 'fallback'].join('-');
+  const fallbackEditing = validateConnection({
+    ...editing,
+    id: 'kx-host-configured-fallback',
+    name: 'Configured fallback profile',
+    password: configuredFallback,
+  });
+  let fallbackPasswordReads = 0;
+  const fallbackCommands = new ConnectionCommands({
+    connections: () => [fallbackEditing],
+    async resolvePassword(id) {
+      fallbackPasswordReads++;
+      assert.strictEqual(id, fallbackEditing.id);
+      return { password: configuredFallback, source: 'configuration' };
+    },
+  }, manager, { refresh() {} });
+  const fallbackProgress = [];
+  const fallbackResult = await fallbackCommands.testConnectionForm(
+    { ...payload, name: fallbackEditing.name },
+    fallbackEditing.id,
+    fallbackEditing,
+    new AbortController().signal,
+    value => fallbackProgress.push(value)
+  );
+  assert.strictEqual(temporaryTests.at(-1).options.password, configuredFallback);
+  assert.strictEqual(fallbackPasswordReads, 1);
+  assert.ok(fallbackProgress.every(item => item.passwordSource === 'configuration'));
+  assert.strictEqual(fallbackResult.passwordSource, 'configuration');
+  assert.ok(
+    !JSON.stringify(fallbackResult).includes(configuredFallback),
+    'configured plaintext must not be returned to the renderer'
+  );
+
+  const bothSourcesEditing = validateConnection({
+    ...editing,
+    id: 'kx-host-both-password-sources',
+    name: 'Both password sources',
+    password: configuredFallback,
+  });
+  let bothSourcesPasswordReads = 0;
+  const bothSourcesCommands = new ConnectionCommands({
+    connections: () => [bothSourcesEditing],
+    async resolvePassword() {
+      bothSourcesPasswordReads++;
+      return { password: savedSecret, source: 'secretStorage' };
+    },
+  }, manager, { refresh() {} });
+  const bothSourcesResult = await bothSourcesCommands.testConnectionForm(
+    {
+      ...payload,
+      name: bothSourcesEditing.name,
+      clearPassword: true,
+    },
+    bothSourcesEditing.id,
+    bothSourcesEditing,
+    new AbortController().signal,
+    () => undefined
+  );
+  assert.strictEqual(
+    temporaryTests.at(-1).options.password,
+    configuredFallback,
+    'Clear must test the configured fallback that saving will reveal'
+  );
+  assert.strictEqual(bothSourcesPasswordReads, 1);
+  assert.strictEqual(bothSourcesResult.passwordSource, 'configuration');
+
+  let refreshedResolution = {
+    password: configuredFallback,
+    source: 'configuration',
+  };
+  const staleSourceCommands = new ConnectionCommands({
+    connections: () => [bothSourcesEditing],
+    async resolvePassword() {
+      return refreshedResolution;
+    },
+  }, manager, { refresh() {} });
+  const refreshedSourceResult = await staleSourceCommands.testConnectionForm(
+    { ...payload, name: bothSourcesEditing.name },
+    bothSourcesEditing.id,
+    bothSourcesEditing,
+    new AbortController().signal,
+    () => undefined
+  );
+  assert.strictEqual(
+    refreshedSourceResult.passwordSource,
+    'configuration',
+    'Test must not use the form-open SecretStorage snapshot after the secret is removed'
+  );
+  await assert.rejects(
+    () => staleSourceCommands.testConnectionForm(
+      {
+        ...payload,
+        name: bothSourcesEditing.name,
+        clearPassword: true,
+      },
+      bothSourcesEditing.id,
+      bothSourcesEditing,
+      new AbortController().signal,
+      () => undefined
+    ),
+    /no saved password to clear/i,
+    'Test must reject stale Clear after the SecretStorage entry is removed'
+  );
+  refreshedResolution = { password: savedSecret, source: 'secretStorage' };
+  const refreshedSecretResult = await staleSourceCommands.testConnectionForm(
+    { ...payload, name: bothSourcesEditing.name },
+    bothSourcesEditing.id,
+    bothSourcesEditing,
+    new AbortController().signal,
+    () => undefined
+  );
+  assert.strictEqual(
+    refreshedSecretResult.passwordSource,
+    'secretStorage',
+    'Test must detect a SecretStorage entry added after the form opened'
+  );
 
   const testsBeforeValidation = temporaryTests.length;
+  const passwordReadsBeforeValidation = passwordReads;
   await assert.rejects(
     () => commands.testConnectionForm(
       { ...payload, port: 'not-a-port' },
       editing.id,
       editing,
-      true,
       new AbortController().signal,
       () => undefined
     ),
     error => error instanceof HostConnectionFormValidationError && error.field === 'port'
   );
   assert.strictEqual(temporaryTests.length, testsBeforeValidation, 'validation failure must not open a socket');
+  assert.strictEqual(
+    passwordReads,
+    passwordReadsBeforeValidation,
+    'local validation failure must not read SecretStorage'
+  );
 
   const canceled = new AbortController();
   canceled.abort();
@@ -7608,7 +7787,6 @@ async function testConnectionFormHostTesting() {
       payload,
       editing.id,
       editing,
-      true,
       canceled.signal,
       () => undefined
     ),
@@ -7618,16 +7796,34 @@ async function testConnectionFormHostTesting() {
 
   const secretFailureCommands = new ConnectionCommands({
     connections: () => [editing],
-    async password() {
+    async resolvePassword() {
       throw new Error(`injected SecretStorage failure ${savedSecret}`);
     },
   }, manager, { refresh() {} });
+  const replacementWithUnavailableStorage = await secretFailureCommands.testConnectionForm(
+    { ...payload, password: enteredSecret },
+    editing.id,
+    editing,
+    new AbortController().signal,
+    () => undefined
+  );
+  assert.strictEqual(temporaryTests.at(-1).options.password, enteredSecret);
+  assert.strictEqual(replacementWithUnavailableStorage.passwordSource, 'entered');
+  await assert.rejects(
+    () => secretFailureCommands.testConnectionForm(
+      { ...payload, port: 'not-a-port' },
+      editing.id,
+      editing,
+      new AbortController().signal,
+      () => undefined
+    ),
+    error => error instanceof HostConnectionFormValidationError && error.field === 'port'
+  );
   await assert.rejects(
     () => secretFailureCommands.testConnectionForm(
       payload,
       editing.id,
       editing,
-      true,
       new AbortController().signal,
       () => undefined
     ),
@@ -7805,20 +8001,37 @@ async function testConnectionScopes() {
   );
   assert.strictEqual(await store.hasPassword('kx-shared'), true);
   assert.strictEqual(
+    await store.hasStoredPassword('kx-shared'),
+    false,
+    'a configured plaintext fallback must not be reported as SecretStorage'
+  );
+  assert.strictEqual(
     await store.password(collisionWorkspace.id),
     collisionPassword,
     'SecretStorage must take precedence over a configured plaintext password'
   );
+  assert.strictEqual(await store.hasStoredPassword(collisionWorkspace.id), true);
   assert.strictEqual(
     await store.password(sameNameWorkspace.id),
     '',
     'an existing empty SecretStorage value must also take precedence'
   );
   assert.strictEqual(await store.hasPassword(sameNameWorkspace.id), true);
+  assert.strictEqual(
+    await store.hasStoredPassword(sameNameWorkspace.id),
+    true,
+    'an empty SecretStorage entry is still present and must shadow configuration'
+  );
   assert.strictEqual(await store.password(workspaceOnly.id), '');
   assert.strictEqual(await store.hasPassword(workspaceOnly.id), true, 'an empty password is present');
+  assert.strictEqual(
+    await store.hasStoredPassword(workspaceOnly.id),
+    false,
+    'an empty configured plaintext password is not a SecretStorage entry'
+  );
   assert.strictEqual(await store.password(sameNameGlobal.id), undefined);
   assert.strictEqual(await store.hasPassword(sameNameGlobal.id), false);
+  assert.strictEqual(await store.hasStoredPassword(sameNameGlobal.id), false);
   assert.strictEqual(
     store.connection('kx-devcontainer').host,
     workspaceOnly.host,
@@ -8029,6 +8242,47 @@ async function testConnectionScopes() {
 }
 
 async function testConnectionStoreTransactions() {
+  const emptyRollbackFallback = ['configured', 'rollback', 'fallback'].join('-');
+  const emptyRollbackConnection = validateConnection({
+    id: 'kx-empty-secret-rollback',
+    name: 'Empty secret rollback',
+    host: 'localhost',
+    port: 4999,
+    database: '.',
+    username: 'runner',
+    password: emptyRollbackFallback,
+  });
+  const emptyRollbackHarness = createScopedConnectionStoreHarness({
+    global: [emptyRollbackConnection],
+    secrets: {
+      [`vscode-kdb.connectionPassword.${emptyRollbackConnection.id}`]: '',
+    },
+  });
+  const { ConnectionStore: EmptyRollbackConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    emptyRollbackHarness.vscode
+  );
+  const emptyRollbackStore = new EmptyRollbackConnectionStore(emptyRollbackHarness.context);
+  emptyRollbackHarness.failNextScopeUpdate('global');
+  await assert.rejects(
+    () => emptyRollbackStore.update(
+      { ...emptyRollbackConnection, port: 5001 },
+      'temporary-rollback-secret',
+      emptyRollbackConnection
+    ),
+    /injected global configuration update failure/
+  );
+  assert.strictEqual(
+    emptyRollbackHarness.secretFor(emptyRollbackConnection.id),
+    '',
+    'rollback must restore a prior empty-string SecretStorage value exactly'
+  );
+  assert.strictEqual(
+    await emptyRollbackStore.password(emptyRollbackConnection.id),
+    '',
+    'the restored empty secret must keep the configured plaintext fallback shadowed'
+  );
+
   const passwordlessHarness = createVscodeStoreHarness();
   const { ConnectionStore: PasswordlessConnectionStore } = requireOutWithVscode(
     'connection-store',
@@ -9315,6 +9569,7 @@ async function testConnectionManagerLifecycle() {
   const createdClients = [];
   let nextConnectError;
   let nextConnectDeferred;
+  let nextCloseDeferred;
   let nextQueryError;
   let nextQueryDeferred;
   class FakeKdbIpcClient {
@@ -9344,6 +9599,12 @@ async function testConnectionManagerLifecycle() {
     }
 
     async close() {
+      if (nextCloseDeferred) {
+        const pending = nextCloseDeferred;
+        nextCloseDeferred = undefined;
+        pending.started.resolve();
+        await pending.promise;
+      }
       this.closed = true;
       if (this.options.onDidClose) {
         this.options.onDidClose();
@@ -9691,6 +9952,356 @@ async function testConnectionManagerLifecycle() {
     inheritedClient,
     'display/namespace-only edits must keep the healthy direct session'
   );
+
+  const configuredCredentialA = ['configured', 'credential', 'a'].join('-');
+  const configuredCredentialB = ['configured', 'credential', 'b'].join('-');
+  const storedCredential = ['stored', 'credential', 'override'].join('-');
+  const credentialProfile = (id, name, port) => validateConnection({
+    id,
+    name,
+    host: 'credential.example.test',
+    port,
+    database: '.',
+    username: 'runner',
+    password: configuredCredentialA,
+  });
+  const fallbackProfile = credentialProfile(
+    'kx-configured-credential-change',
+    'Configured credential change',
+    5200
+  );
+  const storedOverrideProfile = credentialProfile(
+    'kx-stored-credential-precedence',
+    'Stored credential precedence',
+    5201
+  );
+  const emptyStoredOverrideProfile = credentialProfile(
+    'kx-empty-stored-credential-precedence',
+    'Empty stored credential precedence',
+    5202
+  );
+  const directFallbackProfile = credentialProfile(
+    'kx-direct-configured-credential-change',
+    'Direct configured credential change',
+    5203
+  );
+  const directStoredOverrideProfile = credentialProfile(
+    'kx-direct-stored-credential-precedence',
+    'Direct stored credential precedence',
+    5204
+  );
+  const directEmptyStoredOverrideProfile = credentialProfile(
+    'kx-direct-empty-stored-credential-precedence',
+    'Direct empty stored credential precedence',
+    5205
+  );
+  const credentialHarness = createScopedConnectionStoreHarness({
+    global: [
+      fallbackProfile,
+      storedOverrideProfile,
+      emptyStoredOverrideProfile,
+      directFallbackProfile,
+      directStoredOverrideProfile,
+      directEmptyStoredOverrideProfile,
+    ],
+    secrets: {
+      [`vscode-kdb.connectionPassword.${storedOverrideProfile.id}`]: storedCredential,
+      [`vscode-kdb.connectionPassword.${emptyStoredOverrideProfile.id}`]: '',
+      [`vscode-kdb.connectionPassword.${directStoredOverrideProfile.id}`]: storedCredential,
+      [`vscode-kdb.connectionPassword.${directEmptyStoredOverrideProfile.id}`]: '',
+    },
+  });
+  const { ConnectionStore: CredentialConnectionStore } = requireOutWithVscode(
+    'connection-store',
+    credentialHarness.vscode
+  );
+  const credentialStore = new CredentialConnectionStore(credentialHarness.context);
+  const credentialManager = new ConnectionManager(credentialStore);
+  const fallbackClient = await credentialManager.connect(fallbackProfile);
+  const storedOverrideClient = await credentialManager.connect(storedOverrideProfile);
+  const emptyStoredOverrideClient = await credentialManager.connect(emptyStoredOverrideProfile);
+  const directFallbackClient = await credentialManager.connect(directFallbackProfile);
+  const directStoredOverrideClient = await credentialManager.connect(directStoredOverrideProfile);
+  const directEmptyStoredOverrideClient = await credentialManager.connect(
+    directEmptyStoredOverrideProfile
+  );
+  assert.strictEqual(fallbackClient.options.password, configuredCredentialA);
+  assert.strictEqual(storedOverrideClient.options.password, storedCredential);
+  assert.strictEqual(emptyStoredOverrideClient.options.password, '');
+
+  const changedCredentialProfiles = [
+    fallbackProfile,
+    storedOverrideProfile,
+    emptyStoredOverrideProfile,
+    directFallbackProfile,
+    directStoredOverrideProfile,
+    directEmptyStoredOverrideProfile,
+  ].map(profile => ({ ...profile, password: configuredCredentialB }));
+  credentialHarness.applyExternalGlobal(changedCredentialProfiles);
+  const changedFallbackProfile = credentialStore.connection(fallbackProfile.id);
+  const changedStoredOverrideProfile = credentialStore.connection(storedOverrideProfile.id);
+  const changedEmptyStoredOverrideProfile = credentialStore.connection(emptyStoredOverrideProfile.id);
+  const changedDirectFallbackProfile = credentialStore.connection(directFallbackProfile.id);
+  const changedDirectStoredOverrideProfile = credentialStore.connection(
+    directStoredOverrideProfile.id
+  );
+  const changedDirectEmptyStoredOverrideProfile = credentialStore.connection(
+    directEmptyStoredOverrideProfile.id
+  );
+
+  assert.strictEqual(
+    await credentialManager.connect(changedDirectStoredOverrideProfile),
+    directStoredOverrideClient,
+    'direct connect must keep a session when SecretStorage shadows the configured plaintext change'
+  );
+  assert.strictEqual(
+    await credentialManager.connect(changedDirectEmptyStoredOverrideProfile),
+    directEmptyStoredOverrideClient,
+    'direct connect must treat an empty SecretStorage entry as the effective credential'
+  );
+  assert.strictEqual(directStoredOverrideClient.closed, false);
+  assert.strictEqual(directEmptyStoredOverrideClient.closed, false);
+
+  await credentialManager.disconnectIfConfigurationChanged(
+    storedOverrideProfile.id,
+    changedStoredOverrideProfile
+  );
+  await credentialManager.disconnectIfConfigurationChanged(
+    emptyStoredOverrideProfile.id,
+    changedEmptyStoredOverrideProfile
+  );
+  assert.strictEqual(
+    storedOverrideClient.closed,
+    false,
+    'a configured plaintext change shadowed by SecretStorage must keep the authenticated client'
+  );
+  assert.strictEqual(
+    emptyStoredOverrideClient.closed,
+    false,
+    'an empty SecretStorage entry must also shadow configured plaintext changes'
+  );
+  assert.strictEqual(
+    await credentialManager.connect(changedStoredOverrideProfile),
+    storedOverrideClient
+  );
+  assert.strictEqual(
+    await credentialManager.connect(changedEmptyStoredOverrideProfile),
+    emptyStoredOverrideClient
+  );
+
+  await credentialManager.disconnectIfConfigurationChanged(
+    fallbackProfile.id,
+    changedFallbackProfile
+  );
+  assert.strictEqual(
+    fallbackClient.closed,
+    true,
+    'changing the effective configured plaintext password must close the stale client'
+  );
+  assert.strictEqual(credentialManager.isConnected(fallbackProfile.id), false);
+  const fallbackReplacement = await credentialManager.connect(changedFallbackProfile);
+  assert.notStrictEqual(fallbackReplacement, fallbackClient);
+  assert.strictEqual(fallbackReplacement.options.password, configuredCredentialB);
+
+  const directFallbackReplacement = await credentialManager.connect(changedDirectFallbackProfile);
+  assert.notStrictEqual(
+    directFallbackReplacement,
+    directFallbackClient,
+    'connect must independently recycle a session whose effective credential changed'
+  );
+  assert.strictEqual(directFallbackClient.closed, true);
+  assert.strictEqual(directFallbackReplacement.options.password, configuredCredentialB);
+  for (const signatures of [
+    credentialManager.sessionSignatures,
+    credentialManager.sessionRequestSignatures,
+    credentialManager.desiredRequestSignatures,
+  ]) {
+    for (const signature of signatures.values()) {
+      assert.ok(!signature.includes(configuredCredentialA));
+      assert.ok(!signature.includes(configuredCredentialB));
+      assert.ok(!signature.includes(storedCredential));
+    }
+  }
+  await credentialManager.disconnectAll();
+  credentialManager.dispose();
+
+  const openingCredentialGate = deferred();
+  const openingCredentialStarted = deferred();
+  const openingRaceProfile = validateConnection({
+    ...connection,
+    id: 'kx-opening-configuration-race',
+    name: 'Opening configuration race',
+    host: 'opening-a.example.test',
+  });
+  const openingRaceManager = new ConnectionManager({
+    async password() {
+      openingCredentialStarted.resolve();
+      return openingCredentialGate.promise;
+    },
+  });
+  const clientsBeforeOpeningRace = createdClients.length;
+  const staleOpening = openingRaceManager.connect(openingRaceProfile);
+  await openingCredentialStarted.promise;
+  const staleOpeningRejected = assert.rejects(staleOpening, /connection canceled/i);
+  const openingConfigurationChanged = openingRaceManager.disconnectIfConfigurationChanged(
+    openingRaceProfile.id,
+    { ...openingRaceProfile, host: 'opening-b.example.test' }
+  );
+  openingCredentialGate.resolve('opening-race-credential');
+  await Promise.all([staleOpeningRejected, openingConfigurationChanged]);
+  assert.strictEqual(
+    createdClients.length,
+    clientsBeforeOpeningRace,
+    'a changed configuration must cancel a delayed credential lookup before opening a stale client'
+  );
+  assert.strictEqual(openingRaceManager.isConnected(openingRaceProfile.id), false);
+  openingRaceManager.dispose();
+
+  let delayedConfigurationRead;
+  const configurationRaceProfile = validateConnection({
+    ...connection,
+    id: 'kx-configuration-check-race',
+    name: 'Configuration check race',
+    host: 'configuration-a.example.test',
+  });
+  const configurationRaceManager = new ConnectionManager({
+    async password() {
+      if (delayedConfigurationRead) {
+        const pending = delayedConfigurationRead;
+        delayedConfigurationRead = undefined;
+        pending.started.resolve();
+        await pending.promise;
+      }
+      return 'configuration-race-credential';
+    },
+  });
+  const configurationRaceClient = await configurationRaceManager.connect(
+    configurationRaceProfile
+  );
+  const staleConfigurationGate = deferred();
+  const staleConfigurationStarted = deferred();
+  delayedConfigurationRead = {
+    promise: staleConfigurationGate.promise,
+    started: staleConfigurationStarted,
+  };
+  const staleConfigurationCheck = configurationRaceManager.disconnectIfConfigurationChanged(
+    configurationRaceProfile.id,
+    { ...configurationRaceProfile, host: 'configuration-b.example.test' }
+  );
+  await staleConfigurationStarted.promise;
+  await configurationRaceManager.disconnectIfConfigurationChanged(
+    configurationRaceProfile.id,
+    configurationRaceProfile
+  );
+  staleConfigurationGate.resolve();
+  await staleConfigurationCheck;
+  assert.strictEqual(
+    configurationRaceClient.closed,
+    false,
+    'an obsolete async configuration check must not disconnect the latest matching session'
+  );
+  assert.strictEqual(configurationRaceManager.isConnected(configurationRaceProfile.id), true);
+  await configurationRaceManager.disconnectAll();
+  configurationRaceManager.dispose();
+
+  let closeRacePassword = 'close-race-a';
+  const closeRaceProfile = validateConnection({
+    ...connection,
+    id: 'kx-close-credential-race',
+    name: 'Close credential race',
+    password: closeRacePassword,
+  });
+  const closeRaceManager = new ConnectionManager({
+    async password() {
+      return closeRacePassword;
+    },
+  });
+  const closeRaceInitialClient = await closeRaceManager.connect(closeRaceProfile);
+  const closeRaceGate = deferred();
+  const closeRaceStarted = deferred();
+  nextCloseDeferred = {
+    promise: closeRaceGate.promise,
+    started: closeRaceStarted,
+  };
+  closeRacePassword = 'close-race-b';
+  const staleCloseReconnect = closeRaceManager.connect({
+    ...closeRaceProfile,
+    password: closeRacePassword,
+  });
+  await closeRaceStarted.promise;
+  const staleCloseReconnectRejected = assert.rejects(
+    staleCloseReconnect,
+    /connection canceled/i
+  );
+  closeRacePassword = 'close-race-c';
+  const currentCloseRaceProfile = {
+    ...closeRaceProfile,
+    password: closeRacePassword,
+  };
+  await closeRaceManager.disconnectIfConfigurationChanged(
+    closeRaceProfile.id,
+    currentCloseRaceProfile
+  );
+  closeRaceGate.resolve();
+  await staleCloseReconnectRejected;
+  assert.strictEqual(closeRaceInitialClient.closed, true);
+  const closeRaceCurrentClient = await closeRaceManager.connect(currentCloseRaceProfile);
+  assert.strictEqual(closeRaceCurrentClient.options.password, closeRacePassword);
+  await closeRaceManager.disconnectAll();
+  closeRaceManager.dispose();
+
+  let delayedChangedCredentialRead;
+  const cancellationRaceProfile = validateConnection({
+    ...connection,
+    id: 'kx-changed-credential-cancellation',
+    name: 'Changed credential cancellation',
+    password: 'cancellation-race-a',
+  });
+  const cancellationRaceManager = new ConnectionManager({
+    async password() {
+      if (delayedChangedCredentialRead) {
+        const pending = delayedChangedCredentialRead;
+        delayedChangedCredentialRead = undefined;
+        pending.started.resolve();
+        return pending.promise;
+      }
+      return cancellationRaceProfile.password;
+    },
+  });
+  const cancellationRaceClient = await cancellationRaceManager.connect(
+    cancellationRaceProfile
+  );
+  const changedCredentialGate = deferred();
+  const changedCredentialStarted = deferred();
+  delayedChangedCredentialRead = {
+    promise: changedCredentialGate.promise,
+    started: changedCredentialStarted,
+  };
+  const changedCredentialController = new AbortController();
+  const changedCredentialConnect = cancellationRaceManager.connect({
+    ...cancellationRaceProfile,
+    password: 'cancellation-race-b',
+  }, changedCredentialController.signal);
+  await changedCredentialStarted.promise;
+  const changedCredentialCanceled = assert.rejects(
+    changedCredentialConnect,
+    error => error instanceof KdbQueryCanceledError
+  );
+  changedCredentialController.abort();
+  try {
+    await assertCompletesWithin(
+      'changed-credential lookup cancellation',
+      () => changedCredentialCanceled,
+      1000
+    );
+  } finally {
+    changedCredentialGate.resolve('cancellation-race-b');
+  }
+  await eventLoopTurn();
+  assert.strictEqual(cancellationRaceClient.closed, false);
+  assert.strictEqual(cancellationRaceManager.isConnected(cancellationRaceProfile.id), true);
+  await cancellationRaceManager.disconnectAll();
+  cancellationRaceManager.dispose();
 
   const staleNotebookTarget = validateConnection({
     ...connection,
@@ -23252,10 +23863,15 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.21');
+  assert.strictEqual(manifest.version, '0.2.22');
+  assert.strictEqual(
+    manifest.scripts.package,
+    'npm run compile && vsce package --out vscode-kdb-0.2.22.vsix'
+  );
+  assert.strictEqual(manifest.scripts['package:vsix'], manifest.scripts.package);
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.21');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.21');
+  assert.strictEqual(packageLock.version, '0.2.22');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.22');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -24456,7 +25072,7 @@ function testManifestAndSources() {
   assert.match(panelSource, /test\.controller\.abort\(\)/);
   assert.match(panelSource, /await this\.cancelActiveTest\(true\);[\s\S]*?this\.callbacks\.onSave/);
   assert.match(commandsSource, /onTest: \(payload, signal, onProgress\) => this\.testConnectionForm/);
-  assert.match(commandsSource, /password = await this\.store\.password\(editing\.id\)/);
+  assert.match(commandsSource, /savedPassword = await this\.store\.resolvePassword\(editing\.id\)/);
   assert.match(commandsSource, /this\.manager\.testTemporary\(parsed\.connection/);
   assert.match(managerSource, /public async testTemporary\(/);
   assert.match(managerSource, /finally \{[\s\S]*?await client\.close\(\)/);
@@ -24498,6 +25114,9 @@ function testManifestAndSources() {
   assert.match(formHtml, /id="password"[^>]*type="password"/);
   assert.match(formHtml, /Leave blank to keep the saved password/);
   assert.match(formHtml, /Clear saved password/);
+  assert.match(formHtml, /plaintext password (?:is configured|from VS Code settings)/i);
+  assert.match(formHtml, /SecretStorage password currently overrides/i);
+  assert.match(formHtml, /resumes? the configured plaintext password/i);
   assert.match(formHtml, /<details id="advanced">/);
   assert.match(formHtml, /<summary>Advanced direct q IPC<\/summary>/);
   assert.match(formHtml, /blank to use its global default/i);
@@ -24559,6 +25178,9 @@ function testManifestAndSources() {
   assert.match(modelSource, /unsupported field/);
   assert.match(storeSource, /private mutationQueue: Promise<void>/);
   assert.match(storeSource, /return this\.mutate\(async \(\) =>/);
+  assert.match(storeSource, /public async hasStoredPassword\(/);
+  assert.ok(!/hasStoredPassword\s*=\s*await this\.store\.hasPassword/.test(commandsSource));
+  assert.match(commandsSource, /hasStoredPassword\s*=\s*await this\.store\.hasStoredPassword/);
   assert.match(extensionSource, /disconnectIfConfigurationChanged/);
   assert.match(extensionSource, /vscode-kdb\.connectionTimeoutMs/);
   assert.match(extensionSource, /vscode-kdb\.queryTimeoutMs/);

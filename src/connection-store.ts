@@ -45,6 +45,13 @@ export interface MergedConnectionConfiguration {
   conflicts: ConnectionScopeConflict[];
 }
 
+export type ConnectionPasswordSource = 'secretStorage' | 'configuration' | 'none';
+
+export interface ResolvedConnectionPassword {
+  password: string | undefined;
+  source: ConnectionPasswordSource;
+}
+
 interface OptimisticConnections {
   readonly value: readonly KxConnection[];
   readonly owners: ReadonlyMap<string, ConnectionConfigurationScope>;
@@ -522,12 +529,26 @@ export class ConnectionStore {
   }
 
   public async password(id: string): Promise<string | undefined> {
+    return (await this.resolvePassword(id)).password;
+  }
+
+  public async resolvePassword(id: string): Promise<ResolvedConnectionPassword> {
     const secret = await this.context.secrets.get(this.passwordKey(id));
-    return secret !== undefined ? secret : this.connection(id)?.password;
+    if (secret !== undefined) {
+      return { password: secret, source: 'secretStorage' };
+    }
+    const configured = this.connection(id)?.password;
+    return configured === undefined
+      ? { password: undefined, source: 'none' }
+      : { password: configured, source: 'configuration' };
   }
 
   public async hasPassword(id: string): Promise<boolean> {
     return (await this.password(id)) !== undefined;
+  }
+
+  public async hasStoredPassword(id: string): Promise<boolean> {
+    return (await this.resolvePassword(id)).source === 'secretStorage';
   }
 
   private async mutate<T>(action: () => Promise<T>): Promise<T> {
@@ -545,7 +566,7 @@ export class ConnectionStore {
   }
 
   private async writePassword(id: string, password: string | undefined): Promise<void> {
-    if (password) {
+    if (password !== undefined) {
       await this.context.secrets.store(this.passwordKey(id), password);
     } else {
       await this.context.secrets.delete(this.passwordKey(id));
