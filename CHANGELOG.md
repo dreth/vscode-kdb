@@ -2,6 +2,10 @@
 
 All notable changes to KX for VS Code are documented here.
 
+## 0.2.21 - 2026-08-22
+
+- Allowed an optional validated plaintext `password` in `vscode-kdb.connections` as a fallback when SecretStorage has no value. SecretStorage remains preferred and takes precedence; empty strings remain valid, KX does not display or log password values, and ordinary extension-managed edits preserve the configured fallback.
+
 ## 0.2.20 - 2026-08-20
 
 - Fixed mixed-notebook q output verification so VS Code/Jupyter metadata normalization and delayed cell reconciliation no longer report a false post-execution write failure. One canonical ownership parser now requires a durable binding, exactly one matching first-party KX MIME payload, and compatible direct/nested live metadata for verification and every downstream action. Write failures report the exact local stage and distinguish issued q from uncertain pre-issue output failures without recommending a blind retry. Real Extension Host coverage commits and reopens a complete exact 60,000-row result.

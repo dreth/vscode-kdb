@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "Python-first mixed q notebooks, standalone q IPC, persistent Jupyter snapshots, and high-performance KX results for VS Code.",
-  "version": "0.2.20",
+  "version": "0.2.21",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -95,8 +95,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --out vscode-kdb-0.2.20.vsix",
-    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.20.vsix"
+    "package": "npm run compile && vsce package --out vscode-kdb-0.2.21.vsix",
+    "package:vsix": "npm run compile && vsce package --out vscode-kdb-0.2.21.vsix"
   },
   "dependencies": {
     "jszip": "^3.10.1",
@@ -721,8 +721,8 @@
           "scope": "resource",
           "ignoreSync": false,
           "default": [],
-          "description": "Direct q IPC profiles from User, Workspace, and Workspace Folder settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project. Passwords stay in VS Code SecretStorage, never enter settings or sync, and may require re-entry per environment.",
-          "markdownDescription": "Direct q IPC profiles from **User**, **Workspace**, and **Workspace Folder** settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project and survive container recreation. Passwords stay in VS Code SecretStorage, never enter settings or sync, and may require re-entry in each local or remote environment.",
+          "description": "Direct q IPC profiles from User, Workspace, and Workspace Folder settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project. An optional password is plaintext in settings; VS Code SecretStorage is safer and takes precedence when it has a value.",
+          "markdownDescription": "Direct q IPC profiles from **User**, **Workspace**, and **Workspace Folder** settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project and survive container recreation. An optional `password` is plaintext in settings; VS Code SecretStorage is safer and takes precedence when it has a value.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -769,6 +769,12 @@
                 "default": "",
                 "maxLength": 256,
                 "description": "Optional q IPC username."
+              },
+              "password": {
+                "type": "string",
+                "maxLength": 65535,
+                "pattern": "^[^\\u0000]*$",
+                "description": "Optional q IPC password stored as plaintext in settings. VS Code SecretStorage is safer and takes precedence when it has a value."
               },
               "connectTimeoutMs": {
                 "type": "integer",

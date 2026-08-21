@@ -2,7 +2,7 @@
 
 KX for VS Code owns its direct q IPC connections. They appear in the **KX Connections** sidebar and are independent of SQLTools.
 
-Every valid distinct profile is shown immediately after a resolved save, even if VS Code's effective configuration snapshot propagates later. Exactly one profile may be starred as `ACTIVE`, and that star is the sole execution target for editor queries, notebooks, Server Explorer, Query History reruns, and the local data server. Click a connection item, use its inline/context **Activate Connection** action, or run **KX: Activate Connection...** from the Command Palette. Activation opens the candidate transport before moving the star; if it fails, the previous active route remains unchanged. **Deactivate Connection** or removing the active profile leaves no active selection, and KX never silently promotes or routes through another connected profile. Transport health remains visible as status, not a competing selection. Rejected settings or secret writes stay in the form, also produce a visible VS Code error, and refresh the tree without reporting success. Passwordless profiles do not depend on SecretStorage; profiles with passwords retain transactional SecretStorage safety.
+Every valid distinct profile is shown immediately after a resolved save, even if VS Code's effective configuration snapshot propagates later. Exactly one profile may be starred as `ACTIVE`, and that star is the sole execution target for editor queries, notebooks, Server Explorer, Query History reruns, and the local data server. Click a connection item, use its inline/context **Activate Connection** action, or run **KX: Activate Connection...** from the Command Palette. Activation opens the candidate transport before moving the star; if it fails, the previous active route remains unchanged. **Deactivate Connection** or removing the active profile leaves no active selection, and KX never silently promotes or routes through another connected profile. Transport health remains visible as status, not a competing selection. Rejected settings or secret writes stay in the form, also produce a visible VS Code error, and refresh the tree without reporting success. Passwordless profiles do not depend on SecretStorage; password changes made through the form retain transactional SecretStorage safety.
 
 ## Settings scopes and precedence
 
@@ -18,7 +18,7 @@ The form's **Save profile in** selector controls ownership:
 
 Editing writes back to the current owner unless the selector is changed, which explicitly moves the profile. Workspace/project profiles survive Remote or Dev Container recreation because the metadata lives with the project; a remote/container User setting is environment-specific and is not a durable project substitute.
 
-Only safe metadata participates in settings and possible Settings Sync. Passwords remain in VS Code SecretStorage, never enter User/Workspace/Folder settings or source control, and never sync. SecretStorage is environment-specific, so a password may need to be entered again in each local, remote, or container environment.
+Profile fields participate in settings and possible Settings Sync. Passwords saved through the form remain in VS Code SecretStorage. An optional configured `password` is instead plaintext, may enter source control or sync, and is used only when SecretStorage has no value; SecretStorage is safer and takes precedence. SecretStorage is environment-specific, so its password may need to be entered again in each local, remote, or container environment.
 
 ## Connection fields
 
@@ -29,7 +29,7 @@ Only safe metadata participates in settings and possible Settings Sync. Password
 | Port | q IPC port from `1` through `65535`; a new form defaults to `5000`. |
 | Namespace / database | `.` for root, or a dot-qualified q namespace such as `.analytics`; a new form defaults to `.`. |
 | Username | Optional q IPC username. |
-| Password | Optional secret combined with the username for the q IPC handshake. It is a password input and is stored only in SecretStorage. |
+| Password | Optional q IPC password. The form saves it in SecretStorage; a configured plaintext fallback is supported but less safe. |
 | Connect / handshake timeout | Optional per-connection millisecond override in **Advanced direct q IPC**. Blank inherits the global default. |
 | Query response timeout | Optional per-connection millisecond override in **Advanced direct q IPC**. Blank inherits the global query default. |
 
@@ -74,7 +74,7 @@ For an importable candidate, KX maps:
 
 `connectionTimeout: 0` becomes `connectTimeoutMs: 0`. A missing legacy timeout uses the old 30-second schema default. Import never sets `queryTimeoutMs`; the profile continues to inherit the resolved global KX query default until the user edits it. In particular, a per-profile imported connect timeout is not silently reused as that profile's query timeout.
 
-Before any selected plaintext password is copied, a modal prompt explains that KX will re-read it once, write it to SecretStorage, leave the SQLTools setting unchanged, and establish no sync. Choose **Copy Passwords and Import**, explicitly choose **Import Without Passwords**, or cancel without changing KX profiles or secrets. Password values never appear in QuickPick items, notifications, logs, diagnostics, telemetry, Query History, errors, snapshots, webview messages, or `vscode-kdb.connections`; references are discarded after each attempt.
+Before any selected plaintext password is copied, a modal prompt explains that KX will re-read it once, write it to SecretStorage, leave the SQLTools setting unchanged, and establish no sync. Choose **Copy Passwords and Import**, explicitly choose **Import Without Passwords**, or cancel without changing KX profiles or secrets. Imported password values never appear in QuickPick items, notifications, logs, diagnostics, telemetry, Query History, errors, snapshots, webview messages, or `vscode-kdb.connections`; references are discarded after each attempt.
 
 Existing KX data is protected. A conflict by case-insensitive name or equivalent host/port/namespace/username offers only:
 
@@ -155,18 +155,19 @@ Saving is persisted-first. Name or namespace-only edits do not recycle a healthy
 
 ## Storage and secrets
 
-Safe metadata is stored in `vscode-kdb.connections` at the profile's User, Workspace, or Workspace Folder owner. KX inspects explicit values at all three levels, merges them by stable-ID precedence, and writes only the selected owner:
+Profile fields are stored in `vscode-kdb.connections` at the profile's User, Workspace, or Workspace Folder owner. KX inspects explicit values at all three levels, merges them by stable-ID precedence, and writes only the selected owner:
 
 - generated connection ID;
 - display name;
 - host and port;
 - database/namespace;
-- username; and
+- username;
+- optional plaintext `password` fallback; and
 - optional `connectTimeoutMs` and `queryTimeoutMs` overrides.
 
-Passwords and authentication secrets are not written into that setting. Each connection's secret is stored under an extension-specific key in VS Code `SecretStorage`, which delegates at-rest protection to VS Code and the operating system. These secrets do not participate in Settings Sync and may require re-entry in another environment. Removing an override keeps the secret if a lower-scope profile with the same stable ID becomes visible; removing the last definition removes it.
+Passwords entered through the form are stored under an extension-specific key in VS Code `SecretStorage`, which delegates at-rest protection to VS Code and the operating system. A SecretStorage value wins over the configured fallback. SecretStorage values do not participate in Settings Sync and may require re-entry in another environment; configured passwords are plaintext and may be committed or synchronized. Removing an override keeps the secret if a lower-scope profile with the same stable ID becomes visible; removing the last definition removes it.
 
-Do not add a password field to `settings.json`. Do not paste credentials into logs, issue reports, or example queries.
+Prefer SecretStorage. Do not paste credentials into logs, issue reports, or example queries.
 
 During discovery, the importer inspects the password field of a matching legacy KDB profile only to classify it as absent, present, or invalid; the value is not returned in the candidate model or retained through review. After that profile is selected and the modal copy choice is confirmed, KX re-reads only its exact scoped source entry, validates the password, immediately hands it to the normal SecretStorage transaction, and releases the source snapshot. It is never retained as a KX setting. Workspace-scoped source data receives the same validation as every other untrusted configuration value.
 

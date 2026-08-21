@@ -135,6 +135,7 @@ const {
 const {
   DEFAULT_CONNECTION_TIMEOUT_MS,
   DEFAULT_QUERY_TIMEOUT_MS,
+  MAX_PASSWORD_LENGTH,
   MAX_TIMEOUT_MS,
   connectionSessionChanged,
   connectionEndpoint,
@@ -4744,6 +4745,21 @@ function testConnections() {
     database: '.analytics.market',
     username: 'daniel',
   });
+  assert.strictEqual(
+    validateConnection({ ...connection, password: ' <plaintext-password> ' }).password,
+    ' <plaintext-password> ',
+    'configured passwords must retain their exact string value'
+  );
+  assert.strictEqual(
+    validateConnection({ ...connection, password: '' }).password,
+    '',
+    'an empty configured password is valid'
+  );
+  assert.strictEqual(
+    Object.prototype.hasOwnProperty.call(connection, 'password'),
+    false,
+    'a missing configured password must remain missing'
+  );
   assert.strictEqual(connectionEndpoint(connection), '[::1]:5000');
   assert.strictEqual(normalizeNamespace(''), '.');
   assert.strictEqual(normalizeNamespace('analytics'), '.analytics');
@@ -4769,6 +4785,12 @@ function testConnections() {
   assert.throws(() => validateConnection({ ...connection, name: ' ' }), /name is required/);
   assert.throws(() => validateConnection({ ...connection, id: 'bad id' }), /unsupported characters/);
   assert.throws(() => validateConnection({ ...connection, username: 'user:name' }), /cannot contain colons/);
+  assert.throws(() => validateConnection({ ...connection, password: null }), /Password must be a string/);
+  assert.throws(() => validateConnection({ ...connection, password: 'bad\0password' }), /null characters/);
+  assert.throws(
+    () => validateConnection({ ...connection, password: 'x'.repeat(MAX_PASSWORD_LENGTH + 1) }),
+    /characters or fewer/
+  );
   assert.strictEqual(MAX_TIMEOUT_MS, 2147483647);
   assert.strictEqual(DEFAULT_CONNECTION_TIMEOUT_MS, 30000);
   assert.strictEqual(DEFAULT_QUERY_TIMEOUT_MS, 3600000);
@@ -4836,6 +4858,16 @@ function testConnections() {
     safeStoredConnections([{ ...connection, connectTimeoutMs: MAX_TIMEOUT_MS + 1 }]),
     [],
     'out-of-range persisted overrides must be ignored instead of reaching timers'
+  );
+  assert.deepStrictEqual(
+    safeStoredConnections([{ ...connection, password: 42 }]),
+    [],
+    'configured passwords with a non-string type must follow invalid-entry handling'
+  );
+  assert.deepStrictEqual(
+    safeStoredConnections([{ ...connection, password: 'bad\0password' }]),
+    [],
+    'configured passwords with a null character must follow invalid-entry handling'
   );
   assert.strictEqual(qString('a"b\\c\r\n\t'), '"a\\"b\\\\c\\r\\n\\t"');
   assert.strictEqual(queryInNamespace('  select from trade\n', '.'), '  select from trade\n');
@@ -7648,20 +7680,30 @@ async function testConnectionFormHostTesting() {
 }
 
 async function testConnectionScopes() {
-  const profile = (id, name, host, port) => validateConnection({
+  const profile = (id, name, host, port, password) => validateConnection({
     id,
     name,
     host,
     port,
     database: '.',
     username: '',
+    ...(password === undefined ? {} : { password }),
   });
-  const globalShared = profile('kx-shared', 'Shared profile', 'stale-local.example.test', 5000);
-  const workspaceShared = profile('kx-shared', 'Shared profile', 'workspace.example.test', 5001);
-  const folderShared = profile('kx-shared', 'Shared profile', 'container.example.test', 5002);
+  const globalShared = profile(
+    'kx-shared', 'Shared profile', 'stale-local.example.test', 5000, 'global-placeholder'
+  );
+  const workspaceShared = profile(
+    'kx-shared', 'Shared profile', 'workspace.example.test', 5001, 'workspace-placeholder'
+  );
+  const folderShared = profile(
+    'kx-shared', 'Shared profile', 'container.example.test', 5002, 'folder-placeholder'
+  );
   const sameNameGlobal = profile('kx-name-global', 'Same name', 'global-name.example.test', 5100);
-  const sameNameWorkspace = profile('kx-name-workspace', 'Same name', 'workspace-name.example.test', 5101);
-  const workspaceOnly = profile('kx-devcontainer', 'Dev Container q', 'q.example.test', 5200);
+  const sameNameWorkspace = profile(
+    'kx-name-workspace', 'Same name', 'workspace-name.example.test', 5101,
+    'configured-empty-secret-placeholder'
+  );
+  const workspaceOnly = profile('kx-devcontainer', 'Dev Container q', 'q.example.test', 5200, '');
   const conflictA = profile('kx-folder-conflict', 'Folder conflict', 'folder-a.example.test', 5300);
   const conflictB = profile('kx-folder-conflict', 'Folder conflict', 'folder-b.example.test', 5301);
   const identicalA = profile('kx-folder-identical', 'Identical folders', 'same.example.test', 5302);
@@ -7676,7 +7718,8 @@ async function testConnectionScopes() {
     'kx-move-collision',
     'Move collision workspace',
     'workspace-collision.example.test',
-    5304
+    5304,
+    'configured-collision-placeholder'
   );
   const collisionPassword = 'move-collision-password';
   const folderAUri = 'file:///workspace/a';
@@ -7691,6 +7734,7 @@ async function testConnectionScopes() {
     activeId: collisionWorkspace.id,
     secrets: {
       [`vscode-kdb.connectionPassword.${collisionWorkspace.id}`]: collisionPassword,
+      [`vscode-kdb.connectionPassword.${sameNameWorkspace.id}`]: '',
     },
   });
   const {
@@ -7755,6 +7799,27 @@ async function testConnectionScopes() {
     folderUri: folderAUri,
   });
   assert.strictEqual(
+    await store.password('kx-shared'),
+    folderShared.password,
+    'configured password fallback must use the existing effective scoped connection'
+  );
+  assert.strictEqual(await store.hasPassword('kx-shared'), true);
+  assert.strictEqual(
+    await store.password(collisionWorkspace.id),
+    collisionPassword,
+    'SecretStorage must take precedence over a configured plaintext password'
+  );
+  assert.strictEqual(
+    await store.password(sameNameWorkspace.id),
+    '',
+    'an existing empty SecretStorage value must also take precedence'
+  );
+  assert.strictEqual(await store.hasPassword(sameNameWorkspace.id), true);
+  assert.strictEqual(await store.password(workspaceOnly.id), '');
+  assert.strictEqual(await store.hasPassword(workspaceOnly.id), true, 'an empty password is present');
+  assert.strictEqual(await store.password(sameNameGlobal.id), undefined);
+  assert.strictEqual(await store.hasPassword(sameNameGlobal.id), false);
+  assert.strictEqual(
     store.connection('kx-devcontainer').host,
     workspaceOnly.host,
     'effective devcontainer/workspace settings must load independently of stale user settings'
@@ -7808,17 +7873,33 @@ async function testConnectionScopes() {
   assert.strictEqual(harness.activeId, collisionWorkspace.id);
   assert.strictEqual(store.activeConnectionId(), collisionWorkspace.id);
 
-  const editedFolder = { ...folderShared, port: 5400 };
+  const { password: _folderPassword, ...folderEditWithoutPassword } = folderShared;
+  const editedFolder = { ...folderEditWithoutPassword, port: 5400 };
   await store.update(editedFolder, undefined, folderShared);
-  assert.strictEqual(
-    harness.folderConnections(folderAUri)
-      .find(connection => connection.id === editedFolder.id).port,
-    5400,
-    'editing a profile must write back to its owning workspace-folder scope'
+  const savedFolder = harness.folderConnections(folderAUri)
+    .find(connection => connection.id === editedFolder.id);
+  assert.deepStrictEqual(
+    [savedFolder.port, savedFolder.password],
+    [5400, folderShared.password],
+    'an ordinary edit must preserve the configured password in its owning scope'
   );
   assert.strictEqual(
     harness.globalConnections.find(connection => connection.id === editedFolder.id).port,
     globalShared.port
+  );
+  harness.failNextScopeUpdate('workspaceFolder');
+  await assert.rejects(
+    () => store.update(
+      { ...savedFolder, port: 5401 },
+      'temporary-secret-placeholder',
+      savedFolder
+    ),
+    /injected workspaceFolder configuration update failure/
+  );
+  assert.strictEqual(
+    harness.secretFor(savedFolder.id),
+    undefined,
+    'a failed edit must not materialize the configured fallback in SecretStorage'
   );
 
   const workspaceAdded = profile(
@@ -7937,17 +8018,14 @@ async function testConnectionScopes() {
     editedFolder.host,
     'a stale or new user/global event must never trump an explicit workspace-folder profile'
   );
-  for (const connection of [
-    ...harness.globalConnections,
-    ...harness.workspaceConnections,
-    ...harness.folderConnections(folderAUri),
-  ]) {
-    assert.strictEqual(
-      Object.prototype.hasOwnProperty.call(connection, 'password'),
-      false,
-      'connection settings must never contain secrets'
-    );
-  }
+  assert.ok(
+    !JSON.stringify([
+      ...harness.globalConnections,
+      ...harness.workspaceConnections,
+      ...harness.folderConnections(folderAUri),
+    ]).includes(collisionPassword),
+    'a SecretStorage value must not be written into connection settings'
+  );
 }
 
 async function testConnectionStoreTransactions() {
@@ -23174,10 +23252,10 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.20');
+  assert.strictEqual(manifest.version, '0.2.21');
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.20');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.20');
+  assert.strictEqual(packageLock.version, '0.2.21');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.21');
   const pythonNotebookPyproject = fs.readFileSync(
     path.join(ROOT, 'python', 'kx_notebook', 'pyproject.toml'),
     'utf8'
@@ -23856,21 +23934,28 @@ function testManifestAndSources() {
   const storedFields = Object.keys(((connectionsSetting.items || {}).properties) || {}).sort();
   assert.deepStrictEqual(
     storedFields,
-    ['connectTimeoutMs', 'database', 'host', 'id', 'name', 'port', 'queryTimeoutMs', 'username']
+    ['connectTimeoutMs', 'database', 'host', 'id', 'name', 'password', 'port', 'queryTimeoutMs', 'username']
   );
   assert.strictEqual(connectionsSetting.items.additionalProperties, false);
   assert.deepStrictEqual(
     [...connectionsSetting.items.required].sort(),
     ['database', 'host', 'id', 'name', 'port', 'username'],
-    'timeout overrides must stay optional/blank-to-inherit'
+    'password and timeout overrides must stay optional'
   );
   assert.match(connectionsSetting.description, /direct q IPC/i);
   assert.match(connectionsSetting.description, /SecretStorage/);
   assert.match(connectionsSetting.description, /User, Workspace, and Workspace Folder/i);
   assert.match(connectionsSetting.description, /more-specific settings override/i);
   assert.match(connectionsSetting.description, /Settings Sync eligible/i);
-  assert.match(connectionsSetting.description, /never enter settings or sync/i);
-  assert.match(connectionsSetting.description, /re-entry per environment/i);
+  assert.match(connectionsSetting.description, /plaintext/i);
+  assert.match(connectionsSetting.description, /SecretStorage.*safer/i);
+  const configuredPasswordSchema = connectionsSetting.items.properties.password;
+  assert.strictEqual(configuredPasswordSchema.type, 'string');
+  assert.strictEqual(configuredPasswordSchema.maxLength, MAX_PASSWORD_LENGTH);
+  assert.strictEqual(configuredPasswordSchema.minLength, undefined, 'an empty password must be schema-valid');
+  assert.strictEqual(new RegExp(configuredPasswordSchema.pattern).test('bad\0password'), false);
+  assert.match(configuredPasswordSchema.description, /plaintext/i);
+  assert.match(configuredPasswordSchema.description, /SecretStorage.*safer/i);
   for (const timeoutField of ['connectTimeoutMs', 'queryTimeoutMs']) {
     const schema = connectionsSetting.items.properties[timeoutField];
     assert.strictEqual(schema.type, 'integer');
@@ -24051,14 +24136,9 @@ function testManifestAndSources() {
   }
   const safeBlock = sourceSection(storeSource, 'const safeConnections', 'await this.configurationForScope');
   assert.ok(safeBlock.includes('username: connection.username'));
+  assert.ok(safeBlock.includes('password: connection.password'));
   assert.ok(safeBlock.includes('connectTimeoutMs: connection.connectTimeoutMs'));
   assert.ok(safeBlock.includes('queryTimeoutMs: connection.queryTimeoutMs'));
-  assert.ok(!/password/i.test(safeBlock), 'serialized connection settings must never include passwords');
-  assert.strictEqual(
-    Object.prototype.hasOwnProperty.call(connectionsSetting.items.properties, 'password'),
-    false,
-    'password must never be a vscode-kdb.connections property'
-  );
 
   const panelSource = readSource('connection-form-panel.ts');
   const commandsSource = readSource('connection-commands.ts');
