@@ -14,9 +14,13 @@ import {
   connectionScopeLabel,
 } from './connection-store';
 import { ConnectionTreeItem, ConnectionsTreeProvider } from './connection-tree';
-import { parseConnectionFormPayload } from './connection-form-model';
+import {
+  ConnectionFormValidationError,
+  parseConnectionFormPayload,
+} from './connection-form-model';
 import {
   ConnectionFormPanel,
+  ConnectionFormPasswordSource,
   ConnectionFormTestProgress,
   ConnectionFormTestResult,
   initialConnectionFormValues,
@@ -210,7 +214,7 @@ export class ConnectionCommands {
     let hasStoredPassword = false;
     if (editing) {
       try {
-        hasStoredPassword = await this.store.hasPassword(editing.id);
+        hasStoredPassword = await this.store.hasStoredPassword(editing.id);
       } catch (error) {
         this.showFailure(`Open connection "${editing.name}"`, error);
         return;
@@ -248,7 +252,6 @@ export class ConnectionCommands {
         payload,
         draft.id,
         editing,
-        hasStoredPassword,
         signal,
         onProgress
       ),
@@ -268,15 +271,21 @@ export class ConnectionCommands {
     payload: unknown,
     id: string,
     editing: KxConnection | undefined,
-    hasStoredPassword: boolean,
     signal: AbortSignal,
     onProgress: (progress: ConnectionFormTestProgress) => void
   ): Promise<ConnectionFormTestResult> {
+    if (signal.aborted) {
+      throw new ConnectionTestError(
+        'cancel',
+        editing ? connectionTestEndpoint(editing) : undefined
+      );
+    }
+    const existingConnections = this.store.connections();
     const parsed = parseConnectionFormPayload(payload, {
       id,
-      existingConnections: this.store.connections(),
+      existingConnections,
       editing,
-      hasStoredPassword,
+      hasStoredPassword: editing !== undefined,
     });
     const endpoint = connectionTestEndpoint(parsed.connection);
     if (signal.aborted) {
@@ -284,15 +293,31 @@ export class ConnectionCommands {
     }
 
     let password: string | undefined;
-    let usedSavedPassword = false;
+    let passwordSource: ConnectionFormPasswordSource = 'none';
     if (typeof parsed.passwordUpdate === 'string') {
       password = parsed.passwordUpdate;
-    } else if (parsed.passwordUpdate === undefined && editing) {
+      passwordSource = 'entered';
+    } else if (editing) {
+      let savedPassword: Awaited<ReturnType<ConnectionStore['resolvePassword']>>;
       try {
-        password = await this.store.password(editing.id);
-        usedSavedPassword = password !== undefined;
+        savedPassword = await this.store.resolvePassword(editing.id);
       } catch (error) {
         throw new ConnectionTestError('validation', endpoint, error);
+      }
+      if (parsed.passwordUpdate === null) {
+        if (savedPassword.source !== 'secretStorage') {
+          throw new ConnectionFormValidationError(
+            'There is no saved password to clear.',
+            'password'
+          );
+        }
+        const currentEditing = this.store.connections()
+          .find(connection => connection.id === editing.id);
+        password = currentEditing?.password;
+        passwordSource = password === undefined ? 'none' : 'configuration';
+      } else {
+        password = savedPassword.password;
+        passwordSource = savedPassword.source;
       }
     }
     if (signal.aborted) {
@@ -302,14 +327,14 @@ export class ConnectionCommands {
     const timeouts = await this.manager.testTemporary(parsed.connection, {
       password,
       signal,
-      onPhase: phase => onProgress({ phase, endpoint, usedSavedPassword }),
+      onPhase: phase => onProgress({ phase, endpoint, passwordSource }),
     });
     return {
       endpoint,
       connectTimeoutMs: timeouts.connectTimeoutMs,
       queryTimeoutMs: timeouts.queryTimeoutMs,
       namespaceTested: parsed.connection.database !== '.',
-      usedSavedPassword,
+      passwordSource,
     };
   }
 
@@ -338,7 +363,9 @@ export class ConnectionCommands {
     if (editing && !current) {
       throw new Error(`KX connection "${editing.name}" no longer exists.`);
     }
-    const hasStoredPassword = current ? await this.store.hasPassword(current.id) : false;
+    const hasStoredPassword = current
+      ? await this.store.hasStoredPassword(current.id)
+      : false;
     const parsed = parseConnectionFormPayload(payload, {
       id,
       existingConnections: this.store.connections(),

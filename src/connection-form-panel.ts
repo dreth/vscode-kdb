@@ -23,10 +23,17 @@ export interface ConnectionFormInitialValues {
   globalConnectTimeoutMs: number;
   globalQueryTimeoutMs: number;
   hasStoredPassword: boolean;
+  hasConfiguredPassword: boolean;
   reservedNames: string[];
   scopeKey: string;
   scopes: Array<{ key: string; label: string; description: string }>;
 }
+
+export type ConnectionFormPasswordSource =
+  | 'secretStorage'
+  | 'configuration'
+  | 'entered'
+  | 'none';
 
 export interface ConnectionFormCallbacks {
   onSave(payload: unknown): Promise<void>;
@@ -41,7 +48,7 @@ export interface ConnectionFormCallbacks {
 export interface ConnectionFormTestProgress {
   phase: Exclude<ConnectionTestPhase, 'validation' | 'cancel'>;
   endpoint: string;
-  usedSavedPassword: boolean;
+  passwordSource: ConnectionFormPasswordSource;
 }
 
 export interface ConnectionFormTestResult {
@@ -49,7 +56,7 @@ export interface ConnectionFormTestResult {
   connectTimeoutMs: number;
   queryTimeoutMs: number;
   namespaceTested: boolean;
-  usedSavedPassword: boolean;
+  passwordSource: ConnectionFormPasswordSource;
 }
 
 export type ConnectionFormResult = 'saved' | 'deleted' | 'cancelled';
@@ -74,7 +81,7 @@ interface ActiveConnectionTest {
   id: number;
   controller: AbortController;
   endpoint?: string;
-  usedSavedPassword: boolean;
+  passwordSource: ConnectionFormPasswordSource;
   sequence: number;
 }
 
@@ -202,7 +209,7 @@ export class ConnectionFormPanel {
     const test: ActiveConnectionTest = {
       id: this.nextTestId++,
       controller: new AbortController(),
-      usedSavedPassword: false,
+      passwordSource: 'none',
       sequence: 0,
     };
     this.activeTest = test;
@@ -224,7 +231,7 @@ export class ConnectionFormPanel {
           return;
         }
         test.endpoint = progress.endpoint;
-        test.usedSavedPassword = progress.usedSavedPassword;
+        test.passwordSource = progress.passwordSource;
         void this.setTestStatus({
           type: 'testStatus',
           testId: test.id,
@@ -238,11 +245,9 @@ export class ConnectionFormPanel {
         return;
       }
       test.endpoint = result.endpoint;
-      test.usedSavedPassword = result.usedSavedPassword;
+      test.passwordSource = result.passwordSource;
       const namespace = result.namespaceTested ? ' Namespace validity and session restoration passed.' : '';
-      const secret = result.usedSavedPassword
-        ? ' A saved password from VS Code SecretStorage was used.'
-        : ' No saved password was used.';
+      const password = passwordUseMessage(result.passwordSource, 'was used', true);
       await this.setTestStatus({
         type: 'testStatus',
         testId: test.id,
@@ -250,7 +255,7 @@ export class ConnectionFormPanel {
         state: 'success',
         phase: 'query',
         message: `Query phase succeeded for ${result.endpoint}.${namespace} ` +
-          `Effective timeouts: TCP connect/q IPC handshake ${result.connectTimeoutMs} ms each; query response ${result.queryTimeoutMs} ms.${secret}`,
+          `Effective timeouts: TCP connect/q IPC handshake ${result.connectTimeoutMs} ms each; query response ${result.queryTimeoutMs} ms.${password}`,
       });
     } catch (error) {
       if (this.activeTest !== test || this.disposed) {
@@ -270,16 +275,14 @@ export class ConnectionFormPanel {
         const failure = error instanceof ConnectionTestError
           ? error
           : new ConnectionTestError('query', test.endpoint);
-        const secret = test.usedSavedPassword
-          ? ' A saved password from VS Code SecretStorage was used.'
-          : '';
+        const password = passwordUseMessage(test.passwordSource, 'was used', false);
         await this.setTestStatus({
           type: 'testStatus',
           testId: test.id,
           sequence: ++test.sequence,
           state: failure.phase === 'cancel' ? 'canceled' : 'failure',
           phase: failure.phase,
-          message: `${failure.message}${secret}`,
+          message: `${failure.message}${password}`,
         });
       }
     } finally {
@@ -291,10 +294,8 @@ export class ConnectionFormPanel {
 
   private progressMessage(progress: ConnectionFormTestProgress): string {
     const label = progress.phase.charAt(0).toUpperCase() + progress.phase.slice(1);
-    const secret = progress.usedSavedPassword
-      ? ' A saved password from VS Code SecretStorage is being used.'
-      : ' No saved password is being used.';
-    return `${label} phase: testing ${progress.endpoint}.${secret}`;
+    const password = passwordUseMessage(progress.passwordSource, 'is being used', true);
+    return `${label} phase: testing ${progress.endpoint}.${password}`;
   }
 
   private async cancelActiveTest(report: boolean, expectedId?: number): Promise<void> {
@@ -305,16 +306,14 @@ export class ConnectionFormPanel {
     this.activeTest = undefined;
     test.controller.abort();
     if (report && !this.disposed) {
-      const secret = test.usedSavedPassword
-        ? ' A saved password from VS Code SecretStorage was used.'
-        : '';
+      const password = passwordUseMessage(test.passwordSource, 'was used', false);
       await this.setTestStatus({
         type: 'testStatus',
         testId: test.id,
         sequence: ++test.sequence,
         state: 'canceled',
         phase: 'cancel',
-        message: `${connectionTestFailureMessage('cancel', test.endpoint)}${secret}`,
+        message: `${connectionTestFailureMessage('cancel', test.endpoint)}${password}`,
       });
     }
   }
@@ -812,13 +811,23 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
           ? values.reservedNames.filter(value => typeof value === 'string').map(value => value.toLocaleLowerCase())
           : [];
         deleteButton.hidden = values.mode !== 'edit';
-        clearPasswordRow.hidden = values.mode !== 'edit' || !values.hasStoredPassword;
+        const hasStoredPassword = values.hasStoredPassword === true;
+        const hasConfiguredPassword = values.hasConfiguredPassword === true;
+        clearPasswordRow.hidden = values.mode !== 'edit' || !hasStoredPassword;
         clearPassword.checked = false;
-        document.getElementById('passwordHelp').textContent = values.mode === 'edit'
-          ? (values.hasStoredPassword
-            ? 'Leave blank to keep the saved password. It remains in this environment’s VS Code SecretStorage and does not sync; select Clear saved password to remove it.'
-            : 'No password is saved in this environment. Enter one to store it only in VS Code SecretStorage; it will not sync.')
-          : 'Optional. Stored only in this environment’s VS Code SecretStorage; never in settings, source control, or Settings Sync.';
+        let passwordHelp;
+        if (values.mode !== 'edit') {
+          passwordHelp = 'Optional. Stored only in this environment’s VS Code SecretStorage; never in settings, source control, or Settings Sync.';
+        } else if (hasStoredPassword && hasConfiguredPassword) {
+          passwordHelp = 'A SecretStorage password currently overrides a plaintext password in VS Code settings. Leave blank to keep the saved SecretStorage password. Clear saved password removes only SecretStorage and resumes the configured plaintext password; edit Settings JSON to remove that fallback.';
+        } else if (hasStoredPassword) {
+          passwordHelp = 'Leave blank to keep the saved password. It remains in this environment’s VS Code SecretStorage and does not sync; select Clear saved password to remove it.';
+        } else if (hasConfiguredPassword) {
+          passwordHelp = 'A plaintext password is configured in VS Code settings and is currently used. Leave blank to keep it. Clear is unavailable because there is no SecretStorage password; edit Settings JSON to remove the configured fallback, or enter a new password to store a SecretStorage override.';
+        } else {
+          passwordHelp = 'No password is saved in SecretStorage or configured in VS Code settings. Enter one to store it only in VS Code SecretStorage; it will not sync.';
+        }
+        document.getElementById('passwordHelp').textContent = passwordHelp;
         setError('', undefined);
         validate(false);
         window.setTimeout(() => controls.name.focus(), 0);
@@ -919,8 +928,26 @@ export function initialConnectionFormValues(
     globalConnectTimeoutMs,
     globalQueryTimeoutMs,
     hasStoredPassword,
+    hasConfiguredPassword: connection.password !== undefined,
     reservedNames,
     scopes,
     scopeKey,
   };
+}
+
+function passwordUseMessage(
+  source: ConnectionFormPasswordSource,
+  tense: 'is being used' | 'was used',
+  includeNone: boolean
+): string {
+  if (source === 'secretStorage') {
+    return ` A saved password from VS Code SecretStorage ${tense}.`;
+  }
+  if (source === 'configuration') {
+    return ` A plaintext password from VS Code settings ${tense}.`;
+  }
+  if (source === 'entered') {
+    return ` The password entered in this form ${tense}.`;
+  }
+  return includeNone ? ` No password ${tense}.` : '';
 }
