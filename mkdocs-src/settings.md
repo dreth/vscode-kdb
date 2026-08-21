@@ -60,14 +60,14 @@ The imported `connectionTimeout` is interpreted as seconds and maps to the new p
 
 | Setting | Default | Use |
 | --- | --- | --- |
-| `vscode-kdb.connections` | `[]` | Safe standalone connection metadata at User, Workspace, or Workspace Folder scope. Same-ID precedence is Folder > Workspace > User. The form preserves/moves ownership explicitly. User values are Settings Sync eligible where allowed; passwords remain separate in SecretStorage and never sync. |
+| `vscode-kdb.connections` | `[]` | Standalone connection profiles at User, Workspace, or Workspace Folder scope. Same-ID precedence is Folder > Workspace > User. The form preserves/moves ownership explicitly. An optional plaintext password fallback may sync; SecretStorage is safer and takes precedence. |
 | `vscode-kdb.connectionTimeoutMs` | `30000` | Global direct q IPC connect/handshake timeout in milliseconds. TCP connect and q IPC handshake each receive this full budget. `0` disables both phase deadlines. |
 | `vscode-kdb.queryTimeoutMs` | `3600000` | Independent global query-response timeout in milliseconds (60 minutes). `0` disables only the query deadline. |
 | `vscode-kdb.performance.trace` | `false` | Add safe operation timings, sizes, and counts to **Output > KX**. Query text/values, credentials, and local-server tokens are omitted or redacted. |
 
 Timeout settings accept integers from `0` through `2147483647`. Connect/handshake and query response deadlines are independent: setting either global or per-profile value to `0` does not disable the other deadline. The query deadline begins when queued work becomes active and is sent, so time waiting behind another query is excluded. A query timeout discards the uncertain client.
 
-Each object in `vscode-kdb.connections` has these safe fields:
+Each object in `vscode-kdb.connections` has these fields:
 
 | Field | Required | Use |
 | --- | --- | --- |
@@ -77,10 +77,27 @@ Each object in `vscode-kdb.connections` has these safe fields:
 | `port` | Yes | Integer from `1` through `65535`. |
 | `database` | Yes | q namespace, normally `.` or a value such as `.analytics`. |
 | `username` | Yes | Optional username represented as a string; empty means none. |
+| `password` | No | Plaintext q IPC password fallback. SecretStorage is safer and takes precedence when it has a value; empty is valid. |
 | `connectTimeoutMs` | No | Per-connection connect/handshake override. Omit (leave blank in the form) to inherit the global connect default; `0` disables both deadlines. |
 | `queryTimeoutMs` | No | Per-connection query override. Omit (leave blank in the form) to inherit the resolved global query default; `0` disables it. |
 
-Existing connection objects without either override remain valid and need no migration. A blank or omitted per-connection query override inherits the global `queryTimeoutMs` value, whose default is 60 minutes; it does not copy a global or per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; **Clear saved password** removes it explicitly.
+Existing connection objects without optional fields remain valid and need no migration. A blank or omitted per-connection query override inherits the global `queryTimeoutMs` value, whose default is 60 minutes; it does not copy a global or per-connection connect override. Editing with a blank password keeps the effective password; **Clear saved password** removes the SecretStorage value, revealing any configured fallback.
+
+```json
+{
+  "vscode-kdb.connections": [{
+    "id": "dev-q",
+    "name": "Development q",
+    "host": "localhost",
+    "port": 5000,
+    "database": ".",
+    "username": "",
+    "password": "<plaintext-password>"
+  }]
+}
+```
+
+The `password` above is stored as plaintext and may be committed or synchronized. Prefer VS Code SecretStorage through the connection form.
 
 Workspace-defined profiles live with the project and survive container recreation; remote/container User settings are not a durable project substitute. SecretStorage is local to the relevant VS Code environment, so passwords may need re-entry after moving between local, remote, or container hosts.
 

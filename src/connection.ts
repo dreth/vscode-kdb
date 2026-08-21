@@ -15,6 +15,7 @@ export interface KxConnection {
   port: number;
   database: string;
   username: string;
+  password?: string;
   connectTimeoutMs?: number;
   queryTimeoutMs?: number;
 }
@@ -26,6 +27,7 @@ export interface ConnectionCandidate {
   port?: unknown;
   database?: unknown;
   username?: unknown;
+  password?: unknown;
   connectTimeoutMs?: unknown;
   queryTimeoutMs?: unknown;
 }
@@ -68,8 +70,12 @@ export function normalizeConnection(candidate: ConnectionCandidate): KxConnectio
     database: normalizeNamespace(candidate.database),
     username: String(candidate.username === undefined || candidate.username === null ? '' : candidate.username).trim(),
   };
+  const password = normalizeOptionalPassword(candidate.password);
   const connectTimeoutMs = normalizeOptionalTimeout(candidate.connectTimeoutMs);
   const queryTimeoutMs = normalizeOptionalTimeout(candidate.queryTimeoutMs);
+  if (password !== undefined) {
+    connection.password = password;
+  }
   if (connectTimeoutMs !== undefined) {
     connection.connectTimeoutMs = connectTimeoutMs;
   }
@@ -115,6 +121,9 @@ export function validateConnection(
   }
   if (/[\0\r\n:]/.test(connection.username)) {
     throw new ConnectionValidationError('Username cannot contain colons, line breaks, or null characters.');
+  }
+  if (connection.password !== undefined) {
+    validatePassword(connection.password);
   }
   validateOptionalTimeout(connection.connectTimeoutMs, 'Connect / handshake timeout');
   validateOptionalTimeout(connection.queryTimeoutMs, 'Query response timeout');
@@ -258,6 +267,16 @@ function normalizeOptionalTimeout(value: unknown): number | undefined {
     return undefined;
   }
   return typeof value === 'number' ? value : Number(value);
+}
+
+function normalizeOptionalPassword(value: unknown): string | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value !== 'string') {
+    throw new ConnectionValidationError('Password must be a string when configured.');
+  }
+  return value;
 }
 
 function isValidTimeout(value: unknown): value is number {

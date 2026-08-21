@@ -254,7 +254,9 @@ export class ConnectionStore {
         validatePassword(password);
       }
       const passwordChanges = password !== undefined;
-      const previousPassword = passwordChanges ? await this.password(validated.id) : undefined;
+      const previousPassword = passwordChanges
+        ? await this.context.secrets.get(this.passwordKey(validated.id))
+        : undefined;
       const previousActiveId = this.activeConnectionIdSnapshot;
       const shouldActivate = !this.activeConnectionId() &&
         !this.hasRememberedActiveConnection();
@@ -327,7 +329,11 @@ export class ConnectionStore {
       if (expected && !sameConnection(connections[index], expected)) {
         throw new Error(`KX connection "${connection.name}" changed after this form was opened. Reopen it and try again.`);
       }
-      const validated = validateConnection(connection, connections, connection.id);
+      const candidate = connection.password === undefined &&
+        connections[index].password !== undefined
+        ? { ...connection, password: connections[index].password }
+        : connection;
+      const validated = validateConnection(candidate, connections, connection.id);
       const owner = this.connectionScope(connection.id);
       if (!owner) {
         throw new Error(`KX connection "${connection.name}" has no writable owning settings scope.`);
@@ -372,7 +378,9 @@ export class ConnectionStore {
         ? this.stateAfterScopeUpdate(targetScope, updatedTargetConnections)
         : updatedState;
       const passwordChanges = password !== undefined;
-      const previousPassword = passwordChanges ? await this.password(connection.id) : undefined;
+      const previousPassword = passwordChanges
+        ? await this.context.secrets.get(this.passwordKey(connection.id))
+        : undefined;
       let secretAttempted = false;
       let connectionsAttempted = false;
       let connectionsWriteRevision: number | undefined;
@@ -462,7 +470,9 @@ export class ConnectionStore {
       const removeSecret = !updatedState.connections.some(connection => connection.id === id);
       const removedActiveConnection = this.activeConnectionId() === id;
       const previousActiveId = this.activeConnectionIdSnapshot;
-      const previousPassword = removeSecret ? await this.password(id) : undefined;
+      const previousPassword = removeSecret
+        ? await this.context.secrets.get(this.passwordKey(id))
+        : undefined;
       let secretAttempted = false;
       let activeAttempted = false;
       let connectionsAttempted = false;
@@ -512,7 +522,8 @@ export class ConnectionStore {
   }
 
   public async password(id: string): Promise<string | undefined> {
-    return this.context.secrets.get(this.passwordKey(id));
+    const secret = await this.context.secrets.get(this.passwordKey(id));
+    return secret !== undefined ? secret : this.connection(id)?.password;
   }
 
   public async hasPassword(id: string): Promise<boolean> {
@@ -609,6 +620,9 @@ export class ConnectionStore {
       port: connection.port,
       database: connection.database,
       username: connection.username,
+      ...(connection.password === undefined
+        ? {}
+        : { password: connection.password }),
       ...(connection.connectTimeoutMs === undefined
         ? {}
         : { connectTimeoutMs: connection.connectTimeoutMs }),
@@ -1203,6 +1217,7 @@ function connectionListFingerprint(connections: readonly KxConnection[]): string
 function sameConnection(left: KxConnection, right: KxConnection): boolean {
   return left.id === right.id && left.name === right.name && left.host === right.host &&
     left.port === right.port && left.database === right.database && left.username === right.username &&
+    left.password === right.password &&
     left.connectTimeoutMs === right.connectTimeoutMs && left.queryTimeoutMs === right.queryTimeoutMs;
 }
 
