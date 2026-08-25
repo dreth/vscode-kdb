@@ -167,6 +167,24 @@ npm run test:notebook-cross
 npm run test:extension-host
 ```
 
+### Spec-driven changes
+
+This repository uses [OpenSpec](https://openspec.dev/) for new features,
+user-visible behavior changes, compatibility changes, and substantial
+cross-component refactors. OpenSpec requires Node.js 20.19 or newer. Install the
+CLI once on each development machine:
+
+```sh
+npm install -g @fission-ai/openspec@latest
+openspec --version
+```
+
+Codex skills and project guardrails are checked in under `.agents/skills/` and
+`openspec/config.yaml`. Start a change with `$openspec-propose`, implement the
+reviewed change with `$openspec-apply-change`, and finish with
+`$openspec-archive-change`. Run `openspec doctor` to check repository setup and
+`openspec validate --all --strict` when active specs or changes exist.
+
 The live-q test detects `~/.kx/bin/q`, or accepts `VSCODE_KDB_Q_BIN=/absolute/path/to/q`:
 
 ```sh

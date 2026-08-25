@@ -1,0 +1,51 @@
+schema: spec-driven
+
+context: |
+  KX for VS Code is a standalone TypeScript VS Code extension for kdb+/q.
+  Extension-host code lives in src/, the browser notebook renderer lives in
+  renderer/, deterministic JavaScript tests live in test/, and the separately
+  packaged Python notebook companion lives in python/kx_notebook/.
+
+  Many features have two consumers: the KX Results panel and notebook output.
+  Shared behavior belongs in host-neutral helpers when practical, and changes
+  must preserve parity across both surfaces unless a spec explicitly says why
+  they differ. Treat persisted notebook MIME v1/v2, q value identity, settings,
+  saved output, and request/reset/stale-response behavior as compatibility
+  boundaries.
+
+  The primary TypeScript verification gate is `npm test`. Changes to the Python
+  companion also run `npm run test:notebook-python`. Use the narrower extension
+  host, cross-contract, parity, live-q, or visual suites when the affected
+  behavior requires them. Documentation source lives in mkdocs-src/; docs/ is
+  generated and must remain in sync through the documented generation workflow.
+
+  Existing user-visible behavior is intentional unless the approved change says
+  otherwise. Inspect the current implementation, tests, changelog, and relevant
+  docs before changing a capability. Do not delete, weaken, or silently replace
+  an existing invariant merely to make a new feature easier to implement.
+
+rules:
+  proposal:
+    - Describe the current behavior and the regression risk, not only the new behavior.
+    - Include explicit non-goals and identify every affected surface or persisted contract.
+  specs:
+    - Add scenarios for the new behavior and for existing behavior that is at risk of regression.
+    - Make intentional differences between Results panel, live notebook, and saved notebook behavior explicit.
+  design:
+    - Identify the shared source of truth, all downstream consumers, compatibility boundaries, and stale/reset/error lifecycle effects.
+    - Prefer extending shared helpers over creating a second policy for another surface.
+  tasks:
+    - Include focused regression tests before or with implementation tasks.
+    - Include targeted verification and the relevant full project gate before completion.
+
+operations:
+  apply:
+    guidance:
+      - Read the existing implementation and its tests before editing each affected behavior.
+      - Add or update regression tests for every preserved invariant named by the specs.
+      - Keep Results panel and notebook behavior in parity unless the approved specs require a difference.
+      - Do not mark implementation tasks complete while relevant tests fail or specified behavior remains unverified.
+  archive:
+    guidance:
+      - Confirm all specified regression scenarios have automated coverage or a documented reason they require manual verification.
+      - Report the exact verification commands and outcomes in the archive summary.
