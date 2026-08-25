@@ -35,6 +35,7 @@ import {
   isPortableKxFullResult,
   notebookSavedPreviewNotice,
   portableCellValue,
+  portableKxResultForGridDisplay,
 } from './notebook-contract';
 import {
   KxResultsPanel,
@@ -1475,6 +1476,7 @@ export class NotebookIntegration implements vscode.Disposable {
   }
 
   private showPreview(payload: PortableKxResult): void {
+    payload = portableKxResultForGridDisplay(payload);
     const complete = isPortableKxFullResult(payload);
     if (payload.kind === 'qText') {
       KxResultsPanel.showResult(this.context, {
@@ -2193,6 +2195,10 @@ function portablePreviewRange(
     rowIndexes?: number[];
   }
 ): { table: ColumnarPanelResult; range: CellRange } {
+  const displayed = portableKxResultForGridDisplay(payload);
+  if (displayed.kind === 'table') {
+    payload = displayed;
+  }
   const indexes = request.columnIndexes || Array.from(
     { length: request.endColumn - request.startColumn + 1 },
     (_value, index) => request.startColumn + index

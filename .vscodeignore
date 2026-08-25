@@ -2,9 +2,11 @@
 .gitignore
 CNAME
 .github/**
+.agents/**
 docs/**
 mkdocs-src/**
 mkdocs.yml
+openspec/**
 .vscode/**
 .vscode-test/**
 src/**

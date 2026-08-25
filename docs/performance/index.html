@@ -876,7 +876,7 @@
 </tr>
 <tr>
 <td>Built-in chart</td>
-<td>Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views show all eligible finite points below 7,000 and deterministically target exactly 7,000 at or above that count; semantic groups/candles may be fewer.</td>
+<td>Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views return all eligible observations at or below 7,000 and exactly 7,000 shared aligned samples above that count; semantic groups/candles may be fewer. Zoom stays local at 3,000 or more visible samples and refills below that threshold. Compatible pans use a cached X index, retain overlap, and decode only newly exposed/boundary Y slices.</td>
 </tr>
 <tr>
 <td>Local server full export</td>

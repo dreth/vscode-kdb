@@ -29,7 +29,7 @@ select avg price by 0D00:05 xbar time from trade where date=.z.D
 | Sort (panel and live notebook) | Confirmation only above `vscode-kdb.results.largeSortWarningRowThreshold`, which defaults to 5,000,000 rows; exactly 5,000,000 does not warn. Confirmation approves only the exact displayed result, while the global hide setting skips the guardrail. |
 | Column summaries (panel only, opt-in) | Exact only through both inclusive limits of 50,000 rows and 100,000 cells. Larger results use deterministic evenly spaced sampling of at most 10,000 rows and 100,000 cells, labelled sampled/partial. |
 | Copy/export | Confirmation at 1,000,000 selected cells or an estimated 50 MiB; large realized clipboard output gets another export suggestion. |
-| Built-in chart | Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views show all eligible finite points below 7,000 and deterministically target exactly 7,000 at or above that count; semantic groups/candles may be fewer. |
+| Built-in chart | Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views return all eligible observations at or below 7,000 and exactly 7,000 shared aligned samples above that count; semantic groups/candles may be fewer. Zoom stays local at 3,000 or more visible samples and refills below that threshold. Compatible pans use a cached X index, retain overlap, and decode only newly exposed/boundary Y slices. |
 | Local server full export | Rejects more than 1,000,000 visible cells by default. |
 | Local server slice | Fixed maximum of 1,000,000 requested cells. |
 | q-text | Bounds nested traversal at 16 levels; caps very large output at 1,048,576 characters and marks character truncation. |

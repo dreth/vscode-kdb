@@ -138,6 +138,7 @@ export interface QColumnarPanelResult {
   kind: string;
   rowsMaterialized: boolean;
   exactPersistenceIssue?: string;
+  logicalPresentation?: 'standalone-list';
 }
 
 export interface QTextPanelResult {
@@ -146,6 +147,7 @@ export interface QTextPanelResult {
   kind: string;
   rowsMaterialized: boolean;
   exactPersistenceIssue?: string;
+  logicalPresentation?: 'standalone-list';
 }
 
 export type QPanelResult = QColumnarPanelResult | QTextPanelResult;
@@ -1178,6 +1180,57 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
     };
   }
 
+  if (isQVector(value)) {
+    const vectorType = qVectorType(value) || 'mixed';
+    if (displayOptions.listDisplayStrategy === 'qText') {
+      return qTextPanelResult(value, 'list');
+    }
+    if (vectorType === 'char') {
+      if (value.length === 0) {
+        return qTextPanelResult(value, 'list');
+      }
+      const result = createColumnarPanelResult(['value'], 1, () => value, [vectorType]);
+      return {
+        mode: 'grid',
+        cols: result.columns,
+        result,
+        kind: 'list',
+        rowsMaterialized: false,
+      };
+    }
+    if (value.length === 1) {
+      const soleValue = qVectorAtomAt(value, 0) as QValue;
+      const result = createColumnarPanelResult(
+        ['value'],
+        1,
+        () => isQFunction(soleValue) ? value : normalizePanelCell(soleValue),
+        [vectorType]
+      );
+      return {
+        mode: 'grid',
+        cols: result.columns,
+        result,
+        kind: 'list',
+        rowsMaterialized: false,
+      };
+    }
+    const result = createColumnarPanelResult(
+      ['index', 'value'],
+      value.length,
+      (rowIndex, columnIndex) => columnIndex === 0
+        ? rowIndex
+        : normalizePanelCell(qVectorAtomAt(value, rowIndex) as QValue),
+      ['long', vectorType]
+    );
+    return {
+      mode: 'grid',
+      cols: result.columns,
+      result,
+      kind: 'list',
+      rowsMaterialized: false,
+    };
+  }
+
   if (qValuePrefersQText(value)) {
     return qTextPanelResult(value, qValueKind(value));
   }
@@ -1203,25 +1256,6 @@ export function qValueToColumnarPanel(value: QValue, options?: QResultDisplayOpt
       result,
       kind: 'dictionary',
       rowsMaterialized: true,
-    };
-  }
-
-  if (isQVector(value)) {
-    if (displayOptions.listDisplayStrategy === 'qText') {
-      return qTextPanelResult(value, 'list');
-    }
-    const result = createColumnarPanelResult(
-      ['value'],
-      1,
-      () => value,
-      [qVectorType(value) || 'mixed']
-    );
-    return {
-      mode: 'grid',
-      cols: result.columns,
-      result,
-      kind: 'list',
-      rowsMaterialized: false,
     };
   }
 
@@ -1304,6 +1338,9 @@ export function qValueToLosslessPortablePanel(
       ),
       kind: 'list',
       rowsMaterialized: false,
+      ...(qVectorType(value) === 'char'
+        ? {}
+        : { logicalPresentation: 'standalone-list' as const }),
     };
   }
   if (isQAtom(value)) {

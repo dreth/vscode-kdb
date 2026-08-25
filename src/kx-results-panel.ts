@@ -3455,6 +3455,8 @@ export class KxResultsPanel {
       let chartDragMode = 'zoom';
       let chartNavigatorPointerState = null;
       let chartNavigatorOverviewData = null;
+      let chartViewportFrame = 0;
+      let chartPendingViewportRange = null;
       const CHART_PNG_DATA_URL_PREFIX = '${CHART_PNG_DATA_URL_PREFIX}';
       const CHART_MIN_HEIGHT = 180;
       const CHART_MAX_HEIGHT = 720;
@@ -4883,21 +4885,36 @@ export class KxResultsPanel {
         }
         const warnings = chartData.warnings.length > 0 ? ' ' + chartData.warnings.join(' ') : '';
         const grouped = chartData.groupByColumn ? ' grouped by ' + chartData.groupByColumn : '';
+        const samplingLevel = chartSamplingLevelStatus(chartData);
         chartStatus.textContent = chartData.chartType === 'candlestick'
           ? 'Showing ' + formatUiCount(chartData.candlesticks.length) +
             ' candles from ' + formatUiCount(chartData.eligibleRowCount) +
-            ' eligible rows (' + chartData.algorithm + '). Group by is unavailable.' + warnings
+            ' eligible rows. ' + samplingLevel + ' Group by is unavailable.' + warnings
           : chartData.chartType === 'box'
             ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
               ' box groups from ' + formatUiCount(chartData.eligibleRowCount) +
-              ' eligible rows (' + chartData.algorithm + '). Group by is unavailable.' + warnings
+              ' eligible rows. ' + samplingLevel + ' Group by is unavailable.' + warnings
             : chartData.chartType === 'bar'
               ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
                 ' rendered bar groups from ' + formatUiCount(chartData.eligibleRowCount) +
-                ' eligible rows' + grouped + ' (' + chartData.algorithm + ').' + warnings
+                ' eligible rows' + grouped + '. ' + samplingLevel + warnings
               : 'Showing ' + formatUiCount(chartData.sampledPointCount) +
               ' rendered points from ' + formatUiCount(chartData.eligibleRowCount) +
-              ' eligible rows' + grouped + ' (' + chartData.algorithm + ').' + warnings;
+              ' eligible rows' + grouped + '. ' + samplingLevel + warnings;
+      }
+
+      function chartSamplingLevelStatus(value) {
+        const algorithm = String(value && value.algorithm || 'none');
+        const type = normalizeChartType(value && value.chartType);
+        if (type === 'line' || type === 'scatter' || type === 'step') {
+          const interval = Number(value && value.temporalBucketIntervalMs);
+          if (value && value.xKind === 'temporal' && Number.isFinite(interval) && interval > 0) {
+            return 'Sampling level: temporal ' + formatChartNumber(interval) +
+              ' ms buckets anchored at Unix epoch (' + algorithm + ').';
+          }
+          return 'Sampling level: observation-anchored (' + algorithm + ').';
+        }
+        return 'Sampling level: family-specific (' + algorithm + ').';
       }
 
       function normalizeChartData(value) {
@@ -4955,6 +4972,11 @@ export class KxResultsPanel {
           eligibleRowCount: toNonNegativeInteger(value.eligibleRowCount, 0),
           sampledPointCount: toNonNegativeInteger(value.sampledPointCount, 0),
           algorithm: String(value.algorithm || 'none'),
+          temporalBucketIntervalMs: typeof value.temporalBucketIntervalMs === 'number' &&
+            Number.isFinite(value.temporalBucketIntervalMs) && value.temporalBucketIntervalMs > 0
+            ? value.temporalBucketIntervalMs
+            : undefined,
+          temporalBucketOrigin: value.temporalBucketOrigin === 0 ? 0 : undefined,
           sorted: value.sorted === true,
           warnings: Array.isArray(value.warnings) ? value.warnings.map(String) : []
         };
@@ -5901,7 +5923,9 @@ export class KxResultsPanel {
       }
 
       function resetChartZoom() {
+        cancelChartViewportFrame();
         clearChartPanState();
+        clearChartNavigatorPointer();
         const xRange = chartZoomLifecycle.fullRange;
         const fullData = chartZoomLifecycle.fullData;
         const restoreFullData = !!chartZoomLifecycle.requestedRange && !!fullData && !!xRange;
@@ -6014,6 +6038,47 @@ export class KxResultsPanel {
         clearChartSelection();
         hideChartTooltip();
         updateChartNavigator();
+      }
+
+      function queueChartViewportFrame(range) {
+        if (!isValidChartRange(range)) {
+          return;
+        }
+        chartPendingViewportRange = range;
+        if (chartViewportFrame) {
+          return;
+        }
+        chartViewportFrame = requestAnimationFrame(() => {
+          chartViewportFrame = 0;
+          const pending = chartPendingViewportRange;
+          chartPendingViewportRange = null;
+          if (pending) {
+            setChartViewportLocally(pending);
+          }
+        });
+      }
+
+      function flushChartViewportFrame(range) {
+        if (isValidChartRange(range)) {
+          chartPendingViewportRange = range;
+        }
+        if (chartViewportFrame) {
+          cancelAnimationFrame(chartViewportFrame);
+          chartViewportFrame = 0;
+        }
+        const pending = chartPendingViewportRange;
+        chartPendingViewportRange = null;
+        if (pending) {
+          setChartViewportLocally(pending);
+        }
+      }
+
+      function cancelChartViewportFrame() {
+        if (chartViewportFrame) {
+          cancelAnimationFrame(chartViewportFrame);
+          chartViewportFrame = 0;
+        }
+        chartPendingViewportRange = null;
       }
 
       function updateChartNavigator() {
@@ -6194,6 +6259,7 @@ export class KxResultsPanel {
           startX: event.clientX,
           range
         };
+        cancelChartViewportFrame();
         chartNavigatorWindowElement.classList.add('is-dragging');
         event.currentTarget.focus({ preventScroll: true });
         window.addEventListener('pointermove', updateChartNavigatorPointer, true);
@@ -6208,18 +6274,26 @@ export class KxResultsPanel {
         if (!pointer || event.pointerId !== pointer.pointerId) {
           return;
         }
+        const range = chartNavigatorPointerRange(event);
+        if (range) {
+          queueChartViewportFrame(range);
+          chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange, range);
+        }
+        event.preventDefault();
+      }
+
+      function chartNavigatorPointerRange(event) {
+        const pointer = chartNavigatorPointerState;
+        if (!pointer || event.pointerId !== pointer.pointerId) {
+          return null;
+        }
         const width = Math.max(1, chartNavigator.getBoundingClientRect().width);
-        const range = adjustChartNavigatorRange(
+        return adjustChartNavigatorRange(
           pointer.range,
           chartZoomLifecycle.fullRange,
           pointer.part,
           (event.clientX - pointer.startX) / width
         );
-        if (range) {
-          setChartViewportLocally(range);
-          chartZoomed = chartRangeIsZoomed(chartZoomLifecycle.fullRange, range);
-        }
-        event.preventDefault();
       }
 
       function finishChartNavigatorPointer(event) {
@@ -6227,7 +6301,7 @@ export class KxResultsPanel {
         if (!pointer || event.pointerId !== pointer.pointerId) {
           return;
         }
-        updateChartNavigatorPointer(event);
+        flushChartViewportFrame(chartNavigatorPointerRange(event));
         const range = currentChartViewportRange();
         clearChartNavigatorPointer();
         if (range && chartZoomRangeKey(range) !== chartZoomRangeKey(pointer.range)) {
@@ -6334,6 +6408,7 @@ export class KxResultsPanel {
         if (!range) {
           return;
         }
+        cancelChartViewportFrame();
         chartPanState = { startX: event.clientX, range };
         chartCanvasWrap.classList.add('is-panning');
         event.preventDefault();
@@ -6344,24 +6419,31 @@ export class KxResultsPanel {
         if (!chartPanState || !chartUPlot) {
           return;
         }
+        const range = chartPanRange(event);
+        if (range) {
+          queueChartViewportFrame(range);
+        }
+      }
+
+      function chartPanRange(event) {
+        if (!chartPanState || !chartUPlot) {
+          return null;
+        }
         const plotWidth = Math.max(
           1,
           Number(chartUPlot.bbox && chartUPlot.bbox.width || 0) / chartPxRatio()
         );
-        const range = panChartViewportByPixels(
+        return panChartViewportByPixels(
           chartPanState.range,
           chartZoomLifecycle.fullRange,
           event.clientX - chartPanState.startX,
           plotWidth
         );
-        if (range) {
-          setChartViewportLocally(range);
-        }
       }
 
       function finishChartPan(event) {
         const started = chartPanState && chartPanState.range;
-        updateChartPan(event);
+        flushChartViewportFrame(chartPanRange(event));
         const range = currentChartViewportRange();
         clearChartPanState();
         if (range && (!started || chartZoomRangeKey(range) !== chartZoomRangeKey(started))) {
@@ -6505,6 +6587,7 @@ export class KxResultsPanel {
       }
 
       function destroyChartPlot() {
+        cancelChartViewportFrame();
         clearChartPanState();
         clearChartNavigatorPointer();
         captureChartSeriesVisibility(chartUPlot);

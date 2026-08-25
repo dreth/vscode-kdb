@@ -27,6 +27,70 @@ export interface ChartNavigatorWindow {
 
 export type ChartPixelGap = [number, number];
 
+/**
+ * Keep only the latest pointer-driven value and apply it at most once per
+ * browser frame. `flush` cancels pending frame work and applies the final
+ * pointer position synchronously, which keeps pointer-up/cancel/reset exact.
+ */
+export class ChartFrameCoalescer<T> {
+  private frameId: number | undefined;
+  private latest: T | undefined;
+  private hasLatest = false;
+
+  public constructor(
+    private readonly requestFrame: (callback: () => void) => number,
+    private readonly cancelFrame: (frameId: number) => void,
+    private readonly apply: (value: T) => void
+  ) {}
+
+  public queue(value: T): void {
+    this.latest = value;
+    this.hasLatest = true;
+    if (this.frameId !== undefined) {
+      return;
+    }
+    this.frameId = this.requestFrame(() => {
+      this.frameId = undefined;
+      this.applyLatest();
+    });
+  }
+
+  public flush(value?: T): void {
+    if (arguments.length > 0) {
+      this.latest = value as T;
+      this.hasLatest = true;
+    }
+    if (this.frameId !== undefined) {
+      this.cancelFrame(this.frameId);
+      this.frameId = undefined;
+    }
+    this.applyLatest();
+  }
+
+  public cancel(): void {
+    if (this.frameId !== undefined) {
+      this.cancelFrame(this.frameId);
+      this.frameId = undefined;
+    }
+    this.latest = undefined;
+    this.hasLatest = false;
+  }
+
+  public get pending(): boolean {
+    return this.hasLatest;
+  }
+
+  private applyLatest(): void {
+    if (!this.hasLatest) {
+      return;
+    }
+    const value = this.latest as T;
+    this.latest = undefined;
+    this.hasLatest = false;
+    this.apply(value);
+  }
+}
+
 /** Sort and coalesce native/custom uPlot clip intervals. */
 export function mergeChartPixelGaps(gaps: readonly ChartPixelGap[]): ChartPixelGap[] {
   if (gaps.length < 2) {

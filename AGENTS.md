@@ -20,3 +20,7 @@ Treat `openspec/specs/` as the source of truth for current requirements and
 `openspec/changes/` as the reviewable history of intent. Keep task checkboxes
 accurate, validate the change, and archive it only after implementation and
 verification are complete.
+
+Before changing chart sampling or q result presentation, read the applicable
+capability specs under `openspec/specs/` plus any active delta under
+`openspec/changes/`. Never silently weaken either contract.

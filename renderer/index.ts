@@ -11,6 +11,7 @@ import {
 import {
   ChartZoomAppliedData,
   ChartZoomAppliedFailure,
+  ChartFrameCoalescer,
   ChartZoomLifecycleState,
   ChartNavigatorPart,
   ChartRange,
@@ -74,6 +75,7 @@ import {
   notebookQTextDisplay,
   notebookQTextDisplayNotice,
   notebookSavedPreviewNotice,
+  portableKxResultForGridDisplay,
   portableCellChartColumnType,
   portableCellChartValue,
   portableCellToBoundedText,
@@ -263,6 +265,7 @@ interface OutputState {
   domIdPrefix: string;
   element: HTMLElement;
   payload: PortableKxResult;
+  sourcePayload: PortableKxResult;
   savedChart: NotebookChartSpec | undefined;
   savedRenderedChart: NotebookChartSpec | undefined;
   savedChartVisible: boolean;
@@ -358,6 +361,7 @@ interface OutputState {
   savedChartViewportRange?: PlotScaleRange;
   savedChartViewportTimer?: number;
   chartProgrammaticScale: boolean;
+  chartFrameCoalescer?: ChartFrameCoalescer<PlotScaleRange>;
   hostActionRequestId: number;
   hostActionMessage?: string;
   openDetailsKeys: string[];
@@ -421,13 +425,14 @@ export const activate: ActivationFunction<RendererState> = context => {
     renderOutputItem(outputItem, element) {
       const previousState = disposeOutputItemState(outputItem.id, context);
       element.replaceChildren();
-      const payload = portablePayload(outputItem, element);
-      if (!payload) {
+      const sourcePayload = portablePayload(outputItem, element);
+      if (!sourcePayload) {
         return;
       }
+      const payload = portableKxResultForGridDisplay(sourcePayload);
       const inspectedIdentity = inspectNotebookKxOutputIdentity(
         outputItem.metadata,
-        [{ mime: outputItem.mime, value: payload }]
+        [{ mime: outputItem.mime, value: sourcePayload }]
       );
       const identity = inspectedIdentity.status === 'valid'
         ? inspectedIdentity.identity
@@ -494,6 +499,7 @@ export const activate: ActivationFunction<RendererState> = context => {
         domIdPrefix: `kx-grid-${++domSequence}`,
         element,
         payload,
+        sourcePayload,
         savedChart: payload.kind === 'table' && payload.chart
           ? {
             ...defaultNotebookOhlcColumns(payload.schema.columns.map(column => column.name)),
@@ -2242,25 +2248,37 @@ function liveChartValidationMessage(state: OutputState): string {
 function liveChartDataStatus(data: NotebookLiveChartData): string {
   const shown = data.sampledPointCount ?? data.x.length;
   const eligible = data.eligibleRowCount;
-  const algorithm = data.algorithm ? ` (${data.algorithm})` : '';
+  const samplingLevel = chartSamplingLevelStatus(data);
   if (data.chartType === 'candlestick') {
     return `Showing ${shown.toLocaleString()} candles${eligible === undefined
       ? ''
-      : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
+      : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
   }
   if (data.chartType === 'box') {
     return `Showing ${shown.toLocaleString()} box groups${eligible === undefined
       ? ''
-      : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
+      : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
   }
   if (data.chartType === 'bar') {
     return `Showing ${shown.toLocaleString()} rendered bar groups${eligible === undefined
       ? ''
-      : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
+      : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
   }
   return `Showing ${shown.toLocaleString()} rendered points${eligible === undefined
     ? ''
-    : ` from ${eligible.toLocaleString()} eligible rows`}${algorithm}.`;
+    : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
+}
+
+function chartSamplingLevelStatus(data: NotebookLiveChartData): string {
+  const algorithm = data.algorithm || 'none';
+  if (data.chartType === 'line' || data.chartType === 'scatter' || data.chartType === 'step') {
+    if (data.xKind === 'temporal' && Number.isFinite(data.temporalBucketIntervalMs) &&
+      data.temporalBucketIntervalMs! > 0) {
+      return ` Sampling level: temporal ${formatChartNumber(data.temporalBucketIntervalMs!)} ms buckets anchored at Unix epoch (${algorithm}).`;
+    }
+    return ` Sampling level: observation-anchored (${algorithm}).`;
+  }
+  return ` Sampling level: family-specific (${algorithm}).`;
 }
 
 function requestLiveChart(
@@ -2530,7 +2548,7 @@ function renderSavedResult(
       context.postMessage({
         type: 'exportPreviewText',
         ...(state.outputId ? { outputId: state.outputId } : {}),
-        payload: state.payload,
+        payload: state.sourcePayload,
         requestId,
       });
       renderState(context, state);
@@ -4199,6 +4217,22 @@ function setNotebookPlotXRange(state: OutputState, range: PlotScaleRange): void 
   syncCurrentNotebookChartNavigator(state);
 }
 
+function notebookChartFrameCoalescer(state: OutputState): ChartFrameCoalescer<PlotScaleRange> {
+  if (!state.chartFrameCoalescer) {
+    state.chartFrameCoalescer = new ChartFrameCoalescer<PlotScaleRange>(
+      callback => window.requestAnimationFrame(callback),
+      frameId => window.cancelAnimationFrame(frameId),
+      range => {
+        if (state.chartSource === 'saved') {
+          state.savedChartViewportRange = range;
+        }
+        setNotebookPlotXRange(state, range);
+      }
+    );
+  }
+  return state.chartFrameCoalescer;
+}
+
 function completeNotebookChartViewport(
   context: RendererContext<RendererState>,
   state: OutputState,
@@ -4273,6 +4307,7 @@ function resetNotebookChartViewport(
   if (notebookChartViewportInteractionBlocked(state.chartSource, state.liveChart.dirty)) {
     return;
   }
+  state.chartFrameCoalescer?.cancel();
   if (state.chartSource === 'live') {
     resetLiveChartZoom(context, state);
     return;
@@ -4359,23 +4394,25 @@ function installNotebookChartNavigator(
   } | undefined;
   const blocked = (): boolean => notebookChartNavigatorBlocked(state, source);
   const apply = (range: PlotScaleRange): void => {
-    if (source === 'saved') {
-      state.savedChartViewportRange = range;
-    }
-    setNotebookPlotXRange(state, range);
-    syncNotebookChartNavigator(state, data, elements, source);
+    notebookChartFrameCoalescer(state).queue(range);
   };
-  const move = (event: PointerEvent): void => {
-    if (!pointer || event.pointerId !== pointer.id) {
-      return;
-    }
-    const range = adjustChartNavigatorRange(
+  const settle = (range: PlotScaleRange): void => {
+    notebookChartFrameCoalescer(state).flush(range);
+  };
+  const finalRange = (event: PointerEvent): PlotScaleRange | undefined => pointer
+    ? adjustChartNavigatorRange(
       pointer.range,
       chartFullRangeForState(state),
       pointer.part,
       (event.clientX - pointer.startX) /
         Math.max(1, elements.root.getBoundingClientRect().width)
-    );
+    ) || undefined
+    : undefined;
+  const move = (event: PointerEvent): void => {
+    if (!pointer || event.pointerId !== pointer.id) {
+      return;
+    }
+    const range = finalRange(event);
     if (range) {
       apply(range);
     }
@@ -4386,7 +4423,12 @@ function installNotebookChartNavigator(
       return;
     }
     const started = pointer.range;
-    move(event);
+    const settled = finalRange(event);
+    if (settled) {
+      notebookChartFrameCoalescer(state).flush(settled);
+    } else {
+      notebookChartFrameCoalescer(state).flush();
+    }
     const range = currentNotebookChartRange(state);
     pointer = undefined;
     elements.window.classList.remove('is-dragging');
@@ -4407,6 +4449,7 @@ function installNotebookChartNavigator(
       return;
     }
     pointer = { id: event.pointerId, part, startX: event.clientX, range };
+    notebookChartFrameCoalescer(state).cancel();
     elements.window.classList.add('is-dragging');
     const target = part === 'start'
       ? elements.start
@@ -4435,7 +4478,7 @@ function installNotebookChartNavigator(
       (event.clientX - rect.left) / Math.max(1, rect.width)
     );
     if (range) {
-      apply(range);
+      settle(range);
       if (!current || chartZoomRangeKey(current) !== chartZoomRangeKey(range)) {
         completeNotebookChartViewport(context, state, range);
       }
@@ -4464,7 +4507,7 @@ function installNotebookChartNavigator(
       (event.key === 'ArrowLeft' ? -1 : 1) * (event.shiftKey ? 0.1 : 0.01)
     );
     if (range && (!current || chartZoomRangeKey(range) !== chartZoomRangeKey(current))) {
-      apply(range);
+      settle(range);
       completeNotebookChartViewport(context, state, range);
     }
     event.preventDefault();
@@ -4722,10 +4765,7 @@ function installNotebookChartViewport(
       Math.max(1, state.plot.bbox.width / (window.devicePixelRatio || 1))
     );
     if (range) {
-      if (state.chartSource === 'saved') {
-        state.savedChartViewportRange = range;
-      }
-      setNotebookPlotXRange(state, range);
+      notebookChartFrameCoalescer(state).queue(range);
     }
     event.preventDefault();
   };
@@ -4734,7 +4774,17 @@ function installNotebookChartViewport(
       return;
     }
     const started = panStart.range;
-    move(event);
+    const settled = panChartViewportByPixels(
+      panStart.range,
+      chartFullRangeForState(state),
+      event.clientX - panStart.x,
+      Math.max(1, (state.plot?.bbox.width || 1) / (window.devicePixelRatio || 1))
+    );
+    if (settled) {
+      notebookChartFrameCoalescer(state).flush(settled);
+    } else {
+      notebookChartFrameCoalescer(state).flush();
+    }
     const range = currentNotebookChartRange(state);
     panStart = undefined;
     window.removeEventListener('mousemove', move, true);
@@ -4758,6 +4808,7 @@ function installNotebookChartViewport(
       return;
     }
     host.focus({ preventScroll: true });
+    notebookChartFrameCoalescer(state).cancel();
     panStart = { x: event.clientX, range };
     window.addEventListener('mousemove', move, true);
     window.addEventListener('mouseup', finish, true);
@@ -4933,7 +4984,7 @@ function requestChartPngExport(
     context.postMessage({
       type: 'exportChartPng',
       ...(state.outputId ? { outputId: state.outputId } : {}),
-      payload: state.payload,
+      payload: state.sourcePayload,
       requestId,
       dataUrl: canvas.toDataURL('image/png'),
     });
@@ -5983,7 +6034,7 @@ function openPreview(
   context.postMessage({
     type: 'openPreview',
     ...(state.outputId ? { outputId: state.outputId } : {}),
-    payload: state.payload,
+    payload: state.sourcePayload,
     requestId,
   });
   status.textContent = state.hostActionMessage;
@@ -6428,7 +6479,7 @@ function requestSavedCopy(
     type: 'copyPreviewRange',
     ...(state.outputId ? { outputId: state.outputId } : {}),
     requestId,
-    payload,
+    payload: state.sourcePayload,
     ...plan.range,
     format,
     includeHeaders: resultSettings.includeHeaders,
@@ -6460,7 +6511,7 @@ function requestSavedExport(
     type: 'exportPreviewRange',
     ...(state.outputId ? { outputId: state.outputId } : {}),
     requestId,
-    payload,
+    payload: state.sourcePayload,
     ...plan.range,
     format,
     includeHeaders: resultSettings.includeHeaders,
@@ -6486,7 +6537,7 @@ function requestPreviewRerun(
   context.postMessage({
     type: 'rerunPreview',
     ...(state.outputId ? { outputId: state.outputId } : {}),
-    payload: state.payload,
+    payload: state.sourcePayload,
     requestId,
   });
   renderState(context, state);
@@ -6724,6 +6775,8 @@ function renderError(element: HTMLElement, message: string): void {
 }
 
 function destroyPlot(state: OutputState): void {
+  state.chartFrameCoalescer?.cancel();
+  state.chartFrameCoalescer = undefined;
   capturePlotViewport(state);
   capturePlotSeriesVisibility(state);
   state.plotResizeObserver?.disconnect();

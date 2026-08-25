@@ -1056,6 +1056,9 @@ export function directQPortableResult(
     ...(panel.result.keyColumnOrdinals === undefined
       ? {}
       : { keyColumnOrdinals: panel.result.keyColumnOrdinals }),
+    ...(panel.logicalPresentation === undefined
+      ? {}
+      : { logicalPresentation: panel.logicalPresentation }),
     rows: [],
     cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
     rowCount: panel.result.rowCount,

@@ -160,6 +160,31 @@ interface ChartPoint {
   gapFlags?: boolean[];
 }
 
+interface ChartXIndex {
+  columnIndex: number;
+  kind: ChartColumnKind;
+  sourceVersion: number;
+  rowCount: number;
+  x: number[];
+  xText: string[];
+  rowIndexes: number[];
+  droppedX: number;
+  sourceWasUnsorted: boolean;
+  eligibility?: ChartEligibilityIndex;
+}
+
+interface ChartEligibilitySegment {
+  start: number;
+  end: number;
+  prefix: Uint32Array;
+}
+
+interface ChartEligibilityIndex {
+  key: string;
+  entryCount: number;
+  segments: ChartEligibilitySegment[];
+}
+
 interface NormalizedValue {
   value: number;
   text: string;
@@ -197,12 +222,14 @@ interface CollectedChartPoints {
   rangeExcluded: number;
   yMissing: number;
   yInvalid: number;
+  sourceWasUnsorted: boolean;
 }
 
 interface CollectedCandlestickPoints {
   points: CandlestickInputPoint[];
   droppedX: number;
   rangeExcluded: number;
+  sourceWasUnsorted: boolean;
 }
 
 interface BoxChartBin {
@@ -239,6 +266,24 @@ export const CHART_CANDLES_PER_PIXEL = 1;
 export const CHART_MAX_BOX_GROUPS = 120;
 export const CHART_MAX_GROUPS = 12;
 export const CHART_MAX_GROUPED_SERIES = 36;
+
+interface ChartXIndexCache {
+  sourceVersion: number;
+  indexes: Map<string, ChartXIndex>;
+}
+
+interface ChartXIndexCacheSlot {
+  cache: ChartXIndexCache;
+  key: string;
+  cached?: ChartXIndex;
+}
+
+const chartXIndexes = new WeakMap<object, ChartXIndexCache>();
+
+/** Explicitly invalidate normalized X state when a mutable table identity changes in place. */
+export function invalidateChartSourceIndex(table: ColumnarPanelResult): void {
+  chartXIndexes.delete(table as unknown as object);
+}
 
 export function chartColumnOptions(table: ColumnarPanelResult, sampleSize = CHART_INFERENCE_SAMPLE_SIZE): ChartColumnOptions {
   const xColumns: ChartColumnOption[] = [];
@@ -279,6 +324,14 @@ export function buildLineChartData(table: ColumnarPanelResult, request: LineChar
 }
 
 export function buildChartData(table: ColumnarPanelResult, request: LineChartRequest): LineChartData {
+  return buildChartDataInternal(table, request, false);
+}
+
+function buildChartDataInternal(
+  table: ColumnarPanelResult,
+  request: LineChartRequest,
+  recordPanEligibility: boolean
+): LineChartData {
   const chartType = normalizeChartType(request.chartType);
   if (chartType === 'candlestick') {
     return buildCandlestickChartData(table, request);
@@ -286,7 +339,7 @@ export function buildChartData(table: ColumnarPanelResult, request: LineChartReq
   if (chartType === 'box') {
     return buildBoxChartData(table, request);
   }
-  return buildXyChartData(table, request, chartType);
+  return buildXyChartData(table, request, chartType, recordPanEligibility);
 }
 
 /** Reuse only the overlapping summaries of one bounded, compatible temporal viewport. */
@@ -301,20 +354,37 @@ export function buildChartDataWithTemporalPanReuse(
   const interval = Number(request.temporalBucketIntervalMs);
   const chartType = normalizeChartType(request.chartType);
   const cleanBuild = (): TemporalPanChartBuild => {
-    const data = buildChartData(table, request);
+    const data = buildChartDataInternal(table, request, true);
     const responseKey = data.temporalBucketIntervalMs
       ? temporalPanCacheKey({ ...request, temporalBucketIntervalMs: data.temporalBucketIntervalMs })
       : key;
     return { data, cache: temporalPanCacheForResponse(responseKey, min, max, data) };
   };
-  const eligible = request.samplingStrategy === 'temporal-fixed' &&
+  const temporalEligible = request.samplingStrategy === 'temporal-fixed' &&
     Number.isFinite(min) && Number.isFinite(max) && min < max &&
     Number.isFinite(interval) && interval > 0 &&
     !String(request.groupByColumn || '').trim() &&
     (chartType === 'line' || chartType === 'scatter' || chartType === 'step');
+  const observationEligible = request.samplingStrategy === 'point-count' &&
+    Number.isFinite(min) && Number.isFinite(max) && min < max &&
+    !String(request.groupByColumn || '').trim() &&
+    (chartType === 'line' || chartType === 'scatter' || chartType === 'step');
 
-  if (!eligible || !previous || previous.key !== key ||
-    previous.data.xKind !== 'temporal' || previous.max < min || previous.min > max) {
+  if ((!temporalEligible && !observationEligible) || !previous || previous.key !== key ||
+    previous.max < min || previous.min > max) {
+    return cleanBuild();
+  }
+
+  if (observationEligible && previous.data.xKind === 'numeric') {
+    const previousSpan = previous.max - previous.min;
+    const requestedSpan = max - min;
+    const tolerance = Math.max(1e-9, Math.abs(previousSpan) * 1e-9);
+    if (Math.abs(previousSpan - requestedSpan) > tolerance) {
+      return cleanBuild();
+    }
+    return buildObservationPanReuse(table, request, previous, key, min, max, cleanBuild);
+  }
+  if (!temporalEligible || previous.data.xKind !== 'temporal') {
     return cleanBuild();
   }
 
@@ -325,7 +395,11 @@ export function buildChartDataWithTemporalPanReuse(
   const pieces: Array<{ data: LineChartData; reused: boolean }> = [];
   try {
     if (min < reusable.start) {
-      const leftContext = buildChartData(table, { ...request, xMin: min, xMax: reusable.start + interval });
+      const leftContext = buildChartDataInternal(
+        table,
+        { ...request, xMin: min, xMax: reusable.start + interval },
+        true
+      );
       if (!leftContext.x.some(x => x >= reusable.start)) {
         return cleanBuild();
       }
@@ -349,7 +423,11 @@ export function buildChartDataWithTemporalPanReuse(
     }
     pieces.push({ data: reused, reused: true });
     if (max > reusable.end) {
-      const rightContext = buildChartData(table, { ...request, xMin: reusable.end - interval, xMax: max });
+      const rightContext = buildChartDataInternal(
+        table,
+        { ...request, xMin: reusable.end - interval, xMax: max },
+        true
+      );
       if (!rightContext.x.some(x => x < reusable.end)) {
         return cleanBuild();
       }
@@ -388,6 +466,76 @@ export function buildChartDataWithTemporalPanReuse(
     data.x.length > CHART_ORDINARY_TARGET_POINTS) {
     return cleanBuild();
   }
+  if (data.sampledPointCount !== Math.min(data.eligibleRowCount, CHART_ORDINARY_TARGET_POINTS)) {
+    // A source edge or materially changed effective span can leave the retained
+    // overlap too sparse to satisfy the authoritative density without decoding
+    // omitted overlap values. Treat that as incompatible and rebuild cleanly.
+    return cleanBuild();
+  }
+  return { data, cache: { key, min, max, data } };
+}
+
+function buildObservationPanReuse(
+  table: ColumnarPanelResult,
+  request: LineChartRequest,
+  previous: TemporalPanChartCache,
+  key: string,
+  min: number,
+  max: number,
+  cleanBuild: () => TemporalPanChartBuild
+): TemporalPanChartBuild {
+  const overlapMin = Math.max(min, previous.min);
+  const overlapMax = Math.min(max, previous.max);
+  const pieces: Array<{ data: LineChartData; reused: boolean }> = [];
+  try {
+    if (min < previous.min) {
+      pieces.push({
+        data: buildChartDataInternal(
+          table,
+          { ...request, xMin: min, xMax: previous.min },
+          true
+        ),
+        reused: false,
+      });
+    }
+    const reused = filterTemporalChartData(
+      previous.data,
+      x => x >= overlapMin && x <= overlapMax
+    );
+    if (!reused) {
+      return cleanBuild();
+    }
+    pieces.push({ data: reused, reused: true });
+    if (max > previous.max) {
+      pieces.push({
+        data: buildChartDataInternal(
+          table,
+          { ...request, xMin: previous.max, xMax: max },
+          true
+        ),
+        reused: false,
+      });
+    }
+  } catch (error) {
+    if (error instanceof ChartDataError) {
+      return cleanBuild();
+    }
+    throw error;
+  }
+  const summary = temporalRequestSummary(table, request, 'numeric', pieces);
+  if (!summary) {
+    return cleanBuild();
+  }
+  const data = mergeTemporalChartPieces(
+    pieces,
+    request,
+    summary.xDomain,
+    summary.eligibleRowCount,
+    summary.warnings
+  );
+  if (data.sampledPointCount !== Math.min(data.eligibleRowCount, CHART_ORDINARY_TARGET_POINTS)) {
+    return cleanBuild();
+  }
   return { data, cache: { key, min, max, data } };
 }
 
@@ -410,9 +558,13 @@ function temporalPanCacheForResponse(
   max: number,
   data: LineChartData
 ): TemporalPanChartCache | undefined {
-  if (data.xKind !== 'temporal' || data.temporalBucketOrigin !== 0 ||
+  const reusableAlgorithm = data.xKind === 'temporal'
+    ? data.temporalBucketOrigin === 0 &&
+      (data.algorithm === 'none' || /^temporal-minmax\/[^+]+$/.test(data.algorithm))
+    : data.samplingStrategy === 'point-count' &&
+      (data.algorithm === 'none' || /^minmax-bucket\/[^+]+$/.test(data.algorithm));
+  if (!reusableAlgorithm ||
     !Number.isFinite(min) || !Number.isFinite(max) || min >= max || data.groupByColumn ||
-    !/^temporal-minmax\/[^+]+$/.test(data.algorithm) ||
     (data.chartType !== 'line' && data.chartType !== 'scatter' && data.chartType !== 'step')) {
     return undefined;
   }
@@ -486,7 +638,7 @@ function filterTemporalChartData(data: LineChartData, include: (x: number) => bo
 }
 
 function temporalPieceIsUncapped(data: LineChartData): boolean {
-  return /^temporal-minmax\/[^+]+$/.test(data.algorithm);
+  return data.algorithm === 'none' || /^temporal-minmax\/[^+]+$/.test(data.algorithm);
 }
 
 function temporalRequestSummary(
@@ -501,11 +653,7 @@ function temporalRequestSummary(
       if (isTemporalRangeWarning(warning, xKind) || warning === 'x values were sorted for this chart; table order was not changed.') {
         continue;
       }
-      if (warning === 'Chart source exceeds the default row guard. Very large chartMaxSourceRows values can make rendering slow or temporarily block the extension host, especially with multiple y columns.') {
-        sourceWarnings.add(warning);
-        continue;
-      }
-      return undefined;
+      sourceWarnings.add(warning);
     }
   }
 
@@ -513,45 +661,44 @@ function temporalRequestSummary(
   if (xColumnIndex === -1) {
     return undefined;
   }
-  const xRange = normalizedChartXRange(request);
-  let droppedX = 0;
-  let rangeExcluded = 0;
-  let eligibleRowCount = 0;
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let sorted = false;
-  let previousX = -Infinity;
-  for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex++) {
-    const x = normalizeXValue(table.cellValue(rowIndex, xColumnIndex), xKind);
-    if (!x) {
-      droppedX += 1;
-      continue;
-    }
-    if (xRange && (x.value < xRange.min || x.value > xRange.max)) {
-      rangeExcluded += 1;
-      continue;
-    }
-    eligibleRowCount += 1;
-    minX = Math.min(minX, x.value);
-    maxX = Math.max(maxX, x.value);
-    if (x.value < previousX) {
-      sorted = true;
-    }
-    previousX = x.value;
+  const index = chartXIndex(table, xColumnIndex, xKind, request.version);
+  if (index.sourceWasUnsorted) {
+    return undefined;
   }
-  if (eligibleRowCount === 0 || sorted) {
+  const xRange = normalizedChartXRange(request);
+  const bounds = chartXIndexBounds(index, xRange);
+  const yColumnIndexes = uniqueStrings(request.yColumns || [])
+    .map(columnName => table.columns.indexOf(columnName));
+  if (yColumnIndexes.length === 0 || yColumnIndexes.some(columnIndex => columnIndex < 0)) {
+    return undefined;
+  }
+  const eligibleRowCount = chartEligibilityCount(
+    index,
+    chartEligibilityKey(yColumnIndexes),
+    bounds.start,
+    bounds.end
+  );
+  if (eligibleRowCount === undefined) {
+    // Reuse must not guess eligibility from valid X alone. A full ungrouped
+    // source/range build installs these summaries while already decoding Y.
+    return undefined;
+  }
+  if (eligibleRowCount === 0) {
     return undefined;
   }
 
   const warnings = Array.from(sourceWarnings);
-  if (droppedX > 0) {
-    warnings.push(`${droppedX} row${droppedX === 1 ? '' : 's'} dropped because x was null, non-finite, or not ${xKind}.`);
+  if (index.droppedX > 0) {
+    warnings.push(`${index.droppedX} row${index.droppedX === 1 ? '' : 's'} dropped because x was null, non-finite, or not ${xKind}.`);
   }
-  if (rangeExcluded > 0) {
-    warnings.push(`${rangeExcluded} row${rangeExcluded === 1 ? '' : 's'} outside the selected x range were skipped.`);
+  if (bounds.rangeExcluded > 0) {
+    warnings.push(`${bounds.rangeExcluded} row${bounds.rangeExcluded === 1 ? '' : 's'} outside the selected x range were skipped.`);
   }
   return {
-    xDomain: { min: minX, max: maxX },
+    xDomain: {
+      min: index.x[bounds.start],
+      max: index.x[bounds.end - 1],
+    },
     eligibleRowCount,
     warnings,
   };
@@ -590,71 +737,123 @@ function mergeTemporalChartPieces(
     gapBefore: record.gapBefore.map((value, index) => value || overlap.gapBefore[index]),
     reused: record.reused || overlap.reused,
   });
-  const records = new Map<string, {
-    firstOrder: number;
-    occurrences: TemporalMergeRecord[];
-  }>();
-  let nextOrder = 0;
-  pieces.forEach(piece => {
-    const pieceRecords = new Map<string, TemporalMergeRecord[]>();
-    piece.data.x.forEach((x, pointIndex) => {
-      const values = piece.data.series.map(series => series.values[pointIndex]);
-      const key = JSON.stringify([x, values]);
-      const gapFlags = piece.data.series.map(series => !!series.gapFlags?.[pointIndex]);
-      const gapBefore = piece.data.series.map(series => !!series.gapBefore?.[pointIndex]);
-      const occurrences = pieceRecords.get(key);
-      const record = {
+  const recordsByPiece = pieces.map(piece => piece.data.x.map((x, pointIndex) => {
+    return {
         x,
         xText: piece.data.xText[pointIndex],
-        values,
-        gapFlags,
-        gapBefore,
+        values: piece.data.series.map(series => series.values[pointIndex]),
+        gapFlags: piece.data.series.map(series => !!series.gapFlags?.[pointIndex]),
+        gapBefore: piece.data.series.map(series => !!series.gapBefore?.[pointIndex]),
         reused: piece.reused,
         firstOrder: 0,
       };
+  }));
+  const disjointAndOrdered = recordsByPiece.every((pieceRecords, index) =>
+    index === 0 || pieceRecords.length === 0 || recordsByPiece[index - 1].length === 0 ||
+      recordsByPiece[index - 1][recordsByPiece[index - 1].length - 1].x < pieceRecords[0].x
+  );
+  let merged: Array<TemporalMergeRecord & { duplicateOrdinal: number }>;
+  if (disjointAndOrdered) {
+    let nextOrder = 0;
+    merged = recordsByPiece.flatMap(pieceRecords => pieceRecords.map(record => ({
+      ...record,
+      firstOrder: nextOrder++,
+      duplicateOrdinal: 0,
+    })));
+  } else {
+    const records = new Map<string, {
+      firstOrder: number;
+      occurrences: TemporalMergeRecord[];
+    }>();
+    let nextOrder = 0;
+    recordsByPiece.forEach(recordsForPiece => {
+      const pieceRecords = new Map<string, TemporalMergeRecord[]>();
+      recordsForPiece.forEach(record => {
+        const key = JSON.stringify([record.x, record.values]);
+        const occurrences = pieceRecords.get(key);
       if (occurrences) {
         occurrences.push(record);
       } else {
         pieceRecords.set(key, [record]);
       }
-    });
-    pieceRecords.forEach((occurrences, key) => {
-      const existing = records.get(key);
-      if (!existing) {
-        const firstOrder = nextOrder++;
-        records.set(key, {
-          firstOrder,
-          occurrences: occurrences.map(record => ({ ...record, firstOrder })),
+      });
+      pieceRecords.forEach((occurrences, key) => {
+        const existing = records.get(key);
+        if (!existing) {
+          const firstOrder = nextOrder++;
+          records.set(key, {
+            firstOrder,
+            occurrences: occurrences.map(record => ({ ...record, firstOrder })),
+          });
+          return;
+        }
+        if (occurrences.length > existing.occurrences.length) {
+          existing.occurrences = occurrences.map((record, index) => {
+            const next = { ...record, firstOrder: existing.firstOrder };
+            return existing.occurrences[index]
+              ? mergeRecordOverlap(next, existing.occurrences[index])
+              : next;
+          });
+          return;
+        }
+        occurrences.forEach((record, index) => {
+          existing.occurrences[index] = mergeRecordOverlap(
+            existing.occurrences[index],
+            { ...record, firstOrder: existing.firstOrder }
+          );
         });
-        return;
-      }
-      if (occurrences.length > existing.occurrences.length) {
-        existing.occurrences = occurrences.map((record, index) => {
-          const next = { ...record, firstOrder: existing.firstOrder };
-          return existing.occurrences[index]
-            ? mergeRecordOverlap(next, existing.occurrences[index])
-            : next;
-        });
-        return;
-      }
-      occurrences.forEach((record, index) => {
-        existing.occurrences[index] = mergeRecordOverlap(
-          existing.occurrences[index],
-          { ...record, firstOrder: existing.firstOrder }
-        );
       });
     });
-  });
-  const merged = Array.from(records.values())
-    .flatMap(record => record.occurrences.map((occurrence, duplicateOrdinal) => ({
-      ...occurrence,
-      duplicateOrdinal,
-    })))
-    .sort((left, right) =>
-      left.x - right.x ||
-      left.firstOrder - right.firstOrder ||
-      left.duplicateOrdinal - right.duplicateOrdinal
-    );
+    merged = Array.from(records.values())
+      .flatMap(record => record.occurrences.map((occurrence, duplicateOrdinal) => ({
+        ...occurrence,
+        duplicateOrdinal,
+      })))
+      .sort((left, right) =>
+        left.x - right.x ||
+        left.firstOrder - right.firstOrder ||
+        left.duplicateOrdinal - right.duplicateOrdinal
+      );
+  }
+  if (merged.length > CHART_ORDINARY_TARGET_POINTS) {
+    const selected = new Uint8Array(merged.length);
+    merged.forEach((record, index) => {
+      if (record.reused) {
+        selected[index] = 1;
+      }
+    });
+    selected[0] = 1;
+    selected[merged.length - 1] = 1;
+    const seriesCount = merged[0]?.values.length || 0;
+    for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex += 1) {
+      let minValue = Infinity;
+      let maxValue = -Infinity;
+      let minIndex = -1;
+      let maxIndex = -1;
+      for (let index = 0; index < merged.length; index += 1) {
+        const record = merged[index];
+        const value = record.values[seriesIndex];
+        if (record.gapFlags[seriesIndex] || record.gapBefore[seriesIndex]) {
+          selected[index] = 1;
+        }
+        if (Number.isFinite(value) && (value as number) < minValue) {
+          minValue = value as number;
+          minIndex = index;
+        }
+        if (Number.isFinite(value) && (value as number) > maxValue) {
+          maxValue = value as number;
+          maxIndex = index;
+        }
+      }
+      if (minIndex >= 0) selected[minIndex] = 1;
+      if (maxIndex >= 0) selected[maxIndex] = 1;
+    }
+    fillSelectedPointIndexes(selected, merged.length, CHART_ORDINARY_TARGET_POINTS);
+    const selectedRecords = merged.filter((_record, index) => selected[index]);
+    merged = selectedRecords.length <= CHART_ORDINARY_TARGET_POINTS
+      ? selectedRecords
+      : evenlyThin(selectedRecords, CHART_ORDINARY_TARGET_POINTS);
+  }
   const first = pieces[0].data;
   const reusedPointCount = merged.filter(record => record.reused).length;
   const builtPointCount = merged.length - reusedPointCount;
@@ -709,11 +908,24 @@ export function chartTypeCapabilities(value: unknown): ChartTypeCapabilities {
   return { usesGenericY: true, supportsGroupBy: true, usesOhlc: false };
 }
 
-function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest, chartType: ChartType): LineChartData {
+function buildXyChartData(
+  table: ColumnarPanelResult,
+  request: LineChartRequest,
+  chartType: ChartType,
+  recordPanEligibility: boolean
+): LineChartData {
   const source = prepareChartSource(table, request);
   const xRange = normalizedChartXRange(request);
   const warnings = source.warnings.slice();
-  const collected = collectChartPoints(table, source.xOption, source.yColumnIndexes, source.groupColumnIndex, xRange);
+  const collected = collectChartPoints(
+    table,
+    source.xOption,
+    source.yColumnIndexes,
+    source.groupColumnIndex,
+    xRange,
+    request.version,
+    recordPanEligibility
+  );
   appendCollectedWarnings(warnings, collected, source.xOption.kind, chartType === 'line' || chartType === 'step'
     ? 'Null and non-finite y values are rendered as gaps where sampled.'
     : 'Null and non-finite y values are skipped where sampled.', source.groupColumnName);
@@ -722,15 +934,21 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
   if (points.length === 0) {
     throw new ChartDataError(xRange ? 'No rows have a plottable x value in the selected x range.' : 'No rows have a plottable x value.');
   }
-  const sorted = sortChartPoints(points, warnings);
+  const sorted = collected.sourceWasUnsorted;
+  if (sorted) {
+    warnings.push('x values were sorted for this chart; table order was not changed.');
+  }
   const grouped = source.groupColumnName
     ? groupedChartPoints(points, source.yColumnNames, source.groupColumnName, warnings)
     : ungroupedChartPoints(points, source.yColumnNames);
   if (!hasAnyFiniteY(grouped.points)) {
     throw new ChartDataError('No selected y column has finite numeric values.');
   }
-  const eligibleRowCount = grouped.points.filter(chartPointHasFiniteY).length;
-  const finiteGroupedPoints = grouped.points.filter(chartPointHasFiniteY);
+  const mayHaveSourceGaps = collected.yMissing > 0 || collected.yInvalid > 0;
+  const finiteGroupedPoints = !source.groupColumnName && !mayHaveSourceGaps
+    ? grouped.points
+    : grouped.points.filter(chartPointHasFiniteY);
+  const eligibleRowCount = finiteGroupedPoints.length;
 
   // Ordinary point charts use one fixed full/ranged density contract. Semantic
   // grouping still happens before sampling and can therefore yield fewer items.
@@ -757,21 +975,23 @@ function buildXyChartData(table: ColumnarPanelResult, request: LineChartRequest,
         preparedPoints,
         grouped.series.length,
         temporalIntervalMs!,
-        chartType === 'line' || chartType === 'step',
+        (chartType === 'line' || chartType === 'step') && mayHaveSourceGaps,
         targetPointCount
       )
       : downsampleMinMax(
         preparedPoints,
         grouped.series.length,
         targetPointCount,
-        chartType === 'line' || chartType === 'step'
+        (chartType === 'line' || chartType === 'step') && mayHaveSourceGaps
       );
   // Keep the navigator on the full valid-X domain. Missing-Y edge rows are
   // not eligible plotted points, but still define the source domain.
   const xDomain = { min: points[0].x, max: points[points.length - 1].x };
   const series = grouped.series.map((definition, seriesIndex) => {
-    const gapFlags = sampled.points.map(point => !!point.gapFlags && point.gapFlags[seriesIndex] === true);
-    const gapBefore = chartType === 'line' || chartType === 'step'
+    const gapFlags = source.groupColumnName
+      ? sampled.points.map(point => !!point.gapFlags && point.gapFlags[seriesIndex] === true)
+      : [];
+    const gapBefore = (chartType === 'line' || chartType === 'step') && mayHaveSourceGaps
       ? sourceGapBeforeSampledPoints(grouped.points, sampled.points, seriesIndex)
       : [];
     const result: LineChartSeries = {
@@ -817,7 +1037,7 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
   const source = prepareCandlestickSource(table, request);
   const xRange = normalizedChartXRange(request);
   const warnings = source.warnings.slice();
-  const collected = collectCandlestickPoints(table, source, xRange);
+  const collected = collectCandlestickPoints(table, source, xRange, request.version);
   if (collected.droppedX > 0) {
     warnings.push(`${collected.droppedX} row${collected.droppedX === 1 ? '' : 's'} dropped because x was null, non-finite, or not ${source.xOption.kind}.`);
   }
@@ -828,7 +1048,10 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
     throw new ChartDataError(xRange ? 'No rows have a plottable candlestick x value in the selected x range.' : 'No rows have a plottable candlestick x value.');
   }
 
-  const sorted = sortCandlestickPoints(collected.points, warnings);
+  const sorted = collected.sourceWasUnsorted;
+  if (sorted) {
+    warnings.push('x values were sorted for this candlestick chart; table order was not changed.');
+  }
   const targetPointCount = candlestickTargetPointCount(
     request.width,
     request.maxSampledPoints
@@ -874,7 +1097,14 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
   const source = prepareChartSource(table, request);
   const xRange = normalizedChartXRange(request);
   const warnings = source.warnings.slice();
-  const collected = collectChartPoints(table, source.xOption, source.yColumnIndexes, undefined, xRange);
+  const collected = collectChartPoints(
+    table,
+    source.xOption,
+    source.yColumnIndexes,
+    undefined,
+    xRange,
+    request.version
+  );
   appendCollectedWarnings(warnings, collected, source.xOption.kind, 'Null and non-finite y values are skipped for box statistics.');
 
   const points = collected.points;
@@ -885,7 +1115,10 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
     throw new ChartDataError('No selected y column has finite numeric values.');
   }
 
-  const sorted = sortChartPoints(points, warnings);
+  const sorted = collected.sourceWasUnsorted;
+  if (sorted) {
+    warnings.push('x values were sorted for this chart; table order was not changed.');
+  }
   const eligiblePoints = points.filter(chartPointHasFiniteY);
   const maxGroups = boxChartTargetGroupCount(
     eligiblePoints.length,
@@ -1065,11 +1298,10 @@ function prepareCandlestickSource(table: ColumnarPanelResult, request: LineChart
 function collectCandlestickPoints(
   table: ColumnarPanelResult,
   source: PreparedCandlestickSource,
-  xRange?: ChartXRange
+  xRange: ChartXRange | undefined,
+  sourceVersion: number
 ): CollectedCandlestickPoints {
   const points: CandlestickInputPoint[] = [];
-  let droppedX = 0;
-  let rangeExcluded = 0;
   const roles = [
     { label: 'Open', columnName: source.ohlcColumns.open, columnIndex: source.ohlcColumnIndexes[0] },
     { label: 'High', columnName: source.ohlcColumns.high, columnIndex: source.ohlcColumnIndexes[1] },
@@ -1077,17 +1309,10 @@ function collectCandlestickPoints(
     { label: 'Close', columnName: source.ohlcColumns.close, columnIndex: source.ohlcColumnIndexes[3] },
   ];
 
-  for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex++) {
-    const x = normalizeXValue(table.cellValue(rowIndex, source.xOption.columnIndex), source.xOption.kind);
-    if (!x) {
-      droppedX += 1;
-      continue;
-    }
+  const append = (rowIndex: number, x: NormalizedValue): void => {
     if (xRange && (x.value < xRange.min || x.value > xRange.max)) {
-      rangeExcluded += 1;
-      continue;
+      return;
     }
-
     const values: number[] = [];
     roles.forEach(role => {
       const raw = table.cellValue(rowIndex, role.columnIndex);
@@ -1111,9 +1336,36 @@ function collectCandlestickPoints(
       low: values[2],
       close: values[3],
     });
+  };
+  let builtIndex = false;
+  const xIndex = chartXIndex(
+    table,
+    source.xOption.columnIndex,
+    source.xOption.kind,
+    sourceVersion,
+    (rowIndex, x) => {
+      builtIndex = true;
+      append(rowIndex, x);
+    }
+  );
+  const bounds = chartXIndexBounds(xIndex, xRange);
+  if (!builtIndex) {
+    for (let entryIndex = bounds.start; entryIndex < bounds.end; entryIndex += 1) {
+      append(xIndex.rowIndexes[entryIndex], {
+        value: xIndex.x[entryIndex],
+        text: xIndex.xText[entryIndex],
+      });
+    }
+  } else if (xIndex.sourceWasUnsorted) {
+    points.sort((left, right) => left.x - right.x || (left.rowIndex || 0) - (right.rowIndex || 0));
   }
 
-  return { points, droppedX, rangeExcluded };
+  return {
+    points,
+    droppedX: xIndex.droppedX,
+    rangeExcluded: bounds.rangeExcluded,
+    sourceWasUnsorted: xIndex.sourceWasUnsorted,
+  };
 }
 
 function collectChartPoints(
@@ -1121,31 +1373,24 @@ function collectChartPoints(
   xOption: ChartColumnOption,
   yColumnIndexes: number[],
   groupColumnIndex?: number,
-  xRange?: ChartXRange
+  xRange?: ChartXRange,
+  sourceVersion = 0,
+  recordPanEligibility = false
 ): CollectedChartPoints {
   const points: ChartPoint[] = [];
-  let droppedX = 0;
   let droppedGroup = 0;
-  let rangeExcluded = 0;
   let yMissing = 0;
   let yInvalid = 0;
-  for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex++) {
-    const x = normalizeXValue(table.cellValue(rowIndex, xOption.columnIndex), xOption.kind);
-    if (!x) {
-      droppedX += 1;
-      continue;
-    }
+  const append = (rowIndex: number, x: NormalizedValue): void => {
     if (xRange && (x.value < xRange.min || x.value > xRange.max)) {
-      rangeExcluded += 1;
-      continue;
+      return;
     }
-
     let group: string | undefined;
     if (groupColumnIndex !== undefined) {
       const groupValue = normalizeCategoricalValue(table.cellValue(rowIndex, groupColumnIndex));
       if (groupValue === null) {
         droppedGroup += 1;
-        continue;
+        return;
       }
       group = groupValue;
     }
@@ -1163,9 +1408,81 @@ function collectChartPoints(
       return y;
     });
     points.push({ rowIndex, x: x.value, xText: x.text, group, y: yValues });
+  };
+  const slot = chartXIndexCacheSlot(table, xOption.columnIndex, xOption.kind, sourceVersion);
+  let xIndex = slot.cached;
+  if (!xIndex) {
+    let x: number[] = [];
+    let xText: string[] = [];
+    let rowIndexes: number[] = [];
+    let droppedX = 0;
+    let sourceWasUnsorted = false;
+    let previousX = -Infinity;
+    for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex += 1) {
+      const normalized = normalizeXValue(table.cellValue(rowIndex, xOption.columnIndex), xOption.kind);
+      if (!normalized) {
+        droppedX += 1;
+        continue;
+      }
+      if (normalized.value < previousX) {
+        sourceWasUnsorted = true;
+      }
+      previousX = normalized.value;
+      x.push(normalized.value);
+      xText.push(normalized.text);
+      rowIndexes.push(rowIndex);
+      append(rowIndex, normalized);
+    }
+    if (sourceWasUnsorted) {
+      const order = x.map((_value, index) => index)
+        .sort((left, right) => x[left] - x[right] || rowIndexes[left] - rowIndexes[right]);
+      x = order.map(index => x[index]);
+      xText = order.map(index => xText[index]);
+      rowIndexes = order.map(index => rowIndexes[index]);
+      points.sort((left, right) => left.x - right.x || left.rowIndex - right.rowIndex);
+    }
+    xIndex = {
+      columnIndex: xOption.columnIndex,
+      kind: xOption.kind,
+      sourceVersion,
+      rowCount: table.rowCount,
+      x,
+      xText,
+      rowIndexes,
+      droppedX,
+      sourceWasUnsorted,
+    };
+    slot.cache.indexes.set(slot.key, xIndex);
+  }
+  const bounds = chartXIndexBounds(xIndex, xRange);
+  if (slot.cached) {
+    for (let entryIndex = bounds.start; entryIndex < bounds.end; entryIndex += 1) {
+      append(xIndex.rowIndexes[entryIndex], {
+        value: xIndex.x[entryIndex],
+        text: xIndex.xText[entryIndex],
+      });
+    }
+  }
+  if (recordPanEligibility && groupColumnIndex === undefined &&
+    points.length === bounds.end - bounds.start) {
+    recordChartEligibility(
+      xIndex,
+      chartEligibilityKey(yColumnIndexes),
+      bounds.start,
+      bounds.end,
+      points
+    );
   }
 
-  return { points, droppedX, droppedGroup, rangeExcluded, yMissing, yInvalid };
+  return {
+    points,
+    droppedX: xIndex.droppedX,
+    droppedGroup,
+    rangeExcluded: bounds.rangeExcluded,
+    yMissing,
+    yInvalid,
+    sourceWasUnsorted: xIndex.sourceWasUnsorted,
+  };
 }
 
 function appendCollectedWarnings(
@@ -1376,46 +1693,6 @@ function retainedChartGroups(points: ChartPoint[], groupColumnName: string, warn
 
 function chartTypeLabel(chartType: ChartType): string {
   return chartType.slice(0, 1).toUpperCase() + chartType.slice(1);
-}
-
-function sortChartPoints(points: ChartPoint[], warnings: string[]): boolean {
-  const sorted = !isSortedByX(points);
-  if (sorted) {
-    points.sort((left, right) => {
-      if (left.x < right.x) {
-        return -1;
-      }
-      if (left.x > right.x) {
-        return 1;
-      }
-      return left.rowIndex - right.rowIndex;
-    });
-    warnings.push('x values were sorted for this chart; table order was not changed.');
-  }
-  return sorted;
-}
-
-function sortCandlestickPoints(points: CandlestickInputPoint[], warnings: string[]): boolean {
-  let requiresSort = false;
-  for (let index = 1; index < points.length; index++) {
-    if (points[index - 1].x > points[index].x) {
-      requiresSort = true;
-      break;
-    }
-  }
-  if (requiresSort) {
-    points.sort((left, right) => {
-      if (left.x < right.x) {
-        return -1;
-      }
-      if (left.x > right.x) {
-        return 1;
-      }
-      return Number(left.rowIndex || 0) - Number(right.rowIndex || 0);
-    });
-    warnings.push('x values were sorted for this candlestick chart; table order was not changed.');
-  }
-  return requiresSort;
 }
 
 export function chartTargetPointCount(
@@ -1977,6 +2254,189 @@ function normalizedChartXRange(request: LineChartRequest): ChartXRange | undefin
   return { min, max };
 }
 
+function chartXIndex(
+  table: ColumnarPanelResult,
+  columnIndex: number,
+  kind: ChartColumnKind,
+  sourceVersion: number,
+  onBuiltEntry?: (rowIndex: number, x: NormalizedValue) => void
+): ChartXIndex {
+  const slot = chartXIndexCacheSlot(table, columnIndex, kind, sourceVersion);
+  if (slot.cached) {
+    return slot.cached;
+  }
+
+  let x: number[] = [];
+  let xText: string[] = [];
+  let rowIndexes: number[] = [];
+  let droppedX = 0;
+  let sourceWasUnsorted = false;
+  let previousX = -Infinity;
+  for (let rowIndex = 0; rowIndex < table.rowCount; rowIndex += 1) {
+    const normalized = normalizeXValue(table.cellValue(rowIndex, columnIndex), kind);
+    if (!normalized) {
+      droppedX += 1;
+      continue;
+    }
+    if (normalized.value < previousX) {
+      sourceWasUnsorted = true;
+    }
+    previousX = normalized.value;
+    x.push(normalized.value);
+    xText.push(normalized.text);
+    rowIndexes.push(rowIndex);
+    onBuiltEntry?.(rowIndex, normalized);
+  }
+  if (sourceWasUnsorted) {
+    const order = x.map((_value, index) => index)
+      .sort((left, right) => x[left] - x[right] || rowIndexes[left] - rowIndexes[right]);
+    x = order.map(index => x[index]);
+    xText = order.map(index => xText[index]);
+    rowIndexes = order.map(index => rowIndexes[index]);
+  }
+  const built = {
+    columnIndex,
+    kind,
+    sourceVersion,
+    rowCount: table.rowCount,
+    x,
+    xText,
+    rowIndexes,
+    droppedX,
+    sourceWasUnsorted,
+  };
+  slot.cache.indexes.set(slot.key, built);
+  return built;
+}
+
+function chartEligibilityKey(yColumnIndexes: readonly number[]): string {
+  return yColumnIndexes.join(',');
+}
+
+function recordChartEligibility(
+  index: ChartXIndex,
+  key: string,
+  start: number,
+  end: number,
+  points: readonly ChartPoint[]
+): void {
+  let eligibility = index.eligibility;
+  if (!eligibility || eligibility.key !== key) {
+    eligibility = { key, entryCount: 0, segments: [] };
+    index.eligibility = eligibility;
+  }
+  if (eligibility.segments.some(segment => segment.start <= start && segment.end >= end)) {
+    return;
+  }
+  const prefix = new Uint32Array(points.length + 1);
+  for (let pointIndex = 0; pointIndex < points.length; pointIndex += 1) {
+    prefix[pointIndex + 1] = prefix[pointIndex] + (chartPointHasFiniteY(points[pointIndex]) ? 1 : 0);
+  }
+  if (eligibility.segments.length >= 64 ||
+    eligibility.entryCount + points.length > Math.max(index.x.length, 1) * 2) {
+    eligibility.segments = [];
+    eligibility.entryCount = 0;
+  }
+  eligibility.segments.push({ start, end, prefix });
+  eligibility.entryCount += points.length;
+}
+
+function chartEligibilityCount(
+  index: ChartXIndex,
+  key: string,
+  start: number,
+  end: number
+): number | undefined {
+  const eligibility = index.eligibility;
+  if (!eligibility || eligibility.key !== key) {
+    return undefined;
+  }
+  let cursor = start;
+  let count = 0;
+  while (cursor < end) {
+    let covering: ChartEligibilitySegment | undefined;
+    for (const segment of eligibility.segments) {
+      if (segment.start <= cursor && segment.end > cursor &&
+        (!covering || segment.end > covering.end)) {
+        covering = segment;
+      }
+    }
+    if (!covering) {
+      return undefined;
+    }
+    const coveredEnd = Math.min(end, covering.end);
+    count += covering.prefix[coveredEnd - covering.start] -
+      covering.prefix[cursor - covering.start];
+    cursor = coveredEnd;
+  }
+  return count;
+}
+
+function chartXIndexCacheSlot(
+  table: ColumnarPanelResult,
+  columnIndex: number,
+  kind: ChartColumnKind,
+  sourceVersion: number
+): ChartXIndexCacheSlot {
+  const key = JSON.stringify([
+    columnIndex,
+    kind,
+    table.rowCount,
+    table.columns[columnIndex],
+    table.columnTypes?.[columnIndex] || '',
+  ]);
+  let cache = chartXIndexes.get(table as unknown as object);
+  if (!cache || cache.sourceVersion !== sourceVersion) {
+    cache = { sourceVersion, indexes: new Map<string, ChartXIndex>() };
+    chartXIndexes.set(table as unknown as object, cache);
+  }
+  return { cache, key, cached: cache.indexes.get(key) };
+}
+
+function chartXIndexBounds(
+  index: ChartXIndex,
+  range?: ChartXRange
+): { start: number; end: number; rangeExcluded: number } {
+  if (!range) {
+    return { start: 0, end: index.x.length, rangeExcluded: 0 };
+  }
+  const start = lowerBoundChartX(index.x, range.min);
+  const end = upperBoundChartX(index.x, range.max);
+  return {
+    start,
+    end,
+    rangeExcluded: index.x.length - (end - start),
+  };
+}
+
+function lowerBoundChartX(values: readonly number[], value: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (values[middle] < value) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
+function upperBoundChartX(values: readonly number[], value: number): number {
+  let low = 0;
+  let high = values.length;
+  while (low < high) {
+    const middle = low + Math.floor((high - low) / 2);
+    if (values[middle] <= value) {
+      low = middle + 1;
+    } else {
+      high = middle;
+    }
+  }
+  return low;
+}
+
 function isMissing(value: unknown): boolean {
   value = semanticQValue(value);
   return value === null || value === undefined || (typeof value === 'string' && value.trim() === '');
@@ -1997,15 +2457,6 @@ function isNonFiniteScalar(value: unknown): boolean {
 
 function semanticQValue(value: unknown): unknown {
   return isQRuntimeValue(value) ? qValueToSemanticPrimitive(value) : value;
-}
-
-function isSortedByX(points: ChartPoint[]): boolean {
-  for (let index = 1; index < points.length; index++) {
-    if (points[index - 1].x > points[index].x) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function hasAnyFiniteY(points: ChartPoint[]): boolean {
@@ -2090,18 +2541,25 @@ function downsampleTemporalMinMax(
   preserveSourceGaps: boolean,
   maxPoints: number
 ): { points: ChartPoint[]; algorithm: string } {
-  if (points.length <= 2) {
-    return { points, algorithm: `temporal-minmax/${intervalMs}ms@0` };
+  if (points.length <= maxPoints) {
+    return { points, algorithm: 'none' };
   }
-  const selected: boolean[] = [];
-  selected[0] = true;
-  selected[points.length - 1] = true;
+  const selected = new Uint8Array(points.length);
+  selected[0] = 1;
+  selected[points.length - 1] = 1;
   let start = 0;
   while (start < points.length) {
     const bucket = Math.floor(points[start].x / intervalMs);
+    const bucketEnd = (bucket + 1) * intervalMs;
     let end = start + 1;
-    while (end < points.length && Math.floor(points[end].x / intervalMs) === bucket) {
-      end += 1;
+    if (intervalMs >= 1 && Number.isFinite(bucketEnd)) {
+      while (end < points.length && points[end].x < bucketEnd) {
+        end += 1;
+      }
+    } else {
+      while (end < points.length && Math.floor(points[end].x / intervalMs) === bucket) {
+        end += 1;
+      }
     }
     for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex += 1) {
       let minIndex = -1;
@@ -2124,12 +2582,13 @@ function downsampleTemporalMinMax(
           gapIndex = index;
         }
       }
-      if (minIndex >= 0) selected[minIndex] = true;
-      if (maxIndex >= 0) selected[maxIndex] = true;
-      if (gapIndex >= 0) selected[gapIndex] = true;
+      if (minIndex >= 0) selected[minIndex] = 1;
+      if (maxIndex >= 0) selected[maxIndex] = 1;
+      if (gapIndex >= 0) selected[gapIndex] = 1;
     }
     start = end;
   }
+  fillSelectedPointIndexes(selected, points.length, maxPoints);
   const temporalPoints = points.filter((_point, index) => selected[index]);
   if (temporalPoints.length > maxPoints) {
     const capped = downsampleMinMax(temporalPoints, seriesCount, maxPoints, preserveSourceGaps);
@@ -2158,9 +2617,9 @@ function downsampleMinMax(
     };
   }
 
-  const selected: boolean[] = [];
-  selected[0] = true;
-  selected[points.length - 1] = true;
+  const selected = new Uint8Array(points.length);
+  selected[0] = 1;
+  selected[points.length - 1] = 1;
 
   const gapSeries = new Array(seriesCount).fill(false);
   if (preserveSourceGaps) {
@@ -2215,20 +2674,20 @@ function downsampleMinMax(
         }
       }
       if (minIndex >= 0) {
-        selected[minIndex] = true;
+        selected[minIndex] = 1;
         anySelected = true;
       }
       if (maxIndex >= 0) {
-        selected[maxIndex] = true;
+        selected[maxIndex] = 1;
         anySelected = true;
       }
       if (gapIndex >= 0) {
-        selected[gapIndex] = true;
+        selected[gapIndex] = 1;
         anySelected = true;
       }
     }
     if (!anySelected) {
-      selected[start] = true;
+      selected[start] = 1;
     }
   }
 
@@ -2240,7 +2699,11 @@ function downsampleMinMax(
   };
 }
 
-function fillSelectedPointIndexes(selected: boolean[], pointCount: number, targetCount: number): void {
+function fillSelectedPointIndexes(
+  selected: Uint8Array,
+  pointCount: number,
+  targetCount: number
+): void {
   const boundedTarget = Math.max(0, Math.min(pointCount, Math.floor(targetCount)));
   let selectedCount = 0;
   for (let index = 0; index < pointCount; index++) {
@@ -2263,7 +2726,7 @@ function fillSelectedPointIndexes(selected: boolean[], pointCount: number, targe
       continue;
     }
     if (availableRank === nextTargetRank) {
-      selected[index] = true;
+      selected[index] = 1;
       targetRankIndex += 1;
       nextTargetRank = targetRankIndex < needed
         ? Math.round(targetRankIndex * (available - 1) / (needed - 1))
@@ -2273,11 +2736,11 @@ function fillSelectedPointIndexes(selected: boolean[], pointCount: number, targe
   }
 }
 
-function evenlyThin(points: ChartPoint[], maxPoints: number): ChartPoint[] {
+function evenlyThin<T>(points: T[], maxPoints: number): T[] {
   if (points.length <= maxPoints) {
     return points;
   }
-  const result: ChartPoint[] = [];
+  const result: T[] = [];
   const last = points.length - 1;
   for (let index = 0; index < maxPoints; index++) {
     result.push(points[Math.round(index * last / (maxPoints - 1))]);

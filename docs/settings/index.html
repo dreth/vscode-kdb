@@ -1041,7 +1041,7 @@
 <tr>
 <td><code>vscode-kdb.connections</code></td>
 <td><code>[]</code></td>
-<td>Safe standalone connection metadata at User, Workspace, or Workspace Folder scope. Same-ID precedence is Folder &gt; Workspace &gt; User. The form preserves/moves ownership explicitly. User values are Settings Sync eligible where allowed; passwords remain separate in SecretStorage and never sync.</td>
+<td>Standalone connection profiles at User, Workspace, or Workspace Folder scope. Same-ID precedence is Folder &gt; Workspace &gt; User. The form preserves/moves ownership explicitly. An optional plaintext password fallback may sync; SecretStorage is safer and takes precedence.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.connectionTimeoutMs</code></td>
@@ -1061,7 +1061,7 @@
 </tbody>
 </table>
 <p>Timeout settings accept integers from <code>0</code> through <code>2147483647</code>. Connect/handshake and query response deadlines are independent: setting either global or per-profile value to <code>0</code> does not disable the other deadline. The query deadline begins when queued work becomes active and is sent, so time waiting behind another query is excluded. A query timeout discards the uncertain client.</p>
-<p>Each object in <code>vscode-kdb.connections</code> has these safe fields:</p>
+<p>Each object in <code>vscode-kdb.connections</code> has these fields:</p>
 <table>
 <thead>
 <tr>
@@ -1102,6 +1102,11 @@
 <td>Optional username represented as a string; empty means none.</td>
 </tr>
 <tr>
+<td><code>password</code></td>
+<td>No</td>
+<td>Plaintext q IPC password fallback. SecretStorage is safer and takes precedence when it has a value; empty is valid.</td>
+</tr>
+<tr>
 <td><code>connectTimeoutMs</code></td>
 <td>No</td>
 <td>Per-connection connect/handshake override. Omit (leave blank in the form) to inherit the global connect default; <code>0</code> disables both deadlines.</td>
@@ -1113,7 +1118,20 @@
 </tr>
 </tbody>
 </table>
-<p>Existing connection objects without either override remain valid and need no migration. A blank or omitted per-connection query override inherits the global <code>queryTimeoutMs</code> value, whose default is 60 minutes; it does not copy a global or per-connection connect override. Password is deliberately absent from this schema and must not be added manually. Editing with a blank password keeps the SecretStorage value; <strong>Clear saved password</strong> removes it explicitly.</p>
+<p>Existing connection objects without optional fields remain valid and need no migration. A blank or omitted per-connection query override inherits the global <code>queryTimeoutMs</code> value, whose default is 60 minutes; it does not copy a global or per-connection connect override. Editing with a blank password keeps the effective password; <strong>Clear saved password</strong> removes the SecretStorage value, revealing any configured fallback.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"vscode-kdb.connections"</span><span class="p">:</span><span class="w"> </span><span class="p">[{</span>
+<span class="w">    </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"dev-q"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Development q"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"host"</span><span class="p">:</span><span class="w"> </span><span class="s2">"localhost"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"port"</span><span class="p">:</span><span class="w"> </span><span class="mi">5000</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"database"</span><span class="p">:</span><span class="w"> </span><span class="s2">"."</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"username"</span><span class="p">:</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"password"</span><span class="p">:</span><span class="w"> </span><span class="s2">"&lt;plaintext-password&gt;"</span>
+<span class="w">  </span><span class="p">}]</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The <code>password</code> above is stored as plaintext and may be committed or synchronized. Prefer VS Code SecretStorage through the connection form.</p>
 <p>Workspace-defined profiles live with the project and survive container recreation; remote/container User settings are not a durable project substitute. SecretStorage is local to the relevant VS Code environment, so passwords may need re-entry after moving between local, remote, or container hosts.</p>
 <p>The <code>KX</code> Output channel always receives connection/query lifecycle diagnostics. Performance trace adds detail only when explicitly enabled. The extension does not enable it for you.</p>
 <p>Enabled performance records also retain their <code>[vscode-kdb:perf]</code> Extension Host console entry for development compatibility; use <strong>Output &gt; KX</strong> for normal troubleshooting.</p>
