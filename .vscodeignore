@@ -10,6 +10,11 @@ openspec/**
 .vscode/**
 .vscode-test/**
 src/**
+language-server/src/**
+language-server/tsconfig.json
+out/**
+!out/extension.js
+!out/q-language-server.js
 test/**
 scripts/**
 python/**
@@ -146,6 +151,7 @@ node_modules/pako/dist/**
 node_modules/uplot/dist/uPlot.cjs.js
 node_modules/uplot/dist/uPlot.esm.js
 node_modules/uplot/dist/uPlot.iife.js
+node_modules/**
 CODEX*
 **/CODEX*
 PROMPT*

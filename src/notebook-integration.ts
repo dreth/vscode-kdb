@@ -110,6 +110,8 @@ const NOTEBOOK_DEFAULT_LANGUAGE_CONTEXT = 'vscode-kdb.notebookDefaultLanguageAva
 const NOTEBOOK_RESULT_CONTEXT = 'vscode-kdb.notebookResultAvailable';
 const NOTEBOOK_DIRECT_CONTROLLER_CONTEXT =
   'vscode-kdb.notebookDirectQControllerSelected';
+const JUPYTER_NOTEBOOK_TYPE = 'jupyter-notebook';
+const QNB_NOTEBOOK_TYPE = 'vscode-kdb-q-notebook';
 const MAX_NOTEBOOK_SCAN_CELLS = 10_000;
 const MAX_NOTEBOOK_SCAN_OUTPUTS = 2_000;
 
@@ -206,7 +208,14 @@ export class NotebookIntegration implements vscode.Disposable {
       vscode.commands.registerCommand('vscode-kdb.openNotebookPreviewInResults', () =>
         this.openSelectedNotebookPreview()),
       vscode.notebooks.registerNotebookCellStatusBarItemProvider(
-        'jupyter-notebook',
+        JUPYTER_NOTEBOOK_TYPE,
+        {
+          onDidChangeCellStatusBarItems: this.statusBarChanged.event,
+          provideCellStatusBarItems: cell => this.kxRouteStatusBarItems(cell),
+        }
+      ),
+      vscode.notebooks.registerNotebookCellStatusBarItemProvider(
+        QNB_NOTEBOOK_TYPE,
         {
           onDidChangeCellStatusBarItems: this.statusBarChanged.event,
           provideCellStatusBarItems: cell => this.kxRouteStatusBarItems(cell),
@@ -936,7 +945,7 @@ export class NotebookIntegration implements vscode.Disposable {
     commandCell?: vscode.NotebookCell,
     commandEditor?: vscode.NotebookEditor
   ): Promise<NotebookQCellRunOutcome> {
-    const editor = commandEditor ?? activeJupyterNotebookEditor('running a q cell with KX');
+    const editor = commandEditor ?? activeQNotebookEditor('running a q cell with KX');
     if (!editor) {
       return 'unsupported-notebook';
     }
@@ -956,7 +965,7 @@ export class NotebookIntegration implements vscode.Disposable {
     const cell = commandTargetCell(editor, commandCell);
     if (!cell || !isQCell(cell)) {
       void vscode.window.showWarningMessage(
-        'Run q Cell (KX) applies only to a q-language code cell in the active Jupyter notebook.'
+        'Run q Cell (KX) applies only to a q-language code cell in an active .ipynb or .qnb notebook.'
       );
       return 'not-q';
     }
@@ -985,7 +994,7 @@ export class NotebookIntegration implements vscode.Disposable {
       );
     } else if (result === 'not-q' || result === 'unsupported-notebook') {
       void vscode.window.showWarningMessage(
-        'Run q Cell (KX) applies only to a q-language code cell in a Jupyter notebook.'
+        'Run q Cell (KX) applies only to a q-language code cell in an .ipynb or .qnb notebook.'
       );
     }
     return result;
@@ -1124,7 +1133,7 @@ export class NotebookIntegration implements vscode.Disposable {
     allowMagicCell = false
   ): Promise<NotebookQTargetProfile | undefined> {
     const editor = commandEditor ??
-      activeJupyterNotebookEditor('activating a KX connection for q cells');
+      activeQNotebookEditor('activating a KX connection for q cells');
     if (!editor) {
       return undefined;
     }
@@ -1138,7 +1147,7 @@ export class NotebookIntegration implements vscode.Disposable {
     if (!cell || (!isQCell(cell) &&
       !(allowMagicCell && notebookQSourceFromMagic(cell.document.getText()) !== undefined))) {
       void vscode.window.showWarningMessage(
-        'Activate q Connection applies only to a q-language code cell in the active Jupyter notebook.'
+        'Activate q Connection applies only to a q-language code cell in an active .ipynb or .qnb notebook.'
       );
       return undefined;
     }
@@ -1455,6 +1464,10 @@ export class NotebookIntegration implements vscode.Disposable {
         void vscode.window.showWarningMessage(
           'The selected q cell has no valid saved KX output. Run it with KX q (Direct IPC) selected.'
         );
+      } else if (cell && isQCell(cell) && isQnbNotebook(cell.notebook)) {
+        void vscode.window.showWarningMessage(
+          'The selected q notebook cell has no valid saved KX output. Select KX q (Direct IPC), then run the cell.'
+        );
       } else if (cell && isQCell(cell) && !hasNotebookQMarker(cell.document.getText())) {
         const prepare = 'Prepare this q cell for the active Python kernel';
         const choice = await vscode.window.showInformationMessage(
@@ -1565,7 +1578,8 @@ export class NotebookIntegration implements vscode.Disposable {
     void vscode.commands.executeCommand(
       'setContext',
       NOTEBOOK_Q_CELL_NEEDS_PREPARATION_CONTEXT,
-      qCell && !directSelected && !hasNotebookQMarker(cell!.document.getText())
+      qCell && !!editor && isJupyterNotebook(editor.notebook) && !directSelected &&
+        !hasNotebookQMarker(cell!.document.getText())
     );
     void vscode.commands.executeCommand(
       'setContext',
@@ -1746,8 +1760,23 @@ function activeJupyterNotebookEditor(action: string): vscode.NotebookEditor | un
   return editor;
 }
 
+function activeQNotebookEditor(action: string): vscode.NotebookEditor | undefined {
+  const editor = vscode.window.activeNotebookEditor;
+  if (!editor || (!isJupyterNotebook(editor.notebook) && !isQnbNotebook(editor.notebook))) {
+    void vscode.window.showWarningMessage(
+      `Open a Jupyter .ipynb or q .qnb notebook before ${action}.`
+    );
+    return undefined;
+  }
+  return editor;
+}
+
 function isJupyterNotebook(notebook: Pick<vscode.NotebookDocument, 'notebookType'>): boolean {
-  return notebook.notebookType === 'jupyter-notebook';
+  return notebook.notebookType === JUPYTER_NOTEBOOK_TYPE;
+}
+
+function isQnbNotebook(notebook: Pick<vscode.NotebookDocument, 'notebookType'>): boolean {
+  return notebook.notebookType === QNB_NOTEBOOK_TYPE;
 }
 
 function firstPortableOutput(cell: vscode.NotebookCell): PortableKxResult | undefined {

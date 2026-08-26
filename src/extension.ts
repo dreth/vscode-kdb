@@ -43,6 +43,9 @@ import {
   QueryHistoryStatus,
 } from './query-history-model';
 import { qSelectionExecutionKind, selectedTextOrCurrentLine } from './q-text';
+import { QLanguageClientController } from './q-language-client';
+import { QMetadataService } from './q-metadata-service';
+import { QnbNotebookSupport } from './qnb-notebook';
 import { QueryConnectionSelectionSession } from './query-connection-selection';
 
 let activeConnectionManager: ConnectionManager | undefined;
@@ -63,6 +66,7 @@ export interface KxExtensionHostTestApi {
   hasPassword(id: string): Promise<boolean>;
   resolveNotebookTarget(metadata: unknown): KxConnection | undefined;
   isDirectControllerRegistered(): boolean;
+  isQnbControllerRegistered(): boolean;
   queueNotebookTable(
     columns: readonly string[],
     rows: readonly (readonly QCellValue[])[]
@@ -82,6 +86,8 @@ export interface KxExtensionHostTestApi {
     notebookUri: string,
     request: LiveNotebookSliceRequest
   ): LiveNotebookSlice | undefined;
+  qLanguageServerRunning(): boolean;
+  qLanguageServerReady(): Promise<boolean>;
 }
 
 export interface ExtensionHostNotebookQueryGate {
@@ -103,10 +109,18 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
     process.env.VSCODE_KDB_EXTENSION_HOST_NOTEBOOK_EXECUTOR === '1';
   const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
   const diagnostics = new KxDiagnostics(output);
+  const qnbNotebooks = new QnbNotebookSupport();
   configurePerfOutput(value => output.appendLine(value));
   const store = new ConnectionStore(context);
   const manager = new ConnectionManager(store, diagnostics);
   const tree = new ConnectionsTreeProvider(store, manager);
+  const qMetadata = new QMetadataService(
+    store,
+    manager,
+    tree.onDidChangeTreeData,
+    diagnostics
+  );
+  const qLanguage = new QLanguageClientController(context, output, qMetadata);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
   const liveNotebookResults = new LiveNotebookResultStore();
   const notebookBridge = extensionHostNotebookExecutorEnabled && extensionHostNotebookExecutor
@@ -170,7 +184,8 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
           name: entry.connectionName,
         },
       }
-    )
+    ),
+    qMetadata
   );
 
   let connectionSnapshot = connectionMap(store.connections());
@@ -180,6 +195,9 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
     tree,
     treeView,
     output,
+    qLanguage,
+    qMetadata,
+    qnbNotebooks,
     notebookRunner,
     notebookIntegration,
     { dispose: () => liveNotebookResults.clear() },
@@ -271,6 +289,8 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       resolveNotebookTarget: (_metadata: unknown) => safeConnection(store.activeConnection()),
       isDirectControllerRegistered: () =>
         notebookRunner.isDirectControllerRegistered(),
+      isQnbControllerRegistered: () =>
+        notebookRunner.isQnbControllerRegistered(),
       queueNotebookTable: (
         columns: readonly string[],
         rows: readonly (readonly QCellValue[])[]
@@ -295,6 +315,8 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
           }
           : undefined;
       },
+      qLanguageServerRunning: () => qLanguage.isRunning(),
+      qLanguageServerReady: () => qLanguage.ready(),
     }),
   });
 }

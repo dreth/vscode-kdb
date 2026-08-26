@@ -14,6 +14,7 @@ import {
   ServerExplorerFeature,
   ServerPreviewRunner,
 } from './server-explorer';
+import type { QMetadataService } from './q-metadata-service';
 
 export class FeatureControls implements vscode.Disposable {
   private serverExplorer: ServerExplorerFeature | undefined;
@@ -28,7 +29,8 @@ export class FeatureControls implements vscode.Disposable {
     private readonly connectionTree: ConnectionsTreeProvider,
     private readonly diagnostics: KxDiagnostics,
     private readonly runPreview: ServerPreviewRunner,
-    private readonly rerunHistory: QueryHistoryRunner
+    private readonly rerunHistory: QueryHistoryRunner,
+    private readonly qMetadata?: QMetadataService
   ) {
     this.queryHistoryStore = new QueryHistoryStore(context.workspaceState, {
       maxEntries: () => vscode.workspace
@@ -94,7 +96,8 @@ export class FeatureControls implements vscode.Disposable {
         this.manager,
         this.connectionTree,
         this.diagnostics,
-        this.runPreview
+        this.runPreview,
+        this.qMetadata
       );
     } else if (!serverExplorerEnabled && this.serverExplorer) {
       this.serverExplorer.dispose();

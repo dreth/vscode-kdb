@@ -4,9 +4,30 @@ Open VS Code Settings and search for `vscode-kdb`, or edit settings JSON. The ex
 
 Connection records can be owned by User, Workspace, or Workspace Folder settings. Other settings can be set at their declared VS Code configuration scopes unless the UI writes a global preference. Result-panel preference controls write the corresponding global setting; they do not change settings silently.
 
+## q language server
+
+These settings are resource-scoped. TextMate highlighting and q execution remain available when the server is disabled.
+
+| Setting | Default | Values / range | Behavior and tradeoff |
+| --- | --- | --- | --- |
+| `vscode-kdb.languageServer.enabled` | `true` | Boolean | Lazily enable completion, navigation, formatting, semantic tokens, and diagnostics for q documents/cells. |
+| `vscode-kdb.languageServer.diagnostics.debounceMs` | `250` | Integer `0`–`5000` | Quiet period before diagnostics for the current document version. |
+| `vscode-kdb.languageServer.diagnostics.maxProblems` | `200` | Integer `1`–`1000` | Findings retained in source order before one omission notice. |
+| `vscode-kdb.languageServer.maxFileSizeBytes` | `2097152` | Integer `65536`–`52428800` | Parser-backed feature limit. Oversized source retains highlighting/execution and gets one explanation. |
+| `vscode-kdb.languageServer.workspace.include` | `["**/*.q"]` | Up to 32 globs | q files eligible for lazy workspace indexing. |
+| `vscode-kdb.languageServer.workspace.exclude` | generated/vendor defaults | Up to 32 globs | Defaults exclude `.git`, `node_modules`, `out`, `dist`, and `build`. Symlinks are not followed. |
+| `vscode-kdb.languageServer.workspace.maxFiles` | `5000` | Integer `1`–`20000` | Hard cap for lazy workspace indexing. |
+| `vscode-kdb.languageServer.lint.enabled` | `true` | Boolean | Enables conservative lint findings; syntax errors remain active. |
+| `vscode-kdb.languageServer.lint.rules` | five default rules | `error`, `warning`, `information`, `hint`, `off` | Resource-specific severity for each supported stable lint code. |
+| `vscode-kdb.languageServer.connectedIntelligence` | `false` | Boolean | Opt in to bounded active-profile names/types and on-demand table `meta`. No source, values, preview, credentials, or query history crosses to the server process. |
+
+Use **KX: Refresh q Language Metadata** after an out-of-band schema change. Profile, namespace, connection-generation, disconnect, and setting changes invalidate stale metadata automatically. See [q language tooling](q-language.md).
+
 ## Notebook language and results
 
 Notebook cell language is not a `vscode-kdb` setting. The default workflow keeps the Python controller selected: set only the intended code cells to q with **Make q Cell (KX)**, star one global active connection, and use **Run q Cell (KX)**. Python cells retain normal Jupyter Run. KX is absent from the kernel candidates by default; VS Code's top-right Jupyter selector itself remains.
+
+The q-only `vscode-kdb-q-notebook` type is separate: its code cells are always q and its dedicated direct-q controller is always registered. `vscode-kdb.notebook.enableDirectController` controls only the optional Jupyter candidate and cannot disable `.qnb` execution.
 
 Use the leading **Make q Cell (KX)** action. It applies VS Code's supported document-language setter to selected code cells, skips Markdown, preserves source/metadata/output, and does not switch the Python kernel. An actual q cell shows `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS) and a notebook-level **Active** chooser. Every run uses only the globally starred profile. Legacy notebook target metadata is ignored, credentials and endpoint fields remain excluded from notebook routing metadata, and a missing active profile prompts rather than falling through to list order or a connected non-active profile.
 

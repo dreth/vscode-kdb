@@ -368,6 +368,60 @@
 
 
     <li class="md-nav__item">
+      <a href="../q-language/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    q Language Tooling
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../parity/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    q Professional parity
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../notebooks/" class="md-nav__link">
 
 
@@ -375,7 +429,7 @@
   <span class="md-ellipsis">
 
 
-    Jupyter Notebooks
+    qnb & Jupyter Notebooks
 
 
 
@@ -621,6 +675,28 @@
     <span class="md-ellipsis">
 
         Start with KX Output
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#q-completion-diagnostics-or-formatting-is-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        q completion, diagnostics, or formatting is missing
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#qnb-opens-with-the-wrong-extension-or-as-text" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        qnb opens with the wrong extension or as text
 
     </span>
   </a>
@@ -1101,6 +1177,28 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#q-completion-diagnostics-or-formatting-is-missing" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        q completion, diagnostics, or formatting is missing
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#qnb-opens-with-the-wrong-extension-or-as-text" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        qnb opens with the wrong extension or as text
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#cannot-connect" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -1498,6 +1596,13 @@
 <h2 id="start-with-kx-output">Start with KX Output</h2>
 <p>Open <strong>View &gt; Output</strong> and select <strong>KX</strong>. The channel records standalone connect, handshake, query, cancellation, and close phases, including explicit disconnect transitions. Endpoint context uses <code>host:port</code>; credentials and query text are omitted.</p>
 <p>If <strong>KX</strong> is not yet in the Output picker, activate the extension by opening the KX sidebar or a <code>.q</code> file, then open Output again.</p>
+<h2 id="q-completion-diagnostics-or-formatting-is-missing">q completion, diagnostics, or formatting is missing</h2>
+<p>Version 0.2.24 requires VS Code 1.101 or newer. Check <code>vscode-kdb.languageServer.enabled</code>, open <strong>Output &gt; KX</strong>, and run <strong>Developer: Reload Window</strong> after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.</p>
+<p>Disable another q extension while diagnosing. q Professional and other q tooling can register overlapping completion, formatting, semantic-token, grammar, and <code>*.qnb</code> providers. To use this extension as the formatter, set <code>"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }</code>.</p>
+<p>For a file above <code>vscode-kdb.languageServer.maxFileSizeBytes</code>, the server deliberately skips expensive providers and publishes one bounded explanation. Increase the setting only when the workspace can afford the parse/index cost.</p>
+<h2 id="qnb-opens-with-the-wrong-extension-or-as-text">qnb opens with the wrong extension or as text</h2>
+<p>Disable q Professional or any extension that also claims <code>*.qnb</code>, reload VS Code, then use <strong>Reopen Editor With… &gt; q Notebook</strong> if necessary. This extension expects the observable top-level JSON cell-array contract. Malformed, oversized, or unsupported shapes fail visibly and are never replaced with an empty notebook.</p>
+<p>The <code>.qnb</code> controller uses the globally active direct-q profile and does not use Python or Jupyter. Remove a leading <code>%%q</code>; it belongs only to a Python-language mixed-notebook cell. Legacy <code>x-application/q-notebook</code> output remains saved unchanged and receives a visible fallback when no renderer can safely infer its q type.</p>
 <p>For operation timings, temporarily enable:</p>
 <div class="highlight"><pre><span></span><code><span class="nt">"vscode-kdb.performance.trace"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
 </code></pre></div>

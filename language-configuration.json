@@ -19,9 +19,9 @@
     ["(", ")"],
     ["\"", "\""]
   ],
-  "wordPattern": "(`?\\.?[A-Za-z_][A-Za-z0-9_.]*|[-+]?\\d+(?:\\.\\d+)?)",
+  "wordPattern": "(\\.?[A-Za-z][A-Za-z0-9_]*(?:\\.[A-Za-z0-9_]+)*|[-+]?\\d+(?:\\.\\d+)?)",
   "indentationRules": {
     "increaseIndentPattern": "[({[]\\s*$",
-    "decreaseIndentPattern": "^\\s*[)}\\]]"
+    "decreaseIndentPattern": "^\\s+[)}\\]]"
   }
 }

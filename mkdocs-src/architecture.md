@@ -7,7 +7,8 @@ KX for VS Code connects directly to q over IPC. The extension owns connection pr
 - **Connection layer:** saved profiles live in VS Code settings. Passwords entered through the connection form use SecretStorage; an optional plaintext password may be configured in settings as a lower-precedence fallback, including for portable workspace/devcontainer profiles. Each profile has an independent q IPC client and request queue.
 - **Execution layer:** editor commands and direct notebook actions send q text through the selected profile. Namespace wrappers restore the previous q namespace after success or error.
 - **Result layer:** IPC values are decoded once into shared result models used by the KX Results panel and notebook renderer. Large operations apply explicit limits or confirmation prompts.
-- **Notebook layer:** the default mixed-notebook path leaves the Python controller selected and runs marked q cells through an explicit KX action. The optional pure-q controller uses the same direct IPC path.
+- **Language layer:** a generated TextMate grammar provides activation-free lexical scopes. A lazy bundled language client/server owns immutable q source models, offline providers, bounded workspace indexing, conservative formatting/diagnostics, and an optional validated metadata request bridge. The server never opens q IPC.
+- **Notebook layer:** the q-only `.qnb` serializer/controller preserves the compatible JSON cell-array contract and uses direct IPC. The default mixed-Jupyter path leaves Python selected and runs marked q cells through an explicit KX action. The optional Jupyter pure-q controller uses the same direct IPC core.
 - **Optional tools:** Server Explorer, Query History, performance tracing, and the loopback data server are off by default.
 
 ## State and persistence
@@ -20,6 +21,6 @@ The Python `kx_notebook` helper is separate from the extension-managed direct IP
 
 The extension has no SQLTools runtime dependency. Legacy SQLTools connection import is a one-time settings migration and creates no synchronization or shared session.
 
-Direct q IPC is plaintext. TLS, SSH tunnels, gateways, remote administration, SQL translation, q language-server features, and server-side cancellation are outside the extension. Separately managed network controls can be used around direct IPC.
+Direct q IPC is plaintext. TLS, SSH tunnels, gateways, remote administration, SQL translation, speculative dynamic q analysis, and server-side cancellation are outside the extension. Separately managed network controls can be used around direct IPC.
 
 Host-neutral helpers such as IPC codecs, q source grouping, result transformations, export algorithms, and chart data preparation remain isolated from VS Code UI code where practical. Commands, webviews, SecretStorage, and extension lifecycle code remain extension-owned.

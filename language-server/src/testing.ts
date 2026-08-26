@@ -1,0 +1,11 @@
+export * from './catalog';
+export * from './formatter';
+export * from './providers';
+export * from './q-diagnostics';
+export * from './q-source';
+export * from './runtime-metadata';
+export * from './settings';
+export * from './workspace';
+export * from './parser';
+export { parse } from './parser/parser';
+export { FindKind, SyntaxError, findIdentifiers } from './parser/utils';

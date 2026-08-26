@@ -36,6 +36,8 @@ import {
 
 export const KX_Q_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.q-notebook-controller';
 export const KX_Q_NOTEBOOK_TYPE = 'jupyter-notebook';
+export const KX_QNB_NOTEBOOK_CONTROLLER_ID = 'vscode-kdb.qnb-notebook-controller';
+export const KX_QNB_NOTEBOOK_TYPE = 'vscode-kdb-q-notebook';
 export const KX_Q_NOTEBOOK_CONTROLLER_LABEL = 'KX q (Direct IPC)';
 export const KX_NOTEBOOK_LIVE_METADATA_KEY = NOTEBOOK_LIVE_RESULT_METADATA_KEY;
 export const KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY =
@@ -151,11 +153,15 @@ export class KxQNotebookRunner implements vscode.Disposable {
   private readonly configurationSubscription: vscode.Disposable;
   private readonly stateChanged = new vscode.EventEmitter<void>();
   private readonly selectedNotebooks = new Set<string>();
+  private readonly selectedQnbNotebooks = new Set<string>();
   private readonly activeExecutions = new Set<string>();
+  private readonly activeNotebookAborts = new Map<string, Set<AbortController>>();
   private readonly lastRunFailures = new Map<string, DirectQCellRunFailureDetail>();
   private readonly allocatedOutputIds = new Set<string>();
   private controller: vscode.NotebookController | undefined;
+  private qnbController: vscode.NotebookController | undefined;
   private selectionSubscription: vscode.Disposable | undefined;
+  private qnbSelectionSubscription: vscode.Disposable | undefined;
   private executionOrder = 0;
   private disposed = false;
 
@@ -171,6 +177,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
       }
     });
     this.onDidChangeState = this.stateChanged.event;
+    this.registerQnbController();
     this.syncControllerRegistration();
     this.refreshDetails();
   }
@@ -180,11 +187,12 @@ export class KxQNotebookRunner implements vscode.Disposable {
       return;
     }
     const connection = this.bridge.activeConnection();
-    if (this.controller) {
-      this.controller.description = connection
+    for (const controller of [this.controller, this.qnbController]) {
+      if (!controller) continue;
+      controller.description = connection
         ? `Direct IPC • ${connection.name}`
         : 'Direct IPC';
-      this.controller.detail = connection
+      controller.detail = connection
         ? [
           'Direct IPC',
           connection.name,
@@ -216,7 +224,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
   }
 
   public isSelected(notebook: Pick<vscode.NotebookDocument, 'uri'>): boolean {
-    return this.selectedNotebooks.has(notebook.uri.toString());
+    const key = notebook.uri.toString();
+    return this.selectedNotebooks.has(key) || this.selectedQnbNotebooks.has(key);
   }
 
   public lastRunFailure(
@@ -229,6 +238,10 @@ export class KxQNotebookRunner implements vscode.Disposable {
     return this.controller !== undefined;
   }
 
+  public isQnbControllerRegistered(): boolean {
+    return this.qnbController !== undefined;
+  }
+
   public async runCell(
     cell: vscode.NotebookCell,
     connectionId: string,
@@ -237,7 +250,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
     if (this.disposed) {
       return 'unavailable';
     }
-    if (cell.notebook.notebookType !== KX_Q_NOTEBOOK_TYPE) {
+    if (cell.notebook.notebookType !== KX_Q_NOTEBOOK_TYPE &&
+      cell.notebook.notebookType !== KX_QNB_NOTEBOOK_TYPE) {
       return 'unsupported-notebook';
     }
     if (options.source !== undefined &&
@@ -278,8 +292,13 @@ export class KxQNotebookRunner implements vscode.Disposable {
     this.stateSubscription.dispose();
     this.configurationSubscription.dispose();
     this.unregisterController();
+    this.unregisterQnbController();
     this.stateChanged.dispose();
     this.activeExecutions.clear();
+    for (const aborts of this.activeNotebookAborts.values()) {
+      for (const abort of aborts) abort.abort();
+    }
+    this.activeNotebookAborts.clear();
     this.lastRunFailures.clear();
   }
 
@@ -306,6 +325,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
     );
     controller.supportedLanguages = ['q'];
     controller.supportsExecutionOrder = true;
+    controller.interruptHandler = notebook => this.interruptNotebook(notebook);
     this.controller = controller;
     this.selectionSubscription = controller.onDidChangeSelectedNotebooks(event => {
       const key = event.notebook.uri.toString();
@@ -319,12 +339,40 @@ export class KxQNotebookRunner implements vscode.Disposable {
     this.refreshDetails();
   }
 
+  private registerQnbController(): void {
+    if (this.disposed || this.qnbController) return;
+    const controller = vscode.notebooks.createNotebookController(
+      KX_QNB_NOTEBOOK_CONTROLLER_ID,
+      KX_QNB_NOTEBOOK_TYPE,
+      KX_Q_NOTEBOOK_CONTROLLER_LABEL,
+      (cells, notebook) => this.executeCells(cells, notebook)
+    );
+    controller.supportedLanguages = ['q'];
+    controller.supportsExecutionOrder = true;
+    controller.interruptHandler = notebook => this.interruptNotebook(notebook);
+    this.qnbController = controller;
+    this.qnbSelectionSubscription = controller.onDidChangeSelectedNotebooks(event => {
+      const key = event.notebook.uri.toString();
+      if (event.selected) this.selectedQnbNotebooks.add(key);
+      else this.selectedQnbNotebooks.delete(key);
+      this.stateChanged.fire();
+    });
+  }
+
   private unregisterController(): void {
     this.selectionSubscription?.dispose();
     this.selectionSubscription = undefined;
     this.selectedNotebooks.clear();
     this.controller?.dispose();
     this.controller = undefined;
+  }
+
+  private unregisterQnbController(): void {
+    this.qnbSelectionSubscription?.dispose();
+    this.qnbSelectionSubscription = undefined;
+    this.selectedQnbNotebooks.clear();
+    this.qnbController?.dispose();
+    this.qnbController = undefined;
   }
 
   private async executeCells(
@@ -649,7 +697,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
     if (this.activeExecutions.has(executionKey)) {
       return undefined;
     }
-    const controller = this.controller;
+    const controller = notebook.notebookType === KX_QNB_NOTEBOOK_TYPE
+      ? this.qnbController
+      : this.controller;
     if (!controller) {
       return undefined;
     }
@@ -678,6 +728,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
     const source = cell.document.getText();
     const cellUri = cell.document.uri.toString();
     const languageId = cell.document.languageId;
+    this.trackNotebookAbort(notebook, abortController);
     const isStillCurrent = (): boolean => !notebook.isClosed &&
       notebook.getCells().some(candidate =>
         candidate.document.uri.toString() === cellUri &&
@@ -760,6 +811,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
         `${KX_Q_NOTEBOOK_CONTROLLER_LABEL} could not update the cell output: ${detail}.`
       ));
     } finally {
+      this.untrackNotebookAbort(notebook, abortController);
       cancellation.dispose();
       end();
       this.refreshDetails();
@@ -813,11 +865,14 @@ export class KxQNotebookRunner implements vscode.Disposable {
         return { success: true, output: [] };
       }
       if (hasNotebookQMarker(source)) {
+        const qnb = notebook.notebookType === KX_QNB_NOTEBOOK_TYPE;
         return {
           success: false,
           output: errorOutput(
-            `${runLabel} executes ordinary q source and does not use %%q. Remove the %%q line, ` +
-            'or select the Python controller to use the separate kx_notebook route.'
+            qnb
+              ? `${runLabel} executes ordinary q source in this q-only notebook and does not use %%q. Remove the %%q line.`
+              : `${runLabel} executes ordinary q source and does not use %%q. Remove the %%q line, ` +
+                'or select the Python controller to use the separate kx_notebook route.'
           ),
         };
       }
@@ -953,6 +1008,32 @@ export class KxQNotebookRunner implements vscode.Disposable {
       return boundedNotebookText(message || 'Unknown direct IPC error', 4096);
     } catch {
       return 'Direct IPC failed; diagnostic details were unavailable';
+    }
+  }
+
+  private trackNotebookAbort(
+    notebook: Pick<vscode.NotebookDocument, 'uri'>,
+    abort: AbortController
+  ): void {
+    const key = notebook.uri.toString();
+    const aborts = this.activeNotebookAborts.get(key) ?? new Set<AbortController>();
+    aborts.add(abort);
+    this.activeNotebookAborts.set(key, aborts);
+  }
+
+  private untrackNotebookAbort(
+    notebook: Pick<vscode.NotebookDocument, 'uri'>,
+    abort: AbortController
+  ): void {
+    const key = notebook.uri.toString();
+    const aborts = this.activeNotebookAborts.get(key);
+    aborts?.delete(abort);
+    if (aborts?.size === 0) this.activeNotebookAborts.delete(key);
+  }
+
+  private interruptNotebook(notebook: Pick<vscode.NotebookDocument, 'uri'>): void {
+    for (const abort of this.activeNotebookAborts.get(notebook.uri.toString()) ?? []) {
+      abort.abort();
     }
   }
 }

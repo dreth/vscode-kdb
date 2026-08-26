@@ -14,6 +14,46 @@ KX and the KX logo are trademarks of KX. They are used here solely to identify K
 
 The original white source file is not distributed in source control or release artifacts; only the recolored, padded derivative assets are packaged.
 
+## KX q parser adaptation
+
+Selected q parser/token/source utilities are adapted from
+[`KxSystems/kx-vscode`](https://github.com/KxSystems/kx-vscode) at immutable
+commit `955292b68a53179cb1865608e917d4bcdc833ca1`.
+
+Copyright (c) 1998-2026 KX Systems Inc.
+
+The adapted upstream paths are `server/src/parser/{checks,index,keywords,language,lexer,literals,parser,ranges,source,tokens,utils}.ts`;
+their local destinations are the same names under `language-server/src/parser/`.
+Local modifications migrate Chevrotain 11.1.2 behavior to 13.2.0, remove the
+obsolete lodash dependency chain, handle unavailable token locations and
+stricter DSL types, close documented q lexical gaps, and generate this
+extension's standard-scope TextMate grammar. Retained file headers and
+[`language-server/PROVENANCE.md`](language-server/PROVENANCE.md) record the
+boundary in detail. No other KX extension code or assets are included.
+
+These adaptations are licensed under the Apache License, Version 2.0. The full
+license text is distributed as `language-server/APACHE-2.0.txt`.
+
+## Chevrotain
+
+Chevrotain 13.2.0 is used by the bundled q language server and is distributed
+under the Apache License, Version 2.0.
+
+Copyright (c) 2015 SAP SE or an SAP affiliate company.
+
+The full Apache-2.0 text is distributed as
+`language-server/APACHE-2.0.txt`. This release does not contain Chevrotain 11
+or `lodash-es`.
+
+## VS Code language protocol packages
+
+`vscode-languageclient` 9.0.1, `vscode-languageserver` 9.0.1, and
+`vscode-languageserver-textdocument` 1.0.13 are Copyright (c) Microsoft
+Corporation and licensed under the MIT License. The MIT grant and disclaimer
+reproduced below for uPlot apply to these packages with Microsoft as the
+copyright holder. Their upstream third-party notices are retained when their
+corresponding package files are distributed.
+
 ## uPlot
 
 Copyright (c) 2022 Leon Sorokin

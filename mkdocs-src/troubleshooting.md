@@ -6,6 +6,20 @@ Open **View > Output** and select **KX**. The channel records standalone connect
 
 If **KX** is not yet in the Output picker, activate the extension by opening the KX sidebar or a `.q` file, then open Output again.
 
+## q completion, diagnostics, or formatting is missing
+
+Version 0.2.24 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
+
+Disable another q extension while diagnosing. q Professional and other q tooling can register overlapping completion, formatting, semantic-token, grammar, and `*.qnb` providers. To use this extension as the formatter, set `"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }`.
+
+For a file above `vscode-kdb.languageServer.maxFileSizeBytes`, the server deliberately skips expensive providers and publishes one bounded explanation. Increase the setting only when the workspace can afford the parse/index cost.
+
+## qnb opens with the wrong extension or as text
+
+Disable q Professional or any extension that also claims `*.qnb`, reload VS Code, then use **Reopen Editor With… > q Notebook** if necessary. This extension expects the observable top-level JSON cell-array contract. Malformed, oversized, or unsupported shapes fail visibly and are never replaced with an empty notebook.
+
+The `.qnb` controller uses the globally active direct-q profile and does not use Python or Jupyter. Remove a leading `%%q`; it belongs only to a Python-language mixed-notebook cell. Legacy `x-application/q-notebook` output remains saved unchanged and receives a visible fallback when no renderer can safely infer its q type.
+
 For operation timings, temporarily enable:
 
 ```json

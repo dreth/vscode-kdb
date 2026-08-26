@@ -18,6 +18,8 @@ const RUN_Q_NOTEBOOK_CELL_COMMAND = 'vscode-kdb.runQNotebookCell';
 const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
 const KX_OUTPUT_METADATA_KEY = 'vscode-kdb.outputBinding';
 const KX_LIVE_METADATA_KEY = 'vscode-kdb.liveResult';
+const QNB_NOTEBOOK_TYPE = 'vscode-kdb-q-notebook';
+const QNB_LEGACY_MIME = 'x-application/q-notebook';
 
 function kxExtension() {
   return vscode.extensions.getExtension(EXTENSION_ID) ||
@@ -207,6 +209,11 @@ async function exerciseConnectionStore(testApi) {
 async function exerciseDirectControllerLifecycle(testApi) {
   const configuration = vscode.workspace.getConfiguration('vscode-kdb.notebook');
   const previous = configuration.inspect(DIRECT_CONTROLLER_SETTING)?.globalValue;
+  assert.strictEqual(
+    testApi.isQnbControllerRegistered(),
+    true,
+    'the qnb controller must be registered independently of the optional Jupyter controller'
+  );
   try {
     assert.strictEqual(
       configuration.get(DIRECT_CONTROLLER_SETTING),
@@ -238,12 +245,112 @@ async function exerciseDirectControllerLifecycle(testApi) {
       'direct controller disposal',
       () => !testApi.isDirectControllerRegistered()
     );
+    assert.strictEqual(testApi.isQnbControllerRegistered(), true);
   } finally {
     await configuration.update(
       DIRECT_CONTROLLER_SETTING,
       previous,
       vscode.ConfigurationTarget.Global
     );
+  }
+}
+
+async function exerciseQLanguageServer(testApi) {
+  const document = await vscode.workspace.openTextDocument({
+    language: 'q',
+    content: 'double:{[x] x*2}; answer:double[21]\nunused:{[arg] 1}',
+  });
+  await vscode.window.showTextDocument(document, { preview: false });
+  await waitFor('lazy q language server start', () => testApi.qLanguageServerRunning());
+  assert.strictEqual(await testApi.qLanguageServerReady(), true);
+  const completions = await vscode.commands.executeCommand(
+    'vscode.executeCompletionItemProvider',
+    document.uri,
+    new vscode.Position(0, 1)
+  );
+  assert(completions.items.some(item => item.label === 'distinct'));
+  const hovers = await vscode.commands.executeCommand(
+    'vscode.executeHoverProvider',
+    document.uri,
+    new vscode.Position(0, 2)
+  );
+  assert(Array.isArray(hovers) && hovers.length > 0);
+  const symbols = await vscode.commands.executeCommand(
+    'vscode.executeDocumentSymbolProvider',
+    document.uri
+  );
+  assert(symbols.some(symbol => symbol.name === 'double'));
+  const folds = await vscode.commands.executeCommand('vscode.executeFoldingRangeProvider', document.uri);
+  assert(Array.isArray(folds));
+  const edits = await vscode.commands.executeCommand(
+    'vscode.executeFormatDocumentProvider',
+    document.uri,
+    { insertSpaces: true, tabSize: 2 }
+  );
+  assert(Array.isArray(edits));
+  await waitFor('q diagnostics', () => vscode.languages.getDiagnostics(document.uri)
+    .some(value => value.code === 'q.unused-parameter'));
+  await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+}
+
+async function exerciseQnbSaveReopen() {
+  const controlDir = process.env.VSCODE_KDB_E2E_CONTROL_DIR;
+  assert(controlDir, 'the qnb Extension Host test requires its isolated control directory');
+  const notebookUri = vscode.Uri.file(path.join(controlDir, 'first-party-roundtrip.qnb'));
+  const fixture = [
+    {
+      kind: 2,
+      language: 'python',
+      value: 'show 1 2 3\n',
+      metadata: { custom: 'keep' },
+      outputs: [{ mime: QNB_LEGACY_MIME, value: { type: 'list', value: [1, 2, 3] }, vendor: true }],
+    },
+    {
+      kind: 1,
+      language: 'markdown',
+      value: '# Notes',
+      attachments: { 'pixel.png': { 'image/png': 'iVBORw0KGgo=' } },
+      outputs: [],
+    },
+  ];
+  let notebook;
+  try {
+    await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
+    await vscode.workspace.fs.writeFile(
+      notebookUri,
+      new TextEncoder().encode(`${JSON.stringify(fixture, null, 2)}\n`)
+    );
+    notebook = await vscode.workspace.openNotebookDocument(notebookUri);
+    await vscode.window.showNotebookDocument(notebook, { preview: false });
+    assert.strictEqual(notebook.notebookType, QNB_NOTEBOOK_TYPE);
+    assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
+    assert.strictEqual(notebook.cellAt(1).document.languageId, 'markdown');
+    assert.strictEqual(notebook.cellAt(0).outputs[0].items[0].mime, QNB_LEGACY_MIME);
+    assert.strictEqual(notebook.cellAt(0).outputs[0].items[1].mime, 'text/plain');
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      notebook.cellAt(0).document.uri,
+      new vscode.Range(
+        notebook.cellAt(0).document.positionAt(0),
+        notebook.cellAt(0).document.positionAt(notebook.cellAt(0).document.getText().length)
+      ),
+      'show enlist 4\n'
+    );
+    assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+    assert.strictEqual(await notebook.save(), true);
+    await closeNotebookTab(notebookUri);
+    notebook = await vscode.workspace.openNotebookDocument(notebookUri);
+    await vscode.window.showNotebookDocument(notebook, { preview: false });
+    assert.strictEqual(notebook.cellAt(0).document.getText(), 'show enlist 4\n');
+    assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
+    const saved = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(notebookUri)));
+    assert.strictEqual(saved[0].metadata.custom, 'keep');
+    assert.deepStrictEqual(saved[0].outputs, fixture[0].outputs,
+      'the visible legacy fallback must not be persisted as another output');
+    assert.deepStrictEqual(saved[1].attachments, fixture[1].attachments);
+  } finally {
+    if (notebook) await closeNotebookTab(notebookUri).catch(() => undefined);
+    await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
   }
 }
 
@@ -1344,6 +1451,10 @@ async function run() {
     await exerciseConnectionStore(testApi);
     console.log('KX Extension Host phase: direct controller lifecycle');
     await exerciseDirectControllerLifecycle(testApi);
+    console.log('KX Extension Host phase: q language server');
+    await exerciseQLanguageServer(testApi);
+    console.log('KX Extension Host phase: qnb save/reopen');
+    await exerciseQnbSaveReopen();
     console.log('KX Extension Host phase: notebook cell language');
     await exerciseNotebookCellLanguageCommands();
     console.log('KX Extension Host phase: durable mixed notebook');

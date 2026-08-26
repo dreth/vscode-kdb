@@ -413,6 +413,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#use-a-q-only-qnb-notebook" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Use a q-only qnb notebook
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#optional-native-direct-q-notebook-controller" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -525,6 +536,60 @@
 
 
     <li class="md-nav__item">
+      <a href="../q-language/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    q Language Tooling
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
+      <a href="../parity/" class="md-nav__link">
+
+
+
+  <span class="md-ellipsis">
+
+
+    q Professional parity
+
+
+
+  </span>
+
+
+
+      </a>
+    </li>
+
+
+
+
+
+
+
+
+
+    <li class="md-nav__item">
       <a href="../notebooks/" class="md-nav__link">
 
 
@@ -532,7 +597,7 @@
   <span class="md-ellipsis">
 
 
-    Jupyter Notebooks
+    qnb & Jupyter Notebooks
 
 
 
@@ -881,6 +946,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#use-a-q-only-qnb-notebook" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Use a q-only qnb notebook
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#optional-native-direct-q-notebook-controller" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -946,7 +1022,7 @@
 
 <h1 id="installation">Installation</h1>
 <h2 id="requirements">Requirements</h2>
-<p>KX for VS Code requires VS Code <code>1.96.0</code> or newer and a kdb+/q process reachable over q IPC for normal <code>.q</code> editor execution. The extension does not bundle q or a kdb+ license.</p>
+<p>KX for VS Code 0.2.24 requires VS Code <code>1.101.0</code> or newer. That baseline supplies the Node 22 Extension Host required by the bundled language stack. VS Code 1.96–1.100 users can remain on extension 0.2.23. Offline source authoring does not require q; execution requires a kdb+/q process reachable over q IPC. The extension does not bundle q or a kdb+ license.</p>
 <p>Mixed-notebook <strong>Run q Cell (KX)</strong> uses the globally active q profile while Python stays selected. The optional pure-q <strong>KX q (Direct IPC)</strong> controller uses that same active profile only when its default-false setting is enabled and it is selected. Both use the same direct q machinery as editor execution and neither requires a Python package. Release 0.2.20 preserves 0.2.7's client-side complete-source grouping and ordinary q <code>value</code> evaluation, so it does not require <code>.Q.ld</code> or reject a process by q release date. Compatibility is covered deterministically for generated source when <code>.Q.ld</code> is absent and live on the installed modern q runtime; no historical q binary was available, so no exact minimum q version or live old-q result is claimed. The separate optional Python-kernel <code>%%q</code> route requires Python 3.9 through 3.13, IPython, and the separately installed <code>kx-notebook==0.1.0</code> distribution (<code>import kx_notebook</code>) in that kernel. The companion has direct q IPC built in; it bundles no q runtime or PyKX binary.</p>
 <p>SQLTools is neither installed nor activated by this extension. If legacy KDB profiles remain in VS Code's <code>sqltools.connections</code> setting, the explicit import command can read those values as one-time candidates through VS Code's configuration API; that does not create a SQLTools runtime dependency.</p>
 <h2 id="install-the-extension">Install the extension</h2>
@@ -992,6 +1068,9 @@ npm<span class="w"> </span>run<span class="w"> </span>compile
 <p>When a tracked q cell is selected or its editor has text focus, the contributed defaults preserve notebook semantics: <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs and stays, <code>Shift+Enter</code> runs and moves next, and <code>Alt+Enter</code> / <code>Option+Enter</code> runs and inserts below. Move/insert happens only after a successful executed result. The bindings are limited to tracked q code-cell resources in mixed Jupyter notebooks and are disabled when the KX direct controller is selected. Python, Markdown, ordinary source editors, and notebook output focus keep their normal shortcut behavior. User or keymap-extension bindings can override defaults; use the visible KX action if a shortcut was customized.</p>
 <p>Mixed mode is an explicit KX action, not native KX kernel execution, while Python is selected. After q finishes, the KX action applies complete exact rich v2 output as one undoable notebook edit, which marks the notebook dirty until saved and replaces the q cell's internal handle. Source, q language, metadata, and sibling cells are preserved; a cell or output changed during the run is not overwritten. Use VS Code/Jupyter's native <strong>Clear Cell Output</strong> or <strong>Clear All Outputs</strong> actions to remove output.</p>
 <p>KX is absent from the kernel candidates by default. VS Code's top-right Jupyter selector remains; KX does not remove it.</p>
+<h2 id="use-a-q-only-qnb-notebook">Use a q-only qnb notebook</h2>
+<p>Run <strong>KX: New q Notebook</strong> or open a compatible <code>*.qnb</code>. Code cells are normalized to q, Markdown cells remain Markdown, and the dedicated <strong>KX q (Direct IPC)</strong> controller is always available even when <code>vscode-kdb.notebook.enableDirectController</code> is false. Use the globally active KX profile and normal notebook Run actions. <code>.qnb</code> never invokes Python and rejects <code>%%q</code>.</p>
+<p>If q Professional is installed, disable it before opening or saving <code>.qnb</code>: both extensions can claim the same filename selector, and VS Code cannot guarantee which serializer wins. Existing compatible cell-array JSON remains readable without q Professional.</p>
 <h2 id="optional-native-direct-q-notebook-controller">Optional native direct q notebook controller</h2>
 <p>Set the application-scoped <code>vscode-kdb.notebook.enableDirectController</code> setting to <code>true</code>, then choose <strong>KX q (Direct IPC)</strong> from the normal notebook kernel selector. This opt-in controller executes complete q cells through the active profile's existing direct q client and namespace using normal <strong>Run Cell</strong>, <strong>Run All</strong>, and notebook shortcuts. Each successful execution uses standard notebook output APIs and automatically persists complete exact rich v2 output.</p>
 <p>Turning the setting off disposes the controller, so a previously saved KX selection cannot be restored while it is unregistered. Use ordinary q source: a leading <code>%%q</code> is rejected and belongs to the separate Python route. The controller does not install a q kernel, intercept Python/Jupyter, use private APIs, or create a notebook-specific connection. See <a href="../notebooks/">Jupyter/IPython Notebooks</a>.</p>

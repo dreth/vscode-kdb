@@ -5,6 +5,7 @@ import { ConnectionStore } from './connection-store';
 import { ConnectionsTreeProvider } from './connection-tree';
 import type { KxDiagnostics } from './diagnostics';
 import type { QValue } from './q-ipc';
+import type { QMetadataService } from './q-metadata-service';
 import {
   buildServerPreviewQuery,
   buildServerTableMetaQuery,
@@ -56,9 +57,10 @@ export class ServerExplorerFeature implements vscode.Disposable {
     manager: ConnectionManager,
     connectionTree: ConnectionsTreeProvider,
     diagnostics: KxDiagnostics,
-    runPreview: ServerPreviewRunner
+    runPreview: ServerPreviewRunner,
+    qMetadata?: QMetadataService
   ) {
-    this.provider = new ServerExplorerTreeProvider(store, manager, diagnostics);
+    this.provider = new ServerExplorerTreeProvider(store, manager, diagnostics, qMetadata);
     const treeView = vscode.window.createTreeView(SERVER_EXPLORER_VIEW_ID, {
       treeDataProvider: this.provider,
       showCollapseAll: true,
@@ -159,7 +161,8 @@ export class ServerExplorerTreeProvider implements vscode.TreeDataProvider<Serve
   public constructor(
     private readonly store: ConnectionStore,
     private readonly manager: ConnectionManager,
-    private readonly diagnostics: KxDiagnostics
+    private readonly diagnostics: KxDiagnostics,
+    private readonly qMetadata?: QMetadataService
   ) {}
 
   public getTreeItem(element: ServerExplorerNode): vscode.TreeItem {
@@ -312,7 +315,20 @@ export class ServerExplorerTreeProvider implements vscode.TreeDataProvider<Serve
     this.writeDiagnostic(connection, 'start', 'refresh');
 
     try {
-      const [tablesValue, variablesValue] = await vscode.window.withProgress({
+      const metadata = this.qMetadata
+        ? await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Refreshing KX Server Explorer for ${connection.name} (${connection.database})`,
+          cancellable: true,
+        }, (_progress, token) => waitMetadataWithLocalCancellation(
+          signal => this.qMetadata!.root(true, signal),
+          token
+        ))
+        : undefined;
+      if (this.qMetadata && !metadata) throw new StaleMetadataResultError();
+      const [tablesValue, variablesValue] = metadata
+        ? [undefined, undefined]
+        : await vscode.window.withProgress({
         location: vscode.ProgressLocation.Notification,
         title: `Refreshing KX Server Explorer for ${connection.name} (${connection.database})`,
         cancellable: true,
@@ -329,13 +345,17 @@ export class ServerExplorerTreeProvider implements vscode.TreeDataProvider<Serve
           token
         );
         return [tables, variables] as [QValue, QValue];
-      });
+        });
       if (!this.isCurrent(generation, snapshot)) {
         this.writeDiagnostic(connection, 'canceled', 'refresh', Date.now() - started);
         return;
       }
-      const parsedTables = parseServerTableNames(tablesValue);
-      const parsedVariables = parseServerVariables(variablesValue);
+      const parsedTables = metadata
+        ? { names: [...metadata.tables], omittedUnsafeNames: 0 }
+        : parseServerTableNames(tablesValue!);
+      const parsedVariables = metadata
+        ? { variables: [...metadata.variables], omittedUnsafeNames: 0 }
+        : parseServerVariables(variablesValue!);
       this.data = {
         state: 'ready',
         snapshot,
@@ -446,22 +466,35 @@ export class ServerExplorerTreeProvider implements vscode.TreeDataProvider<Serve
     const started = Date.now();
     this.writeDiagnostic(connection, 'start', 'meta');
     try {
-      const value = await vscode.window.withProgress({
-        location: vscode.ProgressLocation.Notification,
-        title: `Loading q meta for ${table.objectName}`,
-        cancellable: true,
-      }, (_progress, token) => waitWithLocalCancellation(
-        () => this.manager.executeInConfiguredNamespace(
-          connection,
-          buildServerTableMetaQuery(table.objectName)
-        ),
-        token
-      ));
+      const metadata = this.qMetadata
+        ? await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Loading q meta for ${table.objectName}`,
+          cancellable: true,
+        }, (_progress, token) => waitMetadataWithLocalCancellation(
+          signal => this.qMetadata!.table(table.objectName, false, signal),
+          token
+        ))
+        : undefined;
+      if (this.qMetadata && !metadata) throw new StaleMetadataResultError();
+      const value = metadata
+        ? undefined
+        : await vscode.window.withProgress({
+          location: vscode.ProgressLocation.Notification,
+          title: `Loading q meta for ${table.objectName}`,
+          cancellable: true,
+        }, (_progress, token) => waitWithLocalCancellation(
+          () => this.manager.executeInConfiguredNamespace(
+            connection,
+            buildServerTableMetaQuery(table.objectName)
+          ),
+          token
+        ));
       if (!this.isCurrent(generation, table.snapshot)) {
         this.writeDiagnostic(connection, 'canceled', 'meta', Date.now() - started);
         return [new ServerStatusTreeItem('Connection or namespace changed. Refresh Server Explorer.', 'error')];
       }
-      const columns = parseServerColumns(value);
+      const columns = metadata ? [...metadata.columns] : parseServerColumns(value!);
       this.columnCache.set(key, columns);
       this.writeDiagnostic(connection, 'success', 'meta', Date.now() - started);
       return columns.length
@@ -645,6 +678,28 @@ async function waitWithLocalCancellation<T>(
       throw new LocalMetadataCancellationError();
     }
     return await Promise.race([operation(), cancellation]);
+  } finally {
+    subscription.dispose();
+  }
+}
+
+async function waitMetadataWithLocalCancellation<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  token: vscode.CancellationToken
+): Promise<T> {
+  const abort = new AbortController();
+  let rejectCancellation!: (error: Error) => void;
+  const canceled = new Promise<never>((_resolve, reject) => {
+    rejectCancellation = reject;
+  });
+  void canceled.catch(() => undefined);
+  const subscription = token.onCancellationRequested(() => {
+    abort.abort();
+    rejectCancellation(new LocalMetadataCancellationError());
+  });
+  try {
+    if (token.isCancellationRequested) throw new LocalMetadataCancellationError();
+    return await Promise.race([operation(abort.signal), canceled]);
   } finally {
     subscription.dispose();
   }

@@ -48,7 +48,9 @@ nav:
   - Installation: installation.md
   - Connections & SecretStorage: connections.md
   - Running q: running-q.md
-  - Jupyter Notebooks: notebooks.md
+  - q Language Tooling: q-language.md
+  - q Professional parity: parity.md
+  - qnb & Jupyter Notebooks: notebooks.md
   - Results Viewer: results-viewer.md
   - Charting: charting.md
   - Copy & Export: copy-export.md

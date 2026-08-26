@@ -47,9 +47,9 @@ Generated script and cell requests do not depend on `.Q.ld` and are not rejected
 
 ## Syntax scope
 
-The extension owns its TextMate q grammar. A top-line `%%q` is recognized as a notebook directive while ordinary q rules and highlighting continue below it. The extension associates q with `.q` files only; `.k` is left to other VS Code language support.
+The extension owns a generated TextMate q grammar and a lazy bundled q language server. A top-line `%%q` is recognized as a mixed-notebook directive while ordinary q rules and highlighting continue below it. The extension associates q with `.q` files and q-language notebook cells only; `.k` is left to other VS Code language support.
 
-This is syntax grammar and editor-command support, not a q language server, lint engine, or source-document formatter. The optional qText syntax highlighting and conservative formatting settings affect result-view presentation only; they do not change `.q` source documents. In notebooks, the cell language selects highlighting; normal Run belongs to the selected Jupyter controller, while the explicit KX action owns Direct IPC q execution. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents.
+Completion, hover, signatures, navigation, rename, folding, semantic tokens, conservative diagnostics, and explicit source formatting use the same offline lexical/scope model for `.q`, q-in-`.ipynb`, and q-in-`.qnb`. Static analysis never executes source and omits uncertain dynamic q findings. Result-view qText highlighting/display formatting remains a separate presentation setting. In notebooks, cell language selects source tooling; normal Run belongs to the selected notebook controller, while the explicit KX action owns mixed `.ipynb` Direct IPC. Standalone q editor keybindings and code lenses are suppressed for notebook-cell documents. See [q language tooling](q-language.md).
 
 ## Active connection and namespace
 
