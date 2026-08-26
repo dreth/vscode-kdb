@@ -1,4 +1,5 @@
 site_name: KX for VS Code
+site_url: https://vscode-kdb.dac.sg/docs/
 repo_url: https://github.com/dreth/vscode-kdb
 repo_name: dreth/vscode-kdb
 site_description: Standalone q IPC, execution, results, charting, and diagnostics documentation for KX for VS Code.
