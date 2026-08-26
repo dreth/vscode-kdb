@@ -1,8 +1,8 @@
 # q Professional replacement parity
 
-Version 0.2.24 is intended to replace q Professional for the team's core q workflow without importing proprietary implementation material.
+Version 0.2.25 is intended to replace q Professional for the team's core q workflow without importing proprietary implementation material.
 
-| Workflow | KX for VS Code 0.2.24 |
+| Workflow | KX for VS Code 0.2.25 |
 | --- | --- |
 | `.q` syntax highlighting | First-party generated TextMate grammar; works without q or the language server. |
 | Completion, hover, signatures | Offline q catalog and lexical/workspace bindings, with official documentation links. Optional active-process names/types are default-off. |
@@ -19,4 +19,4 @@ Known boundaries:
 - Static q intelligence deliberately omits uncertain dynamic evaluation, general type inference, and ambiguous rename/navigation.
 - `.qnb` compatibility covers the observable JSON contract and preserves unknown JSON-compatible data within documented bounds. It does not claim proprietary internal behavior.
 - If q Professional remains enabled, overlapping q providers and `*.qnb` serializers can conflict. Disable one extension per VS Code profile/workspace.
-- VS Code 1.101 is the minimum for 0.2.24; use 0.2.23 on VS Code 1.96–1.100.
+- VS Code 1.101 is the minimum for 0.2.25; use 0.2.23 on VS Code 1.96–1.100.

@@ -8,7 +8,7 @@ If **KX** is not yet in the Output picker, activate the extension by opening the
 
 ## q completion, diagnostics, or formatting is missing
 
-Version 0.2.24 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
+Version 0.2.25 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
 
 Disable another q extension while diagnosing. q Professional and other q tooling can register overlapping completion, formatting, semantic-token, grammar, and `*.qnb` providers. To use this extension as the formatter, set `"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }`.
 

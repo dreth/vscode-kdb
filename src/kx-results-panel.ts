@@ -576,7 +576,7 @@ export class KxResultsPanel {
   private constructor(context: vscode.ExtensionContext, viewColumn: vscode.ViewColumn = initialResultViewColumn()) {
     this.context = context;
     const panelNumber = KxResultsPanel.nextPanelNumber++;
-    const uplotDistRoot = vscode.Uri.file(path.join(context.extensionPath, 'node_modules', 'uplot', 'dist'));
+    const uplotDistRoot = vscode.Uri.file(path.join(context.extensionPath, 'media', 'uplot'));
     this.panel = vscode.window.createWebviewPanel(
       'vscodeKdbResults',
       panelTitle(panelNumber),
@@ -2291,16 +2291,14 @@ export class KxResultsPanel {
     const cspSource = webview.cspSource;
     const uplotScriptUri = webview.asWebviewUri(vscode.Uri.file(path.join(
       context.extensionPath,
-      'node_modules',
+      'media',
       'uplot',
-      'dist',
       'uPlot.iife.min.js'
     )));
     const uplotStyleUri = webview.asWebviewUri(vscode.Uri.file(path.join(
       context.extensionPath,
-      'node_modules',
+      'media',
       'uplot',
-      'dist',
       'uPlot.min.css'
     )));
     return `<!DOCTYPE html>

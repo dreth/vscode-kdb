@@ -497,6 +497,7 @@ async function minimalIpcServerStarts() {
       workspaceFolders: null,
     });
     assert.strictEqual(initialized.serverInfo.name, 'KX q Language Server');
+    assert.strictEqual(initialized.serverInfo.version, '0.2.25');
     assert.strictEqual(initialized.capabilities.textDocumentSync, 2);
     assert(initialized.capabilities.notebookDocumentSync);
     const uri = 'file:///ipc-language-smoke.q';

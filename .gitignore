@@ -82,6 +82,7 @@ web_modules/
 # Next.js build output
 .next
 out
+/media/
 /renderer/kx-notebook-renderer.js
 __pycache__/
 *.py[cod]
