@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "First-party q language tooling, direct q IPC, qnb and mixed Jupyter notebooks, and high-performance KX results for VS Code.",
-  "version": "0.2.25",
+  "version": "0.2.26",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -108,8 +108,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.25.vsix",
-    "package:vsix": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.25.vsix"
+    "package": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.26.vsix",
+    "package:vsix": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.26.vsix"
   },
   "dependencies": {
     "chevrotain": "13.2.0",
@@ -139,7 +139,11 @@
         "extensions": [
           ".q"
         ],
-        "configuration": "./language-configuration.json"
+        "configuration": "./language-configuration.json",
+        "icon": {
+          "light": "./icons/q.png",
+          "dark": "./icons/q.png"
+        }
       }
     ],
     "grammars": [
@@ -153,7 +157,7 @@
       {
         "type": "vscode-kdb-q-notebook",
         "displayName": "q Notebook",
-        "icon": "icons/q-notebook.svg",
+        "icon": "icons/qnb.png",
         "selector": [
           {
             "filenamePattern": "*.qnb"

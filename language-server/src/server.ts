@@ -257,7 +257,7 @@ class QLanguageServer {
           ? { workspaceFolders: { supported: true, changeNotifications: true } }
           : undefined,
       },
-      serverInfo: { name: 'KX q Language Server', version: '0.2.25' },
+      serverInfo: { name: 'KX q Language Server', version: '0.2.26' },
     };
   }
 

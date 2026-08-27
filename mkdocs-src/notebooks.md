@@ -1,6 +1,6 @@
 # qnb and Jupyter/IPython notebooks
 
-KX for VS Code 0.2.25 supports a first-party q-only `.qnb` format and Python-first mixed `.ipynb`. For `.ipynb`, keep the normal Python Jupyter kernel selected, make only intended cells q, activate a saved KX profile, and run those q cells through Direct IPC. KX does not register its optional pure-q Jupyter controller by default, so **KX q (Direct IPC)** is absent from Jupyter kernel candidates. The notebook's top-right Jupyter selector itself remains visible and owned by VS Code/Jupyter.
+KX for VS Code 0.2.26 supports a first-party q-only `.qnb` format and Python-first mixed `.ipynb`. For `.ipynb`, keep the normal Python Jupyter kernel selected, make only intended cells q, activate a saved KX profile, and run those q cells through Direct IPC. KX does not register its optional pure-q Jupyter controller by default, so **KX q (Direct IPC)** is absent from Jupyter kernel candidates. The notebook's top-right Jupyter selector itself remains visible and owned by VS Code/Jupyter.
 
 ## q-only qnb workflow
 

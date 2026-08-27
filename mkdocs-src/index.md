@@ -36,7 +36,7 @@ Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote adm
 
 ## Requirements
 
-- VS Code `1.101.0` or newer for extension 0.2.25. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
+- VS Code `1.101.0` or newer for extension 0.2.26. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
 - A reachable kdb+/q process listening for q IPC.
 - Credentials accepted by that process, if authentication is enabled.
 - For the optional Python-kernel notebook route only: Python 3.9-3.13, IPython, and separately installed `kx-notebook==0.1.0` (`import kx_notebook`). Direct q IPC is built in; profiles, callbacks, PyKX, and a loopback broker are explicit alternatives.
