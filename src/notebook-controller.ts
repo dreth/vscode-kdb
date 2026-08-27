@@ -103,6 +103,7 @@ interface MixedCellSnapshot {
   source: string;
   languageId: string;
   sourceOverrideAuthorized: boolean;
+  restoreTextEditorFocus: boolean;
   outputs: readonly vscode.NotebookCellOutput[];
   executionSummary: string;
 }
@@ -151,6 +152,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
 
   private readonly stateSubscription: vscode.Disposable;
   private readonly configurationSubscription: vscode.Disposable;
+  private readonly notebookOpenSubscription: vscode.Disposable;
+  private readonly notebookCloseSubscription: vscode.Disposable;
   private readonly stateChanged = new vscode.EventEmitter<void>();
   private readonly selectedNotebooks = new Set<string>();
   private readonly selectedQnbNotebooks = new Set<string>();
@@ -176,8 +179,21 @@ export class KxQNotebookRunner implements vscode.Disposable {
         this.syncControllerRegistration();
       }
     });
+    this.notebookOpenSubscription = vscode.workspace.onDidOpenNotebookDocument(notebook => {
+      this.preferQnbNotebook(notebook);
+    });
+    this.notebookCloseSubscription = vscode.workspace.onDidCloseNotebookDocument(notebook => {
+      const key = notebook.uri.toString();
+      this.selectedNotebooks.delete(key);
+      this.selectedQnbNotebooks.delete(key);
+      this.interruptNotebook(notebook);
+      this.stateChanged.fire();
+    });
     this.onDidChangeState = this.stateChanged.event;
     this.registerQnbController();
+    for (const notebook of vscode.workspace.notebookDocuments) {
+      this.preferQnbNotebook(notebook);
+    }
     this.syncControllerRegistration();
     this.refreshDetails();
   }
@@ -250,8 +266,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
     if (this.disposed) {
       return 'unavailable';
     }
-    if (cell.notebook.notebookType !== KX_Q_NOTEBOOK_TYPE &&
-      cell.notebook.notebookType !== KX_QNB_NOTEBOOK_TYPE) {
+    if (cell.notebook.notebookType !== KX_Q_NOTEBOOK_TYPE) {
       return 'unsupported-notebook';
     }
     if (options.source !== undefined &&
@@ -291,6 +306,8 @@ export class KxQNotebookRunner implements vscode.Disposable {
     this.disposed = true;
     this.stateSubscription.dispose();
     this.configurationSubscription.dispose();
+    this.notebookOpenSubscription.dispose();
+    this.notebookCloseSubscription.dispose();
     this.unregisterController();
     this.unregisterQnbController();
     this.stateChanged.dispose();
@@ -357,6 +374,16 @@ export class KxQNotebookRunner implements vscode.Disposable {
       else this.selectedQnbNotebooks.delete(key);
       this.stateChanged.fire();
     });
+  }
+
+  private preferQnbNotebook(notebook: vscode.NotebookDocument): void {
+    if (notebook.notebookType !== KX_QNB_NOTEBOOK_TYPE || !this.qnbController) {
+      return;
+    }
+    this.qnbController.updateNotebookAffinity(
+      notebook,
+      vscode.NotebookControllerAffinity.Preferred
+    );
   }
 
   private unregisterController(): void {
@@ -562,14 +589,6 @@ export class KxQNotebookRunner implements vscode.Disposable {
         expectedOutputs,
         expectedKxOutput
       );
-    const replacement = new vscode.NotebookCellData(
-      current.kind,
-      current.document.getText(),
-      current.document.languageId
-    );
-    replacement.metadata = { ...current.metadata };
-    replacement.outputs = expectedOutputs;
-
     let resolveReplacement: (() => void) | undefined;
     const nextReplacementEvent = (): Promise<void> => new Promise(resolve => {
       resolveReplacement = resolve;
@@ -594,92 +613,179 @@ export class KxQNotebookRunner implements vscode.Disposable {
     });
 
     try {
-      const edit = new vscode.WorkspaceEdit();
-      edit.set(snapshot.notebook.uri, [
-        vscode.NotebookEdit.replaceCells(
-          new vscode.NotebookRange(index, index + 1),
-          [replacement]
-        ),
-      ]);
-      if (isCanceled()) {
-        return { status: 'canceled' };
-      }
-      let applied: boolean;
-      try {
-        applied = await vscode.workspace.applyEdit(edit);
-      } catch {
-        return {
-          status: snapshot.notebook.isClosed
-            ? 'unavailable'
-            : matchingMixedCell(snapshot)
-              ? 'write-failed'
-              : 'stale',
-          failure: {
-            stage: 'applyEdit',
-            detail: 'VS Code threw while applying the notebook cell replacement.',
-          },
-        };
-      }
-      if (!applied) {
-        return {
-          status: snapshot.notebook.isClosed
-            ? 'unavailable'
-            : matchingMixedCell(snapshot)
-              ? 'write-failed'
-              : 'stale',
-          failure: {
-            stage: 'applyEdit',
-            detail: 'VS Code rejected the notebook cell replacement.',
-          },
-        };
-      }
-      if (snapshot.notebook.isClosed) {
-        return { status: 'unavailable' };
-      }
+      const verifyAppliedReplacement = async (): Promise<MixedOutputWriteResult> => {
+        const verificationDeadline = Date.now() + MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS;
+        let deadlineExpired = false;
+        let cancellationObserved = false;
+        while (true) {
+          const nextEvent = replacementEvent;
+          if (snapshot.notebook.isClosed) {
+            return { status: 'unavailable' };
+          }
+          const written = notebookCellAt(snapshot.notebook, index);
+          const verification = written
+            ? committedOutputStatus(written)
+            : 'pending';
+          if (written && verification === 'match') {
+            return { status: 'executed', cell: written };
+          }
+          if (cancellationObserved || isCanceled()) {
+            return { status: 'canceled' };
+          }
+          if (!written || !mixedCellSourceAtIndexMatchesSnapshot(written, snapshot, index)) {
+            return { status: 'stale' };
+          }
+          if (expectedKxOutput === 'invalid' ||
+            deadlineExpired || Date.now() >= verificationDeadline) {
+            return {
+              status: 'write-failed',
+              failure: {
+                stage: 'verify',
+                detail: verification === 'foreign'
+                  ? 'VS Code committed a replacement cell with a different or invalid KX output identity.'
+                  : `VS Code reported the notebook edit was applied, but the replacement cell did not expose the expected ${expectedKxOutput ? 'KX output identity' : 'output'} within ${MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS} ms.`,
+              },
+            };
+          }
+          const waitStatus = await waitForNotebookReplacement(
+            nextEvent,
+            verificationDeadline,
+            cancellationSignal
+          );
+          cancellationObserved = waitStatus === 'canceled';
+          deadlineExpired = waitStatus === 'deadline';
+        }
+      };
 
-      const verificationDeadline = Date.now() + MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS;
-      let deadlineExpired = false;
-      let cancellationObserved = false;
-      while (true) {
-        const nextEvent = replacementEvent;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        if (isCanceled()) {
+          return { status: 'canceled' };
+        }
         if (snapshot.notebook.isClosed) {
           return { status: 'unavailable' };
         }
-        const written = notebookCellAt(snapshot.notebook, index);
-        const verification = written
-          ? committedOutputStatus(written)
-          : 'pending';
-        if (written && verification === 'match') {
-          return { status: 'executed', cell: written };
-        }
-        if (cancellationObserved || isCanceled()) {
-          return { status: 'canceled' };
-        }
-        if (!written || !mixedCellSourceAtIndexMatchesSnapshot(written, snapshot, index)) {
+        const candidate = notebookCellAt(snapshot.notebook, index);
+        if (!candidate || !mixedCellMatchesSnapshot(candidate, snapshot)) {
           return { status: 'stale' };
         }
-        if (expectedKxOutput === 'invalid' ||
-          deadlineExpired || Date.now() >= verificationDeadline) {
+        const replacement = new vscode.NotebookCellData(
+          candidate.kind,
+          candidate.document.getText(),
+          candidate.document.languageId
+        );
+        replacement.metadata = { ...candidate.metadata };
+        replacement.outputs = expectedOutputs;
+        const edit = new vscode.WorkspaceEdit();
+        edit.set(snapshot.notebook.uri, [
+          vscode.NotebookEdit.replaceCells(
+            new vscode.NotebookRange(index, index + 1),
+            [replacement]
+          ),
+        ]);
+        if (isCanceled()) {
+          return { status: 'canceled' };
+        }
+
+        let applied = false;
+        let applyFailureDetail = 'VS Code rejected the notebook cell replacement.';
+        try {
+          applied = await vscode.workspace.applyEdit(edit);
+        } catch {
+          applyFailureDetail = 'VS Code threw while applying the notebook cell replacement.';
+        }
+        if (applied) {
+          const verified = await verifyAppliedReplacement();
+          if (verified.status === 'executed' && verified.cell) {
+            await this.restoreMixedCellFocus(snapshot, verified.cell, index);
+          }
+          return verified;
+        }
+
+        if (snapshot.notebook.isClosed) {
+          return { status: 'unavailable' };
+        }
+        const observed = notebookCellAt(snapshot.notebook, index);
+        const observedStatus = observed
+          ? committedOutputStatus(observed)
+          : 'pending';
+        if (observed && observedStatus === 'match') {
+          await this.restoreMixedCellFocus(snapshot, observed, index);
+          return { status: 'executed', cell: observed };
+        }
+        if (isCanceled()) {
+          return { status: 'canceled' };
+        }
+        if (!observed || !mixedCellMatchesSnapshot(observed, snapshot)) {
+          const originalCellChanged = observed?.document.uri.toString() === snapshot.cellUri;
           return {
-            status: 'write-failed',
-            failure: {
-              stage: 'verify',
-              detail: verification === 'foreign'
-                ? 'VS Code committed a replacement cell with a different or invalid KX output identity.'
-                : `VS Code reported the notebook edit was applied, but the replacement cell did not expose the expected ${expectedKxOutput ? 'KX output identity' : 'output'} within ${MIXED_NOTEBOOK_OUTPUT_VERIFY_TIMEOUT_MS} ms.`,
-            },
+            status: observed && observedStatus === 'foreign' && !originalCellChanged
+              ? 'write-failed'
+              : 'stale',
+            ...(observed && observedStatus === 'foreign' && !originalCellChanged
+              ? {
+                failure: {
+                  stage: 'verify' as const,
+                  detail: 'VS Code committed a replacement cell with a different or invalid KX output identity.',
+                },
+              }
+              : {}),
           };
         }
-        const waitStatus = await waitForNotebookReplacement(
-          nextEvent,
-          verificationDeadline,
-          cancellationSignal
-        );
-        cancellationObserved = waitStatus === 'canceled';
-        deadlineExpired = waitStatus === 'deadline';
+        if (attempt === 0 && snapshot.restoreTextEditorFocus) {
+          try {
+            await vscode.commands.executeCommand('notebook.cell.quitEdit');
+          } catch {
+            return {
+              status: 'write-failed',
+              failure: {
+                stage: 'applyEdit',
+                detail: applyFailureDetail,
+              },
+            };
+          }
+          if (!matchingMixedCell(snapshot)) {
+            return { status: 'stale' };
+          }
+          continue;
+        }
+        return {
+          status: 'write-failed',
+          failure: {
+            stage: 'applyEdit',
+            detail: applyFailureDetail,
+          },
+        };
       }
+      return {
+        status: 'write-failed',
+        failure: {
+          stage: 'applyEdit',
+          detail: 'VS Code rejected the notebook cell replacement.',
+        },
+      };
     } finally {
       eventSubscription.dispose();
+    }
+  }
+
+  private async restoreMixedCellFocus(
+    snapshot: MixedCellSnapshot,
+    cell: vscode.NotebookCell,
+    index: number
+  ): Promise<void> {
+    if (!snapshot.restoreTextEditorFocus || snapshot.notebook.isClosed ||
+      !mixedCellSourceAtIndexMatchesSnapshot(cell, snapshot, index)) {
+      return;
+    }
+    const editor = vscode.window.activeNotebookEditor;
+    if (!editor || editor.notebook !== snapshot.notebook) {
+      return;
+    }
+    editor.selections = [new vscode.NotebookRange(index, index + 1)];
+    try {
+      await vscode.commands.executeCommand('notebook.cell.edit');
+    } catch {
+      // Output success must not be downgraded if VS Code cannot restore text focus.
     }
   }
 
@@ -1252,6 +1358,8 @@ function mixedCellSnapshot(
     source: cell.document.getText(),
     languageId: cell.document.languageId,
     sourceOverrideAuthorized,
+    restoreTextEditorFocus: vscode.window.activeNotebookEditor?.notebook === cell.notebook &&
+      vscode.window.activeTextEditor?.document.uri.toString() === cell.document.uri.toString(),
     outputs: [...cell.outputs],
     executionSummary: executionSummaryKey(cell.executionSummary),
   };

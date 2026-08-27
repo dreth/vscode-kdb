@@ -1,6 +1,7 @@
 .git/**
 .gitignore
 CNAME
+index.html
 .github/**
 .agents/**
 docs/**

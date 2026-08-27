@@ -214,13 +214,6 @@ export class NotebookIntegration implements vscode.Disposable {
           provideCellStatusBarItems: cell => this.kxRouteStatusBarItems(cell),
         }
       ),
-      vscode.notebooks.registerNotebookCellStatusBarItemProvider(
-        QNB_NOTEBOOK_TYPE,
-        {
-          onDidChangeCellStatusBarItems: this.statusBarChanged.event,
-          provideCellStatusBarItems: cell => this.kxRouteStatusBarItems(cell),
-        }
-      ),
       vscode.window.onDidChangeActiveNotebookEditor(() => this.updateContexts()),
       vscode.window.onDidChangeNotebookEditorSelection(() => this.updateContexts()),
       vscode.workspace.onDidChangeNotebookDocument(event => {
@@ -956,18 +949,26 @@ export class NotebookIntegration implements vscode.Disposable {
       );
       return 'unavailable';
     }
-    if (this.directControllerSelected(editor.notebook)) {
-      void vscode.window.showInformationMessage(
-        'KX q (Direct IPC) is selected. Use the notebook’s normal Run Cell or Ctrl+Enter action.'
-      );
-      return 'controller-selected';
-    }
     const cell = commandTargetCell(editor, commandCell);
     if (!cell || !isQCell(cell)) {
       void vscode.window.showWarningMessage(
         'Run q Cell (KX) applies only to a q-language code cell in an active .ipynb or .qnb notebook.'
       );
       return 'not-q';
+    }
+    if (editor.notebook.notebookType === QNB_NOTEBOOK_TYPE) {
+      await vscode.commands.executeCommand(
+        'notebook.cell.execute',
+        { start: cell.index, end: cell.index + 1 },
+        editor.notebook.uri
+      );
+      return 'executed';
+    }
+    if (this.directControllerSelected(editor.notebook)) {
+      void vscode.window.showInformationMessage(
+        'KX q (Direct IPC) is selected. Use the notebook’s normal Run Cell or Ctrl+Enter action.'
+      );
+      return 'controller-selected';
     }
     const target = activeNotebookQProfile(runner.connectionProfiles()) ??
       await this.selectNotebookQTarget(cell, editor);

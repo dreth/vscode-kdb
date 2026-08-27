@@ -77,8 +77,6 @@ KX is absent from the kernel candidates by default. VS Code's top-right Jupyter 
 
 Run **KX: New q Notebook** or open a compatible `*.qnb`. Code cells are normalized to q, Markdown cells remain Markdown, and the dedicated **KX q (Direct IPC)** controller is always available even when `vscode-kdb.notebook.enableDirectController` is false. Use the globally active KX profile and normal notebook Run actions. `.qnb` never invokes Python and rejects `%%q`.
 
-If q Professional is installed, disable it before opening or saving `.qnb`: both extensions can claim the same filename selector, and VS Code cannot guarantee which serializer wins. Existing compatible cell-array JSON remains readable without q Professional.
-
 ## Optional native direct q notebook controller
 
 Set the application-scoped `vscode-kdb.notebook.enableDirectController` setting to `true`, then choose **KX q (Direct IPC)** from the normal notebook kernel selector. This opt-in controller executes complete q cells through the active profile's existing direct q client and namespace using normal **Run Cell**, **Run All**, and notebook shortcuts. Each successful execution uses standard notebook output APIs and automatically persists complete exact rich v2 output.

@@ -4,18 +4,17 @@ KX for VS Code 0.2.25 supports a first-party q-only `.qnb` format and Python-fir
 
 ## q-only qnb workflow
 
-Run **KX: New q Notebook** or open `*.qnb`. The notebook type is `vscode-kdb-q-notebook`; every code cell is q and every narrative cell remains Markdown. Its dedicated **KX q (Direct IPC)** controller is registered unconditionally and is independent of `vscode-kdb.notebook.enableDirectController`, which still controls only the optional Jupyter candidate.
+Run **KX: New q Notebook** or open `*.qnb`. The notebook type is `vscode-kdb-q-notebook`; every code cell is q and every narrative cell remains Markdown. Its dedicated **KX q (Direct IPC)** controller is registered unconditionally, preferred for every open `.qnb`, and independent of `vscode-kdb.notebook.enableDirectController`, which still controls only the optional Jupyter candidate. Use normal **Run Cell** or `Ctrl+Enter` (`Cmd+Enter` on macOS); `.qnb` deliberately has no mixed-Jupyter **Run q Cell (KX)** status action or competing KX shortcut.
 
 Normal **Run Cell**, **Run All**, and interruption use the globally active direct-q profile, complete current cell source, normal q execution ordering, and the same result conversion/live registry as direct q in `.ipynb`. Markdown is never executed. Python/Jupyter is never invoked. A leading `%%q` is rejected because a q-only cell already contains ordinary q.
 
-The serializer uses the established observable q Professional top-level cell-array JSON shape. It preserves cell/source order, empty and multiline source including final newlines, Markdown, output order and MIME values, attachments, execution summaries, and bounded JSON-compatible unknown fields. Code language is normalized to q. Malformed, oversized, non-array, or unsafe data fails visibly rather than opening/saving an empty notebook.
+The serializer uses a top-level JSON cell array. It preserves cell/source order, empty and multiline source including final newlines, Markdown, output order and MIME values, attachments, execution summaries, and bounded JSON-compatible unknown fields. Code language is normalized to q. Malformed, oversized, non-array, or unsafe data fails visibly rather than opening/saving an empty notebook.
 
 Current `application/vnd.kx.result+json` output retains exact q identity and the shared KX renderer. Legacy `x-application/q-notebook` output is kept unchanged; recognized primitive-list shapes get a visible index/element fallback (or one cell for a singleton), while unsupported shapes get visible preserved JSON without guessed q conversion. Generated fallback text is not written as a duplicate output. Credentials, request/session/live IDs, and IPC handles are stripped on save; durable output binding remains available after reopen.
 
-q Professional and this extension both claim `*.qnb`. Disable one in each VS Code profile/workspace to avoid serializer conflicts. No proprietary q Professional code or assets are used by this implementation.
-
 | Selected notebook kernel + cell | Use |
 | --- | --- |
+| Dedicated KX q controller + `.qnb` q cell | normal Run / `Ctrl` or `Cmd`+`Enter` |
 | Python selected + Python cell | normal Run |
 | Python selected + q cell | **Run q Cell (KX)** / `Ctrl` or `Cmd`+`Enter` / `Shift+Enter` / `Alt+Enter` |
 | Optional KX q selected + q cell | normal Run, only after enabling `vscode-kdb.notebook.enableDirectController` |
@@ -39,7 +38,7 @@ Legacy `.ipynb` target `{id, name}` metadata remains safe to read but is ignored
 
 With no active profile the status shows **Activate connection** and prompts for explicit activation. Mixed q never routes to list order or a connected non-active profile.
 
-Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. **Run q Cell (KX)** leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.
+Because Python remains the selected controller, public APIs do not let KX own a native cell execution in mixed mode. **Run q Cell (KX)** leaves the old output visible while q runs, then commits the finished KX output as one normal undoable notebook edit. If VS Code rejects that local edit while the q cell still has text focus, KX leaves edit mode and retries the same already-prepared output once; it never sends q again. Exact output identity is verified before the live result is rebound or run-and-stay focus is restored. The edit marks the notebook dirty until saved and gives that q cell a new internal VS Code cell handle. It preserves the q source, q language, cell metadata, and every sibling Python/Markdown cell; it does not copy an old native execution order/timing summary onto the new KX output. If the q cell source, language, output, or execution state changes while KX is waiting, KX refuses to overwrite the newer state.
 
 ### Selected q-cell shortcuts
 

@@ -10,13 +10,13 @@ If **KX** is not yet in the Output picker, activate the extension by opening the
 
 Version 0.2.25 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
 
-Disable another q extension while diagnosing. q Professional and other q tooling can register overlapping completion, formatting, semantic-token, grammar, and `*.qnb` providers. To use this extension as the formatter, set `"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }`.
+Disable another q extension while diagnosing because overlapping completion, formatting, semantic-token, grammar, and `*.qnb` providers can conflict. To use this extension as the formatter, set `"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }`.
 
 For a file above `vscode-kdb.languageServer.maxFileSizeBytes`, the server deliberately skips expensive providers and publishes one bounded explanation. Increase the setting only when the workspace can afford the parse/index cost.
 
 ## qnb opens with the wrong extension or as text
 
-Disable q Professional or any extension that also claims `*.qnb`, reload VS Code, then use **Reopen Editor With… > q Notebook** if necessary. This extension expects the observable top-level JSON cell-array contract. Malformed, oversized, or unsupported shapes fail visibly and are never replaced with an empty notebook.
+Disable any other extension that also claims `*.qnb`, reload VS Code, then use **Reopen Editor With… > q Notebook** if necessary. This extension expects a top-level JSON cell array. Malformed, oversized, or unsupported shapes fail visibly and are never replaced with an empty notebook.
 
 The `.qnb` controller uses the globally active direct-q profile and does not use Python or Jupyter. Remove a leading `%%q`; it belongs only to a Python-language mixed-notebook cell. Legacy `x-application/q-notebook` output remains saved unchanged and receives a visible fallback when no renderer can safely infer its q type.
 
@@ -183,11 +183,13 @@ For an explicit pure-q workflow, set the application-scoped `vscode-kdb.notebook
 
 ## Run q Cell (KX) is missing
 
-The mixed-notebook action appears only for an actual q-language code cell while the optional **KX q (Direct IPC)** controller is not selected. Keep Python selected and click the leading **Make q Cell (KX)** action; **Run q Cell (KX)** should replace it immediately. Do not switch the top-right kernel merely to mark the cell q.
+In `.qnb`, this is intentional: use normal **Run Cell** or `Ctrl+Enter` (`Cmd+Enter` on macOS) through the dedicated preferred KX controller. The mixed action appears only for an actual q-language code cell in `.ipynb` while the optional **KX q (Direct IPC)** Jupyter controller is not selected. Keep Python selected and click the leading **Make q Cell (KX)** action; **Run q Cell (KX)** should replace it immediately. Do not switch the top-right kernel merely to mark the cell q.
 
 The q status must show `KX: <profile> · Ctrl+Enter` (`Cmd+Enter` on macOS). If it shows **Activate connection**, click the notebook **Active** item and star a saved profile. Every run uses only that globally active profile; legacy notebook target metadata, list order, and connected non-active profiles cannot override it. Editing the active profile from port `5005` to `5000` routes the next run to `5000` and reconnects a stale client as needed. With the optional **KX q (Direct IPC)** controller selected, the mixed actions/status deliberately disappear and normal Run owns q execution.
 
 After a successful mixed run the notebook becomes dirty because KX commits the finished output as one supported, undoable notebook edit while Python remains selected. This replaces that q cell's internal handle but preserves its source, q language, metadata, and sibling cells. If the q cell or its output changes while the query is running, KX leaves the newer state alone and reports that it did not overwrite it.
+
+If KX reports that q already ran but the local output could not be applied or verified, inspect the current notebook output and the target q process before doing anything else. Do not blindly rerun a stateful query: the extension never reissues q during its bounded local output retry, but the original request may already have changed server state.
 
 If `Ctrl+Enter` / `Cmd+Enter`, `Shift+Enter`, or `Alt+Enter` / `Option+Enter` runs a customized action instead, use the visible **Run q Cell (KX)** toolbar/context command. User and keymap-extension bindings can override extension defaults. **Developer: Toggle Keyboard Shortcuts Troubleshooting** shows which rule VS Code selected.
 
@@ -195,7 +197,7 @@ The three KX Enter bindings apply while the tracked q cell is selected in notebo
 
 ## Normal Run did not execute q through KX
 
-That is expected while a Python controller is selected. Public notebook APIs select one controller for normal Run, so KX does not reroute Jupyter's action. Use **Run q Cell (KX)** for a q-language cell. If a pure-q notebook should give normal Run to KX, explicitly enable `vscode-kdb.notebook.enableDirectController` and select **KX q (Direct IPC)**.
+For `.qnb`, confirm an active KX profile exists, then use normal Run again; the dedicated KX controller is always registered and preferred without enabling the optional Jupyter setting. For mixed `.ipynb`, this is expected while a Python controller is selected. Public notebook APIs select one controller for normal Run, so KX does not reroute Jupyter's action. Use **Run q Cell (KX)** for a q-language cell. If a pure-q Jupyter notebook should give normal Run to KX, explicitly enable `vscode-kdb.notebook.enableDirectController` and select **KX q (Direct IPC)**.
 
 ## An existing cell is not q
 

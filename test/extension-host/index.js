@@ -293,10 +293,18 @@ async function exerciseQLanguageServer(testApi) {
   await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
 }
 
-async function exerciseQnbSaveReopen() {
+async function exerciseQnbSaveReopen(testApi) {
   const controlDir = process.env.VSCODE_KDB_E2E_CONTROL_DIR;
   assert(controlDir, 'the qnb Extension Host test requires its isolated control directory');
   const notebookUri = vscode.Uri.file(path.join(controlDir, 'first-party-roundtrip.qnb'));
+  const profile = {
+    id: 'e2e-native-qnb',
+    name: 'Extension Host Native qnb',
+    host: '127.0.0.1',
+    port: 5013,
+    database: '.qnb',
+    username: '',
+  };
   const fixture = [
     {
       kind: 2,
@@ -315,13 +323,20 @@ async function exerciseQnbSaveReopen() {
   ];
   let notebook;
   try {
+    assert.strictEqual(
+      vscode.workspace.getConfiguration('vscode-kdb.notebook').get(DIRECT_CONTROLLER_SETTING),
+      false,
+      'native qnb execution must not require the optional Jupyter controller'
+    );
+    await testApi.addConnection(profile);
+    await testApi.setActiveConnection(profile.id);
     await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
     await vscode.workspace.fs.writeFile(
       notebookUri,
       new TextEncoder().encode(`${JSON.stringify(fixture, null, 2)}\n`)
     );
     notebook = await vscode.workspace.openNotebookDocument(notebookUri);
-    await vscode.window.showNotebookDocument(notebook, { preview: false });
+    const editor = await vscode.window.showNotebookDocument(notebook, { preview: false });
     assert.strictEqual(notebook.notebookType, QNB_NOTEBOOK_TYPE);
     assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
     assert.strictEqual(notebook.cellAt(1).document.languageId, 'markdown');
@@ -337,20 +352,60 @@ async function exerciseQnbSaveReopen() {
       'show enlist 4\n'
     );
     assert.strictEqual(await vscode.workspace.applyEdit(edit), true);
+    editor.selections = [new vscode.NotebookRange(0, 1)];
+    const qnbCellUri = notebook.cellAt(0).document.uri.toString();
+    const siblingCellUri = notebook.cellAt(1).document.uri.toString();
+    const callsBefore = testApi.notebookQueryCalls().length;
+    testApi.queueNotebookTable(
+      ['row', 'value'],
+      [[0, 'native-qnb-output'], [1, 'persisted-qnb-output']]
+    );
+    await vscode.commands.executeCommand(
+      'notebook.cell.execute',
+      { start: 0, end: 1 },
+      notebook.uri
+    );
+    await waitFor('native qnb KX output', () =>
+      notebook.cellAt(0).outputs.some(output =>
+        output.items.some(item => item.mime === KX_NOTEBOOK_MIME)
+      )
+    );
+    assert.strictEqual(testApi.notebookQueryCalls().length, callsBefore + 1);
+    assert.deepStrictEqual(testApi.notebookQueryCalls().at(-1), {
+      connectionId: profile.id,
+      source: 'show enlist 4\n',
+    });
+    assert.strictEqual(
+      notebook.cellAt(0).document.uri.toString(),
+      qnbCellUri,
+      'native qnb output must not structurally replace the executed cell'
+    );
+    assert.strictEqual(notebook.cellAt(1).document.uri.toString(), siblingCellUri);
+    const nativePayload = portableOutput(notebook.cellAt(0));
+    assert.strictEqual(nativePayload.version, 2);
+    assert.strictEqual(nativePayload.persistence.mode, 'full');
+    assert.deepStrictEqual(
+      nativePayload.data.rows.map(row => row.map(cell => cell.value)),
+      [[0, 'native-qnb-output'], [1, 'persisted-qnb-output']]
+    );
     assert.strictEqual(await notebook.save(), true);
     await closeNotebookTab(notebookUri);
     notebook = await vscode.workspace.openNotebookDocument(notebookUri);
     await vscode.window.showNotebookDocument(notebook, { preview: false });
     assert.strictEqual(notebook.cellAt(0).document.getText(), 'show enlist 4\n');
     assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
+    assert.deepStrictEqual(portableOutput(notebook.cellAt(0)), nativePayload);
     const saved = JSON.parse(new TextDecoder().decode(await vscode.workspace.fs.readFile(notebookUri)));
     assert.strictEqual(saved[0].metadata.custom, 'keep');
-    assert.deepStrictEqual(saved[0].outputs, fixture[0].outputs,
-      'the visible legacy fallback must not be persisted as another output');
+    const savedKxOutputs = saved[0].outputs.filter(output => output.mime === KX_NOTEBOOK_MIME);
+    assert.strictEqual(savedKxOutputs.length, 1);
+    assert.deepStrictEqual(savedKxOutputs[0].value, nativePayload);
     assert.deepStrictEqual(saved[1].attachments, fixture[1].attachments);
   } finally {
     if (notebook) await closeNotebookTab(notebookUri).catch(() => undefined);
     await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
+    await testApi.removeConnection(profile.id).catch(() => undefined);
+    await testApi.setActiveConnection(undefined);
   }
 }
 
@@ -848,8 +903,25 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
       repeatedRows('tail-1')
     );
 
+    editor.selections = [new vscode.NotebookRange(0, 1)];
+    await vscode.commands.executeCommand('notebook.cell.edit');
+    await waitFor('mixed q cell text focus', () =>
+      vscode.window.activeTextEditor?.document.uri.toString() ===
+        postRaceQCell.document.uri.toString()
+    );
+    const textFocusedCallsBefore = testApi.notebookQueryCalls().length;
     await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, postRaceQCell);
     const afterFirst = notebook.cellAt(0);
+    assert.strictEqual(
+      testApi.notebookQueryCalls().length,
+      textFocusedCallsBefore + 1,
+      'a text-focused mixed q gesture must issue exactly one q request'
+    );
+    assert.strictEqual(
+      vscode.window.activeTextEditor?.document.uri.toString(),
+      afterFirst.document.uri.toString(),
+      'Ctrl+Enter run-and-stay behavior must restore text focus to the replacement q cell'
+    );
     assert.strictEqual(notebook.cellCount, 2);
     assert.strictEqual(afterFirst.outputs.length, 1);
     assert.strictEqual(afterFirst.document.getText(), source);
@@ -1454,7 +1526,7 @@ async function run() {
     console.log('KX Extension Host phase: q language server');
     await exerciseQLanguageServer(testApi);
     console.log('KX Extension Host phase: qnb save/reopen');
-    await exerciseQnbSaveReopen();
+    await exerciseQnbSaveReopen(testApi);
     console.log('KX Extension Host phase: notebook cell language');
     await exerciseNotebookCellLanguageCommands();
     console.log('KX Extension Host phase: durable mixed notebook');

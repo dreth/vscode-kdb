@@ -30,7 +30,7 @@ Implemented foundations include:
 - an opt-in tokenized loopback data server;
 - a dedicated `KX` Output channel with opt-in performance tracing;
 - offline-first q completion, hover, signatures, navigation, rename, call hierarchy, semantic tokens, folding, selection, formatting, and conservative diagnostics from one lazy bundled language server; and
-- compatible q-only `.qnb` serialization, a permanently available q controller, and visible lossless fallback for legacy q Professional output.
+- compatible q-only `.qnb` serialization, a permanently available q controller, and visible lossless fallback for legacy notebook output.
 
 Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote administration, SQLTools UI/session behavior, recovery of rows omitted from a historical or Python-helper saved preview, and server-side q interruption are not included. Static analysis intentionally omits speculative dynamic q errors. See [Architecture](architecture.md) for component and state boundaries.
 
@@ -61,7 +61,7 @@ SQLTools is not required.
 - [Installation](installation.md): requirements, local development, and first connection.
 - [Connections & SecretStorage](connections.md): direct IPC, namespaces, authentication, and lifecycle.
 - [Running q](running-q.md): exact editor semantics and cancellation boundaries.
-- [q Language Tooling](q-language.md): completion, navigation, formatting, linting, connected metadata, and q Professional migration.
+- [q Language Tooling](q-language.md): completion, navigation, formatting, linting, and connected metadata.
 - [qnb & Jupyter Notebooks](notebooks.md): q-only compatible notebooks, Python-first mixed execution, active-profile routing, persistence, and the separate Python `%%q` route.
 - [Results Viewer](results-viewer.md): grids, q text, selection, search, sort, and column controls.
 - [Charting](charting.md): chart types, controls, sampling, and PNG export.
