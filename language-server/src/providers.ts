@@ -200,11 +200,14 @@ export function qDocumentSymbols(source: QSource): readonly DocumentSymbol[] {
   return source.bindings
     .filter(value => value.declaration && !value.local)
     .map(value => {
+      const bodyRange = value.bodyScopeOffset === undefined
+        ? undefined
+        : scopeRange(source, value.bodyScopeOffset);
       const symbol = DocumentSymbol.create(
         value.name,
         value.callable ? 'q function' : 'q global',
         value.callable ? SymbolKind.Function : SymbolKind.Variable,
-        value.bodyScopeOffset === undefined ? value.range : scopeRange(source, value.bodyScopeOffset) ?? value.range,
+        bodyRange ? Range.create(value.range.start, bodyRange.end) : value.range,
         value.range
       );
       if (value.bodyScopeOffset !== undefined) {

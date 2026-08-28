@@ -258,7 +258,7 @@ async function exerciseDirectControllerLifecycle(testApi) {
 async function exerciseQLanguageServer(testApi) {
   const document = await vscode.workspace.openTextDocument({
     language: 'q',
-    content: 'double:{[x] x*2}; answer:double[21]\nunused:{[arg] 1}',
+    content: 'double:{[x]\n    x*2\n  }; answer:double[21]\nunused:{[arg] 1}',
   });
   await vscode.window.showTextDocument(document, { preview: false });
   await waitFor('lazy q language server start', () => testApi.qLanguageServerRunning());

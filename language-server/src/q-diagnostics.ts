@@ -106,15 +106,16 @@ function unusedBindings(source: QSource): Diagnostic[] {
 
 function declaredAfterUse(source: QSource): Diagnostic[] {
   const result: Diagnostic[] = [];
+  const earliestDeclarations = new Map<string, typeof source.bindings[number]>();
   const earliestReferences = new Map<string, typeof source.bindings[number]>();
   for (const binding of source.bindings) {
-    if (binding.declaration) continue;
     const key = bindingKey(binding);
-    const current = earliestReferences.get(key);
-    if (!current || binding.offset < current.offset) earliestReferences.set(key, binding);
+    const values = binding.declaration ? earliestDeclarations : earliestReferences;
+    const current = values.get(key);
+    if (!current || binding.offset < current.offset) values.set(key, binding);
   }
-  for (const declaration of source.bindings.filter(value => value.declaration)) {
-    const earlier = earliestReferences.get(bindingKey(declaration));
+  for (const [key, declaration] of earliestDeclarations) {
+    const earlier = earliestReferences.get(key);
     if (earlier && earlier.offset < declaration.offset) {
       result.push(lintDiagnostic(
         earlier.range,
