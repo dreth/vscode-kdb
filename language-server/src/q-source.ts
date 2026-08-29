@@ -215,19 +215,15 @@ export class QSource {
 
 function sourceBindings(source: Source): QBinding[] {
   const declarations = new Set(source.definitions);
-  const values = [...source.definitions, ...source.references];
-  const seen = new Set<string>();
+  const references = new Set(source.references);
   const bindings: QBinding[] = [];
-  for (const token of values) {
-    if (Type(token) !== Identifier) {
+  for (let index = 0; index < source.tokens.length; index++) {
+    const token = source.tokens[index];
+    if (Type(token) !== Identifier ||
+      (!declarations.has(token) && !references.has(token) && !qSqlContext(token, source.tokens, index))) {
       continue;
     }
     const start = tokenStart(token);
-    const key = `${start}:${declarations.has(token) ? 'd' : 'r'}`;
-    if (seen.has(key)) {
-      continue;
-    }
-    seen.add(key);
     const scope = Scope(token);
     bindings.push(Object.freeze({
       name: Name(token),
@@ -238,7 +234,7 @@ function sourceBindings(source: Source): QBinding[] {
       parameter: Param(token),
       local: scope !== undefined,
       callable: token.call !== undefined,
-      qsql: qSqlIdentifier(token, source.tokens),
+      qsql: qSqlContext(token, source.tokens, index),
       scopeOffset: scope ? tokenStart(scope) : undefined,
       bodyScopeOffset: token.call ? tokenStart(token.call) : undefined,
     }));
@@ -246,24 +242,35 @@ function sourceBindings(source: Source): QBinding[] {
   return bindings.sort((a, b) => a.offset - b.offset);
 }
 
-function qSqlIdentifier(token: SourceToken, tokens: readonly SourceToken[]): boolean {
-  if (Type(token.mode) === LSql) return true;
-  const index = token.index ?? tokens.indexOf(token);
+interface QContextToken extends IToken {
+  readonly index?: number;
+  readonly mode?: QContextToken;
+  readonly scope?: QContextToken;
+}
+
+export function qSqlContext(
+  token: QContextToken,
+  tokens: readonly QContextToken[],
+  knownIndex?: number,
+): boolean {
+  if (token.tokenType === LSql || token.tokenType === RSql ||
+    token.mode?.tokenType === LSql || token.scope?.tokenType === LSql) return true;
+  const index = knownIndex ?? tokens.indexOf(token);
   let start = index - 1;
-  while (start >= 0 && Type(tokens[start]) !== RSql &&
-    Type(tokens[start]) !== LSql && tokens[start].image !== ';' && !tokens[start].image.includes('\n')) {
+  while (start >= 0 && tokens[start].tokenType !== RSql &&
+    tokens[start].tokenType !== LSql && tokens[start].image !== ';' && !tokens[start].image.includes('\n')) {
     start--;
   }
-  if (start < 0 || Type(tokens[start]) !== RSql) return false;
+  if (start < 0 || tokens[start].tokenType !== RSql) return false;
   let queryStart = start - 1;
-  while (queryStart >= 0 && Type(tokens[queryStart]) !== LSql &&
+  while (queryStart >= 0 && tokens[queryStart].tokenType !== LSql &&
     tokens[queryStart].image !== ';' && !tokens[queryStart].image.includes('\n')) {
     queryStart--;
   }
-  if (queryStart < 0 || Type(tokens[queryStart]) !== LSql) return false;
+  if (queryStart < 0 || tokens[queryStart].tokenType !== LSql) return false;
   for (let previous = index - 1; previous >= 0; previous--) {
     if (tokens[previous].image.trim().length === 0) continue;
-    return Type(tokens[previous]) !== RSql;
+    return tokens[previous].tokenType !== RSql;
   }
   return true;
 }

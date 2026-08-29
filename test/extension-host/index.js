@@ -256,41 +256,83 @@ async function exerciseDirectControllerLifecycle(testApi) {
 }
 
 async function exerciseQLanguageServer(testApi) {
-  const document = await vscode.workspace.openTextDocument({
-    language: 'q',
-    content: 'double:{[x]\n    x*2\n  }; answer:double[21]\nunused:{[arg] 1}',
-  });
-  await vscode.window.showTextDocument(document, { preview: false });
-  await waitFor('lazy q language server start', () => testApi.qLanguageServerRunning());
-  assert.strictEqual(await testApi.qLanguageServerReady(), true);
-  const completions = await vscode.commands.executeCommand(
-    'vscode.executeCompletionItemProvider',
-    document.uri,
-    new vscode.Position(0, 1)
-  );
-  assert(completions.items.some(item => item.label === 'distinct'));
-  const hovers = await vscode.commands.executeCommand(
-    'vscode.executeHoverProvider',
-    document.uri,
-    new vscode.Position(0, 2)
-  );
-  assert(Array.isArray(hovers) && hovers.length > 0);
-  const symbols = await vscode.commands.executeCommand(
-    'vscode.executeDocumentSymbolProvider',
-    document.uri
-  );
-  assert(symbols.some(symbol => symbol.name === 'double'));
-  const folds = await vscode.commands.executeCommand('vscode.executeFoldingRangeProvider', document.uri);
-  assert(Array.isArray(folds));
-  const edits = await vscode.commands.executeCommand(
-    'vscode.executeFormatDocumentProvider',
-    document.uri,
-    { insertSpaces: true, tabSize: 2 }
-  );
-  assert(Array.isArray(edits));
-  await waitFor('q diagnostics', () => vscode.languages.getDiagnostics(document.uri)
-    .some(value => value.code === 'q.unused-parameter'));
-  await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  const source = 'double:{[x]\n    x*2\n  }; answer:double[21]\nunused:{[arg] 1}';
+  const document = await vscode.workspace.openTextDocument({ language: 'q', content: source });
+  const notebooks = [];
+  const configuration = vscode.workspace.getConfiguration('vscode-kdb.languageServer', document.uri);
+  const previousEnabled = configuration.inspect('enabled')?.globalValue;
+  try {
+    await vscode.window.showTextDocument(document, { preview: false });
+    await waitFor('lazy q language server start', () => testApi.qLanguageServerRunning());
+    assert.strictEqual(await testApi.qLanguageServerReady(), true);
+    const completions = await vscode.commands.executeCommand(
+      'vscode.executeCompletionItemProvider',
+      document.uri,
+      new vscode.Position(0, 1)
+    );
+    assert(completions.items.some(item => item.label === 'distinct'));
+    const hovers = await vscode.commands.executeCommand(
+      'vscode.executeHoverProvider',
+      document.uri,
+      new vscode.Position(0, 2)
+    );
+    assert(Array.isArray(hovers) && hovers.length > 0);
+    const symbols = await vscode.commands.executeCommand(
+      'vscode.executeDocumentSymbolProvider',
+      document.uri
+    );
+    assert(symbols.some(symbol => symbol.name === 'double'));
+    const folds = await vscode.commands.executeCommand('vscode.executeFoldingRangeProvider', document.uri);
+    assert(Array.isArray(folds));
+    const edits = await vscode.commands.executeCommand(
+      'vscode.executeFormatDocumentProvider',
+      document.uri,
+      { insertSpaces: true, tabSize: 2 }
+    );
+    assert(Array.isArray(edits));
+    const standaloneSemantic = await vscode.commands.executeCommand(
+      'vscode.provideDocumentSemanticTokens',
+      document.uri
+    );
+    assert(standaloneSemantic?.data?.length > 0, 'standalone q source should receive semantic tokens');
+
+    for (const notebookType of ['jupyter-notebook', QNB_NOTEBOOK_TYPE]) {
+      const data = new vscode.NotebookData([
+        new vscode.NotebookCellData(vscode.NotebookCellKind.Code, source, 'q'),
+      ]);
+      const notebook = await vscode.workspace.openNotebookDocument(notebookType, data);
+      notebooks.push(notebook);
+      await vscode.window.showNotebookDocument(notebook, { preserveFocus: false, preview: false });
+      const cell = notebook.cellAt(0);
+      assert.strictEqual(cell.document.languageId, 'q');
+      const semantic = await vscode.commands.executeCommand(
+        'vscode.provideDocumentSemanticTokens',
+        cell.document.uri
+      );
+      assert.deepStrictEqual(
+        Array.from(semantic?.data ?? []),
+        Array.from(standaloneSemantic.data),
+        `${notebookType} q source should receive the standalone semantic roles`
+      );
+    }
+
+    await waitFor('q diagnostics', () => vscode.languages.getDiagnostics(document.uri)
+      .some(value => value.code === 'q.unused-parameter'));
+
+    await configuration.update('enabled', false, vscode.ConfigurationTarget.Global);
+    await waitFor('q language server disable', () => !testApi.qLanguageServerRunning());
+    const fallback = await vscode.workspace.openTextDocument({ language: 'q', content: '.r.value:19.5' });
+    assert.strictEqual(fallback.languageId, 'q');
+    assert((await vscode.languages.getLanguages()).includes('q'),
+      'declarative q language and TextMate grammar must remain registered while the server is disabled');
+  } finally {
+    for (const notebook of notebooks.reverse()) {
+      await discardNotebookChangesAndClose(notebook).catch(() => undefined);
+    }
+    await configuration.update('enabled', previousEnabled, vscode.ConfigurationTarget.Global);
+    await vscode.window.showTextDocument(document, { preview: false }).catch(() => undefined);
+    await vscode.commands.executeCommand('workbench.action.closeActiveEditor');
+  }
 }
 
 async function exerciseQnbSaveReopen(testApi) {
@@ -406,6 +448,50 @@ async function exerciseQnbSaveReopen(testApi) {
     await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
     await testApi.removeConnection(profile.id).catch(() => undefined);
     await testApi.setActiveConnection(undefined);
+  }
+}
+
+async function exerciseBlankQnbBootstrap(testApi) {
+  const controlDir = process.env.VSCODE_KDB_E2E_CONTROL_DIR;
+  assert(controlDir, 'the blank qnb Extension Host test requires its isolated control directory');
+  const notebookUri = vscode.Uri.file(path.join(controlDir, 'blank-flat-file.qnb'));
+  let notebook;
+  try {
+    await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
+    await vscode.workspace.fs.writeFile(notebookUri, new Uint8Array());
+    notebook = await vscode.workspace.openNotebookDocument(notebookUri);
+    await vscode.window.showNotebookDocument(notebook, { preview: false });
+    await waitFor('blank qnb dirty bootstrap', () => notebook.cellCount === 1 && notebook.isDirty);
+    assert.strictEqual(notebook.notebookType, QNB_NOTEBOOK_TYPE);
+    assert.strictEqual(testApi.isQnbControllerRegistered(), true);
+    assert.strictEqual(notebook.cellAt(0).kind, vscode.NotebookCellKind.Code);
+    assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
+    assert.strictEqual(notebook.cellAt(0).document.getText(), '');
+    assert.strictEqual(notebook.cellAt(0).outputs.length, 0);
+    assert.strictEqual(
+      (await vscode.workspace.fs.readFile(notebookUri)).byteLength,
+      0,
+      'opening a blank qnb must not write to disk'
+    );
+
+    assert.strictEqual(await notebook.save(), true, 'saving the dirty blank qnb bootstrap failed');
+    await waitFor('saved blank qnb clean state', () => !notebook.isDirty);
+    const saved = JSON.parse(new TextDecoder().decode(
+      await vscode.workspace.fs.readFile(notebookUri)
+    ));
+    assert.deepStrictEqual(saved, [{ kind: 2, language: 'q', value: '', outputs: [] }]);
+
+    await closeNotebookTab(notebookUri);
+    notebook = await vscode.workspace.openNotebookDocument(notebookUri);
+    await vscode.window.showNotebookDocument(notebook, { preview: false });
+    assert.strictEqual(notebook.notebookType, QNB_NOTEBOOK_TYPE);
+    assert.strictEqual(notebook.isDirty, false);
+    assert.strictEqual(notebook.cellCount, 1);
+    assert.strictEqual(notebook.cellAt(0).document.languageId, 'q');
+    assert.strictEqual(notebook.cellAt(0).document.getText(), '');
+  } finally {
+    if (notebook) await discardNotebookChangesAndClose(notebook).catch(() => undefined);
+    await vscode.workspace.fs.delete(notebookUri, { useTrash: false }).catch(() => undefined);
   }
 }
 
@@ -1525,6 +1611,8 @@ async function run() {
     await exerciseDirectControllerLifecycle(testApi);
     console.log('KX Extension Host phase: q language server');
     await exerciseQLanguageServer(testApi);
+    console.log('KX Extension Host phase: blank qnb bootstrap');
+    await exerciseBlankQnbBootstrap(testApi);
     console.log('KX Extension Host phase: qnb save/reopen');
     await exerciseQnbSaveReopen(testApi);
     console.log('KX Extension Host phase: notebook cell language');

@@ -271,7 +271,8 @@ async function runNotebookVisualAcceptance({ port, controlDir }) {
       state => state.chartReady && state.chartControlType === 'bar' &&
         state.chartResetDisabled === false &&
         state.chartStatus ===
-          'Showing 29 rendered bar groups from 29 eligible rows (bar-cluster/29). ' +
+          'Showing 29 rendered bar groups from 29 eligible rows. ' +
+          'Sampling level: family-specific (bar-cluster/29). ' +
           'Null and non-finite y values are skipped where sampled.' &&
         validChartRange(state.chart) && validChartNavigator(state.navigator),
       'saved padded-family chart render for viewport input'

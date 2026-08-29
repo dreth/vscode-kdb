@@ -93,6 +93,8 @@ async function main() {
   const cold = elapsed(() => q.QSource.create('file:///benchmark-large.q', 1, sourceText));
   mark('cold parse/index', cold.milliseconds);
   const source = cold.result;
+  const semantic = elapsed(() => q.qSemanticTokens(source));
+  mark('semantic classification', semantic.milliseconds);
   const warm = elapsed(() => {
     for (let index = 0; index < 50; index++) {
       q.qCompletions(source, { line: index * 75, character: 2 });
@@ -139,11 +141,12 @@ async function main() {
   const startup = await elapsedAsync(serverStartup);
   mark('server initialize/shutdown', startup.milliseconds);
   const heapDeltaMiB = (process.memoryUsage().heapUsed - heapBefore) / MIB;
-  const currentVsix = path.join(ROOT, 'vscode-kdb-0.2.26.vsix');
+  const currentVsix = path.join(ROOT, 'vscode-kdb-0.2.28.vsix');
   const currentVsixBytes = fs.existsSync(currentVsix) ? fs.statSync(currentVsix).size : null;
   const report = {
     fixtureBytes: sourceBytes,
     coldParseIndexMs: Number(cold.milliseconds.toFixed(2)),
+    semanticClassificationMs: Number(semantic.milliseconds.toFixed(2)),
     warmProvider100RequestsMs: Number(warm.milliseconds.toFixed(2)),
     editToDiagnosticsMs: Number(editDiagnostics.milliseconds.toFixed(2)),
     format300kMs: Number(formatting.milliseconds.toFixed(2)),
@@ -157,6 +160,8 @@ async function main() {
   };
 
   assert(cold.milliseconds < 10_000, 'cold parse/index exceeded its deterministic ceiling');
+  assert(semantic.result.data.length > 0, 'semantic classification returned no tokens');
+  assert(semantic.milliseconds < 5_000, 'semantic classification exceeded its deterministic ceiling');
   assert(warm.milliseconds < 3_000, 'warm providers exceeded their deterministic ceiling');
   assert(editDiagnostics.milliseconds < 10_000, 'edit-to-diagnostics exceeded its deterministic ceiling');
   assert(formatting.milliseconds < 10_000, 'formatter exceeded its deterministic ceiling');

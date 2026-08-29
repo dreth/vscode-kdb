@@ -8,7 +8,7 @@ If **KX** is not yet in the Output picker, activate the extension by opening the
 
 ## q completion, diagnostics, or formatting is missing
 
-Version 0.2.26 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
+Version 0.2.28 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
 
 Disable another q extension while diagnosing because overlapping completion, formatting, semantic-token, grammar, and `*.qnb` providers can conflict. To use this extension as the formatter, set `"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }`.
 
@@ -17,6 +17,10 @@ For a file above `vscode-kdb.languageServer.maxFileSizeBytes`, the server delibe
 ## qnb opens with the wrong extension or as text
 
 Disable any other extension that also claims `*.qnb`, reload VS Code, then use **Reopen Editor With… > q Notebook** if necessary. This extension expects a top-level JSON cell array. Malformed, oversized, or unsupported shapes fail visibly and are never replaced with an empty notebook.
+
+A plain zero-byte, BOM-only, or whitespace-only `.qnb` is the one exception: it opens with one empty q cell and is marked unsaved, but its bytes are not changed until Save. If this does not happen after installing 0.2.28, open Extensions in the same VS Code window, check the **Local - Installed** or remote **Installed** section that owns that window's Extension Host, and verify the KX details page reports version 0.2.28. From a command line attached to that same host/profile, `code --list-extensions --show-versions` should include `DanielAlonso.vscode-kdb@0.2.28`. Reload the window after replacing an older local or remote installation.
+
+Distinct `.q` and `.qnb` artwork is available only as VS Code's contributed language-icon fallback. The selected file-icon theme has precedence and may show its own icon or suppress the fallback; this extension does not install or override a complete file-icon theme.
 
 The `.qnb` controller uses the globally active direct-q profile and does not use Python or Jupyter. Remove a leading `%%q`; it belongs only to a Python-language mixed-notebook cell. Legacy `x-application/q-notebook` output remains saved unchanged and receives a visible fallback when no renderer can safely infer its q type.
 

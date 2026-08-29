@@ -1,14 +1,18 @@
 # qnb and Jupyter/IPython notebooks
 
-KX for VS Code 0.2.26 supports a first-party q-only `.qnb` format and Python-first mixed `.ipynb`. For `.ipynb`, keep the normal Python Jupyter kernel selected, make only intended cells q, activate a saved KX profile, and run those q cells through Direct IPC. KX does not register its optional pure-q Jupyter controller by default, so **KX q (Direct IPC)** is absent from Jupyter kernel candidates. The notebook's top-right Jupyter selector itself remains visible and owned by VS Code/Jupyter.
+KX for VS Code 0.2.28 supports a first-party q-only `.qnb` format and Python-first mixed `.ipynb`. For `.ipynb`, keep the normal Python Jupyter kernel selected, make only intended cells q, activate a saved KX profile, and run those q cells through Direct IPC. KX does not register its optional pure-q Jupyter controller by default, so **KX q (Direct IPC)** is absent from Jupyter kernel candidates. The notebook's top-right Jupyter selector itself remains visible and owned by VS Code/Jupyter.
 
 ## q-only qnb workflow
 
 Run **KX: New q Notebook** or open `*.qnb`. The notebook type is `vscode-kdb-q-notebook`; every code cell is q and every narrative cell remains Markdown. Its dedicated **KX q (Direct IPC)** controller is registered unconditionally, preferred for every open `.qnb`, and independent of `vscode-kdb.notebook.enableDirectController`, which still controls only the optional Jupyter candidate. Use normal **Run Cell** or `Ctrl+Enter` (`Cmd+Enter` on macOS); `.qnb` deliberately has no mixed-Jupyter **Run q Cell (KX)** status action or competing KX shortcut.
 
+Creating a flat empty file also works: `touch analysis.qnb`, or create `analysis.qnb` in Explorer, and open it normally. Zero-byte, BOM-only, and whitespace-only input becomes one empty q code cell and the tab is marked unsaved. The bytes on disk remain untouched until ordinary Save writes the compatible JSON cell array; after save/reopen the notebook is clean. Nonblank malformed or unsupported input still fails visibly and is never overwritten by the bootstrap path.
+
 Normal **Run Cell**, **Run All**, and interruption use the globally active direct-q profile, complete current cell source, normal q execution ordering, and the same result conversion/live registry as direct q in `.ipynb`. Markdown is never executed. Python/Jupyter is never invoked. A leading `%%q` is rejected because a q-only cell already contains ordinary q.
 
 The serializer uses a top-level JSON cell array. It preserves cell/source order, empty and multiline source including final newlines, Markdown, output order and MIME values, attachments, execution summaries, and bounded JSON-compatible unknown fields. Code language is normalized to q. Malformed, oversized, non-array, or unsafe data fails visibly rather than opening/saving an empty notebook.
+
+Explorer and editor labels can use distinct supplied artwork for `.q` and `.qnb`. This is a language-icon fallback, not a bundled file-icon theme: the active file-icon theme retains precedence and may replace or suppress it. The `qnb` identity exists only for filename/icon resolution; notebook code cells remain language `q` and receive the same highlighting, formatting, and diagnostics as `.q` source.
 
 Current `application/vnd.kx.result+json` output retains exact q identity and the shared KX renderer. Legacy `x-application/q-notebook` output is kept unchanged; recognized primitive-list shapes get a visible index/element fallback (or one cell for a singleton), while unsupported shapes get visible preserved JSON without guessed q conversion. Generated fallback text is not written as a duplicate output. Credentials, request/session/live IDs, and IPC handles are stripped on save; durable output binding remains available after reopen.
 

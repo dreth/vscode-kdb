@@ -12,6 +12,7 @@ import {
 export const QNB_NOTEBOOK_TYPE = 'vscode-kdb-q-notebook';
 export const NEW_Q_NOTEBOOK_COMMAND = 'vscode-kdb.newQNotebook';
 export const QNB_LEGACY_OUTPUT_MIME = 'x-application/q-notebook';
+export const QNB_BLANK_BOOTSTRAP_METADATA_KEY = 'vscode-kdb.qnb.blankBootstrap';
 const CELL_SIDECAR = 'vscode-kdb.qnb.cellSidecar';
 const OUTPUT_SIDECAR = 'vscode-kdb.qnb.outputSidecar';
 
@@ -27,6 +28,7 @@ interface OutputSidecar {
 
 export class QnbNotebookSupport implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[];
+  private readonly preparedBlankDocuments = new WeakSet<vscode.NotebookDocument>();
 
   public constructor() {
     this.disposables = [
@@ -36,6 +38,9 @@ export class QnbNotebookSupport implements vscode.Disposable {
         { transientOutputs: false }
       ),
       vscode.commands.registerCommand('vscode-kdb.newQNotebook', () => this.createNotebook()),
+      vscode.workspace.onDidOpenNotebookDocument(notebook => {
+        void this.prepareBlankNotebook(notebook);
+      }),
     ];
   }
 
@@ -52,6 +57,26 @@ export class QnbNotebookSupport implements vscode.Disposable {
     );
     await vscode.window.showNotebookDocument(document);
   }
+
+  private async prepareBlankNotebook(notebook: vscode.NotebookDocument): Promise<void> {
+    if (notebook.notebookType !== QNB_NOTEBOOK_TYPE ||
+      notebook.metadata[QNB_BLANK_BOOTSTRAP_METADATA_KEY] !== true ||
+      this.preparedBlankDocuments.has(notebook)) return;
+    this.preparedBlankDocuments.add(notebook);
+
+    const metadata = { ...notebook.metadata };
+    delete metadata[QNB_BLANK_BOOTSTRAP_METADATA_KEY];
+    const edit = new vscode.WorkspaceEdit();
+    edit.set(notebook.uri, [vscode.NotebookEdit.updateNotebookMetadata(metadata)]);
+    try {
+      if (await vscode.workspace.applyEdit(edit)) return;
+    } catch {
+      // The same actionable error is shown for a rejected or failed host edit.
+    }
+    void vscode.window.showErrorMessage(
+      'KX could not prepare this blank q notebook for Save. The file was not modified.'
+    );
+  }
 }
 
 export class QnbNotebookSerializer implements vscode.NotebookSerializer {
@@ -60,7 +85,11 @@ export class QnbNotebookSerializer implements vscode.NotebookSerializer {
     _token: vscode.CancellationToken,
   ): Promise<vscode.NotebookData> {
     const decoded = decodeQnb(content);
-    return new vscode.NotebookData(decoded.cells.map(cellData));
+    const data = new vscode.NotebookData(decoded.cells.map(cellData));
+    if (decoded.blankBootstrap) {
+      data.metadata = { [QNB_BLANK_BOOTSTRAP_METADATA_KEY]: true };
+    }
+    return data;
   }
 
   public async serializeNotebook(
@@ -129,7 +158,8 @@ function cellModel(cell: vscode.NotebookCellData, index: number): QnbCellModel {
   };
   if (Object.keys(metadata).length > 0) unknown.metadata = metadata;
   if (cell.executionSummary) {
-    unknown.executionSummary = executionSummary(cell.executionSummary);
+    const summary = executionSummary(cell.executionSummary);
+    if (Object.keys(summary).length > 0) unknown.executionSummary = summary;
   }
   return {
     kind,
@@ -201,7 +231,7 @@ function withoutOwned(value: unknown, key: string): Record<string, QnbJson> {
   ) as Record<string, QnbJson>;
 }
 
-function executionSummary(value: vscode.NotebookCellExecutionSummary): QnbJson {
+function executionSummary(value: vscode.NotebookCellExecutionSummary): Record<string, QnbJson> {
   const result: Record<string, QnbJson> = {};
   if (typeof value.executionOrder === 'number') result.executionOrder = value.executionOrder;
   if (typeof value.success === 'boolean') result.success = value.success;

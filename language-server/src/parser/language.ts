@@ -14,40 +14,18 @@ import { writeFileSync } from 'fs';
 import type { TokenType } from 'chevrotain';
 
 import { Q_CATALOG } from '../catalog';
-import { Control, Identifier, Keyword, LSql, Module, Reserved, RSql, System } from './keywords';
 import {
-  BinaryLiteral,
-  ByteLiteral,
-  DateLiteral,
-  DateTimeLiteral,
-  GuidLiteral,
-  InfinityLiteral,
-  MonthLiteral,
-  NumberLiteral,
-  SymbolLiteral,
-  TimeLiteral,
-  TimeStampLiteral,
-} from './literals';
+  Q_TEXTMATE_CATALOG_ROLES,
+  Q_TEXTMATE_LITERAL_ROLES,
+  Q_TEXTMATE_PUNCTUATION_ROLES,
+  Q_TEXTMATE_SCOPES,
+  Q_TEXTMATE_WORD_ROLES,
+} from '../highlighting';
 import { CommentBegin, CommentEnd, ExitCommentBegin, StringBegin, StringEnd } from './ranges';
 import {
-  Colon,
   Command,
-  Comparator,
-  Cond,
-  CutDrop,
-  Dict,
   Documentation,
-  DoubleColon,
-  Iterator,
-  LBracket,
-  LCurly,
   LineComment,
-  LParen,
-  Operator,
-  RBracket,
-  RCurly,
-  RParen,
-  SemiColon,
   StringEscape,
 } from './tokens';
 
@@ -55,76 +33,43 @@ type Pattern = Record<string, unknown>;
 
 const ranges: Pattern[] = [
   {
-    name: 'comment.block.q',
+    name: Q_TEXTMATE_SCOPES.blockComment,
     begin: pattern(CommentBegin),
-    beginCaptures: { 0: { name: 'punctuation.definition.comment.begin.q' } },
+    beginCaptures: { 0: { name: Q_TEXTMATE_SCOPES.blockCommentBegin } },
     end: pattern(CommentEnd),
-    endCaptures: { 0: { name: 'punctuation.definition.comment.end.q' } },
+    endCaptures: { 0: { name: Q_TEXTMATE_SCOPES.blockCommentEnd } },
   },
-  { name: 'comment.line.documentation.q', match: pattern(Documentation) },
-  { name: 'comment.line.slash.q', match: pattern(LineComment) },
-  { name: 'meta.preprocessor.q', match: pattern(Command) },
-  { name: 'meta.preprocessor.q', match: pattern(ExitCommentBegin) },
+  { name: Q_TEXTMATE_SCOPES.documentationComment, match: pattern(Documentation) },
+  { name: Q_TEXTMATE_SCOPES.lineComment, match: pattern(LineComment) },
+  { name: Q_TEXTMATE_SCOPES.preprocessor, match: pattern(Command) },
+  { name: Q_TEXTMATE_SCOPES.preprocessor, match: pattern(ExitCommentBegin) },
   {
-    name: 'string.quoted.double.q',
+    name: Q_TEXTMATE_SCOPES.string,
     begin: pattern(StringBegin),
-    beginCaptures: { 0: { name: 'punctuation.definition.string.begin.q' } },
+    beginCaptures: { 0: { name: Q_TEXTMATE_SCOPES.stringBegin } },
     end: pattern(StringEnd),
-    endCaptures: { 0: { name: 'punctuation.definition.string.end.q' } },
-    patterns: [{ name: 'constant.character.escape.q', match: pattern(StringEscape) }],
+    endCaptures: { 0: { name: Q_TEXTMATE_SCOPES.stringEnd } },
+    patterns: [{ name: Q_TEXTMATE_SCOPES.stringEscape, match: pattern(StringEscape) }],
   },
 ];
 
-const literals: Pattern[] = [
-  { name: 'constant.other.symbol.q', match: pattern(SymbolLiteral) },
-  { name: 'constant.other.guid.q', match: bounded(GuidLiteral) },
-  { name: 'constant.numeric.datetime.q', match: bounded(DateTimeLiteral) },
-  { name: 'constant.numeric.timestamp.q', match: bounded(TimeStampLiteral) },
-  { name: 'constant.numeric.date.q', match: bounded(DateLiteral) },
-  { name: 'constant.numeric.month.q', match: bounded(MonthLiteral) },
-  { name: 'constant.numeric.time.q', match: bounded(TimeLiteral) },
-  { name: 'constant.language.null.q', match: bounded(InfinityLiteral) },
-  { name: 'constant.language.boolean.q', match: bounded(BinaryLiteral) },
-  { name: 'constant.numeric.hex.q', match: bounded(ByteLiteral) },
-  { name: 'constant.numeric.q', match: bounded(NumberLiteral) },
-];
+const literals: Pattern[] = Q_TEXTMATE_LITERAL_ROLES.map(({ token, scope }, index) => ({
+  name: scope,
+  match: index === 0 ? pattern(token) : bounded(token),
+}));
 
 const words: Pattern[] = [
-  {
-    name: 'support.function.builtin.q',
-    match: catalogPattern('builtin'),
-  },
-  {
-    name: 'support.function.system.q',
-    match: catalogPattern('system-namespace'),
-  },
-  { name: 'keyword.control.q', match: bounded(Control) },
-  { name: 'keyword.other.query.q', match: bounded(LSql) },
-  { name: 'keyword.other.query.q', match: bounded(RSql) },
-  { name: 'keyword.control.module.q', match: bounded(Module) },
-  { name: 'support.function.system.q', match: bounded(Reserved) },
-  { name: 'support.function.q', match: bounded(Keyword) },
-  { name: 'support.function.q', match: bounded(System) },
-  { name: 'variable.other.q', match: bounded(Identifier) },
+  ...Q_TEXTMATE_CATALOG_ROLES.map(({ category, scope }) => ({
+    name: scope,
+    match: catalogPattern(category),
+  })),
+  ...Q_TEXTMATE_WORD_ROLES.map(({ token, scope }) => ({ name: scope, match: bounded(token) })),
 ];
 
-const punctuation: Pattern[] = [
-  { name: 'keyword.operator.iterator.q', match: pattern(Iterator) },
-  { name: 'keyword.operator.comparison.q', match: pattern(Comparator) },
-  { name: 'keyword.operator.q', match: pattern(CutDrop) },
-  { name: 'keyword.operator.q', match: pattern(Dict) },
-  { name: 'keyword.operator.q', match: pattern(Operator) },
-  { name: 'keyword.operator.conditional.q', match: pattern(Cond) },
-  { name: 'keyword.operator.assignment.q', match: pattern(DoubleColon) },
-  { name: 'keyword.operator.assignment.q', match: pattern(Colon) },
-  { name: 'punctuation.separator.semicolon.q', match: pattern(SemiColon) },
-  { name: 'punctuation.section.parens.begin.q', match: pattern(LParen) },
-  { name: 'punctuation.section.parens.end.q', match: pattern(RParen) },
-  { name: 'punctuation.section.brackets.begin.q', match: pattern(LBracket) },
-  { name: 'punctuation.section.brackets.end.q', match: pattern(RBracket) },
-  { name: 'punctuation.section.block.begin.q', match: pattern(LCurly) },
-  { name: 'punctuation.section.block.end.q', match: pattern(RCurly) },
-];
+const punctuation: Pattern[] = Q_TEXTMATE_PUNCTUATION_ROLES.map(({ token, scope }) => ({
+  name: scope,
+  match: pattern(token),
+}));
 
 export function qTextMateGrammar(): Record<string, unknown> {
   return {
@@ -141,7 +86,7 @@ export function qTextMateGrammar(): Record<string, unknown> {
     repository: {
       notebookMagic: {
         patterns: [{
-          name: 'meta.preprocessor.notebook.magic.q',
+          name: Q_TEXTMATE_SCOPES.notebookMagic,
           match: '\\A[ \\t]*%%q(?:[ \\t].*)?$',
         }],
       },

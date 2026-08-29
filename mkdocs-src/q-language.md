@@ -1,6 +1,6 @@
 # q language tooling
 
-KX for VS Code 0.2.26 provides one offline-first q authoring model for `.q` files, q-language Jupyter cells, and every code cell in a `.qnb` notebook. It requires VS Code 1.101 or newer because the bundled language stack targets the Extension Host's Node 22 runtime. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
+KX for VS Code 0.2.28 provides one offline-first q authoring model for `.q` files, q-language Jupyter cells, and every code cell in a `.qnb` notebook. It requires VS Code 1.101 or newer because the bundled language stack targets the Extension Host's Node 22 runtime. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
 
 ## Included features
 
@@ -14,6 +14,10 @@ KX for VS Code 0.2.26 provides one offline-first q authoring model for `.q` file
 All offline analysis is local. It does not run q, call a shell, send source to a connection, write Query History, or require Python. Query execution remains available even when a source diagnostic exists. TextMate highlighting remains available when `vscode-kdb.languageServer.enabled` is false or the language server cannot start.
 
 Static q analysis deliberately fails closed where q is dynamic. It does not guess general runtime types, undefined names, dynamic `value`/`eval` targets, symbol lookups, process state, or qSQL column identity. Ambiguous definitions are omitted from navigation and rename rather than editing an uncertain target.
+
+Highlighting uses stable, standard roles across `.q`, q-language Jupyter cells, and `.qnb` code cells. A directly assigned lambda and all safely resolved references use the function role; parameters, local and global values, qSQL columns, built-ins, keywords, and documented system names retain their respective roles. An inline lambda nested inside an assignment, such as an `update` expression, does not turn the assignment target into a function. Unresolved identifiers keep their lexical identifier scope instead of being guessed as resolved symbols.
+
+The extension assigns TextMate scopes and semantic-token roles, not foreground colors. Your active VS Code color theme decides how those standard roles look and may intentionally render some categories with the same color. Disabling the language server removes semantic refinement but retains activation-free TextMate highlighting.
 
 ## Formatting and lint controls
 

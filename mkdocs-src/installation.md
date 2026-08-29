@@ -2,7 +2,7 @@
 
 ## Requirements
 
-KX for VS Code 0.2.26 requires VS Code `1.101.0` or newer. That baseline supplies the Node 22 Extension Host required by the bundled language stack. VS Code 1.96–1.100 users can remain on extension 0.2.23. Offline source authoring does not require q; execution requires a kdb+/q process reachable over q IPC. The extension does not bundle q or a kdb+ license.
+KX for VS Code 0.2.28 requires VS Code `1.101.0` or newer. That baseline supplies the Node 22 Extension Host required by the bundled language stack. VS Code 1.96–1.100 users can remain on extension 0.2.23. Offline source authoring does not require q; execution requires a kdb+/q process reachable over q IPC. The extension does not bundle q or a kdb+ license.
 
 Mixed-notebook **Run q Cell (KX)** uses the globally active q profile while Python stays selected. The optional pure-q **KX q (Direct IPC)** controller uses that same active profile only when its default-false setting is enabled and it is selected. Both use the same direct q machinery as editor execution and neither requires a Python package. Release 0.2.20 preserves 0.2.7's client-side complete-source grouping and ordinary q `value` evaluation, so it does not require `.Q.ld` or reject a process by q release date. Compatibility is covered deterministically for generated source when `.Q.ld` is absent and live on the installed modern q runtime; no historical q binary was available, so no exact minimum q version or live old-q result is claimed. The separate optional Python-kernel `%%q` route requires Python 3.9 through 3.13, IPython, and the separately installed `kx-notebook==0.1.0` distribution (`import kx_notebook`) in that kernel. The companion has direct q IPC built in; it bundles no q runtime or PyKX binary.
 

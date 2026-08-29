@@ -99,18 +99,18 @@ export class Source {
     let current: Token;
 
     const Assign = (pattern = true) => {
-      let count = 0;
+      const assigned: Token[] = [];
       while ((token = stack.pop())) {
         if (Type(token) === Identifier) {
           this.definitions.push(token);
-          count++;
+          assigned.push(token);
           if (!pattern) {
             stack.length = 0;
             break;
           }
         }
       }
-      return count;
+      return assigned;
     };
 
     for (let i = 0; i < this.tokens.length; i++) {
@@ -137,8 +137,6 @@ export class Source {
           scope.push(current);
           modes.push(current);
           stack.length = 0;
-          token = Peek(this.definitions);
-          if (token) token.call = current;
           this.definitions.push(current);
           break;
         case RCurly:
@@ -158,7 +156,7 @@ export class Source {
           break;
         case RBracket:
           if (Type(current.feat) === LCurly) {
-            current.feat!.rank = Assign();
+            current.feat!.rank = Assign().length;
             feats.pop();
           } else if (Type(current.feat) !== LParen) {
             stack.length = 0;
@@ -184,7 +182,11 @@ export class Source {
             );
             stack.length = 0;
           } else if (Type(current.feat) !== LCurly) {
-            Assign(Type(Peek(stack)) === RParen && Type(stack[0]) === LParen);
+            const assigned = Assign(Type(Peek(stack)) === RParen && Type(stack[0]) === LParen);
+            const lambda = assignedLambda(this.tokens, i);
+            if (assigned.length === 1 && lambda) {
+              assigned[0].call = lambda;
+            }
           }
           break;
         case SemiColon:
@@ -227,11 +229,22 @@ export class Source {
   }
 
   private process() {
+    const definitions = new Map<string, Map<Token | undefined, Token[]>>();
+    for (const definition of this.definitions) {
+      if (Type(definition) !== Identifier) continue;
+      const scopes = definitions.get(Name(definition)) ?? new Map<Token | undefined, Token[]>();
+      const values = scopes.get(Scope(definition)) ?? [];
+      values.push(definition);
+      scopes.set(Scope(definition), values);
+      definitions.set(Name(definition), scopes);
+    }
     for (const reference of this.references) {
-      const definition = this.definitions.find(
-        (token) => Name(token) === Name(reference),
-      );
-      if (definition?.call) reference.call = definition.call;
+      const matches = definitions.get(Name(reference))?.get(Scope(reference)) ?? [];
+      if (matches.length > 0 && matches.every(definition => definition.call !== undefined)) {
+        reference.call = matches[0].call;
+      } else {
+        reference.call = undefined;
+      }
     }
   }
 
@@ -348,7 +361,51 @@ export function Type(token?: Token) {
 }
 
 export function Param(token?: Token) {
-  return Type(token?.feat) === LCurly;
+  return token !== undefined && (Type(token.feat) === LCurly || (
+    Type(token.scope) === LCurly && token.scope?.rank === undefined &&
+    (token.image === "x" || token.image === "y" || token.image === "z")
+  ));
+}
+
+function assignedLambda(tokens: readonly Token[], colonIndex: number): Token | undefined {
+  let cursor = nextNonWhitespace(tokens, colonIndex + 1);
+  let parens = 0;
+  while (cursor < tokens.length && Type(tokens[cursor]) === LParen) {
+    parens++;
+    cursor = nextNonWhitespace(tokens, cursor + 1);
+  }
+  const lambda = tokens[cursor];
+  if (Type(lambda) !== LCurly) return undefined;
+
+  let depth = 0;
+  for (; cursor < tokens.length; cursor++) {
+    if (Type(tokens[cursor]) === LCurly) depth++;
+    if (Type(tokens[cursor]) === RCurly) {
+      depth--;
+      if (depth === 0) break;
+    }
+  }
+  if (depth !== 0) return undefined;
+
+  cursor = nextNonWhitespace(tokens, cursor + 1);
+  while (parens > 0 && Type(tokens[cursor]) === RParen) {
+    parens--;
+    cursor = nextNonWhitespace(tokens, cursor + 1);
+  }
+  if (parens !== 0) return undefined;
+
+  const next = tokens[cursor];
+  if (next && Type(next) !== SemiColon && Type(next) !== EndOfLine &&
+    Type(next) !== RCurly && Type(next) !== RParen) {
+    return undefined;
+  }
+  return lambda;
+}
+
+function nextNonWhitespace(tokens: readonly Token[], start: number): number {
+  let cursor = start;
+  while (cursor < tokens.length && Type(tokens[cursor]) === WhiteSpace) cursor++;
+  return cursor;
 }
 
 export function Callable(token?: Token) {

@@ -21,6 +21,7 @@ export interface QnbCellModel {
 
 export interface QnbDocumentModel {
   readonly cells: readonly QnbCellModel[];
+  readonly blankBootstrap?: true;
 }
 
 export class QnbCodecError extends Error {
@@ -39,6 +40,18 @@ export function decodeQnb(bytes: Uint8Array): QnbDocumentModel {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
   } catch {
     throw new QnbCodecError('q notebook is not valid UTF-8.');
+  }
+  if (text.trim().length === 0) {
+    return Object.freeze({
+      cells: Object.freeze([Object.freeze({
+        kind: 'code' as const,
+        language: 'q' as const,
+        value: '',
+        outputs: Object.freeze([]),
+        unknown: Object.freeze({}),
+      })]),
+      blankBootstrap: true as const,
+    });
   }
   let value: unknown;
   try {

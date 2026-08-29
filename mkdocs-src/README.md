@@ -38,6 +38,8 @@ npm run test:extension-host
 npm run test:notebook-results-visual
 ```
 
+The Extension Host runner starts `/usr/bin/Xvfb` by default. In a graphical environment that already owns a suitable X display, such as WSLg, set `VSCODE_KDB_E2E_DISPLAY=:0`. `VSCODE_KDB_E2E_CODE` and `VSCODE_KDB_E2E_LIBS` can select an isolated compatible Linux VS Code runtime and its shared-library directory.
+
 Each distinct valid settled live navigator or main-plot range is an absolute source-resampling request after a 450 ms debounce in both KX Results and live notebook output. Requests stay clamped to the original full X domain across successive narrower ranges; initial/full-domain renders, duplicate scale notifications, dirty charts, and pending requests do not auto-request. Refinement is automatic and has no separate visible Refine control.
 
 For a release candidate, require the live IPC check instead of allowing it to skip:
@@ -51,16 +53,16 @@ Set `VSCODE_KDB_Q_BIN=/absolute/path/to/q` when q is not at the runner's default
 For release candidates, package the explicit versioned VSIX, create the required one-member wrapper with Python's `zipfile`, and run the repository auditor:
 
 ```sh
-npx @vscode/vsce package --out vscode-kdb-0.2.26.vsix
+npx @vscode/vsce package --out vscode-kdb-0.2.28.vsix
 python - <<'PY'
 from pathlib import Path
 from zipfile import ZIP_DEFLATED, ZipFile
 
-source = Path("vscode-kdb-0.2.26.vsix")
-with ZipFile("vscode-kdb-0.2.26-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
+source = Path("vscode-kdb-0.2.28.vsix")
+with ZipFile("vscode-kdb-0.2.28-vsix.zip", "w", ZIP_DEFLATED, compresslevel=9) as archive:
     archive.write(source, arcname=source.name)
 PY
-python scripts/audit-release.py vscode-kdb-0.2.26.vsix vscode-kdb-0.2.26-vsix.zip
+python scripts/audit-release.py vscode-kdb-0.2.28.vsix vscode-kdb-0.2.28-vsix.zip
 ```
 
 `scripts/audit-release.py` validates the VSIX and an already-created wrapper; it does not create either artifact.

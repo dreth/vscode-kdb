@@ -6,7 +6,7 @@ See the [user guide](mkdocs-src/index.md) for detailed setup and the [troublesho
 
 ## Quick start
 
-KX for VS Code requires VS Code 1.96 or newer and a reachable q process. For local development, bind q to loopback:
+KX for VS Code 0.2.28 requires VS Code 1.101 or newer and a reachable q process for execution. Offline authoring does not require q. VS Code 1.96–1.100 users can remain on extension 0.2.23. For local development, bind q to loopback:
 
 ```sh
 q -p 127.0.0.1:5000
@@ -35,6 +35,26 @@ Queries use only the starred active connection. A connected non-active profile i
 With the root namespace (`.`), single-line execution sends raw q. For a non-root namespace, the extension wraps the query to enter that namespace and restore the previous one afterward. Multiline selections, complete documents, and direct notebook cells are grouped by q source-line indentation and evaluated in order with `value`. Blank lines, q comments, and top-level system commands retain their script meaning. This path does not use `.Q.ld`.
 
 Complete-source execution also enters the configured namespace and restores the previous process namespace afterward.
+
+## q authoring and language intelligence
+
+Opening a `.q` file, a q-language cell in `.ipynb`, or a code cell in `.qnb` starts the bundled q language server lazily. No q process, Python environment, network request, or connection is required for syntax highlighting, completion, hover, signatures, document/workspace symbols, definition/references, conservative rename, call hierarchy, semantic tokens, folding, expanding selection, diagnostics, or formatting. The generated TextMate grammar remains active if the server is disabled or fails.
+
+Source formatting is intentionally conservative: it normalizes safe indentation and trailing code whitespace, preserves every non-trivia token and newline, and refuses malformed or uncertain source. It does not rewrite internal expression spacing. Use **Format Document** or **Format Selection**, or select this extension as q's default formatter:
+
+```json
+{
+  "[q]": {
+    "editor.defaultFormatter": "DanielAlonso.vscode-kdb"
+  }
+}
+```
+
+Default lint findings cover deprecated datetime literals, provably unused lambda parameters/locals, declarations used before their definition, and unindented continuation lines. They are advisory and never block q execution. `vscode-kdb.languageServer.enabled` disables server-backed features without disabling lexical highlighting or execution; the diagnostic cap, debounce, workspace globs, file-size bound, lint severities, and local suppression directives are configurable under `vscode-kdb.languageServer.*`.
+
+`vscode-kdb.languageServer.connectedIntelligence` is an explicit default-off option. When enabled, completion and hover may request bounded current-namespace table, function, variable, and on-demand `meta` column names from the active connected profile. Only validated names, q type metadata, active profile ID, namespace, and a local generation number cross to the language-server process. Credentials, host/port, source text, object values, previews, query history, and telemetry do not. Results are cached for 30 seconds and can be cleared with **KX: Refresh q Language Metadata**.
+
+If another q extension is enabled, overlapping language or `*.qnb` providers can cause duplicate tooling or a serializer-selection conflict. Disable one of the competing extensions for that VS Code profile or workspace, then reload the window. Existing compatible `.qnb` files remain ordinary JSON and can be opened directly.
 
 Cancel stops the extension waiting for a result. It does not reliably interrupt q work or side effects already sent to the server. Disconnect the profile to close its socket and fail outstanding IPC work.
 
@@ -74,6 +94,16 @@ The panel Settings menu can enable default-off column summary statistics. They a
 The optional local data server exposes the current visible grid as tokenized CSV, JSON, or NDJSON endpoints on `127.0.0.1`. It never starts automatically. The URL is a temporary bearer secret: another local process that obtains it can read the exposed result, and `metadata.json` includes result metadata such as the connection name and query text. Stop the server when finished.
 
 See [Results viewer](mkdocs-src/results-viewer.md), [copy and export](mkdocs-src/copy-export.md), [charting](mkdocs-src/charting.md), and [local data server](mkdocs-src/local-data-server.md).
+
+## q-only `.qnb` notebooks
+
+Run **KX: New q Notebook** or open an existing `*.qnb` file. The dedicated `q Notebook` type uses q for every code cell, keeps narrative cells as Markdown, and always offers the **KX q (Direct IPC)** controller independently of the optional Jupyter-controller setting. Normal Run/Run All executes ordinary q source against the starred active profile; Markdown is ignored, Python is never invoked, and a leading `%%q` is rejected because it is unnecessary in a q-only notebook.
+
+A `.qnb` created as a plain empty file—for example with `touch analysis.qnb` or VS Code Explorer—opens with one empty q code cell and an unsaved marker. Opening does not write to the file; the first ordinary Save writes the compatible JSON cell array. BOM-only and whitespace-only files follow the same bootstrap path, while any nonblank malformed content remains an error and is never replaced.
+
+The serializer reads and writes the established top-level qnb cell-array shape. Cell order, source text and final newlines, Markdown, ordered MIME outputs, attachments, execution summaries, and JSON-compatible unknown fields are preserved within documented bounds. Current KX MIME v2 results use the same exact-value renderer, grids, charts, resampling, copy/export, rerun, cancellation, and stale-result protection as direct q cells in `.ipynb`. Session-only live IDs and credentials are not saved. Recognized legacy `x-application/q-notebook` lists receive a visible text fallback without converting or replacing the original value; unsupported shapes remain losslessly preserved and are shown as preserved JSON rather than guessed into an incorrect q type.
+
+The extension contributes distinct `.q` and `.qnb` language artwork for Explorer and editor-label fallback. A selected file-icon theme can replace or suppress contributed language icons. After installing an update, verify that the KX extension shown under the current window's **Local** or remote **Installed** section is version 0.2.28, then run **Developer: Reload Window**.
 
 ## Jupyter notebooks
 
@@ -134,7 +164,7 @@ Direct q IPC is plaintext in transit, including authentication and query traffic
 
 Complete-source execution does not depend on `.Q.ld`. No minimum q version is enforced; historical q releases are not maintained as a compatibility matrix.
 
-Language support covers `.q` files with a TextMate grammar; `.k` is not associated with q. The extension does not provide language-server features such as linting or source formatting.
+Language support covers `.q` files and q cells in `.ipynb`/`.qnb`; `.k` is not associated with q. Static analysis is best-effort and deliberately omits speculative dynamic-name and type errors. The optional connected metadata path never evaluates editor source or retrieves object values.
 
 Open `View > Output` and select `KX` for connection, handshake, query, cancellation, and socket lifecycle diagnostics. Diagnostics omit credentials, query text, result values, and local-data-server tokens. Optional timing diagnostics can be enabled with:
 
@@ -164,6 +194,7 @@ Additional maintained checks include:
 ```sh
 npm run test:notebook-python
 npm run test:notebook-cross
+npm run test:language
 npm run test:extension-host
 ```
 

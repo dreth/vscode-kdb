@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "First-party q language tooling, direct q IPC, qnb and mixed Jupyter notebooks, and high-performance KX results for VS Code.",
-  "version": "0.2.26",
+  "version": "0.2.28",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -108,8 +108,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.26.vsix",
-    "package:vsix": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.26.vsix"
+    "package": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.28.vsix",
+    "package:vsix": "npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.28.vsix"
   },
   "dependencies": {
     "chevrotain": "13.2.0",
@@ -125,7 +125,9 @@
     "@types/vscode-notebook-renderer": "^1.72.4",
     "@vscode/vsce": "^3.6.2",
     "esbuild": "^0.25.12",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vscode-oniguruma": "2.0.1",
+    "vscode-textmate": "9.3.2"
   },
   "contributes": {
     "languages": [
@@ -143,6 +145,16 @@
         "icon": {
           "light": "./icons/q.png",
           "dark": "./icons/q.png"
+        }
+      },
+      {
+        "id": "qnb",
+        "extensions": [
+          ".qnb"
+        ],
+        "icon": {
+          "light": "./icons/qnb.png",
+          "dark": "./icons/qnb.png"
         }
       }
     ],

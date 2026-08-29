@@ -116,7 +116,15 @@ Rename SHALL validate the requested q name and edit only references belonging to
 - **THEN** that reference is excluded from rename rather than edited speculatively
 
 ### Requirement: Structural editor features follow parsed q ranges
-The server SHALL provide folding ranges, expanding selection ranges, and semantic tokens from parsed q structure.
+The extension SHALL provide activation-free, theme-neutral TextMate highlighting for q source, and the server SHALL provide folding ranges, expanding selection ranges, and semantic tokens from parsed q structure. Semantic highlighting SHALL refine the lexical scopes without changing a token to a conflicting semantic role, and source-highlighting changes SHALL NOT alter q execution or result presentation.
+
+#### Scenario: Lexical highlighting roles
+- **WHEN** q source contains comments, strings and escapes, symbols, numeric or temporal literals, qSQL words, built-ins, system names, operators, delimiters, and user identifiers
+- **THEN** each recognized category receives a stable standard TextMate scope, user identifiers retain an identifier scope, and the grammar contains no hard-coded foreground color
+
+#### Scenario: Activation-free lexical fallback
+- **WHEN** the q language server is disabled, unavailable, crashed, or skips an oversized document
+- **THEN** `.q` documents, q-language `.ipynb` cells, and `.qnb` code cells retain the same lexical TextMate categories without requiring q, Python, a connection, or extension-host analysis
 
 #### Scenario: Folding
 - **WHEN** a document contains multiline lambdas, parenthesized/bracketed expressions, qSQL blocks, or multiline comments
@@ -128,7 +136,31 @@ The server SHALL provide folding ranges, expanding selection ranges, and semanti
 
 #### Scenario: Semantic roles
 - **WHEN** declarations and references are resolved
-- **THEN** semantic tokens distinguish functions, parameters, local/global variables, declarations, and read-only built-ins without coloring unresolved text as resolved
+- **THEN** semantic tokens distinguish user functions, parameters, local/global variables, declarations, read-only built-ins, documented system names, qSQL words, and statically known qSQL columns without coloring unresolved text as resolved
+
+#### Scenario: Stable role across a resolved binding
+- **WHEN** a local, global, namespace-qualified global, parameter, or user function has one statically resolved declaration and one or more references
+- **THEN** every occurrence receives the declaration's same base semantic role, with modifiers allowed to describe declaration or read-only status without replacing that role
+
+#### Scenario: Inline lambda does not reclassify its assignment target
+- **WHEN** a value assignment such as `.r.stats:update hits:{deltas x & .r.thresholds} each count from .r.stats` contains a nested inline lambda but the assigned expression is not itself a lambda
+- **THEN** `.r.stats` remains a variable at that declaration and at every resolved reference, while the inline lambda's parameters and locals receive their own roles
+
+#### Scenario: Assigned lambda remains callable
+- **WHEN** a binding's assigned expression is statically identifiable as a lambda and later references resolve to that binding
+- **THEN** the declaration and every resolved reference receive the user-function role
+
+#### Scenario: qSQL columns and unresolved identifiers fail closed
+- **WHEN** an identifier is a statically recognized qSQL column or cannot be resolved safely as a source binding
+- **THEN** the qSQL column receives a column/property role when known and the unresolved identifier retains lexical identifier highlighting, but neither is mislabeled as a resolved user function or variable
+
+#### Scenario: Equivalent source surfaces
+- **WHEN** equivalent q text is opened as a `.q` document, a q-language cell in `.ipynb`, and a code cell in `.qnb`
+- **THEN** the same TextMate categories and semantic roles are produced for the source text on all three surfaces
+
+#### Scenario: Result surfaces remain independent
+- **WHEN** highlighted q source is executed into the KX Results panel, live notebook output, or saved notebook output
+- **THEN** highlighting metadata does not enter, replace, recolor, or otherwise change the existing result payload and presentation contracts
 
 ### Requirement: Connected intelligence is explicit, bounded, and stale-safe
 Active-process completion and hover SHALL be controlled by `vscode-kdb.languageServer.connectedIntelligence`, disabled by default, and limited to metadata from the active connected direct-q profile.
@@ -200,11 +232,11 @@ The extension SHALL contribute `*.qnb` as a dedicated VS Code notebook type whos
 - **THEN** the q controller does not send that cell to q and does not replace its content or attachments
 
 ### Requirement: qnb files are compatible, portable JSON
-The extension SHALL read and write the established q Professional `.qnb` top-level cell-array format in which each cell has `kind`, `language`, `value`, and an array of `{mime, value}` outputs, while accepting optional extension fields and preserving JSON-compatible data it does not own.
+The extension SHALL read and write the established qnb top-level cell-array format in which each cell has `kind`, `language`, `value`, and an array of `{mime, value}` outputs, while accepting optional extension fields and preserving JSON-compatible data it does not own. As the sole bootstrap exception, a zero-byte, BOM-only, or whitespace-only `.qnb` SHALL open as a new, unsaved notebook with one empty q code cell and SHALL become the compatible cell-array format when the user first saves it.
 
 #### Scenario: Open an existing q Professional qnb
-- **WHEN** a valid `.qnb` cell array produced by q Professional contains q code, markdown, plain-text or HTML output, or `x-application/q-notebook` result output
-- **THEN** the extension opens the same ordered cell sources and compatible outputs without requiring q Professional to be installed
+- **WHEN** a valid `.qnb` cell array contains q code, markdown, plain-text or HTML output, or `x-application/q-notebook` result output
+- **THEN** the extension opens the same ordered cell sources and compatible outputs without requiring another q extension to be installed
 
 #### Scenario: Save in the compatible shape
 - **WHEN** a `.qnb` notebook is saved
@@ -218,13 +250,40 @@ The extension SHALL read and write the established q Professional `.qnb` top-lev
 - **WHEN** a valid `.qnb` is opened and saved without notebook edits
 - **THEN** the decoded cell order, kinds, sources, q languages, output order, MIME types, values, and unknown compatible data are unchanged even if insignificant JSON whitespace differs
 
+#### Scenario: Blank filesystem-created notebook
+- **WHEN** the user creates a zero-byte, BOM-only, or whitespace-only `*.qnb` through Explorer, `touch`, or an equivalent flat-file operation and opens it
+- **THEN** VS Code opens the dedicated qnb notebook surface with one empty q code cell, the dedicated direct-q controller available, and the notebook marked dirty so ordinary Save is enabled
+
+#### Scenario: Blank bootstrap persistence
+- **WHEN** a blank filesystem-created qnb is opened and then saved
+- **THEN** opening alone does not mutate the bytes on disk, while the save writes one empty q cell in the compatible top-level cell-array format, clears the dirty state, and the file reopens identically as a clean notebook
+
 #### Scenario: Invalid JSON is not erased
-- **WHEN** a `.qnb` file is malformed, is not a supported cell array, exceeds a documented safety bound, or contains an unsupported field value that cannot be preserved safely
-- **THEN** opening or saving fails visibly with an actionable error and the extension does not replace the file with an empty notebook or silently drop the unsupported data
+- **WHEN** a nonblank `.qnb` file is malformed, is not a supported cell array, exceeds a documented safety bound, or contains an unsupported field value that cannot be preserved safely
+- **THEN** opening or saving fails visibly with an actionable error and the extension does not replace the file with a new or empty notebook or silently drop the unsupported data
 
 #### Scenario: Newline and empty-source handling
 - **WHEN** source text is empty, contains multiple lines, or the compatible file uses any JSON string representation accepted by the format
 - **THEN** the editor presents the same source text and a save/reopen cycle preserves its line content and final-newline state
+
+### Requirement: qnb has a distinct file identity without changing cell language
+The extension SHALL associate `.qnb` with a minimal `qnb` language contribution that supplies the qnb artwork for light and dark language-icon fallback, while the existing notebook contribution SHALL continue to own `*.qnb` opening and every qnb code cell SHALL continue to use language identifier `q`.
+
+#### Scenario: qnb Explorer artwork
+- **WHEN** VS Code resolves a `.qnb` file and the active file-icon theme permits contributed language icons
+- **THEN** Explorer and editor file labels are eligible to display the supplied qnb PNG rather than a generic file icon
+
+#### Scenario: qnb opens as a notebook
+- **WHEN** the user opens a blank or valid `.qnb` after the file association is installed
+- **THEN** the `vscode-kdb-q-notebook` serializer/controller owns the document and its code cells are q, not `qnb`, Python, or plaintext
+
+#### Scenario: Existing q artwork remains available
+- **WHEN** the installed extension version contains the q and qnb icon contributions and the active file-icon theme permits contributed language icons
+- **THEN** `.q` remains associated with language `q` and q artwork while `.qnb` uses its distinct qnb artwork
+
+#### Scenario: Theme and unrelated-file precedence
+- **WHEN** a selected file-icon theme supplies or suppresses its own icon, or VS Code resolves `.k`, `.ipynb`, Python, Markdown, or another unrelated file
+- **THEN** the extension does not override that theme and does not change the unrelated file's language, notebook, or icon association
 
 ### Requirement: qnb reuses the complete direct-q notebook result contract
 Executing q in `.qnb` SHALL use the same execution, output conversion, durable MIME v2 identity, renderer, result actions, stale-response protection, and cancellation contracts as a direct-q cell in `.ipynb`.

@@ -24,14 +24,19 @@ import {
 } from 'vscode-languageserver/node';
 
 import { Q_CATALOG, qCatalogEntry } from './catalog';
+import {
+  Q_SEMANTIC_TOKEN_MODIFIERS,
+  Q_SEMANTIC_TOKEN_TYPES,
+  QSemanticRole,
+  QSemanticTokenModifier,
+  QSemanticTokenType,
+  qCatalogSemanticRole,
+} from './highlighting';
 import { LBracket, LCurly, LParen, RBracket, RCurly, RParen } from './parser/tokens';
 import { CommentBegin, CommentEnd } from './parser/ranges';
-import { QBinding, QSource, tokenRange } from './q-source';
+import { QBinding, QSource, qSqlContext, tokenRange } from './q-source';
 
-export const Q_SEMANTIC_TOKEN_TYPES = Object.freeze([
-  'variable', 'function', 'parameter', 'keyword',
-]);
-export const Q_SEMANTIC_TOKEN_MODIFIERS = Object.freeze(['declaration', 'readonly']);
+export { Q_SEMANTIC_TOKEN_MODIFIERS, Q_SEMANTIC_TOKEN_TYPES } from './highlighting';
 
 export function qCompletions(
   source: QSource,
@@ -318,18 +323,42 @@ export function qSemanticTokens(source: QSource): SemanticTokens {
   const data: number[] = [];
   let previousLine = 0;
   let previousCharacter = 0;
-  const entries = [
-    ...source.bindings.filter(binding => !binding.qsql).map(binding => ({
-      range: binding.range,
-      type: binding.parameter ? 2 : binding.callable ? 1 : 0,
-      modifiers: binding.declaration ? 1 : 0,
-    })),
-    ...source.tokens.filter(token => qCatalogEntry(token.image) !== undefined).map(token => ({
-      range: tokenRange(token),
-      type: 3,
-      modifiers: 2,
-    })),
-  ].sort((left, right) => left.range.start.line - right.range.start.line ||
+  const bindingRoles = qBindingSemanticRoles(source.bindings);
+  const entriesByRange = new Map<string, {
+    range: Range;
+    type: number;
+    modifiers: number;
+  }>();
+  const addEntry = (range: Range, role: QSemanticRole) => {
+    const type = Q_SEMANTIC_TOKEN_TYPES.indexOf(role.type);
+    if (type < 0 || range.start.line !== range.end.line) return;
+    const key = `${range.start.line}:${range.start.character}:${range.end.character}`;
+    entriesByRange.set(key, { range, type, modifiers: semanticModifierMask(role.modifiers) });
+  };
+
+  for (const binding of source.bindings) {
+    if (binding.qsql) {
+      addEntry(binding.range, { type: 'property', modifiers: [] });
+      continue;
+    }
+    const role = bindingRoles.get(qBindingKey(binding));
+    if (!role) continue;
+    const modifiers: QSemanticTokenModifier[] = [];
+    if (binding.declaration) modifiers.push('declaration');
+    modifiers.push(binding.local ? 'local' : 'global');
+    addEntry(binding.range, { type: role, modifiers });
+  }
+
+  for (let index = 0; index < source.tokens.length; index++) {
+    const token = source.tokens[index];
+    const entry = qCatalogEntry(token.image);
+    if (!entry) continue;
+    const role = qCatalogSemanticRole(entry.category, entry.spelling, qSqlContext(token, source.tokens, index));
+    if (role) addEntry(tokenRange(token), role);
+  }
+
+  const entries = [...entriesByRange.values()].sort((left, right) =>
+    left.range.start.line - right.range.start.line ||
     left.range.start.character - right.range.start.character);
   for (const entry of entries) {
     const line = entry.range.start.line;
@@ -346,6 +375,41 @@ export function qSemanticTokens(source: QSource): SemanticTokens {
     previousCharacter = character;
   }
   return { data };
+}
+
+function qBindingSemanticRoles(bindings: readonly QBinding[]): ReadonlyMap<string, QSemanticTokenType> {
+  const facts = new Map<string, { parameter: boolean; callable: boolean; value: boolean }>();
+  for (const binding of bindings) {
+    if (binding.qsql) continue;
+    const key = qBindingKey(binding);
+    const fact = facts.get(key) ?? { parameter: false, callable: false, value: false };
+    if (binding.parameter) fact.parameter = true;
+    if (binding.declaration && !binding.parameter) {
+      if (binding.callable) fact.callable = true;
+      else fact.value = true;
+    }
+    facts.set(key, fact);
+  }
+  const roles = new Map<string, QSemanticTokenType>();
+  for (const [key, fact] of facts) {
+    if (fact.parameter) roles.set(key, 'parameter');
+    else if (fact.callable && !fact.value) roles.set(key, 'function');
+    else if (fact.callable || fact.value) roles.set(key, 'variable');
+  }
+  return roles;
+}
+
+function qBindingKey(binding: QBinding): string {
+  return `${binding.local ? binding.scopeOffset : 'global'}\u0000${binding.name}`;
+}
+
+function semanticModifierMask(modifiers: readonly QSemanticTokenModifier[]): number {
+  let mask = 0;
+  for (const modifier of modifiers) {
+    const index = Q_SEMANTIC_TOKEN_MODIFIERS.indexOf(modifier);
+    if (index >= 0) mask |= 1 << index;
+  }
+  return mask;
 }
 
 export function qFoldingRanges(source: QSource): readonly FoldingRange[] {

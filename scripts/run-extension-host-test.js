@@ -30,6 +30,7 @@ const VSCODE_LIBRARY_PATH = process.env.VSCODE_KDB_E2E_LIBS ||
     fs.statSync(DEFAULT_LIBRARY_PATH, { throwIfNoEntry: false })?.isDirectory()
     ? DEFAULT_LIBRARY_PATH
     : undefined);
+const EXISTING_DISPLAY = process.env.VSCODE_KDB_E2E_DISPLAY?.trim();
 const TEST_TIMEOUT_MS = Number(process.env.VSCODE_KDB_E2E_TIMEOUT_MS || 150_000);
 
 let xvfbProcess;
@@ -215,7 +216,7 @@ function runVsCode(display, remoteDebuggingPort, controlDir, phase) {
 
 async function main() {
   assertFile(VSCODE_PATH, 'VS Code runtime');
-  assertFile('/usr/bin/Xvfb', 'Xvfb');
+  if (!EXISTING_DISPLAY) assertFile('/usr/bin/Xvfb', 'Xvfb');
   assertFile(EXTENSION_TESTS_PATH, 'Extension Host test module');
   if (VSCODE_LIBRARY_PATH &&
       !fs.statSync(VSCODE_LIBRARY_PATH, { throwIfNoEntry: false })?.isDirectory()) {
@@ -226,7 +227,7 @@ async function main() {
   const controlDir = path.join(e2eRoot, 'control');
   fs.mkdirSync(controlDir, { recursive: true });
   console.log(`Extension Host runtime: ${VSCODE_PATH}`);
-  const { display } = await startXvfb();
+  const display = EXISTING_DISPLAY || (await startXvfb()).display;
   console.log(`Extension Host display: ${display}`);
   const savePort = await availablePort();
   await runVsCode(display, savePort, controlDir, 'save');
