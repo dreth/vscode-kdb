@@ -2,7 +2,7 @@
 
 - [x] 1.1 Extend the deterministic notebook harness with controller-affinity, native notebook execution, active-cell edit focus, and bounded apply-edit retry observations; verify the new fixtures distinguish `.qnb` controller output from mixed `.ipynb` structural output.
 - [x] 1.2 Add deterministic tests for defensive `.qnb` command dispatch, hidden mixed-route controls, exact single query issue, native inline MIME v2 output, mixed text-focused same-result retry, ambiguous commit verification, stale/foreign/canceled branches, focus restoration, and conditional move/insert; verify the focused notebook controller/integration test groups pass.
-- [ ] 1.3 Add real Extension Host coverage that executes and save/reopens an actual `.qnb` through normal notebook execution with the Jupyter opt-in disabled, plus a text-focused mixed `.ipynb` run; verify one q request per gesture, inline output identity, no `.qnb` structural cell replacement, preserved source/siblings/controller, and successful persisted output.
+- [x] 1.3 Add real Extension Host coverage that executes and save/reopens an actual `.qnb` through normal notebook execution with the Jupyter opt-in disabled, plus a text-focused mixed `.ipynb` run; verify one q request per gesture, inline output identity, no `.qnb` structural cell replacement, preserved source/siblings/controller, and successful persisted output.
 
 ## 2. Notebook Route Ownership
 
@@ -23,6 +23,6 @@
 ## 5. Verification
 
 - [x] 5.1 Run the focused deterministic notebook tests, TypeScript compilation, and `npm test`; verify all relevant test groups pass without weakening existing Results, notebook persistence, q-list grid, or chart-resampling assertions.
-- [ ] 5.2 Run the real Extension Host notebook suite (and notebook visual/cross-contract gates if touched), then run `openspec validate fix-notebook-q-execution --type change --strict`; record any environment-only blocker without marking its task complete.
+- [x] 5.2 Run the real Extension Host notebook suite (and notebook visual/cross-contract gates if touched), then run `openspec validate fix-notebook-q-execution --type change --strict`; record any environment-only blocker without marking its task complete.
 
-Verification blocker (2026-08-27): `npm run test:extension-host` compiled successfully but could not start because the pinned Linux VS Code runtime and `/usr/bin/Xvfb` are not installed in this environment. Strict OpenSpec validation passed.
+Verification completed (2026-08-31): `npm run test:extension-host` passed against the pinned Linux VS Code 1.130.0 runtime on the available display, including native `.qnb` execution/save/reopen, text-focused mixed `.ipynb` execution, and embedded renderer acceptance. `npm run test:notebook-cross` and strict OpenSpec change validation also passed. The standalone screenshot harness was not applicable because this change did not modify the renderer or its visual test surface.
