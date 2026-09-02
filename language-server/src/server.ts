@@ -156,7 +156,11 @@ class QLanguageServer {
     this.connection.onPrepareRename(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return null;
-      return qPrepareRename(source, params.position);
+      return qPrepareRename(
+        source,
+        params.position,
+        await this.relatedSources(source, token.isCancellationRequested)
+      );
     });
     this.connection.onRenameRequest(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
@@ -257,7 +261,7 @@ class QLanguageServer {
           ? { workspaceFolders: { supported: true, changeNotifications: true } }
           : undefined,
       },
-      serverInfo: { name: 'KX q Language Server', version: '0.2.28' },
+      serverInfo: { name: 'KX q Language Server', version: '0.2.29' },
     };
   }
 

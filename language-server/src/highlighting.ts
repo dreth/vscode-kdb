@@ -55,6 +55,11 @@ export const Q_TEXTMATE_SCOPES = Object.freeze({
   stringEnd: 'punctuation.definition.string.end.q',
   stringEscape: 'constant.character.escape.q',
   notebookMagic: 'meta.preprocessor.notebook.magic.q',
+  semanticVariable: 'variable.other.q',
+  semanticFunction: 'entity.name.function.q',
+  semanticParameter: 'variable.parameter.q',
+  semanticProperty: 'variable.other.property.q',
+  semanticKeyword: 'keyword.other.query.q',
 });
 
 export const Q_TEXTMATE_LITERAL_ROLES: readonly QTextMateTokenRole[] = Object.freeze([
@@ -112,6 +117,14 @@ export const Q_SEMANTIC_TOKEN_TYPES = Object.freeze([
 export const Q_SEMANTIC_TOKEN_MODIFIERS = Object.freeze([
   'declaration', 'readonly', 'defaultLibrary', 'local', 'global',
 ] as const);
+
+export const Q_SEMANTIC_TOKEN_SCOPES = Object.freeze({
+  variable: Object.freeze([Q_TEXTMATE_SCOPES.semanticVariable]),
+  function: Object.freeze([Q_TEXTMATE_SCOPES.semanticFunction]),
+  parameter: Object.freeze([Q_TEXTMATE_SCOPES.semanticParameter]),
+  property: Object.freeze([Q_TEXTMATE_SCOPES.semanticProperty]),
+  keyword: Object.freeze([Q_TEXTMATE_SCOPES.semanticKeyword]),
+});
 
 export type QSemanticTokenType = typeof Q_SEMANTIC_TOKEN_TYPES[number];
 export type QSemanticTokenModifier = typeof Q_SEMANTIC_TOKEN_MODIFIERS[number];

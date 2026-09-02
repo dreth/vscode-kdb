@@ -32,11 +32,16 @@ import {
   QSemanticTokenType,
   qCatalogSemanticRole,
 } from './highlighting';
+import { Identifier } from './parser/keywords';
 import { LBracket, LCurly, LParen, RBracket, RCurly, RParen } from './parser/tokens';
 import { CommentBegin, CommentEnd } from './parser/ranges';
 import { QBinding, QSource, qSqlContext, tokenRange } from './q-source';
 
-export { Q_SEMANTIC_TOKEN_MODIFIERS, Q_SEMANTIC_TOKEN_TYPES } from './highlighting';
+export {
+  Q_SEMANTIC_TOKEN_MODIFIERS,
+  Q_SEMANTIC_TOKEN_SCOPES,
+  Q_SEMANTIC_TOKEN_TYPES,
+} from './highlighting';
 
 export function qCompletions(
   source: QSource,
@@ -279,9 +284,15 @@ export function qHighlights(source: QSource, position: Position): readonly Docum
   ));
 }
 
-export function qPrepareRename(source: QSource, position: Position): Range | null {
+export function qPrepareRename(
+  source: QSource,
+  position: Position,
+  sources: readonly QSource[] = [source],
+): Range | null {
   const binding = bindingAt(source, position);
-  return binding && !binding.qsql ? binding.range : null;
+  return binding && !binding.qsql && bindingLocations(source, binding, sources, true).length === 1
+    ? binding.range
+    : null;
 }
 
 export function qRename(
@@ -336,6 +347,12 @@ export function qSemanticTokens(source: QSource): SemanticTokens {
     entriesByRange.set(key, { range, type, modifiers: semanticModifierMask(role.modifiers) });
   };
 
+  for (const token of source.tokens) {
+    if (token.tokenType === Identifier) {
+      addEntry(tokenRange(token), { type: 'variable', modifiers: [] });
+    }
+  }
+
   for (const binding of source.bindings) {
     if (binding.qsql) {
       addEntry(binding.range, { type: 'property', modifiers: [] });
@@ -343,10 +360,7 @@ export function qSemanticTokens(source: QSource): SemanticTokens {
     }
     const role = bindingRoles.get(qBindingKey(binding));
     if (!role) continue;
-    const modifiers: QSemanticTokenModifier[] = [];
-    if (binding.declaration) modifiers.push('declaration');
-    modifiers.push(binding.local ? 'local' : 'global');
-    addEntry(binding.range, { type: role, modifiers });
+    addEntry(binding.range, { type: role, modifiers: [] });
   }
 
   for (let index = 0; index < source.tokens.length; index++) {
@@ -394,7 +408,7 @@ function qBindingSemanticRoles(bindings: readonly QBinding[]): ReadonlyMap<strin
   for (const [key, fact] of facts) {
     if (fact.parameter) roles.set(key, 'parameter');
     else if (fact.callable && !fact.value) roles.set(key, 'function');
-    else if (fact.callable || fact.value) roles.set(key, 'variable');
+    else roles.set(key, 'variable');
   }
   return roles;
 }

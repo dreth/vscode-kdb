@@ -1,6 +1,6 @@
 # q language tooling
 
-KX for VS Code 0.2.28 provides one offline-first q authoring model for `.q` files, q-language Jupyter cells, and every code cell in a `.qnb` notebook. It requires VS Code 1.101 or newer because the bundled language stack targets the Extension Host's Node 22 runtime. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
+KX for VS Code 0.2.29 provides one offline-first q authoring model for `.q` files, q-language Jupyter cells, and every code cell in a `.qnb` notebook. It requires VS Code 1.101 or newer because the bundled language stack targets the Extension Host's Node 22 runtime. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
 
 ## Included features
 
@@ -15,9 +15,11 @@ All offline analysis is local. It does not run q, call a shell, send source to a
 
 Static q analysis deliberately fails closed where q is dynamic. It does not guess general runtime types, undefined names, dynamic `value`/`eval` targets, symbol lookups, process state, or qSQL column identity. Ambiguous definitions are omitted from navigation and rename rather than editing an uncertain target.
 
-Highlighting uses stable, standard roles across `.q`, q-language Jupyter cells, and `.qnb` code cells. A directly assigned lambda and all safely resolved references use the function role; parameters, local and global values, qSQL columns, built-ins, keywords, and documented system names retain their respective roles. An inline lambda nested inside an assignment, such as an `update` expression, does not turn the assignment target into a function. Unresolved identifiers keep their lexical identifier scope instead of being guessed as resolved symbols.
+Highlighting uses stable, standard roles across `.q`, q-language Jupyter cells, and `.qnb` code cells. Every ordinary data identifier uses the exact unmodified semantic `variable` selector at definitions and reads, including local/global and namespace-qualified names, repeated assignments, `::` and augmented writes, destructuring targets, read-before-definition occurrences, and unresolved external names. A directly assigned lambda and its safely resolved references use the function role; parameters, qSQL columns, built-ins, qSQL words, and documented system names retain their respective distinct roles. An inline lambda nested inside an assignment, such as an `update` expression, does not turn the assignment target into a function.
 
-The extension assigns TextMate scopes and semantic-token roles, not foreground colors. Your active VS Code color theme decides how those standard roles look and may intentionally render some categories with the same color. Disabling the language server removes semantic refinement but retains activation-free TextMate highlighting.
+Generic visual classification does not claim that a name was resolved. An unresolved identifier receives the neutral q variable category for consistent display but gains no source hover, definition, references, rename, call hierarchy, connected metadata, inferred callability, or diagnostic fact. Static scope and declaration facts remain available internally for names that can be resolved safely.
+
+The extension assigns TextMate scopes and semantic-token roles, not foreground colors. It contributes q-specific semantic fallbacks so an ordinary `variable` returns to `variable.other.q` when the active theme has no explicit semantic rule. Your VS Code color theme and user customizations still decide the final colors and may intentionally render different roles—such as functions, parameters, and qSQL properties—differently. Disabling the language server removes semantic refinement but retains activation-free TextMate highlighting.
 
 ## Formatting and lint controls
 
