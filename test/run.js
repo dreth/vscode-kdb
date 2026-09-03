@@ -25152,12 +25152,14 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.version, '0.2.29');
   assert.strictEqual(
     manifest.scripts.package,
-    'npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix'
+    'npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies ' +
+      '--out vscode-kdb-0.2.29.vsix && npm run audit:vsix-confidentiality'
   );
   assert.strictEqual(manifest.scripts['package:vsix'], manifest.scripts.package);
   assert.strictEqual(
     manifest.scripts['vscode:prepublish'],
-    'npm run audit:repository-confidentiality && npm run compile'
+    'npm run audit:repository-confidentiality && npm run compile && ' +
+      'npm run audit:compiled-confidentiality'
   );
   assert.strictEqual(
     manifest.scripts['compile:extension'],

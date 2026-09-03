@@ -5,6 +5,7 @@ const { execFileSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const JSZip = require('jszip');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const {
@@ -20,6 +21,11 @@ const {
   matchingPolicyCategories,
   verifyRefCoverage,
 } = require(path.join(ROOT, 'scripts', 'audit-repository-confidentiality'));
+const {
+  auditGeneratedBytes,
+  auditVsixBytes,
+  isGeneratedBundle,
+} = require(path.join(ROOT, 'scripts', 'audit-vsix-confidentiality'));
 const { HIGHLIGHTING_FIXTURE } = require(path.join(ROOT, 'test', 'language', 'fixtures'));
 
 const canary = 'reviewguardian';
@@ -138,4 +144,57 @@ assert.deepStrictEqual(
   formatAuditFailure('working tree', trackedReport)
 );
 
-console.log('repository confidentiality hygiene passed');
+async function verifyPackagedArtifactAudit() {
+  const packagedCanaryPolicy = Object.freeze([{
+    category: 'private-identifier',
+    mode: 'normalized-sequence',
+    length: canary.length,
+    sha256: digestNormalized(canary),
+  }]);
+
+  assert.strictEqual(isGeneratedBundle('extension/out/extension.js'), true);
+  assert.strictEqual(isGeneratedBundle('extension/renderer/view.js'), true);
+  assert.strictEqual(isGeneratedBundle('extension/readme.md'), false);
+  assert.strictEqual(
+    auditGeneratedBytes(Buffer.from('Review Guardian'), packagedCanaryPolicy).total,
+    0
+  );
+  assert.strictEqual(
+    auditGeneratedBytes(Buffer.from(canary), packagedCanaryPolicy).total,
+    1
+  );
+
+  const generatedSeparated = new JSZip();
+  generatedSeparated.file('extension/out/extension.js', 'Review Guardian');
+  assert.strictEqual(
+    (await auditVsixBytes(await generatedSeparated.generateAsync({ type: 'nodebuffer' }),
+      packagedCanaryPolicy)).total,
+    0,
+    'generated bundles should avoid normalized numeric false positives across syntax boundaries'
+  );
+
+  const generatedExact = new JSZip();
+  generatedExact.file('extension/out/extension.js', canary);
+  assert.strictEqual(
+    (await auditVsixBytes(await generatedExact.generateAsync({ type: 'nodebuffer' }),
+      packagedCanaryPolicy)).total,
+    1,
+    'generated bundles must still reject exact protected values'
+  );
+
+  const packagedSource = new JSZip();
+  packagedSource.file('extension/readme.md', 'Review Guardian');
+  assert.strictEqual(
+    (await auditVsixBytes(await packagedSource.generateAsync({ type: 'nodebuffer' }),
+      packagedCanaryPolicy)).total,
+    1,
+    'non-generated package content must retain normalized matching'
+  );
+}
+
+verifyPackagedArtifactAudit().then(() => {
+  console.log('repository confidentiality hygiene passed');
+}).catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});
