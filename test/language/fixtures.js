@@ -22,6 +22,44 @@ const LEXICAL_FIXTURE = [
   '\\',
 ].join('\n');
 
+const HIGHLIGHTING_FIXTURE = [
+  '///// Syntax coverage',
+  '/ Verify stable roles for synthetic q names and qSQL columns.',
+  '.demo.batch_sizes:2 4 8;',
+  '.demo.running_sizes:sums .demo.batch_sizes;',
+  '.demo.weights:1 2 3f;',
+  '.demo.window:"2000.01.01 2000.01.02";',
+  '.demo.item_id:7;',
+  '.demo.rows:.service.fetch["select item, quantity, price from sample";`archive]; / synthetic records',
+  '.demo.summary:select total:sum abs quantity, row_count:count i by item from .demo.rows;',
+  '.demo.summary:update changes:{deltas x} each total from .demo.summary;',
+  '.demo.summary:update score:{x wavg .demo.weights} each changes from .demo.summary;',
+  '.demo.transform:{[arg] local:arg+1;local};',
+  '.demo.answer:.demo.transform[2];',
+  '.demo.system_fn:.Q.en;',
+  'unresolvedThing',
+].join('\n');
+
+const SEMANTIC_SELECTOR_FIXTURE = [
+  'future;',
+  'future:1;',
+  'future+:2;',
+  'globalValue:1;',
+  'globalValue::2;',
+  '.ns.value:globalValue;',
+  '.ns.value:.ns.value+1;',
+  '(left;right):1 2;',
+  'fn:{[arg]',
+  '  localValue:arg;',
+  '  localValue+:1;',
+  '  localValue};',
+  'fn[2];',
+  'mixed:{x};mixed:42;mixed;',
+  'summary:select alias:price by sym from trade where amount>0;',
+  '.external.query["x"];',
+  'inlineTarget:update hit:{deltas x} each count from trade;',
+].join('\n');
+
 const NEGATIVE_FIXTURES = Object.freeze([
   { name: 'invalid escape', source: 'x:"bad \\q"', code: 'q.invalid-escape' },
   { name: 'unterminated string', source: 'x:"bad', code: 'q.unterminated-string' },
@@ -90,7 +128,9 @@ const FORMAT_FIXTURES = Object.freeze([
 
 module.exports = {
   FORMAT_FIXTURES,
+  HIGHLIGHTING_FIXTURE,
   LEXICAL_BOUNDARY_CASES,
   LEXICAL_FIXTURE,
   NEGATIVE_FIXTURES,
+  SEMANTIC_SELECTOR_FIXTURE,
 };

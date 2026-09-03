@@ -4,6 +4,8 @@ const assert = require('assert');
 const { fork } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const oniguruma = require('vscode-oniguruma');
+const textmate = require('vscode-textmate');
 const {
   createMessageConnection,
   IPCMessageReader,
@@ -14,12 +16,14 @@ const ROOT = path.resolve(__dirname, '..', '..');
 const q = require(path.join(ROOT, 'out', 'q-language-testing.js'));
 const {
   FORMAT_FIXTURES,
+  HIGHLIGHTING_FIXTURE,
   LEXICAL_BOUNDARY_CASES,
   LEXICAL_FIXTURE,
   NEGATIVE_FIXTURES,
+  SEMANTIC_SELECTOR_FIXTURE,
 } = require('./fixtures');
 
-function languageCoreTests() {
+async function languageCoreTests() {
   assert.deepStrictEqual(q.validateQCatalog(), []);
   assert(q.Q_CATALOG.length > 100, 'static q catalog should cover the common authoring surface');
   assert.deepStrictEqual(q.validateQCatalog([...q.Q_CATALOG, q.Q_CATALOG[0]]), [
@@ -43,6 +47,12 @@ function languageCoreTests() {
   ]) {
     assert(generatedGrammar.includes(scope), `grammar should include ${scope}`);
   }
+  assert.deepStrictEqual(
+    require(path.join(ROOT, 'package.json')).contributes.semanticTokenScopes,
+    [{ language: 'q', scopes: q.Q_SEMANTIC_TOKEN_SCOPES }],
+    'the extension manifest must contribute the shared q semantic-to-TextMate fallback map'
+  );
+  await textMateScopeTests(generatedGrammar);
   const languageConfiguration = JSON.parse(
     fs.readFileSync(path.join(ROOT, 'language-configuration.json'), 'utf8')
   );
@@ -88,6 +98,7 @@ function languageCoreTests() {
   );
   assert(signature && signature.activeParameter === 2);
   providerTests();
+  semanticHighlightingTests();
 
   const invalidSettings = q.normalizeQLanguageSettings({
     diagnostics: { debounceMs: -1, maxProblems: 0 },
@@ -124,6 +135,210 @@ function languageCoreTests() {
   diagnosticTests();
 
   runtimeMetadataTests();
+}
+
+async function textMateScopeTests(generatedGrammar) {
+  const wasm = fs.readFileSync(require.resolve('vscode-oniguruma/release/onig.wasm'));
+  await oniguruma.loadWASM(wasm.buffer.slice(wasm.byteOffset, wasm.byteOffset + wasm.byteLength));
+  const registry = new textmate.Registry({
+    onigLib: Promise.resolve({
+      createOnigScanner: patterns => new oniguruma.OnigScanner(patterns),
+      createOnigString: value => new oniguruma.OnigString(value),
+    }),
+    loadGrammar: async scopeName => scopeName === 'source.q'
+      ? textmate.parseRawGrammar(generatedGrammar, 'q.tmLanguage.json')
+      : null,
+  });
+  const grammar = await registry.loadGrammar('source.q');
+  assert(grammar, 'generated q TextMate grammar should load without extension activation');
+
+  const canonical = '.r.value:19.5 / trailing';
+  const canonicalTokens = grammar.tokenizeLine(canonical, null).tokens.map(token => ({
+    text: canonical.slice(token.startIndex, token.endIndex),
+    start: token.startIndex,
+    end: token.endIndex,
+    scope: token.scopes[token.scopes.length - 1],
+  }));
+  assert.deepStrictEqual(canonicalTokens, [
+    { text: '.r.value', start: 0, end: 8, scope: 'variable.other.q' },
+    { text: ':', start: 8, end: 9, scope: 'keyword.operator.assignment.q' },
+    { text: '19.5', start: 9, end: 13, scope: 'constant.numeric.q' },
+    { text: ' ', start: 13, end: 14, scope: 'source.q' },
+    { text: '/ trailing', start: 14, end: 24, scope: 'comment.line.slash.q' },
+  ]);
+
+  const records = tokenizeTextMate(grammar, HIGHLIGHTING_FIXTURE);
+  assertTextMateScope(records, '.demo.summary', 'variable.other.q');
+  assertTextMateScope(records, '2000.01.01 2000.01.02', 'string.quoted.double.q', true);
+  assertTextMateScope(records, '`archive', 'constant.other.symbol.q');
+  assertTextMateScope(records, 'select', 'keyword.other.query.q');
+  assertTextMateScope(records, 'sums', 'support.function.builtin.q');
+  assertTextMateScope(records, '.Q.en', 'support.function.system.q');
+  assertTextMateScope(records, '/ synthetic records', 'comment.line.slash.q');
+}
+
+function tokenizeTextMate(grammar, source) {
+  const records = [];
+  let ruleStack = null;
+  for (const [line, text] of source.split('\n').entries()) {
+    const result = grammar.tokenizeLine(text, ruleStack);
+    ruleStack = result.ruleStack;
+    for (const token of result.tokens) {
+      records.push({
+        line,
+        text: text.slice(token.startIndex, token.endIndex),
+        start: token.startIndex,
+        end: token.endIndex,
+        scopes: token.scopes,
+      });
+    }
+  }
+  return records;
+}
+
+function assertTextMateScope(records, text, expectedScope, containing = false) {
+  const matches = records.filter(record => containing ? record.text.includes(text) : record.text === text);
+  assert(matches.length > 0, `TextMate fixture should contain ${JSON.stringify(text)}`);
+  assert(matches.every(record => record.scopes.includes(expectedScope)),
+    `${JSON.stringify(text)} should always include ${expectedScope}`);
+}
+
+function semanticHighlightingTests() {
+  const source = q.QSource.create('file:///highlighting.q', 1, HIGHLIGHTING_FIXTURE);
+  const records = decodeSemanticTokens(source.text, q.qSemanticTokens(source));
+  assert(records.length > 0, 'semantic fixture should produce decoded records');
+  for (let index = 1; index < records.length; index++) {
+    const previous = records[index - 1];
+    const current = records[index];
+    assert(current.line > previous.line || current.character >= previous.character + previous.length,
+      'semantic entries must be sorted and non-overlapping');
+  }
+
+  assertSemanticRole(records, '.demo.summary', 'variable');
+  assertSemanticRole(records, '.demo.running_sizes', 'variable');
+  assertSemanticRole(records, '.demo.transform', 'function');
+  assertSemanticRole(records, 'arg', 'parameter');
+  assertSemanticRole(records, 'local', 'variable');
+  assertSemanticRole(records, 'x', 'parameter');
+  assertSemanticRole(records, 'changes', 'property');
+  assertSemanticRole(records, 'row_count', 'property');
+  for (const builtin of ['sums', 'abs', 'count', 'deltas', 'each', 'wavg']) {
+    assertSemanticRole(records, builtin, 'function', ['readonly', 'defaultLibrary']);
+  }
+  for (const keyword of ['select', 'update', 'from', 'by']) {
+    assertSemanticRole(records, keyword, 'keyword', ['readonly', 'defaultLibrary']);
+  }
+  assertSemanticRole(records, '.Q.en', 'function', ['defaultLibrary']);
+  assertSemanticRole(records, 'unresolvedThing', 'variable');
+
+  completeSemanticSelectorTests();
+  callableOwnershipTests();
+}
+
+function completeSemanticSelectorTests() {
+  const source = q.QSource.create('file:///complete-selectors.q', 1, SEMANTIC_SELECTOR_FIXTURE);
+  assert.deepStrictEqual(source.issues, [], 'complete-selector fixture should parse cleanly');
+  const records = decodeSemanticTokens(source.text, q.qSemanticTokens(source));
+  const byRange = new Map(records.map(record => [
+    `${record.line}:${record.character}:${record.length}`,
+    record,
+  ]));
+  const functions = new Set(['fn']);
+  const parameters = new Set(['arg', 'x']);
+  const properties = new Set(['alias', 'price', 'sym', 'amount', 'hit']);
+  for (const token of source.tokens.filter(value => value.tokenType.name === 'Identifier')) {
+    const line = token.startLine - 1;
+    const character = token.startColumn - 1;
+    const record = byRange.get(`${line}:${character}:${token.image.length}`);
+    assert(record, `identifier ${JSON.stringify(token.image)} at ${line}:${character} needs a semantic token`);
+    const expectedType = properties.has(token.image)
+      ? 'property'
+      : parameters.has(token.image)
+        ? 'parameter'
+        : functions.has(token.image)
+          ? 'function'
+          : 'variable';
+    assert.deepStrictEqual(
+      { type: record.type, modifiers: record.modifiers },
+      { type: expectedType, modifiers: [] },
+      `${JSON.stringify(token.image)} at ${line}:${character} must use one complete selector`
+    );
+  }
+  for (const builtin of ['deltas', 'each', 'count']) {
+    assertSemanticRole(records, builtin, 'function', ['readonly', 'defaultLibrary']);
+  }
+  for (const keyword of ['select', 'by', 'from', 'where', 'update']) {
+    assertSemanticRole(records, keyword, 'keyword', ['readonly', 'defaultLibrary']);
+  }
+  assert(records.every(record => record.modifiers.length === 0 ||
+    record.modifiers.join(',') === 'readonly,defaultLibrary'),
+  'only catalog entries may carry foreground-affecting semantic modifiers');
+}
+
+function callableOwnershipTests() {
+  const cases = [
+    { name: 'direct lambda', text: 'f:{x};f', callable: true },
+    { name: 'grouped lambda', text: 'f:({x});f', callable: true },
+    { name: 'applied lambda result', text: 'f:{x} 1;f', callable: false },
+    { name: 'lambda list member', text: 'f:(1;{x});f', callable: false },
+    { name: 'lambda argument', text: 'f:enlist {x};f', callable: false },
+    { name: 'qSQL nested lambda', text: 'f:update hit:{x} each size from trade;f', callable: false },
+  ];
+  for (const fixture of cases) {
+    const source = q.QSource.create(`file:///callable-${fixture.name.replaceAll(' ', '-')}.q`, 1, fixture.text);
+    const occurrences = source.bindings.filter(binding => binding.name === 'f');
+    assert(occurrences.length >= 2, `${fixture.name} should include declaration and reference`);
+    assert(occurrences.every(binding => binding.callable === fixture.callable),
+      `${fixture.name} should have stable callable facts`);
+    const semantic = decodeSemanticTokens(source.text, q.qSemanticTokens(source))
+      .filter(record => record.text === 'f');
+    const expectedType = fixture.callable ? 'function' : 'variable';
+    assert(semantic.every(record => record.type === expectedType && record.modifiers.length === 0),
+      `${fixture.name} should use the exact unmodified semantic type ${expectedType}`);
+  }
+
+  const mixedText = 'f:{x};f:42;f';
+  const mixed = decodeSemanticTokens(
+    mixedText,
+    q.qSemanticTokens(q.QSource.create('file:///mixed-callable.q', 1, mixedText))
+  ).filter(record => record.text === 'f');
+  assert(mixed.length === 3 && mixed.every(record =>
+    record.type === 'variable' && record.modifiers.length === 0),
+    'mixed callable/value assignments should fail closed to one variable role');
+}
+
+function decodeSemanticTokens(source, semantic) {
+  const lines = source.split('\n');
+  const records = [];
+  let line = 0;
+  let character = 0;
+  for (let index = 0; index < semantic.data.length; index += 5) {
+    const deltaLine = semantic.data[index];
+    line += deltaLine;
+    character = deltaLine === 0 ? character + semantic.data[index + 1] : semantic.data[index + 1];
+    const length = semantic.data[index + 2];
+    const type = q.Q_SEMANTIC_TOKEN_TYPES[semantic.data[index + 3]];
+    const modifierMask = semantic.data[index + 4];
+    const modifiers = q.Q_SEMANTIC_TOKEN_MODIFIERS.filter((_, bit) => (modifierMask & (1 << bit)) !== 0);
+    records.push({
+      line,
+      character,
+      length,
+      text: lines[line].slice(character, character + length),
+      type,
+      modifiers,
+    });
+  }
+  return records;
+}
+
+function assertSemanticRole(records, text, expectedType, expectedModifiers = []) {
+  const matches = records.filter(record => record.text === text);
+  assert(matches.length > 0, `semantic fixture should contain ${JSON.stringify(text)}`);
+  assert(matches.every(record => record.type === expectedType),
+    `${JSON.stringify(text)} should always use semantic type ${expectedType}`);
+  assert(matches.every(record => JSON.stringify(record.modifiers) === JSON.stringify(expectedModifiers)),
+    `${JSON.stringify(text)} should always use exactly [${expectedModifiers.join(', ')}] modifiers`);
 }
 
 function lexicalBoundaryTests() {
@@ -199,6 +414,11 @@ function providerTests() {
   const symbols = q.qDocumentSymbols(source);
   const functionSymbol = symbols.find(symbol => symbol.name === 'globalFn');
   assert(functionSymbol && functionSymbol.kind === 12);
+  assert.deepStrictEqual(
+    functionSymbol.range.start,
+    functionSymbol.selectionRange.start,
+    'a callable document symbol range must contain its declaration-name selection'
+  );
   assert(functionSymbol.children.some(symbol => symbol.name === 'arg'));
   assert(functionSymbol.children.some(symbol => symbol.name === 'local'));
   assert(q.qWorkspaceSymbols([source, workspace], 'workspace').some(symbol => symbol.name === 'workspaceFn'));
@@ -222,7 +442,25 @@ function providerTests() {
 
   const hover = q.qHover(source, { line: 0, character: 2 });
   assert(hover && hover.contents.value.includes('Statically resolved'));
-  assert.strictEqual(q.qHover(q.QSource.create('file:///unknown.q', 1, 'runtimeThing'), { line: 0, character: 3 }), null);
+  const unresolved = q.QSource.create('file:///unknown.q', 1, '.external.runtimeThing[1]');
+  const unresolvedPosition = { line: 0, character: 3 };
+  assert.strictEqual(q.qHover(unresolved, unresolvedPosition), null);
+  assert.deepStrictEqual(q.qDefinition(unresolved, unresolvedPosition, [unresolved]), []);
+  assert.deepStrictEqual(q.qReferences(unresolved, unresolvedPosition, [unresolved], true), []);
+  assert.strictEqual(q.qPrepareRename(unresolved, unresolvedPosition), null);
+  assert.deepStrictEqual(q.qPrepareCallHierarchy(unresolved, unresolvedPosition), []);
+  assert.strictEqual(q.qSignatureHelp(unresolved, { line: 0, character: 23 }), null);
+  assert.deepStrictEqual(
+    q.diagnoseQSource(unresolved, q.DEFAULT_Q_LANGUAGE_SETTINGS)
+      .filter(value => /undefined|declared-after-use|call/i.test(String(value.code))),
+    [],
+    'generic unresolved-name styling must not create resolution or callable diagnostics'
+  );
+  assertSemanticRole(
+    decodeSemanticTokens(unresolved.text, q.qSemanticTokens(unresolved)),
+    '.external.runtimeThing',
+    'variable'
+  );
   const nestedSignature = q.qSignatureHelp(
     q.QSource.create('file:///nested-signature.q', 1, 'ssr["a;b";first[1;2];'),
     { line: 0, character: 21 }
@@ -347,6 +585,38 @@ function diagnosticTests() {
   }
   assert.strictEqual(diagnostics.find(value => value.code === 'q.unused-parameter').severity, 4);
   assert.strictEqual(diagnostics.find(value => value.code === 'q.deprecated-datetime').severity, 2);
+
+  const repeatedAssignments = q.QSource.create(
+    'file:///repeated-assignments.q',
+    1,
+    '.pnl.instruments:1;\n' +
+      '.pnl.copy:.pnl.instruments;\n' +
+      '.pnl.instruments:.pnl.instruments+1;\n' +
+      '.pnl.instruments:.pnl.instruments+1;\n' +
+      'f:{local:1;copy:local;local:local+1;local}'
+  );
+  assert.deepStrictEqual(
+    q.diagnoseQSource(repeatedAssignments, q.DEFAULT_Q_LANGUAGE_SETTINGS)
+      .filter(value => value.code === 'q.declared-after-use'),
+    [],
+    'reads after an initial global or local assignment must not become declared-after-use findings'
+  );
+
+  const genuinelyLateRepeatedAssignment = q.QSource.create(
+    'file:///genuinely-late-repeated-assignment.q',
+    1,
+    '.demo.pending;\n.demo.pending:1;\n.demo.pending:2;'
+  );
+  const genuinelyLateDiagnostics = q.diagnoseQSource(
+    genuinelyLateRepeatedAssignment,
+    q.DEFAULT_Q_LANGUAGE_SETTINGS
+  ).filter(value => value.code === 'q.declared-after-use');
+  assert.strictEqual(
+    genuinelyLateDiagnostics.length,
+    1,
+    'one binding first read before multiple writes must produce exactly one declared-after-use finding'
+  );
+  assert.deepStrictEqual(genuinelyLateDiagnostics[0].range.start, { line: 0, character: 0 });
 
   const disabled = q.diagnoseQSource(source, {
     ...q.DEFAULT_Q_LANGUAGE_SETTINGS,
@@ -497,9 +767,17 @@ async function minimalIpcServerStarts() {
       workspaceFolders: null,
     });
     assert.strictEqual(initialized.serverInfo.name, 'KX q Language Server');
-    assert.strictEqual(initialized.serverInfo.version, '0.2.26');
+    assert.strictEqual(initialized.serverInfo.version, '0.2.29');
     assert.strictEqual(initialized.capabilities.textDocumentSync, 2);
     assert(initialized.capabilities.notebookDocumentSync);
+    assert.deepStrictEqual(
+      initialized.capabilities.semanticTokensProvider.legend.tokenTypes,
+      [...q.Q_SEMANTIC_TOKEN_TYPES]
+    );
+    assert.deepStrictEqual(
+      initialized.capabilities.semanticTokensProvider.legend.tokenModifiers,
+      [...q.Q_SEMANTIC_TOKEN_MODIFIERS]
+    );
     const uri = 'file:///ipc-language-smoke.q';
     const source = 'f:{[unused]\n  local:1;\n  til 2};\nanswer:f[2]';
     connection.sendNotification('textDocument/didOpen', {
@@ -572,11 +850,11 @@ async function minimalIpcServerStarts() {
           version: 1,
           cells: [{ kind: 2, document: cellUri }],
         },
-        cellTextDocuments: [{ uri: cellUri, languageId: 'q', version: 1, text: 'til 3' }],
+        cellTextDocuments: [{ uri: cellUri, languageId: 'q', version: 1, text: source }],
       });
       const cellHover = await connection.sendRequest('textDocument/hover', {
         textDocument: { uri: cellUri },
-        position: { line: 0, character: 1 },
+        position: { line: 2, character: 3 },
       });
       assert(cellHover.contents.value.includes('code.kx.com'),
         `${notebookType} q cells should use the standalone q provider model`);
@@ -585,6 +863,11 @@ async function minimalIpcServerStarts() {
         options: { insertSpaces: true, tabSize: 2 },
       });
       assert(Array.isArray(cellFormatting));
+      const cellSemantic = await connection.sendRequest('textDocument/semanticTokens/full', {
+        textDocument: { uri: cellUri },
+      });
+      assert.deepStrictEqual(cellSemantic.data, semantic.data,
+        `${notebookType} q cells should use the standalone semantic-role model`);
       connection.sendNotification('notebookDocument/didClose', {
         notebookDocument: { uri: notebookUri },
         cellTextDocuments: [{ uri: cellUri }],
@@ -612,12 +895,13 @@ async function waitUntil(predicate, timeoutMs = 3_000) {
   assert.fail('timed out waiting for language-server event');
 }
 
-languageCoreTests();
+async function main() {
+  await languageCoreTests();
+  await minimalIpcServerStarts();
+  console.log('language server IPC smoke passed');
+}
 
-minimalIpcServerStarts().then(
-  () => console.log('language server IPC smoke passed'),
-  error => {
-    console.error(error);
-    process.exitCode = 1;
-  }
-);
+main().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

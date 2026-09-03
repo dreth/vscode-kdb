@@ -86,17 +86,19 @@
     "onCommand:vscode-kdb.refreshQLanguageMetadata"
   ],
   "scripts": {
-    "vscode:prepublish": "npm run compile",
+    "vscode:prepublish": "npm run audit:repository-confidentiality && npm run compile",
     "compile": "npm run compile:extension && npm run compile:language && npm run compile:renderer && npm run compile:assets",
     "compile:extension": "tsc -p ./ && esbuild src/extension.ts --bundle --format=cjs --platform=node --target=node22 --external:vscode --outfile=out/extension.js --minify-syntax --minify-whitespace --legal-comments=inline",
     "compile:language": "tsc -p language-server/tsconfig.json --noEmit && esbuild language-server/src/server.ts language-server/src/testing.ts --bundle --format=cjs --platform=node --target=node22 --outdir=out --entry-names=q-language-[name] --minify --legal-comments=inline",
     "compile:renderer": "tsc -p renderer/tsconfig.json --noEmit && esbuild renderer/index.ts --bundle --format=esm --platform=browser --target=es2022 --loader:.css=text --outfile=renderer/kx-notebook-renderer.js --minify --legal-comments=none",
     "compile:assets": "node scripts/copy-webview-assets.js",
     "watch": "tsc -watch -p ./",
-    "test": "npm run test:repository-hygiene && npm run compile && node test/run.js && node test/language/run.js",
+    "test": "npm run test:repository-confidentiality && npm run compile && node test/run.js && node test/language/run.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:language": "npm run compile:language && node test/language/run.js",
-    "test:repository-hygiene": "node test/repository-hygiene/run.js",
+    "audit:repository-confidentiality": "node scripts/audit-repository-confidentiality.js",
+    "test:repository-confidentiality": "node test/repository-hygiene/run.js",
+    "test:repository-hygiene": "npm run test:repository-confidentiality",
     "benchmark:q-language": "npm run compile:language && node scripts/benchmark-q-language.js",
     "generate:q-grammar": "npm run compile:language && node scripts/generate-q-grammar.js",
     "check:q-grammar": "npm run compile:language && node scripts/generate-q-grammar.js --check",
@@ -109,8 +111,8 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run test:repository-hygiene && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix",
-    "package:vsix": "npm run test:repository-hygiene && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix"
+    "package": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix",
+    "package:vsix": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix"
   },
   "dependencies": {
     "chevrotain": "13.2.0",

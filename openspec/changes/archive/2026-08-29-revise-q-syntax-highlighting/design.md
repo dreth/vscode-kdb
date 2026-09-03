@@ -6,7 +6,7 @@ See `proposal.md` for the user-visible problem and `specs/q-language-intelligenc
 
 The same q language ID drives standalone `.q` editors, q-language Jupyter cells, and `.qnb` code cells. TextMate is the activation-free fallback on all three; semantic tokens are a versioned, full-document language-server response layered over it. KX Results, live notebook output, and saved notebook output do not consume either highlighting representation.
 
-The locally installed third-party q package is licensed “All rights reserved.” Its grammar is therefore not an implementation source. The maintained Apache-licensed lexer/parser, the independently authored catalog, official q behavior, and black-box expected categories are the only sources for this work.
+An inspected third-party q package is licensed “All rights reserved.” Its grammar is therefore not an implementation source. The maintained Apache-licensed lexer/parser, the independently authored catalog, official q behavior, and black-box expected categories are the only sources for this work.
 
 ## Goals / Non-Goals
 
@@ -77,7 +77,7 @@ Add explicit development dependencies on the VS Code TextMate tokenizer and its 
 
 Golden fixtures will cover:
 
-- the reported `.r.*` script shape, repeated table assignments, nested inline lambdas, qSQL clauses/columns, and trailing comments;
+- a synthetic dotted-namespace shape, repeated table assignments, nested inline lambdas, qSQL clauses/columns, and trailing comments;
 - direct lambdas and all resolved function references;
 - explicit and implicit parameters, locals, globals, qualified globals, built-ins, system names, literals, and unresolved identifiers;
 - server-disabled lexical fallback and identical source classification for `.q`, q-language `.ipynb`, and `.qnb` cell documents; and
