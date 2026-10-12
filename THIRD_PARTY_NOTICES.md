@@ -127,7 +127,42 @@ with their respective notices:
 `inherits` is distributed under the ISC License, Copyright (c) Isaac Z.
 Schlueter. Its full license is bundled at `node_modules/inherits/LICENSE`.
 
-`pako` is distributed under MIT and zlib terms. Copyright (C) 2014-2017
+`pako` (including the packed-column codec dependency) is distributed under MIT
+and zlib terms. Copyright (C) 2014-2017
 Vitaly Puzrin and Andrei Tuputcyn; its zlib-derived portions retain Copyright
 (C) 1995-2013 Jean-loup Gailly and Mark Adler. The MIT license and zlib notice
-are bundled with the component.
+are reproduced here: the MIT grant and disclaimer above apply with these
+copyright holders. The zlib notice follows.
+
+```text
+(C) 1995-2013 Jean-loup Gailly and Mark Adler
+(C) 2014-2017 Vitaly Puzrin and Andrey Tupitsin
+
+This software is provided 'as-is', without any express or implied
+warranty. In no event will the authors be held liable for any damages
+arising from the use of this software.
+
+Permission is granted to anyone to use this software for any purpose,
+including commercial applications, and to alter it and redistribute it
+freely, subject to the following restrictions:
+
+1. The origin of this software must not be misrepresented; you must not
+  claim that you wrote the original software. If you use this software
+  in a product, an acknowledgment in the product documentation would be
+  appreciated but is not required.
+2. Altered source versions must be plainly marked as such, and must not be
+  misrepresented as being the original software.
+3. This notice may not be removed or altered from any source distribution.
+```
+
+## Sentry JavaScript SDK
+
+Optional, configuration-gated failure reporting uses the Sentry JavaScript SDK (`@sentry/node` 10.76.1 and matching `@sentry/core`) and its bundled runtime dependencies.
+
+- Source: https://github.com/getsentry/sentry-javascript
+- Copyright: Functional Software, Inc. dba Sentry and contributors
+- License: MIT
+
+Full upstream license/notice texts for the SDK and its additional bundled runtime dependencies (including Apache-2.0 OpenTelemetry modules) are distributed in [third-party/sentry-runtime-licenses.txt](third-party/sentry-runtime-licenses.txt). Instrumentation modules are bundled as SDK dependencies but are not initialized by KX reporting.
+
+The reporting transport uses an isolated client with default integrations disabled; no hosted destination is bundled.

@@ -95,6 +95,13 @@ try {
   fs.writeFileSync(path.join(temporary, 'sample.txt'), 'Review-Guardian\n');
   execFileSync('git', ['add', 'sample.txt'], { cwd: temporary });
   assert.strictEqual(auditStagedText(temporary, normalizedCanaryPolicy).total, 1);
+  const nestedRepository = path.join(temporary, 'nested-repository');
+  fs.mkdirSync(nestedRepository);
+  execFileSync('git', ['init', '-q'], { cwd: nestedRepository });
+  assert.doesNotThrow(
+    () => auditTrackedText(temporary, normalizedCanaryPolicy),
+    'untracked nested repositories may be listed as directories and must not be read as files'
+  );
 
   const normalizedDate = '2000-01-01T12:00:00Z';
   execFileSync('git', ['commit', '-qm', 'review guardian'], {

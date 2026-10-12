@@ -519,15 +519,14 @@ def _normalize_chart(
     missing = [name for name in y_columns if name not in columns]
     if missing:
         raise KxNotebookError(f"chart y column {missing[0]!r} is not in the table")
-    supports_group_by = chart_type in {"line", "scatter", "step", "bar"}
     if chart.group_by_column is not None:
-        if not supports_group_by:
-            raise KxNotebookError(
-                f"group_by_column is unavailable for {chart_type} charts"
-            )
         if chart.group_by_column not in columns:
             raise KxNotebookError(
                 f"chart group-by column {chart.group_by_column!r} is not in the table"
+            )
+        if chart.group_by_column == chart.x_column or chart.group_by_column in y_columns:
+            raise KxNotebookError(
+                "chart group-by column must be distinct from x and y columns"
             )
     ohlc_columns = (
         chart.open_column,
@@ -548,6 +547,10 @@ def _normalize_chart(
         if missing_ohlc:
             raise KxNotebookError(
                 f"candlestick column {missing_ohlc[0]!r} is not in the table"
+            )
+        if chart.group_by_column in resolved_ohlc:
+            raise KxNotebookError(
+                "chart group-by column must be distinct from OHLC columns"
             )
     elif any(value is not None for value in ohlc_columns):
         raise KxNotebookError("OHLC columns are available only for candlestick charts")

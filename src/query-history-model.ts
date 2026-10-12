@@ -5,7 +5,7 @@ export const DEFAULT_QUERY_HISTORY_MAX_ENTRIES = 100;
 export const MIN_QUERY_HISTORY_MAX_ENTRIES = 1;
 export const MAX_QUERY_HISTORY_MAX_ENTRIES = 1000;
 
-export type HistoryExecutionKind = 'line' | 'selection' | 'script';
+export type HistoryExecutionKind = 'line' | 'selection' | 'script' | 'notebook';
 export type QueryHistoryStatus = 'succeeded' | 'failed' | 'canceled';
 export type HistoryTransportKind = 'query' | 'script';
 
@@ -35,7 +35,12 @@ export interface QueryHistoryStoreOptions {
   createId?: () => string;
 }
 
-const HISTORY_EXECUTION_KINDS = new Set<HistoryExecutionKind>(['line', 'selection', 'script']);
+const HISTORY_EXECUTION_KINDS = new Set<HistoryExecutionKind>([
+  'line',
+  'selection',
+  'script',
+  'notebook',
+]);
 const QUERY_HISTORY_STATUSES = new Set<QueryHistoryStatus>(['succeeded', 'failed', 'canceled']);
 const MAX_DATE_TIMESTAMP_MS = 8_640_000_000_000_000;
 
@@ -141,7 +146,8 @@ export function historyTransportKind(
 ): HistoryTransportKind {
   const kind = typeof entryOrKind === 'string' ? entryOrKind : entryOrKind.kind;
   const text = typeof entryOrKind === 'string' ? queryText : entryOrKind.queryText;
-  return kind === 'script' || (kind === 'selection' && /[\r\n]/.test(text))
+  return kind === 'script' || kind === 'notebook' ||
+    (kind === 'selection' && /[\r\n]/.test(text))
     ? 'script'
     : 'query';
 }

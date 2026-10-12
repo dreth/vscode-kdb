@@ -593,6 +593,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#numeric-label-formatting" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Numeric label formatting
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -899,6 +910,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#numeric-label-formatting" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Numeric label formatting
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -928,7 +950,7 @@
 <li>line, scatter, step, bar, box, and candlestick;</li>
 <li>an eligible X column;</li>
 <li>one or more eligible Y series;</li>
-<li>Group By only for supported generic types; and</li>
+<li>Group By for every chart family using a distinct scalar column; and</li>
 <li>distinct Open, High, Low, and Close fields for candlestick.</li>
 </ul>
 <p>Column choices are visible and validated. Changing configuration leaves the old rendered chart visible until <strong>Render</strong> is pressed. The chart stays below the table and adds no chart height while hidden.</p>
@@ -962,44 +984,44 @@
 <td>Line</td>
 <td>Numeric or temporal</td>
 <td>One or more numeric Y columns</td>
-<td>Categorical column supported</td>
+<td>Distinct scalar column</td>
 </tr>
 <tr>
 <td>Scatter</td>
 <td>Numeric or temporal</td>
 <td>One or more numeric Y columns</td>
-<td>Categorical column supported</td>
+<td>Distinct scalar column</td>
 </tr>
 <tr>
 <td>Step</td>
 <td>Numeric or temporal</td>
 <td>One or more numeric Y columns</td>
-<td>Categorical column supported</td>
+<td>Distinct scalar column</td>
 </tr>
 <tr>
 <td>Bar</td>
 <td>Numeric or temporal</td>
 <td>One or more numeric Y columns</td>
-<td>Categorical column supported</td>
+<td>Distinct scalar column</td>
 </tr>
 <tr>
 <td>Box</td>
 <td>Numeric or temporal</td>
-<td>One or more numeric Y columns summarized as box statistics</td>
-<td>Not supported</td>
+<td>One or more numeric Y columns summarized independently per group</td>
+<td>Distinct scalar column</td>
 </tr>
 <tr>
 <td>Candlestick</td>
 <td>Numeric or temporal</td>
 <td>Four distinct numeric Open, High, Low, and Close columns</td>
-<td>Not supported</td>
+<td>Distinct scalar column</td>
 </tr>
 </tbody>
 </table>
-<p>Decoded q columns use shared q type metadata before any value sampling. q <code>byte</code>, <code>short</code>, <code>int</code>, <code>long</code>, <code>real</code>, and <code>float</code> are numeric; q <code>timestamp</code>, <code>month</code>, <code>date</code>, <code>datetime</code>, <code>timespan</code>, <code>minute</code>, <code>second</code>, and <code>time</code> are temporal. Every listed temporal type is a valid X choice for every chart family above, but not a numeric Y or OHLC choice. Portable notebook schema uses the same classification, so saved temporal values remain chartable within the rows their payload owns. Unknown/untyped external values use conservative sample inference. Hidden columns do not appear as chart choices.</p>
+<p>Decoded q columns use shared q type metadata before any value sampling. q <code>byte</code>, <code>short</code>, <code>int</code>, <code>long</code>, <code>real</code>, and <code>float</code> are numeric; q <code>timestamp</code>, <code>month</code>, <code>date</code>, <code>datetime</code>, <code>timespan</code>, <code>minute</code>, <code>second</code>, and <code>time</code> are temporal. Every listed temporal type is a valid X choice for every chart family above, but not a numeric Y or OHLC choice. Group By accepts bounded scalar categorical, boolean, GUID, numeric, and temporal atoms, and excludes lists, dictionaries, tables, functions, projections, and other complex values. The grouping column must differ from X, selected Y, and every OHLC role. The selector remains visible with <code>None</code> and is disabled when no distinct candidate remains. Portable notebook schema uses the same classification, so saved temporal and grouping values remain chartable within the rows their payload owns. Unknown/untyped external values use conservative bounded sample inference. Hidden columns do not appear as chart choices, while visible off-screen columns remain candidates despite grid virtualization.</p>
 <h3 id="candlestick-validation">Candlestick validation</h3>
 <p>Candlestick rows require finite numeric OHLC values. The selected columns must be distinct, <code>High</code> must be at least <code>Low</code>, <code>Open</code>, and <code>Close</code>, and <code>Low</code> must be no greater than <code>Open</code> and <code>Close</code>. The chart reports the offending row/x value instead of drawing an invalid envelope.</p>
-<p>Rows at the same x value are aggregated into an OHLC candle. Further reduction uses financial buckets that preserve opening, high, low, and closing meaning.</p>
+<p>Rows at the same x value are aggregated into an OHLC candle. Grouped candles validate and aggregate each retained category independently, render side by side at a shared X value, and expose category legends and textual tooltips. Further reduction uses financial buckets that preserve opening, high, low, and closing meaning.</p>
 <h2 id="interaction-and-reduction">Interaction and reduction</h2>
 <p>The bundled uPlot assets run locally under the VS Code webview content security policy. The chart supports:</p>
 <ul>
@@ -1015,8 +1037,8 @@
 </ul>
 <p>The first full render captures an immutable original X domain and retains the extension-side full source and original sample. Main-plot zoom plus navigator window/edge input feed one settled-viewport coordinator. For an identical absolute X range, every input runs the same unchanged range-loading and resampling decision. A sampled view is retained locally while at least 3,000 sampled points remain visible. Below that low-water mark, the authoritative source range is inspected: at most 7,000 eligible observations are all returned, while a larger range is refilled to exactly 7,000. The decision is based on visible count, not gesture count. Navigator movement and resizing clamp to the immutable full range, stale replies cannot replace a newer range or reset, and Y remains automatic for visible X rather than gaining a second navigator. Identical scale notifications are deduplicated. Programmatic response reconstruction, settings, resize, and hide/show rerenders cannot recursively request another range. The same lifecycle applies to live notebook charts, while saved notebook charts navigate and rebuild only from their immutable stored payload.</p>
 <p>Navigator changes, manual zoom, automatic refinement, resize/rerender, and reduced samples never replace the immutable baseline. <strong>Reset zoom</strong>, Home, or double-click restores the original numeric or temporal domain and sample without backend I/O, invalidates pending requests, returns Y to automatic scaling, and clears selection, tooltip, and settled-range timer/state. Series hidden from the legend remain hidden through these refreshes. The button state uses a small deterministic floating-point tolerance.</p>
-<p>Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step retain sampled gaps for missing/non-finite Y values; other generic types skip them where appropriate.</p>
-<p>Generic series use deterministic min/max-aware reduction, bars keep aligned X clusters, boxes use bounded X buckets, and candlesticks use OHLC-aware aggregation. Every ordinary line/scatter/step sample uses one shared X selection; every selected or generated Y series therefore has exactly one aligned value slot per returned X, including retained null/gap semantics. Ungrouped temporal charts use automatic or fixed-duration buckets anchored to Unix epoch zero. Compatible same-span temporal panning retains that interval and overlapping point identities, then samples newly exposed time slices at the same level. Numeric X uses an equivalent observation-anchored policy. A source/version-aware normalized X index and binary range lookup avoid complete X rescans; compatible pans decode only newly exposed/boundary Y slices plus bounded retained-sample work. Changed configuration/span/source and unsafe grouped cases fall back to a clean authoritative range build. Grouping retains at most 12 categories and 36 generated group/Y series. Status text separately reports eligible rows, rendered visual items, the sampling level/algorithm, and warnings; a reduced group/candle count is not presented as missing eligible source rows.</p>
+<p>Input x values are sorted for charting when required; table order is unchanged and a warning is shown. Invalid x values are dropped. Line and step leave gaps for missing/non-finite Y values, including null rows omitted by sampling and nulls sharing a normalized timestamp with neighbouring observations. Step charts do not hold the last value across these missing stretches. Cached pans preserve gaps introduced by newly exposed data, including after bounded merge thinning. Each series/group keeps its own gaps; structural alignment holes from other groups do not break a continuous series. Genuine zero values remain plotted. Static ungrouped notebook line/step fallbacks also split finite runs at nulls; other generic types skip invalid values where appropriate.</p>
+<p>Generic series use deterministic min/max-aware reduction, bars keep aligned X clusters, boxes use shared bounded X buckets with independent <code>(group, Y, bucket)</code> statistics, and candlesticks use category-independent OHLC aggregation. Missing or complex group values are dropped with a warning rather than merged into a synthetic category. Grouped line/scatter/step charts preserve repeated finite <code>(group, X)</code> observations in stable source-occurrence slots instead of rejecting the whole chart; groups with fewer occurrences receive structural null slots. Every ordinary line/scatter/step sample uses one shared X selection; every selected or generated Y series therefore has exactly one aligned value slot per returned X, including retained null/gap semantics. Ungrouped temporal charts use automatic or fixed-duration buckets anchored to Unix epoch zero. Compatible same-span temporal panning retains that interval and overlapping point identities, then samples newly exposed time slices at the same level. Numeric X uses an equivalent observation-anchored policy. A source/version-aware normalized X index and binary range lookup avoid complete X rescans; compatible pans decode only newly exposed/boundary Y slices plus bounded retained-sample work. Changed configuration/span/source and unsafe grouped cases fall back to a clean authoritative range build. Grouping retains at most 12 categories and 36 generated group/Y series, and grouped family rendering shares one total 7,000-item ceiling rather than applying it once per category. Status text separately reports eligible rows, rendered visual items, retained categories, the sampling level/algorithm, and warnings; a reduced group/candle count is not presented as missing eligible source rows.</p>
 <h2 id="limits-and-settings">Limits and settings</h2>
 <p>The default chart source limit is 2,000,000 rows. Sources above <code>vscode-kdb.results.viewer.chartMaxSourceRows</code> are rejected before scanning. Raising the limit can block the extension host; prefer a q-side limit or the <a href="../local-data-server/">Local Data Server</a> for larger analysis.</p>
 <p>Initial/full and absolute ranged views use one fixed ordinary-series density contract; plot width is not a lower cap:</p>
@@ -1030,6 +1052,8 @@
 <p>The exact KDB SQLTools 0.3.15 release source at commit <code>f7af079</code> rebuilt each refined response as a fresh plot whose natural sampled X-domain became the next zoom frame. The following 0.3.16 lifecycle change at commit <code>4beaa6b</code> added a fixed full-range baseline plus one <code>chartRequestIsRefinement</code> boolean, but did not retain the exact requested range and original full sample as independent state. A refined plot reconstruction could therefore compare its natural sampled domain with the full baseline as though it were a new user zoom, while nested requests and Reset lacked a complete lifecycle baseline.</p>
 <p>This implementation instead tracks the active request ID, exact absolute requested range, immutable original domain, and original full sample separately. That is why a reconstruction notification can be ignored without suppressing a distinct second zoom, and why Reset can reject stale responses and restore locally.</p>
 <p>The built-in chart intentionally does not attempt to embed a full external analytics environment. Use tokenized local data endpoints for Python, pandas, Plotly, or another separately managed toolchain.</p>
+<h2 id="numeric-label-formatting">Numeric label formatting</h2>
+<p><strong>Chart decimals</strong> in quick settings controls chart precision independently of <strong>Table decimals</strong>. <code>vscode-kdb.results.viewer.chartScientificNotationThreshold</code> sets the positive magnitude at which numeric X and Y labels switch to scientific notation (default <code>1000000</code>, inclusive, for either sign). Time-series X labels keep time formatting. Very small nonzero numbers retain the existing scientific display below <code>0.001</code>. Axis space is measured using the label font, including on high-DPI displays. Source-row limits remain available in extension settings.</p>
 
 
 

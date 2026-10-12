@@ -1,4 +1,5 @@
 import * as net from 'net';
+import { newFailureOperationId } from './failure-record';
 import { MAX_TIMEOUT_MS } from './connection';
 import type { KxDiagnosticPhase, KxDiagnosticStatus, KxDiagnostics } from './diagnostics';
 import { ColumnarPanelResult, cellValueToText, createColumnarPanelResult } from './kx-results';
@@ -16,7 +17,6 @@ import {
   qAtom,
   qSpecial,
   qValueToBoundedLiteral,
-  qValueDescription,
   qValueToLiteral,
   qValueToSemanticPrimitive,
   qVector,
@@ -138,7 +138,10 @@ export interface QColumnarPanelResult {
   kind: string;
   rowsMaterialized: boolean;
   exactPersistenceIssue?: string;
-  logicalPresentation?: 'standalone-list';
+  logicalPresentation?: 'standalone-list' | 'standalone-symbol';
+  columnAttributes?: Array<{ ordinal: number; attribute: number }>;
+  /** Exact native table vectors, used only by versioned notebook persistence. */
+  qColumns?: readonly QValue[];
 }
 
 export interface QTextPanelResult {
@@ -147,7 +150,7 @@ export interface QTextPanelResult {
   kind: string;
   rowsMaterialized: boolean;
   exactPersistenceIssue?: string;
-  logicalPresentation?: 'standalone-list';
+  logicalPresentation?: 'standalone-list' | 'standalone-symbol';
 }
 
 export type QPanelResult = QColumnarPanelResult | QTextPanelResult;
@@ -166,6 +169,7 @@ export interface KdbConnectionOptions {
 }
 
 interface PendingQuery {
+  reportingOperationId?: string;
   queryId: number;
   query: string;
   onIssued?: () => void;
@@ -411,6 +415,7 @@ export class KdbIpcClient {
   private pending: PendingQuery | null = null;
   private queue: PendingQuery[] = [];
   private protocolVersion = 0;
+  private reportingConnectionId?: string;
   private intentionalClose = false;
 
   constructor(private readonly options: KdbConnectionOptions) {}
@@ -423,6 +428,7 @@ export class KdbIpcClient {
       return this.connectPromise;
     }
 
+    this.reportingConnectionId = newFailureOperationId();
     const connectStartedMs = Date.now();
     const timeoutMs = this.connectTimeoutMs();
     const timeoutDetails = {
@@ -713,9 +719,11 @@ export class KdbIpcClient {
     }
 
     this.pending = pending;
+    pending.reportingOperationId = newFailureOperationId();
     pending.startedAtMs = Date.now();
     const timeoutMs = this.queryTimeoutMs();
     this.writeDiagnostic('query', 'start', undefined, undefined, false, {
+      operationId: pending.reportingOperationId,
       queryId: pending.queryId,
       queryChars: pending.query.length,
       queryBytes: Buffer.byteLength(pending.query, 'utf8'),
@@ -1014,6 +1022,7 @@ export class KdbIpcClient {
       error,
       false,
       {
+        operationId: pending.reportingOperationId,
         queryId: pending.queryId,
         queryChars: pending.query.length,
         queryBytes: Buffer.byteLength(pending.query, 'utf8'),
@@ -1043,7 +1052,9 @@ export class KdbIpcClient {
         endpoint: this.endpointLabel(),
         status,
         durationMs: startedMs === undefined ? undefined : Date.now() - startedMs,
-        details,
+        details: { transport: 'ipc', connected: !!((this.socket && !this.socket.destroyed) || (this.connectingSocket && !this.connectingSocket.destroyed)),
+          ready: this.protocolVersion > 0, protocolVersion: this.protocolVersion, queueLength: this.queue.length,
+          operationId: this.reportingConnectionId, ...details },
         error,
         includeErrorMessage,
         secrets: [this.options.username || '', this.options.password || ''],
@@ -1350,32 +1361,8 @@ export function qValueToLosslessPortablePanel(
       result: createColumnarPanelResult(['value'], 1, () => value, [value.type]),
       kind: 'scalar',
       rowsMaterialized: false,
+      ...(value.type === 'symbol' ? { logicalPresentation: 'standalone-symbol' as const } : {}),
     };
-  }
-  // The row-oriented portable table contract preserves keyed-table structure
-  // with explicit key-column ordinals. A vector attribute attached to a whole
-  // table column still cannot be reconstructed from row cells, so fail it
-  // explicitly instead of silently flattening that metadata.
-  if (isQKeyedTable(value)) {
-    const columnData = [
-      ...value.keyTable.columnData,
-      ...value.valueTable.columnData,
-    ];
-    const attributedColumn = columnData.findIndex(column =>
-      isQVector(column) && (qVectorAttribute(column) || 0) !== 0
-    );
-    if (attributedColumn >= 0) {
-      const column = columnData[attributedColumn];
-      const detail = qValueDescription(column) ||
-        `q ${qColumnType(column)} vector with an attribute`;
-      return {
-        ...qValueToColumnarPanel(value),
-        exactPersistenceIssue:
-          `Full notebook persistence cannot exactly encode q keyed table column ` +
-          `${attributedColumn + 1} (${JSON.stringify(value.columns[attributedColumn])}; ` +
-          `${detail}). The portable table schema does not support whole-column q attributes.`,
-      };
-    }
   }
   if (isQDict(value)) {
     return {
@@ -1386,23 +1373,6 @@ export function qValueToLosslessPortablePanel(
         `entr${value.entries.length === 1 ? 'y' : 'ies'}]. ` +
         'The portable grid form would lose q dictionary identity.',
     };
-  }
-  if (isQTable(value)) {
-    const attributedColumn = value.columnData.findIndex(column =>
-      isQVector(column) && (qVectorAttribute(column) || 0) !== 0
-    );
-    if (attributedColumn >= 0) {
-      const column = value.columnData[attributedColumn];
-      const detail = qValueDescription(column) ||
-        `q ${qColumnType(column)} vector with an attribute`;
-      return {
-        ...qValueToColumnarPanel(value),
-        exactPersistenceIssue:
-          `Full notebook persistence cannot exactly encode q table column ` +
-          `${attributedColumn + 1} (${JSON.stringify(value.columns[attributedColumn])}; ` +
-          `${detail}). The portable table schema does not support whole-column q attributes.`,
-      };
-    }
   }
   if (Array.isArray(value) && value.length > 0) {
     const plainRows = losslessPlainObjectListColumns(value);
@@ -1468,6 +1438,8 @@ export function qValueToLosslessPortablePanel(
   if (isQTable(value)) {
     return {
       ...panel,
+      ...qTableColumnAttributes(value.columnData),
+      qColumns: value.columnData.slice(0, value.columns.length),
       result: createColumnarPanelResult(
         value.columns,
         qTableRowCount(value),
@@ -1481,6 +1453,14 @@ export function qValueToLosslessPortablePanel(
   if (isQKeyedTable(value)) {
     return {
       ...panel,
+      qColumns: [
+        ...value.keyTable.columnData.slice(0, value.keyTable.columns.length),
+        ...value.valueTable.columnData.slice(0, value.valueTable.columns.length),
+      ],
+      ...qTableColumnAttributes([
+        ...value.keyTable.columnData,
+        ...value.valueTable.columnData,
+      ]),
       result: createColumnarPanelResult(
         value.columns,
         qKeyedTableRowCount(value),
@@ -1529,7 +1509,7 @@ export function qValueToLosslessPortablePanel(
 }
 
 /**
- * Empty and no-value q results have no meaningful rectangular row model.
+ * Standalone numeric/symbol atoms and empty/no-value results prefer qText.
  * Keep actual q tables (including typed zero-row tables) in the grid path.
  */
 export function qValuePrefersQText(value: QValue): boolean {
@@ -1540,7 +1520,7 @@ export function qValuePrefersQText(value: QValue): boolean {
     return true;
   }
   if (isQAtom(value)) {
-    return Q_STANDALONE_NUMERIC_ATOM_TYPES.has(value.type) ||
+    return value.type === 'symbol' || Q_STANDALONE_NUMERIC_ATOM_TYPES.has(value.type) ||
       qValueToSemanticPrimitive(value) === null;
   }
   if (isQVector(value)) {
@@ -2537,6 +2517,19 @@ function qKeyedTableToColumnarPanel(table: QKeyedTable): ColumnarPanelResult {
 
 function sourceColumnOrdinals(columnCount: number): number[] {
   return Array.from({ length: columnCount }, (_value, index) => index);
+}
+
+function qTableColumnAttributes(
+  columns: readonly QValue[]
+): { columnAttributes?: Array<{ ordinal: number; attribute: number }> } {
+  const columnAttributes: Array<{ ordinal: number; attribute: number }> = [];
+  columns.forEach((column, ordinal) => {
+    const attribute = qVectorAttribute(column) || 0;
+    if (attribute !== 0) {
+      columnAttributes.push({ ordinal, attribute });
+    }
+  });
+  return columnAttributes.length === 0 ? {} : { columnAttributes };
 }
 
 function qColumnType(value: QValue): string {

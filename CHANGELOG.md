@@ -1,6 +1,88 @@
 # Changelog
 
+## 0.2.44 - 2026-10-08
+
+- Added automatic opt-in KX-owned failure diagnostics with structured operation history, safe host/runtime/resource/settings summaries, sanitized causes and reproducible packaged-build identity. Reporting destinations remain empty by default; VS Code 1.101 remains the minimum.
+- Added `vscode-kdb.diagnostics.failSilently`, enabled by default. Reporter outages produce no local status notices or UI notifications. A failed destination drops pending reports and waits one hour before a new failure can trigger another delivery attempt; there are no background probes, timed retries or event replay. Reporting connection failures never become reported incidents.
+
+## 0.2.43 - 2026-10-02
+
+- Fixed line/step charts connecting across nulls that share normalized timestamps with neighbouring observations. Missing values now preserve a break per series/group, including omitted sampled rows and coincident chart pixels.
+- Fixed cached temporal pans dropping gap metadata from newly exposed data when the retained overlap had no gaps. Breaks also survive bounded merge thinning.
+- Static notebook line/step fallback charts now split at null/non-finite/empty values and use shared q scalar conversion. Real zero values remain plotted; finite sampling, grouping and saved data stay unchanged.
+
+## 0.2.42 - 2026-10-02
+
+- Remove the one-million-cell cutoff for native notebook tables: small, empty, 60k and 600k results now use the same complete lossless packed columns. This fixes smaller nested-vector results producing larger files than bigger queries.
+- Preserve exact q values, attributes, keyed-table structure, scalar/list presentation, saved-format compatibility and existing live/saved actions. Existing output keeps its format until rerun.
+
 All notable changes to KX for VS Code are documented here.
+
+## Unreleased
+
+
+## 0.2.41 - 2026-10-02
+
+- Fixed standalone symbol atoms such as `` `hola `` appearing as one-cell tables. They now default to type-preserving qText in Results and new live/saved notebook output, independently of list display settings. Symbol vectors still follow their selected Grid/qText strategy, and table/dictionary/list symbol cells retain their structured display and analyst exports.
+- Preserved exact standalone symbol identity with strict full-v2 presentation metadata, including escaped and null symbols; saved text export authorizes the original output before deriving qText. Existing unmarked outputs keep their previous layout until rerun. New marked symbol output requires this version or later; previous v1/v2/v3/v4 files remain readable.
+
+## 0.2.40 - 2026-10-01
+
+- Reduced complete large-table notebook storage using strict v4 packed columns: exact constants, reversible numeric binary encoding and compressed homogeneous nested vectors retain every scalar, vector boundary, q type, attribute, key and durable identity. Existing v1/v2/v3 output remains readable; ordinary output stays v2. New v4 rich output requires this version or later.
+- Verified the actual 600,000 × 14 Dev Container notebook shrank from 279 MiB to 20.1 MiB with all 20,340,848 scalar values exact, unchanged MIME bytes after save/reopen, no q execution and no changes to the user file. Isolated converted-file serialization took 0.22 seconds. Existing output is not automatically migrated on open/save; rerun writes the new format.
+- Preserved live/saved scrolling, copy/export, charts, Results handoff and zero/positive retention and ownership behavior; strict packed-byte validation rejects malformed or changed data.
+
+## 0.2.39 - 2026-10-01
+
+- Fixed complete notebook encoding for large native q tables and keyed tables using strict v3 column vectors above one million cells, removing repeated per-cell wrappers that could exceed Node’s single-string limit. Every value, q type, vector attribute, structural key, and durable output identity is retained; ordinary output stays on v2 and existing v1/v2 files remain readable. New v3 output needs this version or later for rich rendering.
+- Adapted saved grids, static fallbacks, exports, charts, KX Results handoff, and ownership validation to read exact columns lazily, preserving scroll behavior and zero/positive live-retention policies without passive q reruns. Runtime serialization exhaustion now reports a bounded resource error.
+- Verified every cell in a 600,000 × 14 save/reopen fixture under a 1 GiB JavaScript heap limit, plus the actual query’s full-column identity and byte-identical temporary file round trip in the running Dev Container.
+
+## 0.2.38 - 2026-10-01
+
+- Fixed repeated whole-result JSON parsing on notebook scroll, sizing, ownership reconciliation, and result-menu checks. A bounded byte-validation proof cache preserves exact output and current metadata/session checks without retaining another typed-result tree. This removes the allocation loop that could stall autosave and exhaust the remote extension host.
+- Verified 120 live-slice requests during an actual 60,000-row, 14-column Dev Container save: every request succeeded, the 77 MiB file finished writing, and unchanged output required no further full parses.
+
+## 0.2.37 - 2026-10-01
+
+- Reduced notebook memory pressure by emitting compact Direct IPC MIME JSON and saving `.qnb` JSON output without rebuilding its complete typed-result object tree. Reopening avoids a redundant copy of parsed output. Exact values, legacy indented files, metadata privacy, and structural validation remain supported.
+- Added content-free `.qnb` serialization byte/timing events in **Output > KX** and a 60,000-row, 14-column save/reopen regression under a 384 MiB JavaScript heap limit.
+
+## 0.2.36 - 2026-10-01
+
+- Reduced large `.qnb` save overhead by writing compact JSON and avoiding a redundant full copy of parsed output. Complete typed results, metadata, source, and durable output identity still survive save/reopen; older indented notebooks remain readable and the file-size cap remains removed.
+
+## 0.2.35 - 2026-09-30
+
+- Fixed notebook table scroll positions jumping upward during live slice updates and saved visible-row auto-fit. Removed the 16 MiB `.qnb` file-size ceiling so complete Direct IPC results can be saved and reopened; structural and output validation still apply.
+
+## 0.2.34 - 2026-09-30
+
+- Fixed Direct IPC `.qnb` and mixed `.ipynb` results for q tables and keyed tables with attributed columns, including sorted symbol keys and empty typed columns. Complete MIME v2 output now retains each source-column attribute alongside exact rows and key ordinals through save/reopen; old v1/v2 output remains readable. Post-query encoding failures no longer suggest testing an already-working connection.
+
+## 0.2.33 - 2026-09-24
+
+- Corrected checked column auto-fit across KX Results and live/saved notebook grids: visible on-screen text is now the default sizing scope, measured by its actual rendered width, and stale manual widths cannot mask the fit. Manual resizing turns auto-fit off; explicit stable whole-result fitting remains available.
+
+## 0.2.32 - 2026-09-24
+
+- Fixed grouped line, scatter, and step charts blanking when one category contains repeated normalized X values; repeated observations now remain aligned in stable source order. Added **Fit columns now** to Results and notebook settings so auto-fit can be reapplied while already enabled.
+
+- Enabled **Group By** for line, scatter, step, bar, box, and candlestick charts across KX Results and live/saved notebook output. Distinct scalar categorical, boolean, GUID, numeric, and temporal columns remain selectable even when off-screen; grouped boxes use independent category statistics and grouped candles use independent clustered OHLC series, with stable 12-category/36-series and shared visual-item bounds. Portable v1 and the Python companion now accept grouped box/candlestick specifications while static HTML keeps an explicit interactive-only notice.
+- Expanded **KX Variables** into a process-wide namespace tree. Manual refresh lists current root bindings and multi-character application namespaces while structurally excluding KX-reserved one-character roots; namespace expansion lazily shows nested data, tables, functions, projections, and unknown bindings without fetching values or inventing absent names. Data and tables retain a confirmed bounded KX Results action using revalidated fully qualified paths, while callable and namespace rows remain metadata-only. Server Explorer and connected language intelligence remain configured-namespace-only.
+## 0.2.31 - 2026-09-11
+
+- Fixed explicit autofit activation after manual column resizing; current columns are fitted again while subsequent manual widths still persist.
+- Simplified Results quick preferences by moving guardrails, elapsed-time format, and array separators to extension settings. Added independent table/chart decimal controls; table rounding is display-only across Results and notebooks.
+- Added a configurable numeric chart-axis scientific-notation threshold (default 1e6), numeric notebook X-axis formatting, and font-aware axis sizing to prevent large labels clipping.
+
+## 0.2.30 - 2026-09-09
+
+- Added `vscode-kdb.notebook.maxOutputRows: 0` as an unlimited durable-output mode: first-party Direct IPC tables, standalone lists, and qText keep their complete exact rich v2 result in the notebook while skipping the duplicate session live-result cache. Passive rendering, save/reopen, and **Open in KX Results** use the saved payload without q execution; an explicit rerun executes current source once and replaces it with a fresh output. Positive values retain existing live-cache behavior, Tag/Prepare uses a 20-row helper fallback in zero mode, and `maxOutputBytes` continues to bound only static/helper output.
+- Enabled privacy-aware Query History by default for issued editor and first-party Direct IPC notebook commands. An explicit `vscode-kdb.features.queryHistory: false` remains disabled across activation/reload; local history still excludes results, notebook MIME, credentials, metadata/preview work, renderer actions, rejected-before-issue runs, and Python-owned `%%q`.
+- Added default-visible, independently collapsible **KX Connections**, **KX Variables**, and **KX Query History** sections in the existing KX sidebar. VS Code's native section headers support drag-to-reorder plus the sidebar Views menu for showing and hiding sections.
+- Added **KX Variables** for the active connected runtime and configured namespace. Explicit refresh retrieves safe name/type metadata only, filters out tables and functions, reports omitted non-standard names, and invalidates stale rows when the active connection, namespace, or transport changes. Each current variable has an inline, confirmed action that revalidates it and opens a bounded value through the existing KX Results panel.
+- Kept **KX Query History** visible when explicitly disabled, with a clear opt-out status instead of reading, displaying, deleting, or adding retained entries. When enabled, it records each issued first-party Direct IPC `.qnb` or mixed-Jupyter q-cell command exactly once alongside existing editor commands; Python-owned `%%q`, metadata, preview, and renderer actions remain excluded, and results and credentials are never stored.
 
 ## 0.2.29 - 2026-09-02
 

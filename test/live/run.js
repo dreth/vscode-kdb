@@ -29,8 +29,10 @@ const {
   portableCellText,
   portableCellValue,
   validatePortableKxResult,
+  portableKxResultForGridDisplay,
 } = requireOut('notebook-contract');
 const { createColumnarPanelResult } = requireOut('kx-results');
+const { buildChartData } = requireOut('charting');
 const { qScriptInNamespace, queryInNamespace, queryInNamespaceStrict } = requireOut('connection');
 const {
   CONNECTION_TEST_QUERY,
@@ -38,10 +40,14 @@ const {
   connectionTestNamespaceResultIsSafe,
 } = requireOut('connection-test');
 const {
+  RUNTIME_PROCESS_ROOT_QUERY,
   SERVER_TABLES_QUERY,
   SERVER_VARIABLES_QUERY,
+  buildRuntimeBindingPreviewQuery,
+  buildRuntimeContextQuery,
   buildServerPreviewQuery,
   buildServerTableMetaQuery,
+  parseRuntimeBindings,
   parseServerColumns,
   parseServerTableNames,
   parseServerVariables,
@@ -82,6 +88,35 @@ async function runAssertions(port) {
     const qVersion = semanticQValue(await client.query('.z.K'));
     assert.ok(client.getProtocolVersion() >= 1);
     assert.strictEqual(semanticQValue(await client.query('1+1')), 2);
+    const nullSeries = await client.query('([] time:13:00:00.000 13:00:00.000 13:00:00.001; price:0 0n 2f; other:10 11 12f)');
+    const nullPanel = qValueToColumnarPanel(nullSeries).result;
+    for (const chartType of ['line','step']) {
+      const chart = buildChartData(nullPanel, { chartType, xColumn:'time',yColumns:['price','other'],width:720,maxSourceRows:3 });
+      assert.deepStrictEqual(chart.series[0].values,[0,null,2]);
+      assert.deepStrictEqual(chart.series[0].gapBefore,[false,false,true]);
+      assert.ok(!chart.series[1].gapBefore?.some(Boolean));
+    }
+
+    for (const source of ['`hola', '`$"hola ciao"', '`']) {
+      const atom = await client.query(source);
+      for (const listDisplayStrategy of ['grid', 'qText']) {
+        const panel = qValueToColumnarPanel(atom, { listDisplayStrategy });
+        assert.strictEqual(panel.mode, 'text');
+        assert.strictEqual(panel.text, qValueToLiteral(atom));
+      }
+      const exact = qValueToLosslessPortablePanel(atom);
+      assert.strictEqual(exact.logicalPresentation, 'standalone-symbol');
+      const saved = createPortableKxResultV2({
+        columns: [{ name: 'value', type: 'symbol' }], rows: [[exact.result.cellValue(0, 0)]],
+        logicalPresentation: exact.logicalPresentation, marker: 'direct-ipc',
+      }, { outputId: 'live-symbol-' + 's'.repeat(32), persistenceMode: 'full' });
+      assert(saved.ok, saved.error);
+      const reopened = validatePortableKxResult(JSON.parse(JSON.stringify(saved.value)));
+      assert(reopened.ok, reopened.error);
+      assert.strictEqual(portableKxResultForGridDisplay(reopened.value).data.text, qValueToLiteral(atom));
+      assert.deepStrictEqual(qValueToPortableNode(portableCellValue(reopened.value.data.rows[0][0])),
+        qValueToPortableNode(atom));
+    }
     const assignment = await client.query('rootVector:rootVector');
     assert.deepStrictEqual(assignment, { qtype: 'generalNull' });
     assert.deepStrictEqual(qValueToColumnarPanel(assignment), {
@@ -90,7 +125,10 @@ async function runAssertions(port) {
       kind: 'no value',
       rowsMaterialized: true,
     });
-    assert.strictEqual(qValueToColumnarPanel(await client.query('()')).mode, 'text');
+    const emptyList = qValueToColumnarPanel(await client.query('()'));
+    assert.strictEqual(emptyList.mode, 'grid');
+    assert.deepStrictEqual(emptyList.cols, ['index', 'value']);
+    assert.strictEqual(emptyList.result.rowCount, 0);
     const zeroRowTable = qValueToColumnarPanel(await client.query('([]a:`int$())'));
     assert.strictEqual(zeroRowTable.mode, 'grid');
     assert.deepStrictEqual(zeroRowTable.cols, ['a']);
@@ -204,6 +242,88 @@ async function runAssertions(port) {
     assert.deepStrictEqual(
       analyticsVariables.map(item => [item.name, item.kind]),
       [['analyticsFunction', 'function'], ['analyticsVector', 'variable'], ['answer', 'variable']]
+    );
+
+    const processRootBindings = parseRuntimeBindings(
+      await client.query(queryInNamespaceStrict(RUNTIME_PROCESS_ROOT_QUERY, '.analytics')),
+      '.'
+    ).bindings;
+    for (const expected of ['.analytics', '.app', '.qr', 'rootFunction', 'rootVector', 'trade']) {
+      assert.ok(
+        processRootBindings.some(binding => binding.qualifiedName === expected),
+        `process root metadata must include ${expected} when it exists`
+      );
+    }
+    assert.ok(
+      processRootBindings
+        .filter(binding => binding.kind === 'namespace')
+        .every(binding => binding.name.length > 1),
+      'all one-character KX-reserved top-level namespaces must be excluded structurally'
+    );
+    assert.strictEqual(
+      processRootBindings.some(binding => binding.qualifiedName === '.qr.calculate'),
+      false,
+      'root discovery must not synthesize namespace children'
+    );
+
+    const qrBindings = parseRuntimeBindings(await client.query(queryInNamespaceStrict(
+      buildRuntimeContextQuery('.qr'),
+      '.analytics'
+    )), '.qr').bindings;
+    assert.deepStrictEqual(qrBindings.map(binding => [binding.qualifiedName, binding.kind]), [
+      ['.qr.calculate', 'function'],
+      ['.qr.data', 'variable'],
+      ['.qr.runtimeTable', 'table'],
+    ]);
+    const appBindings = parseRuntimeBindings(await client.query(queryInNamespaceStrict(
+      buildRuntimeContextQuery('.app'),
+      '.analytics'
+    )), '.app').bindings;
+    assert.deepStrictEqual(appBindings.map(binding => [binding.qualifiedName, binding.kind]), [
+      ['.app.q', 'namespace'],
+      ['.app.state', 'namespace'],
+      ['.app.payload', 'variable'],
+    ]);
+    assert.deepStrictEqual(
+      parseRuntimeBindings(await client.query(queryInNamespaceStrict(
+        buildRuntimeContextQuery('.app.q'),
+        '.analytics'
+      )), '.app.q').bindings.map(binding => binding.qualifiedName),
+      ['.app.q.nestedValue'],
+      'one-character nested namespace segments must remain visible beneath application roots'
+    );
+
+    assert.deepStrictEqual(
+      semanticQValue(await client.query(queryInNamespaceStrict(
+        buildRuntimeBindingPreviewQuery('.qr', 'data', 'variable', 3),
+        '.analytics'
+      ))),
+      [0, 1, 2],
+      'qualified process data previews must be bounded and independent of the configured namespace'
+    );
+    const runtimeTablePreview = qValueToColumnarPanel(await client.query(queryInNamespaceStrict(
+      buildRuntimeBindingPreviewQuery('.qr', 'runtimeTable', 'table', 3),
+      '.analytics'
+    )));
+    assert.strictEqual(runtimeTablePreview.mode, 'grid');
+    assert.strictEqual(runtimeTablePreview.result.rowCount, 1);
+    await assert.rejects(
+      () => client.query(queryInNamespaceStrict(
+        buildRuntimeBindingPreviewQuery('.qr', 'calculate', 'variable', 3),
+        '.analytics'
+      )),
+      error => error && error.name === 'KdbQError' && /Function and projection previews are disabled/.test(error.message),
+      'runtime q type checks must reject a callable even if a stale row claims it is data'
+    );
+    await client.query('delete calculate from `.qr');
+    const qrWithoutQuery = parseRuntimeBindings(await client.query(queryInNamespaceStrict(
+      buildRuntimeContextQuery('.qr'),
+      '.analytics'
+    )), '.qr').bindings;
+    assert.strictEqual(
+      qrWithoutQuery.some(binding => binding.qualifiedName === '.qr.calculate'),
+      false,
+      'removed bindings must disappear instead of being synthesized'
     );
 
     const quoteColumns = parseServerColumns(await client.query(queryInNamespaceStrict(
@@ -824,17 +944,21 @@ async function waitForPort(port, state, timeoutMs) {
   throw new Error(`Timed out waiting for q on 127.0.0.1:${port}.\n${state.output}`);
 }
 
-function canConnect(port) {
-  return new Promise(resolve => {
-    const socket = net.createConnection({ host: '127.0.0.1', port });
-    const done = value => {
-      socket.destroy();
-      resolve(value);
-    };
-    socket.once('connect', () => done(true));
-    socket.once('error', () => done(false));
-    socket.setTimeout(300, () => done(false));
+async function canConnect(port) {
+  const probe = new KdbIpcClient({
+    host: '127.0.0.1',
+    port,
+    connectTimeoutMs: 300,
+    queryTimeoutMs: 300,
   });
+  try {
+    await probe.connect();
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await probe.close();
+  }
 }
 
 function delay(milliseconds) {

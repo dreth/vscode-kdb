@@ -9,7 +9,10 @@ const { runNotebookVisualAcceptance } = require('../test/extension-host/visual-c
 
 const REPOSITORY_ROOT = path.resolve(__dirname, '..');
 const TEMP_ROOT = path.resolve(os.tmpdir());
-const EXTENSION_TESTS_PATH = path.join(REPOSITORY_ROOT, 'test', 'extension-host', 'index.js');
+const REPORTING_ONLY = process.argv.includes('--reporting-only');
+const EXTENSION_TESTS_PATH = process.env.VSCODE_KDB_E2E_TESTS_PATH ||
+  path.join(REPOSITORY_ROOT, 'test', 'extension-host', REPORTING_ONLY ? 'failure-reporting.js' : 'index.js');
+const EXTENSION_DEVELOPMENT_PATH = process.env.VSCODE_KDB_E2E_EXTENSION_PATH || REPOSITORY_ROOT;
 const SIBLING_TEST_ROOT = path.resolve(
   REPOSITORY_ROOT,
   '..',
@@ -156,7 +159,7 @@ function runVsCode(display, remoteDebuggingPort, controlDir, phase) {
     `--remote-debugging-port=${remoteDebuggingPort}`,
     `--user-data-dir=${userDataDir}`,
     `--extensions-dir=${extensionsDir}`,
-    `--extensionDevelopmentPath=${REPOSITORY_ROOT}`,
+    `--extensionDevelopmentPath=${EXTENSION_DEVELOPMENT_PATH}`,
     `--extensionTestsPath=${EXTENSION_TESTS_PATH}`,
     REPOSITORY_ROOT,
   ];
@@ -231,6 +234,10 @@ async function main() {
   console.log(`Extension Host display: ${display}`);
   const savePort = await availablePort();
   await runVsCode(display, savePort, controlDir, 'save');
+  if (REPORTING_ONLY) {
+    console.log('Extension Host automatic failure-reporting smoke test passed.');
+    return;
+  }
   const savedMarker = path.join(controlDir, 'notebook-host-saved.json');
   if (!fs.statSync(savedMarker, { throwIfNoEntry: false })?.isFile()) {
     throw new Error('The save-phase Extension Host did not produce its durable notebook marker.');

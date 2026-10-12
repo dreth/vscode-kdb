@@ -141,7 +141,7 @@ async function main() {
   const startup = await elapsedAsync(serverStartup);
   mark('server initialize/shutdown', startup.milliseconds);
   const heapDeltaMiB = (process.memoryUsage().heapUsed - heapBefore) / MIB;
-  const currentVsix = path.join(ROOT, 'vscode-kdb-0.2.29.vsix');
+  const currentVsix = path.join(ROOT, `vscode-kdb-${require('../package.json').version}.vsix`);
   const currentVsixBytes = fs.existsSync(currentVsix) ? fs.statSync(currentVsix).size : null;
   const report = {
     fixtureBytes: sourceBytes,

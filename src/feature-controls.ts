@@ -15,10 +15,12 @@ import {
   ServerPreviewRunner,
 } from './server-explorer';
 import type { QMetadataService } from './q-metadata-service';
+import { VariablesFeature } from './variables';
 
 export class FeatureControls implements vscode.Disposable {
   private serverExplorer: ServerExplorerFeature | undefined;
-  private queryHistory: QueryHistoryFeature | undefined;
+  private readonly variables: VariablesFeature;
+  private readonly queryHistory: QueryHistoryFeature;
   private readonly queryHistoryStore: QueryHistoryStore;
   private disposed = false;
 
@@ -37,6 +39,21 @@ export class FeatureControls implements vscode.Disposable {
         .getConfiguration('vscode-kdb.queryHistory')
         .get<unknown>('maxEntries'),
     });
+    this.variables = new VariablesFeature(
+      this.store,
+      this.manager,
+      this.connectionTree,
+      this.diagnostics,
+      this.runPreview,
+      this.qMetadata
+    );
+    this.queryHistory = new QueryHistoryFeature(
+      this.queryHistoryStore,
+      this.store,
+      this.connectionTree,
+      this.rerunHistory,
+      this.queryHistoryEnabled()
+    );
     this.reconcile();
   }
 
@@ -46,14 +63,14 @@ export class FeatureControls implements vscode.Disposable {
       this.reconcile();
     }
     if (event.affectsConfiguration('vscode-kdb.queryHistory.maxEntries')) {
-      void this.queryHistory?.prune().catch(error => {
+      void this.queryHistory.prune().catch(error => {
         vscode.window.showWarningMessage(`KX Query History could not apply its new limit: ${errorMessage(error)}`);
       });
     }
   }
 
   public captureHistory(): QueryHistoryCapture | undefined {
-    return this.queryHistory?.capture();
+    return this.queryHistory.capture();
   }
 
   public async recordHistory(
@@ -76,9 +93,9 @@ export class FeatureControls implements vscode.Disposable {
     }
     this.disposed = true;
     this.serverExplorer?.dispose();
-    this.queryHistory?.dispose();
+    this.variables.dispose();
+    this.queryHistory.dispose();
     this.serverExplorer = undefined;
-    this.queryHistory = undefined;
     void vscode.commands.executeCommand('setContext', SERVER_EXPLORER_AVAILABLE_CONTEXT, false);
   }
 
@@ -88,7 +105,7 @@ export class FeatureControls implements vscode.Disposable {
     }
     const settings = vscode.workspace.getConfiguration('vscode-kdb.features');
     const serverExplorerEnabled = settings.get<boolean>('serverExplorer', false);
-    const queryHistoryEnabled = settings.get<boolean>('queryHistory', false);
+    this.queryHistory.setEnabled(settings.get<boolean>('queryHistory', true));
 
     if (serverExplorerEnabled && !this.serverExplorer) {
       this.serverExplorer = new ServerExplorerFeature(
@@ -106,17 +123,12 @@ export class FeatureControls implements vscode.Disposable {
       void vscode.commands.executeCommand('setContext', SERVER_EXPLORER_AVAILABLE_CONTEXT, false);
     }
 
-    if (queryHistoryEnabled && !this.queryHistory) {
-      this.queryHistory = new QueryHistoryFeature(
-        this.queryHistoryStore,
-        this.store,
-        this.connectionTree,
-        this.rerunHistory
-      );
-    } else if (!queryHistoryEnabled && this.queryHistory) {
-      this.queryHistory.dispose();
-      this.queryHistory = undefined;
-    }
+  }
+
+  private queryHistoryEnabled(): boolean {
+    return vscode.workspace
+      .getConfiguration('vscode-kdb.features')
+      .get<boolean>('queryHistory', true);
   }
 }
 

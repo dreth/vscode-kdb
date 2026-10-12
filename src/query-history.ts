@@ -9,7 +9,8 @@ import {
 
 export const QUERY_HISTORY_VIEW_ID = 'vscode-kdb.queryHistory';
 
-type QueryHistoryNode = QueryHistoryTreeItem | EmptyQueryHistoryTreeItem;
+type QueryHistoryNode = QueryHistoryTreeItem | EmptyQueryHistoryTreeItem |
+  DisabledQueryHistoryTreeItem;
 
 export type QueryHistoryRunner = (entry: QueryHistoryEntry) => Promise<void>;
 
@@ -21,15 +22,22 @@ export interface QueryHistoryCapture {
 export class QueryHistoryFeature implements vscode.Disposable {
   private readonly provider: QueryHistoryTreeProvider;
   private readonly disposables: vscode.Disposable[];
+  private enabled: boolean;
   private disposed = false;
 
   public constructor(
     private readonly history: QueryHistoryStore,
     connections: ConnectionStore,
     connectionTree: ConnectionsTreeProvider,
-    runQuery: QueryHistoryRunner
+    runQuery: QueryHistoryRunner,
+    enabled = true
   ) {
-    this.provider = new QueryHistoryTreeProvider(this.history, connections);
+    this.enabled = enabled;
+    this.provider = new QueryHistoryTreeProvider(
+      this.history,
+      connections,
+      () => this.enabled
+    );
     const treeView = vscode.window.createTreeView(QUERY_HISTORY_VIEW_ID, {
       treeDataProvider: this.provider,
       showCollapseAll: false,
@@ -44,21 +52,17 @@ export class QueryHistoryFeature implements vscode.Disposable {
       vscode.commands.registerCommand('vscode-kdb.deleteQueryHistoryEntry', argument => this.delete(argument)),
       vscode.commands.registerCommand('vscode-kdb.clearQueryHistory', () => this.clear()),
     ];
-    void this.prune().catch(error => {
-      if (!this.disposed) {
-        vscode.window.showWarningMessage(`KX Query History could not apply its local retention limit: ${errorMessage(error)}`);
-      }
-    });
+    if (this.enabled) this.pruneWithWarning();
   }
 
   public capture(): QueryHistoryCapture | undefined {
-    return this.disposed
+    return this.disposed || !this.enabled
       ? undefined
       : { feature: this, generation: this.history.captureGeneration() };
   }
 
   public async record(capture: QueryHistoryCapture, input: QueryHistoryRecordInput): Promise<void> {
-    if (this.disposed || capture.feature !== this) {
+    if (this.disposed || !this.enabled || capture.feature !== this) {
       return;
     }
     const entry = await this.history.record(input, capture.generation);
@@ -68,13 +72,21 @@ export class QueryHistoryFeature implements vscode.Disposable {
   }
 
   public async prune(): Promise<void> {
-    if (this.disposed) {
+    if (this.disposed || !this.enabled) {
       return;
     }
     await this.history.prune();
     if (!this.disposed) {
       this.provider.refresh();
     }
+  }
+
+  public setEnabled(enabled: boolean): void {
+    if (this.disposed || this.enabled === enabled) return;
+    this.enabled = enabled;
+    this.history.invalidatePending();
+    this.provider.refresh();
+    if (enabled) this.pruneWithWarning();
   }
 
   public dispose(): void {
@@ -93,6 +105,16 @@ export class QueryHistoryFeature implements vscode.Disposable {
       return;
     }
     await runQuery(entry);
+  }
+
+  private pruneWithWarning(): void {
+    void this.prune().catch(error => {
+      if (!this.disposed && this.enabled) {
+        vscode.window.showWarningMessage(
+          `KX Query History could not apply its local retention limit: ${errorMessage(error)}`
+        );
+      }
+    });
   }
 
   private async copy(argument: unknown): Promise<void> {
@@ -137,6 +159,12 @@ export class QueryHistoryFeature implements vscode.Disposable {
   }
 
   private async clear(): Promise<void> {
+    if (!this.enabled) {
+      vscode.window.showInformationMessage(
+        'Enable Query History before managing retained query text.'
+      );
+      return;
+    }
     const count = this.history.entries().length;
     if (!count) {
       vscode.window.showInformationMessage('KX Query History is already empty.');
@@ -167,7 +195,8 @@ export class QueryHistoryTreeProvider implements vscode.TreeDataProvider<QueryHi
 
   public constructor(
     private readonly history: QueryHistoryStore,
-    private readonly connections: ConnectionStore
+    private readonly connections: ConnectionStore,
+    private readonly isEnabled: () => boolean = () => true
   ) {}
 
   public getTreeItem(element: QueryHistoryNode): vscode.TreeItem {
@@ -177,6 +206,9 @@ export class QueryHistoryTreeProvider implements vscode.TreeDataProvider<QueryHi
   public getChildren(element?: QueryHistoryNode): QueryHistoryNode[] {
     if (element) {
       return [];
+    }
+    if (!this.isEnabled()) {
+      return [new DisabledQueryHistoryTreeItem()];
     }
     const entries = this.history.entries();
     if (!entries.length) {
@@ -190,7 +222,8 @@ export class QueryHistoryTreeProvider implements vscode.TreeDataProvider<QueryHi
   }
 
   public resolveEntry(argument: unknown): QueryHistoryEntry | undefined {
-    if (!(argument instanceof QueryHistoryTreeItem) || !this.ownedItems.has(argument)) {
+    if (!this.isEnabled() || !(argument instanceof QueryHistoryTreeItem) ||
+      !this.ownedItems.has(argument)) {
       return undefined;
     }
     return this.history.entries().find(entry => entry.id === argument.entry.id);
@@ -245,10 +278,19 @@ export class QueryHistoryTreeItem extends vscode.TreeItem {
 
 export class EmptyQueryHistoryTreeItem extends vscode.TreeItem {
   public constructor() {
-    super('No issued editor queries recorded', vscode.TreeItemCollapsibleState.None);
+    super('No issued q commands recorded', vscode.TreeItemCollapsibleState.None);
     this.contextValue = 'vscode-kdb.queryHistory.empty';
     this.iconPath = new vscode.ThemeIcon('history');
-    this.tooltip = 'Only editor executions issued while Query History is enabled are stored locally.';
+    this.tooltip = 'Only editor and first-party Direct IPC notebook executions issued while Query History is enabled are stored locally.';
+  }
+}
+
+export class DisabledQueryHistoryTreeItem extends vscode.TreeItem {
+  public constructor() {
+    super('Query History recording is disabled', vscode.TreeItemCollapsibleState.None);
+    this.contextValue = 'vscode-kdb.queryHistory.disabled';
+    this.iconPath = new vscode.ThemeIcon('history');
+    this.tooltip = 'Enable vscode-kdb.features.queryHistory to store issued q command text in local workspace extension storage.';
   }
 }
 

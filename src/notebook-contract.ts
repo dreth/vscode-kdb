@@ -1,3 +1,4 @@
+import { PackedQColumn, ColumnCompressor, packQColumn, validatePackedQColumn, packedQColumnCell } from './notebook-packed-column';
 import {
   CellTextOptions,
   allCellsRange,
@@ -9,6 +10,9 @@ import {
 import {
   PortableQAtomNode,
   PortableQNode,
+  PortableQTypedVectorNode,
+  PortableQMixedVectorNode,
+  Q_TYPE_NAMES,
   QScalarValue,
   isQRuntimeValue,
   portableNodeToQValue,
@@ -16,11 +20,13 @@ import {
   portableQNodeToBoundedLiteral,
   qValueDescription,
   qValueToBoundedLiteral,
+  qValueToLiteral,
   qValueToGridCellText,
   qValueToPortableNode,
   validatePortableQNode,
 } from './q-value';
 import { isQTemporalType } from './q-type';
+import { chartScalarNumber } from './charting';
 import { compareResultCellText } from './result-table-interaction';
 
 export type { PortableQNode } from './q-value';
@@ -28,6 +34,8 @@ export type { PortableQNode } from './q-value';
 export const KX_NOTEBOOK_MIME = 'application/vnd.kx.result+json';
 export const KX_NOTEBOOK_CONTRACT_VERSION = 1;
 export const KX_NOTEBOOK_CONTRACT_VERSION_V2 = 2;
+export const KX_NOTEBOOK_CONTRACT_VERSION_V3 = 3;
+export const KX_NOTEBOOK_CONTRACT_VERSION_V4 = 4;
 
 export const DEFAULT_NOTEBOOK_ROW_LIMIT = 20;
 export const MIN_NOTEBOOK_ROW_LIMIT = 1;
@@ -47,6 +55,7 @@ export const STATIC_NOTEBOOK_TABLE_ROW_LIMIT = 100;
 export const STATIC_NOTEBOOK_CHART_POINT_LIMIT = 240;
 const MAX_PORTABLE_JSON_DEPTH = 128;
 const MAX_PORTABLE_JSON_NODES = 20_000;
+const PORTABLE_Q_COLUMN_TYPES = new Set<string>([...Q_TYPE_NAMES, 'mixed']);
 
 export type NotebookResultMarker = '%%q' | 'direct-ipc';
 export type NotebookPersistenceMode = 'preview' | 'full';
@@ -109,6 +118,11 @@ export interface PortableColumn {
   type: string;
 }
 
+export interface PortableColumnAttribute {
+  ordinal: number;
+  attribute: number;
+}
+
 export type NotebookChartType =
   | 'line'
   | 'scatter'
@@ -148,20 +162,21 @@ Record<NotebookTruncationReason, string> = {
 };
 
 export interface PortableKxTableResult {
-  version: 1 | 2;
+  version: 1 | 2 | 3 | 4;
   outputId?: string;
   persistence?: NotebookPersistenceMetadata;
   kind: 'table';
-  logicalPresentation?: 'standalone-list';
+  logicalPresentation?: 'standalone-list' | 'standalone-symbol';
   schema: {
     columns: PortableColumn[];
     /** Present only when decoded q keyed-table structure supplied exact key ordinals. */
     keyColumnOrdinals?: number[];
+    /** Nonzero q vector attributes on original table columns, in source order. */
+    columnAttributes?: PortableColumnAttribute[];
   };
-  data: {
-    encoding: 'rows';
-    rows: PortableCell[][];
-  };
+  data: { encoding: 'rows'; rows: PortableCell[][] } |
+    { encoding: 'q-columns'; columns: PortableQColumn[] } |
+    { encoding: 'packed-q-columns'; columns: Array<PortableQColumn | PackedQColumn> };
   result: {
     rowCount: number;
     columnCount?: number;
@@ -178,6 +193,43 @@ export interface PortableKxTableResult {
     qSource?: string;
   };
   chart?: NotebookChartSpec;
+}
+
+export type PortableQColumn = PortableQTypedVectorNode | PortableQMixedVectorNode;
+export type PortableKxRowTableResult = Omit<PortableKxTableResult, 'data'> & {
+  data: { encoding: 'rows'; rows: PortableCell[][] };
+};
+
+/** Columnar wire data remains authoritative; allocate only the requested cell. */
+export function portableTableRowCount(table: PortableKxTableResult): number {
+  return table.data.encoding === 'rows' ? table.data.rows.length : table.result.rowCount;
+}
+
+export function portableTableCell(table: PortableKxTableResult, row: number, column: number): PortableCell {
+  if (table.data.encoding === 'rows') {
+    return table.data.rows[row][column];
+  }
+  const vector = table.data.columns[column];
+  if (vector.form === 'packed-vector') return { kind: 'q', version: 1, value: packedQColumnCell(vector, row) };
+  return { kind: 'q', version: 1, value: vector.type === 'mixed'
+    ? vector.values[row]
+    : { form: 'atom', type: vector.type, value: vector.values[row] } };
+}
+
+export function portableTableRow(table: PortableKxTableResult, row: number): PortableCell[] {
+  if (row < 0 || row >= portableTableRowCount(table)) return [];
+  return table.data.encoding === 'rows' ? table.data.rows[row]
+    : table.schema.columns.map((_column, ordinal) => portableTableCell(table, row, ordinal));
+}
+
+export function* portableTableRows(table: PortableKxTableResult): IterableIterator<PortableCell[]> {
+  for (let row = 0; row < portableTableRowCount(table); row++) {
+    yield portableTableRow(table, row);
+  }
+}
+
+export function portableTableRowIndexes(table: PortableKxTableResult): number[] {
+  return Array.from({ length: portableTableRowCount(table) }, (_row, index) => index);
 }
 
 export interface PortableKxTextResult {
@@ -206,7 +258,8 @@ export type PortableKxResult = PortableKxTableResult | PortableKxTextResult;
 export interface NotebookResultInput {
   columns: Array<string | PortableColumn>;
   keyColumnOrdinals?: readonly number[];
-  logicalPresentation?: 'standalone-list';
+  columnAttributes?: readonly PortableColumnAttribute[];
+  logicalPresentation?: 'standalone-list' | 'standalone-symbol';
   rows: unknown[][];
   cellValue?: (rowIndex: number, columnIndex: number) => unknown;
   rowCount?: number;
@@ -273,14 +326,14 @@ const CHART_TYPES = new Set<NotebookChartType>([
   'candlestick',
 ]);
 
-export function createPortableKxResult(input: NotebookResultInput): PortableKxTableResult {
+export function createPortableKxResult(input: NotebookResultInput): PortableKxRowTableResult {
   return createPortableKxTable(input, false);
 }
 
 function createPortableKxTable(
   input: NotebookResultInput,
   allowExactQ: boolean
-): PortableKxTableResult {
+): PortableKxRowTableResult {
   const rowLimit = boundedInteger(
     input.rowLimit,
     DEFAULT_NOTEBOOK_ROW_LIMIT,
@@ -313,7 +366,7 @@ function createPortableKxTable(
   if (!usesCellAccessor && input.rows.length < Math.min(rowCount, rowLimit)) {
     reasons.add('sourcePreview');
   }
-  const payload: PortableKxTableResult = {
+  const payload: PortableKxRowTableResult = {
     version: KX_NOTEBOOK_CONTRACT_VERSION,
     kind: 'table',
     schema: { columns },
@@ -467,7 +520,7 @@ export function createPortableKxTextResult(input: NotebookTextResultInput): Port
 export function createPortableKxResultV2(
   input: NotebookResultInput,
   options: NotebookV2ResultOptions
-): NotebookV2CreationResult<PortableKxTableResult> {
+): NotebookV2CreationResult<PortableKxRowTableResult> {
   let rowCount = 0;
   let columnCount = 0;
   try {
@@ -490,7 +543,7 @@ export function createPortableKxResultV2(
       return v2Failure('KX notebook persistence mode is invalid.', rowCount, columnCount);
     }
     if (input.logicalPresentation !== undefined &&
-      input.logicalPresentation !== 'standalone-list') {
+      input.logicalPresentation !== 'standalone-list' && input.logicalPresentation !== 'standalone-symbol') {
       return v2Failure('KX notebook logical presentation is invalid.', rowCount, columnCount);
     }
     return options.persistenceMode === 'full'
@@ -512,7 +565,7 @@ function createPortableKxFullTable(
   outputId: string,
   rowCount: number,
   columnCount: number
-): NotebookV2CreationResult<PortableKxTableResult> {
+): NotebookV2CreationResult<PortableKxRowTableResult> {
   const rowLimit = boundedInteger(
     input.rowLimit,
     DEFAULT_NOTEBOOK_ROW_LIMIT,
@@ -544,6 +597,14 @@ function createPortableKxFullTable(
       columnCount
     );
   }
+  const columnAttributes = strictOptionalColumnAttributes(input.columnAttributes, columns);
+  if (columnAttributes === null) {
+    return v2Failure(
+      'Full notebook persistence requires valid q column attributes.',
+      rowCount,
+      columnCount
+    );
+  }
   const usesCellAccessor = typeof input.cellValue === 'function';
   if (!usesCellAccessor && input.rows.length < rowCount) {
     return v2Failure(
@@ -564,17 +625,18 @@ function createPortableKxFullTable(
 
   const rows: PortableCell[][] = [];
   const chart = normalizeChart(input.chart, columns);
-  const payload: PortableKxTableResult = {
+  const payload: PortableKxRowTableResult = {
     version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
     outputId,
     persistence: { mode: 'full', previewRowLimit: rowLimit, byteLimit },
     kind: 'table',
-    ...(input.logicalPresentation === 'standalone-list'
+    ...(input.logicalPresentation !== undefined
       ? { logicalPresentation: input.logicalPresentation }
       : {}),
     schema: {
       columns,
       ...(keyColumnOrdinals === undefined ? {} : { keyColumnOrdinals }),
+      ...(columnAttributes === undefined ? {} : { columnAttributes }),
     },
     data: { encoding: 'rows', rows },
     result: {
@@ -609,18 +671,18 @@ function createPortableKxFullTable(
     }
     rows.push(row);
   }
-  if (payload.logicalPresentation && !validStandaloneListPresentation(payload)) {
+  if (payload.logicalPresentation && !validStandalonePresentation(payload)) {
     return v2Failure(
-      'Standalone-list presentation requires one exact non-character q vector cell.',
+      'Standalone presentation requires one matching exact q value cell.',
       rowCount,
       columnCount
     );
   }
   try {
     return { ok: true, value: payload, serializedBytes: portableKxResultBytes(payload) };
-  } catch {
+  } catch (error) {
     return v2Failure(
-      'Full notebook persistence could not serialize the complete result exactly.',
+      notebookSerializationFailure(error),
       rowCount,
       columnCount
     );
@@ -632,10 +694,17 @@ function createPortableKxPreviewTableV2(
   outputId: string,
   rowCount: number,
   columnCount: number
-): NotebookV2CreationResult<PortableKxTableResult> {
+): NotebookV2CreationResult<PortableKxRowTableResult> {
+  if (input.columnAttributes !== undefined) {
+    return v2Failure(
+      'Notebook preview does not support q column attributes.',
+      rowCount,
+      columnCount
+    );
+  }
   if (input.logicalPresentation !== undefined) {
     return v2Failure(
-      'Standalone-list presentation is supported only by complete exact output.',
+      'Standalone presentation is supported only by complete exact output.',
       rowCount,
       columnCount
     );
@@ -664,7 +733,7 @@ function createPortableKxPreviewTableV2(
       columnCount
     );
   }
-  const payload: PortableKxTableResult = {
+  const payload: PortableKxRowTableResult = {
     ...legacy,
     version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
     outputId,
@@ -760,6 +829,12 @@ export function validatePortableKxResult(raw: unknown): NotebookValidationResult
   try {
     if (!isRecord(raw)) {
       return invalid('KX notebook output must be a JSON object.');
+    }
+    if (raw.version === KX_NOTEBOOK_CONTRACT_VERSION_V4) {
+      return validatePortableKxPackedTable(raw);
+    }
+    if (raw.version === KX_NOTEBOOK_CONTRACT_VERSION_V3) {
+      return validatePortableKxColumnTable(raw);
     }
     if (raw.version === KX_NOTEBOOK_CONTRACT_VERSION_V2) {
       return validatePortableKxResultV2(raw);
@@ -866,7 +941,7 @@ export function validatePortableKxResult(raw: unknown): NotebookValidationResult
       return invalid('KX notebook output chart specification is invalid.');
     }
 
-    const value: PortableKxTableResult = {
+    const value: PortableKxRowTableResult = {
       version: 1,
       kind: 'table',
       schema: { columns },
@@ -894,6 +969,154 @@ export function validatePortableKxResult(raw: unknown): NotebookValidationResult
   } catch {
     return invalid('KX notebook output could not be validated.');
   }
+}
+
+/** Large native q tables keep one exact vector per source column. */
+export function createPortableKxColumnTableV3(
+  input: NotebookResultInput,
+  columns: readonly unknown[],
+  outputId: string
+): NotebookV2CreationResult<PortableKxTableResult> {
+  const rowCount = input.rowCount ?? 0;
+  const header = createPortableKxResultV2(
+    { ...input, rows: [], cellValue: undefined, rowCount: 0 },
+    { outputId, persistenceMode: 'full' }
+  );
+  if (!header.ok) return header;
+  const qColumns: PortableQColumn[] = [];
+  for (let ordinal = 0; ordinal < columns.length; ordinal++) {
+    const node = qValueToPortableNode(columns[ordinal]);
+    if (!node || node.form !== 'vector') {
+      return v2Failure(`Columnar notebook persistence cannot exactly encode column ${ordinal + 1}.`,
+        rowCount, input.columns.length);
+    }
+    qColumns.push(node);
+  }
+  const payload: PortableKxTableResult = {
+    ...header.value, version: 3, data: { encoding: 'q-columns', columns: qColumns },
+    result: { ...header.value.result, rowCount, previewRowCount: rowCount },
+  };
+  const checked = validatePortableKxResult(payload);
+  if (!checked.ok || checked.value.kind !== 'table') {
+    return v2Failure(checked.ok ? 'Invalid columnar notebook table.' : checked.error, rowCount, input.columns.length);
+  }
+  try {
+    return { ok: true, value: checked.value, serializedBytes: portableKxResultBytes(checked.value) };
+  } catch (error) {
+    return v2Failure(notebookSerializationFailure(error), rowCount, input.columns.length);
+  }
+}
+
+/** Eligible raw IPC columns are packed directly; portable v3 input supports lossless conversion without q. */
+export function createPortableKxPackedTableV4(
+  input: NotebookResultInput,
+  columns: readonly unknown[],
+  outputId: string,
+  compressor?: ColumnCompressor,
+  portableInput = false
+): NotebookV2CreationResult<PortableKxTableResult> {
+  const rowCount = input.rowCount ?? 0;
+  const header = createPortableKxResultV2({ ...input, rows: [], cellValue: undefined, rowCount: 0 },
+    { outputId, persistenceMode: 'full' });
+  if (!header.ok) return header;
+  try {
+    const packed: Array<PortableQColumn | PackedQColumn> = [];
+    for (let ordinal = 0; ordinal < columns.length; ordinal++) {
+      const column = packQColumn(columns[ordinal], compressor, portableInput);
+      if (column) { packed.push(column); continue; }
+      const fallback = portableInput ? columns[ordinal] : qValueToPortableNode(columns[ordinal]);
+      if (!validatePortableQNode(fallback) || fallback.form !== 'vector') {
+        return v2Failure(`Packed notebook persistence cannot exactly encode column ${ordinal + 1}.`, rowCount, input.columns.length);
+      }
+      packed.push(fallback);
+    }
+    const payload: PortableKxTableResult = { ...header.value, version: 4,
+      data: { encoding: 'packed-q-columns', columns: packed },
+      result: { ...header.value.result, rowCount, previewRowCount: rowCount } };
+    const checked = validatePortableKxResult(payload);
+    if (!checked.ok || checked.value.kind !== 'table') {
+      return v2Failure(checked.ok ? 'Invalid packed notebook table.' : checked.error, rowCount, input.columns.length);
+    }
+    return { ok: true, value: checked.value, serializedBytes: portableKxResultBytes(checked.value) };
+  } catch (error) {
+    return v2Failure(error instanceof RangeError ? notebookSerializationFailure(error)
+      : 'Complete packed notebook output could not be encoded exactly.', rowCount, input.columns.length);
+  }
+}
+
+function validatePortableKxPackedTable(raw: Record<string, unknown>): NotebookValidationResult {
+  if (raw.kind !== 'table' || raw.logicalPresentation !== undefined || !isRecord(raw.persistence) ||
+    raw.persistence.mode !== 'full' || !isRecord(raw.data) || !hasOnlyKeys(raw.data, ['encoding', 'columns']) ||
+    raw.data.encoding !== 'packed-q-columns' || !Array.isArray(raw.data.columns) || !isDensePrimitiveArray(raw.data.columns) ||
+    !isRecord(raw.result) || !safeIntegerInRange(raw.result.rowCount, 0, Number.MAX_SAFE_INTEGER) ||
+    raw.result.previewRowCount !== raw.result.rowCount) return invalid('KX notebook v4 packed data or bounds are invalid.');
+  const rowCount = raw.result.rowCount as number;
+  const header = validatePortableKxResultV2({ ...raw, version: 2, data: { encoding: 'rows', rows: [] },
+    result: { ...raw.result, rowCount: 0, previewRowCount: 0 } });
+  if (!header.ok || header.value.kind !== 'table') return header;
+  const table = header.value;
+  if (raw.data.columns.length !== table.schema.columns.length) return invalid('KX notebook v4 column count is invalid.');
+  const columns: Array<PortableQColumn | PackedQColumn> = [];
+  for (let ordinal = 0; ordinal < raw.data.columns.length; ordinal++) {
+    const column = raw.data.columns[ordinal];
+    const packed = isRecord(column) && column.form === 'packed-vector';
+    if (packed ? !validatePackedQColumn(column) : !validatePortableQNode(column) || column.form !== 'vector') {
+      return invalid(`KX notebook v4 column ${ordinal + 1} has invalid packed or exact q data.`);
+    }
+    const checked = column as PortableQColumn | PackedQColumn;
+    const length = checked.form === 'packed-vector' ? checked.length : checked.values.length;
+    const attribute = table.schema.columnAttributes?.find(entry => entry.ordinal === ordinal)?.attribute ?? 0;
+    if (checked.type !== table.schema.columns[ordinal].type || checked.attribute !== attribute || length !== rowCount) {
+      return invalid(`KX notebook v4 column ${ordinal + 1} disagrees with its schema or cardinality.`);
+    }
+    columns.push(checked);
+  }
+  return { ok: true, value: { ...table, version: 4, data: { encoding: 'packed-q-columns', columns },
+    result: { ...table.result, rowCount, previewRowCount: rowCount } } };
+}
+
+function validatePortableKxColumnTable(raw: Record<string, unknown>): NotebookValidationResult {
+  if (raw.kind !== 'table' || raw.logicalPresentation !== undefined ||
+    !isRecord(raw.persistence) || raw.persistence.mode !== 'full' ||
+    !isRecord(raw.data) || !hasOnlyKeys(raw.data, ['encoding', 'columns']) ||
+    raw.data.encoding !== 'q-columns' || !Array.isArray(raw.data.columns) ||
+    !isDensePrimitiveArray(raw.data.columns) ||
+    !isRecord(raw.result) || !safeIntegerInRange(raw.result.rowCount, 0, Number.MAX_SAFE_INTEGER) ||
+    raw.result.previewRowCount !== raw.result.rowCount) {
+    return invalid('KX notebook v3 columnar data or bounds are invalid.');
+  }
+  const rowCount = raw.result.rowCount as number;
+  // Reuse all strict full v2 envelope checks without expanding vector cells.
+  const header = validatePortableKxResultV2({
+    ...raw, version: 2, data: { encoding: 'rows', rows: [] },
+    result: { ...raw.result, rowCount: 0, previewRowCount: 0 },
+  });
+  if (!header.ok || header.value.kind !== 'table') return header;
+  const table = header.value;
+  if (raw.data.columns.length !== table.schema.columns.length) {
+    return invalid('KX notebook v3 requires exactly one vector per schema column.');
+  }
+  const columns: PortableQColumn[] = [];
+  for (let ordinal = 0; ordinal < raw.data.columns.length; ordinal++) {
+    const node = raw.data.columns[ordinal];
+    const attribute = table.schema.columnAttributes?.find(entry => entry.ordinal === ordinal)?.attribute ?? 0;
+    if (!validatePortableQNode(node) || node.form !== 'vector' ||
+      node.type !== table.schema.columns[ordinal].type ||
+      node.attribute !== attribute || node.values.length !== rowCount) {
+      return invalid(`KX notebook v3 column ${ordinal + 1} has invalid q values, type, attribute, or length.`);
+    }
+    columns.push(node);
+  }
+  return { ok: true, value: {
+    ...table, version: 3, data: { encoding: 'q-columns', columns },
+    result: { ...table.result, rowCount, previewRowCount: rowCount },
+  } };
+}
+
+function notebookSerializationFailure(error: unknown): string {
+  return error instanceof RangeError
+    ? 'Complete notebook JSON exceeds a JavaScript string or allocation limit. No result was truncated.'
+    : 'Full notebook persistence could not serialize the complete result exactly.';
 }
 
 function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValidationResult {
@@ -932,7 +1155,9 @@ function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValid
   const mode = raw.persistence.mode as NotebookPersistenceMode;
   const byteLimit = raw.persistence.byteLimit as number;
   const previewRowLimit = raw.persistence.previewRowLimit as number;
-  if (!isRecord(raw.schema) || !hasOnlyKeys(raw.schema, ['columns', 'keyColumnOrdinals']) ||
+  if (!isRecord(raw.schema) || !hasOnlyKeys(raw.schema, [
+    'columns', 'keyColumnOrdinals', 'columnAttributes',
+  ]) ||
     !Array.isArray(raw.schema.columns) ||
     (mode === 'preview' && raw.schema.columns.length > MAX_NOTEBOOK_COLUMNS)) {
     return invalid('KX notebook v2 schema is invalid.');
@@ -957,6 +1182,12 @@ function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValid
   );
   if (keyColumnOrdinals === null) {
     return invalid('KX notebook v2 key-column ordinals are invalid.');
+  }
+  const columnAttributes = mode === 'full'
+    ? strictOptionalColumnAttributes(raw.schema.columnAttributes, columns)
+    : raw.schema.columnAttributes === undefined ? undefined : null;
+  if (columnAttributes === null) {
+    return invalid('KX notebook v2 q column attributes are invalid.');
   }
   if (!isRecord(raw.data) || !hasOnlyKeys(raw.data, ['encoding', 'rows']) ||
     raw.data.encoding !== 'rows' || !Array.isArray(raw.data.rows) ||
@@ -1041,13 +1272,13 @@ function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValid
   }
   const logicalPresentation = raw.logicalPresentation === undefined
     ? undefined
-    : raw.logicalPresentation === 'standalone-list'
+    : raw.logicalPresentation === 'standalone-list' || raw.logicalPresentation === 'standalone-symbol'
       ? raw.logicalPresentation
       : null;
   if (logicalPresentation === null) {
     return invalid('KX notebook v2 logical presentation is invalid.');
   }
-  const value: PortableKxTableResult = {
+  const value: PortableKxRowTableResult = {
     version: KX_NOTEBOOK_CONTRACT_VERSION_V2,
     outputId: raw.outputId,
     persistence: { mode, previewRowLimit, byteLimit },
@@ -1056,6 +1287,7 @@ function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValid
     schema: {
       columns,
       ...(keyColumnOrdinals === undefined ? {} : { keyColumnOrdinals }),
+      ...(columnAttributes === undefined ? {} : { columnAttributes }),
     },
     data: { encoding: 'rows', rows },
     result: {
@@ -1070,8 +1302,8 @@ function validatePortableKxResultV2(raw: Record<string, unknown>): NotebookValid
     provenance,
     ...(chart ? { chart } : {}),
   };
-  if (value.logicalPresentation && !validStandaloneListPresentation(value)) {
-    return invalid('KX notebook v2 standalone-list presentation is inconsistent.');
+  if (value.logicalPresentation && !validStandalonePresentation(value)) {
+    return invalid('KX notebook v2 standalone presentation is inconsistent.');
   }
   return mode === 'full' || portableKxResultBytes(value) <= byteLimit
     ? { ok: true, value }
@@ -1249,9 +1481,9 @@ export function portableCellText(
   }
   if (cell.kind === 'q') {
     const value = portableNodeToQValue(cell.value);
-    return value === undefined ? '' : qValueToGridCellText(value);
+    return value === undefined ? '' : qValueToGridCellText(value, options.tableDecimalPlaces);
   }
-  if (cell.kind === 'json') {
+  if (cell.kind === 'json' || cell.kind === 'number') {
     return cellValueToText(portableCellValue(cell), options);
   }
   return String(cell.value);
@@ -1273,6 +1505,7 @@ export function portableCellToBoundedText(
     const rendered = portableQNodeToBoundedGridCellText(cell.value, {
       maxChars: limit,
       maxDepth: 512,
+      tableDecimalPlaces: options.tableDecimalPlaces,
     });
     return { text: rendered.text, truncated: rendered.truncated };
   }
@@ -1499,8 +1732,8 @@ export function notebookResultToCsv(value: PortableKxTableResult): string {
   }
   const table = createColumnarPanelResult(
     value.schema.columns.map(column => column.name),
-    value.data.rows.length,
-    (rowIndex, columnIndex) => portableCellValue(value.data.rows[rowIndex][columnIndex])
+    portableTableRowCount(value),
+    (rowIndex, columnIndex) => portableCellValue(portableTableCell(value, rowIndex, columnIndex))
   );
   return table.toText('csv', allCellsRange(table.rowCount, table.columns.length), true);
 }
@@ -1513,7 +1746,7 @@ export function notebookTruncationReasonSummary(
 }
 
 export function isPortableKxFullResult(value: PortableKxResult): boolean {
-  return value.version === KX_NOTEBOOK_CONTRACT_VERSION_V2 &&
+  return (value.version === KX_NOTEBOOK_CONTRACT_VERSION_V2 || value.version === 3 || value.version === 4) &&
     value.persistence?.mode === 'full';
 }
 
@@ -1521,30 +1754,45 @@ export function isHistoricalDirectPreview(value: PortableKxResult): boolean {
   return value.provenance.marker === 'direct-ipc' && !isPortableKxFullResult(value);
 }
 
-function validStandaloneListPresentation(value: PortableKxTableResult): boolean {
-  if (value.logicalPresentation !== 'standalone-list' || value.version !== 2 ||
+function validStandalonePresentation(value: PortableKxTableResult): boolean {
+  if ((value.logicalPresentation !== 'standalone-list' && value.logicalPresentation !== 'standalone-symbol') ||
+    value.version !== 2 || value.data.encoding !== 'rows' ||
     value.persistence?.mode !== 'full' || value.chart !== undefined ||
     value.schema.columns.length !== 1 || value.schema.keyColumnOrdinals !== undefined ||
+    value.schema.columnAttributes !== undefined ||
     value.result.rowCount !== 1 || value.result.columnCount !== 1 ||
     value.result.previewRowCount !== 1 || value.data.rows.length !== 1 ||
     value.data.rows[0].length !== 1) {
     return false;
   }
   const cell = value.data.rows[0][0];
+  if (value.logicalPresentation === 'standalone-symbol') {
+    return value.schema.columns[0].type === 'symbol' && cell.kind === 'q' && cell.version === 1 &&
+      cell.value.form === 'atom' && cell.value.type === 'symbol';
+  }
   return cell.kind === 'q' && cell.version === 1 && cell.value.form === 'vector' &&
     cell.value.type !== 'char';
 }
 
 /**
- * Derive the cardinality-aware saved Grid without changing the authoritative
- * exact vector cell stored in the notebook payload.
+ * Derive standalone saved presentation without changing the authoritative
+ * exact q cell stored in the notebook payload.
  */
 export function portableKxResultForGridDisplay(value: PortableKxResult): PortableKxResult {
+  if (value.kind === 'table' && value.logicalPresentation === 'standalone-symbol' &&
+    validStandalonePresentation(value)) {
+    return {
+      version: 2, outputId: value.outputId, persistence: value.persistence,
+      kind: 'qText', data: { text: qValueToLiteral(portableCellValue(portableTableCell(value, 0, 0))) },
+      result: { truncated: false, truncationReasons: [], byteLimit: value.result.byteLimit },
+      provenance: value.provenance,
+    };
+  }
   if (value.kind !== 'table' || value.logicalPresentation !== 'standalone-list' ||
-    !validStandaloneListPresentation(value)) {
+    !validStandalonePresentation(value)) {
     return value;
   }
-  const vectorCell = value.data.rows[0][0] as PortableQCell;
+  const vectorCell = portableTableCell(value, 0, 0) as PortableQCell;
   const vector = vectorCell.value;
   if (vector.form !== 'vector') {
     return value;
@@ -1654,7 +1902,7 @@ export function notebookResultStaticHtml(value: PortableKxResult): string {
     parts.push('</div>');
     return parts.join('');
   }
-  const staticRowCount = Math.min(result.data.rows.length, STATIC_NOTEBOOK_TABLE_ROW_LIMIT);
+  const staticRowCount = Math.min(portableTableRowCount(result), STATIC_NOTEBOOK_TABLE_ROW_LIMIT);
   const staticColumns = result.schema.columns.slice(0, MAX_NOTEBOOK_COLUMNS);
   const omittedStaticColumns = result.schema.columns.length - staticColumns.length;
   const parts: string[] = [
@@ -1705,7 +1953,7 @@ export function notebookResultStaticHtml(value: PortableKxResult): string {
   parts.push('</tr></thead><tbody>');
   for (let rowIndex = 0; rowIndex < staticRowCount; rowIndex++) {
     parts.push('<tr>');
-    for (const cell of result.data.rows[rowIndex].slice(0, staticColumns.length)) {
+    for (const cell of portableTableRow(result, rowIndex).slice(0, staticColumns.length)) {
       parts.push('<td>', escapeHtml(portableCellToBoundedText(cell, 2048).text), '</td>');
     }
     parts.push('</tr>');
@@ -1765,7 +2013,7 @@ export function notebookResultPlainText(value: PortableKxResult): string {
   if (!persistedFull) {
     lines.push(notebookSavedPreviewNotice(result));
   }
-  const plainRows = result.data.rows.slice(0, 20);
+  const plainRows = Array.from({ length: Math.min(20, portableTableRowCount(result)) }, (_row, ordinal) => portableTableRow(result, ordinal));
   if (plainColumns.length > 0) {
     lines.push(plainColumns.map(column => plainCell(column.name)).join('\t'));
     plainRows.forEach(row => lines.push(
@@ -1894,6 +2142,45 @@ function strictOptionalKeyColumnOrdinals(
     return null;
   }
   return raw.slice() as number[];
+}
+
+function strictOptionalColumnAttributes(
+  raw: unknown,
+  columns: readonly PortableColumn[]
+): PortableColumnAttribute[] | undefined | null {
+  if (raw === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(raw) || raw.length === 0 ||
+    raw.length > columns.length || !isDensePrimitiveArray(raw)) {
+    return null;
+  }
+  const attributes: PortableColumnAttribute[] = [];
+  let previousOrdinal = -1;
+  for (const entry of raw) {
+    if (!isRecord(entry) ||
+      (Object.getPrototypeOf(entry) !== Object.prototype &&
+        Object.getPrototypeOf(entry) !== null) ||
+      Reflect.ownKeys(entry).length !== 2 ||
+      !Object.prototype.hasOwnProperty.call(entry, 'ordinal') ||
+      !Object.prototype.hasOwnProperty.call(entry, 'attribute')) {
+      return null;
+    }
+    const ordinalProperty = Object.getOwnPropertyDescriptor(entry, 'ordinal');
+    const attributeProperty = Object.getOwnPropertyDescriptor(entry, 'attribute');
+    if (!ordinalProperty || !attributeProperty ||
+      !ordinalProperty.enumerable || !attributeProperty.enumerable ||
+      !('value' in ordinalProperty) || !('value' in attributeProperty) ||
+      !safeIntegerInRange(ordinalProperty.value, previousOrdinal + 1, columns.length - 1) ||
+      !safeIntegerInRange(attributeProperty.value, 1, 4) ||
+      !PORTABLE_Q_COLUMN_TYPES.has(columns[ordinalProperty.value].type)) {
+      return null;
+    }
+    const ordinal = ordinalProperty.value as number;
+    attributes.push({ ordinal, attribute: attributeProperty.value as number });
+    previousOrdinal = ordinal;
+  }
+  return attributes;
 }
 
 function isDensePrimitiveArray(value: unknown[]): boolean {
@@ -2216,8 +2503,7 @@ function normalizeChart(
     }
     uniqueY.push(fallback);
   }
-  const groupByColumn = type !== 'box' && type !== 'candlestick' &&
-    typeof raw.groupByColumn === 'string' && columnNames.has(raw.groupByColumn)
+  const requestedGroup = typeof raw.groupByColumn === 'string' && columnNames.has(raw.groupByColumn)
     ? raw.groupByColumn
     : undefined;
   const ohlc = type === 'candlestick'
@@ -2233,6 +2519,10 @@ function normalizeChart(
   if (type === 'candlestick' && (ohlc.length !== 4 || new Set(ohlc).size !== 4)) {
     return undefined;
   }
+  const groupByColumn = requestedGroup && requestedGroup !== xColumn &&
+    !(type === 'candlestick' ? ohlc : uniqueY).includes(requestedGroup)
+    ? requestedGroup
+    : undefined;
   const title = typeof raw.title === 'string' && raw.title.length > 0
     ? clipText(raw.title, MAX_NOTEBOOK_LABEL_CHARS)
     : undefined;
@@ -2288,21 +2578,21 @@ function validateChart(raw: unknown, columns: PortableColumn[]): NotebookChartSp
     return undefined;
   }
   const type = raw.type as NotebookChartType;
-  const supportsGroupBy =
-    type === 'line' || type === 'scatter' || type === 'step' || type === 'bar';
   const groupByColumn = raw.groupByColumn === undefined
     ? undefined
     : typeof raw.groupByColumn === 'string' && names.has(raw.groupByColumn)
       ? raw.groupByColumn
       : null;
-  if (groupByColumn === null || (!supportsGroupBy && groupByColumn !== undefined)) {
+  if (groupByColumn === null || groupByColumn === raw.xColumn ||
+    (groupByColumn !== undefined && yColumns.includes(groupByColumn))) {
     return undefined;
   }
   const ohlc = [raw.openColumn, raw.highColumn, raw.lowColumn, raw.closeColumn];
   if (type === 'candlestick') {
     if (yColumns.length !== 0 ||
       !ohlc.every(value => typeof value === 'string' && names.has(value)) ||
-      new Set(ohlc).size !== 4) {
+      new Set(ohlc).size !== 4 ||
+      (groupByColumn !== undefined && ohlc.includes(groupByColumn))) {
       return undefined;
     }
   } else if (yColumns.length === 0 || ohlc.some(value => value !== undefined)) {
@@ -2342,17 +2632,23 @@ function staticChartSvg(result: PortableKxTableResult): string {
   }
   const xIndex = result.schema.columns.findIndex(column => column.name === chart.xColumn);
   const yIndexes = chart.yColumns.map(name => result.schema.columns.findIndex(column => column.name === name));
-  const sampledRows = evenlySample(result.data.rows, STATIC_NOTEBOOK_CHART_POINT_LIMIT);
-  const series = yIndexes.map(() => [] as Array<{ x: number; y: number }>);
-  sampledRows.forEach((row, rowIndex) => {
-    const x = chartNumber(row[xIndex], rowIndex);
+  const sampleIndexes = new Set(evenlySample(portableTableRowIndexes(result), STATIC_NOTEBOOK_CHART_POINT_LIMIT));
+  const series = yIndexes.map(() => [] as Array<{ x: number; y: number; gapBefore: boolean }>);
+  const gapPending = yIndexes.map(() => false);
+  for (let rowIndex = 0; rowIndex < portableTableRowCount(result); rowIndex++) {
+    const xCell = portableTableCell(result, rowIndex, xIndex);
+    const x = chartScalarNumber(portableCellChartValue(xCell),
+      isQTemporalType(result.schema.columns[xIndex].type) || xCell.kind === 'temporal' ? 'temporal' : 'numeric');
+    if (x === undefined) continue;
     yIndexes.forEach((columnIndex, seriesIndex) => {
-      const y = chartNumber(row[columnIndex]);
-      if (x !== undefined && y !== undefined) {
-        series[seriesIndex].push({ x, y });
+      const y = chartScalarNumber(portableCellChartValue(portableTableCell(result, rowIndex, columnIndex)));
+      if (y === undefined) { gapPending[seriesIndex] = true; return; }
+      if (sampleIndexes.has(rowIndex)) {
+        series[seriesIndex].push({ x, y, gapBefore: gapPending[seriesIndex] });
+        gapPending[seriesIndex] = false;
       }
     });
-  });
+  }
   const points = series.flat();
   if (points.length === 0) {
     return '<div class="kx-note">Static chart unavailable: selected columns contain no finite numeric/temporal points.</div>';
@@ -2392,37 +2688,24 @@ function staticChartSvg(result: PortableKxTableResult): string {
       });
       return;
     }
-    const coordinates: string[] = [];
+    let coordinates: string[] = [];
+    const flush = (): void => {
+      if (coordinates.length) parts.push(`<polyline points="${coordinates.join(' ')}" fill="none" stroke="${color}" stroke-width="1.5"/>`);
+      coordinates = [];
+    };
     values.forEach((point, index) => {
+      if (point.gapBefore) flush();
       const x = scaleX(point.x).toFixed(2);
       const y = scaleY(point.y).toFixed(2);
-      if (chart.type === 'step' && index > 0) {
+      if (chart.type === 'step' && coordinates.length > 0) {
         coordinates.push(`${x},${scaleY(values[index - 1].y).toFixed(2)}`);
       }
       coordinates.push(`${x},${y}`);
     });
-    parts.push(`<polyline points="${coordinates.join(' ')}" fill="none" stroke="${color}" stroke-width="1.5"/>`);
+    flush();
   });
   parts.push('</svg>');
   return parts.join('');
-}
-
-function chartNumber(cell: PortableCell | undefined, fallback?: number): number | undefined {
-  if (!cell) {
-    return fallback;
-  }
-  if (cell.kind === 'null') {
-    return fallback;
-  }
-  if (cell.kind === 'number') {
-    return cell.value;
-  }
-  if (cell.kind === 'temporal') {
-    const value = Date.parse(cell.value);
-    return Number.isFinite(value) ? value : fallback;
-  }
-  const value = Number(portableCellText(cell));
-  return Number.isFinite(value) ? value : fallback;
 }
 
 function evenlySample<T>(values: T[], limit: number): T[] {
@@ -2437,7 +2720,7 @@ function evenlySample<T>(values: T[], limit: number): T[] {
 }
 
 function updateResultSummary(
-  payload: PortableKxTableResult,
+  payload: PortableKxRowTableResult,
   reasons: Set<NotebookTruncationReason>,
   previewRowCount = payload.data.rows.length
 ): void {
@@ -2447,7 +2730,7 @@ function updateResultSummary(
 }
 
 function trimNotebookColumnsToMetadataBudget(
-  payload: PortableKxTableResult,
+  payload: PortableKxRowTableResult,
   reasons: Set<NotebookTruncationReason>,
   byteLimit: number,
   previewRowCount: number
@@ -2466,7 +2749,7 @@ function trimNotebookColumnsToMetadataBudget(
   payload.data.rows = savedRows;
 }
 
-function portableKxResultMetadataBytes(payload: PortableKxTableResult): number {
+function portableKxResultMetadataBytes(payload: PortableKxRowTableResult): number {
   const savedRows = payload.data.rows;
   payload.data.rows = [];
   const bytes = portableKxResultBytes(payload);
@@ -2486,7 +2769,7 @@ function portableRowPrefixBytes(rows: readonly PortableCell[][]): number[] {
 }
 
 function portableKxResultBytesForRowCount(
-  payload: PortableKxTableResult,
+  payload: PortableKxRowTableResult,
   reasons: Set<NotebookTruncationReason>,
   prefixBytes: readonly number[],
   rowCount: number
@@ -2497,7 +2780,7 @@ function portableKxResultBytesForRowCount(
     Math.max(0, rowCount - 1);
 }
 
-function fitV2PreviewTableToBudget(payload: PortableKxTableResult): void {
+function fitV2PreviewTableToBudget(payload: PortableKxRowTableResult): void {
   const byteLimit = payload.result.byteLimit;
   const reasons = new Set(payload.result.truncationReasons);
   if (portableKxResultBytes(payload) > byteLimit && payload.data.rows.length > 0) {
@@ -2538,7 +2821,7 @@ function fitV2PreviewTableToBudget(payload: PortableKxTableResult): void {
 }
 
 function refreshV2PreviewSummary(
-  payload: PortableKxTableResult,
+  payload: PortableKxRowTableResult,
   reasons: Set<NotebookTruncationReason>
 ): void {
   payload.result.previewRowCount = payload.data.rows.length;

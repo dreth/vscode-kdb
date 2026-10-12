@@ -1,5 +1,7 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
+import { currentFailureReportingState, onFailureReportingChanged, reportKxFailure, reportKxBreadcrumb, newFailureOperationId,
+  forwardKxFailure, FAILURE_LSP_STATE, FAILURE_LSP_EVENT } from './failure-record';
 import {
   LanguageClient,
   LanguageClientOptions,
@@ -19,6 +21,7 @@ export class QLanguageClientController implements vscode.Disposable {
   private client: LanguageClient | undefined;
   private startPromise: Promise<void> | undefined;
   private disposed = false;
+  private failureForwarding: vscode.Disposable | undefined;
 
   public constructor(
     private readonly context: vscode.ExtensionContext,
@@ -26,6 +29,9 @@ export class QLanguageClientController implements vscode.Disposable {
     private readonly metadata?: QMetadataService,
   ) {
     this.subscriptions.push(
+      onFailureReportingChanged(state => {
+        if (state.enabled || this.failureForwarding) this.syncFailureForwarding();
+      }),
       vscode.workspace.onDidOpenTextDocument(document => this.documentOpened(document)),
       vscode.workspace.onDidChangeConfiguration(event => {
         if (!event.affectsConfiguration('vscode-kdb.languageServer')) return;
@@ -140,9 +146,17 @@ export class QLanguageClientController implements vscode.Disposable {
       });
     }
     this.client = client;
+    const reporting = currentFailureReportingState();
+    const details = { operationId: newFailureOperationId(), surface: 'language', transport: 'lsp' };
+    reportKxBreadcrumb('language', 'start', { ...details, status: 'start', ready: false });
     this.startPromise = client.start().catch(error => {
       if (this.client === client) this.client = undefined;
       this.logFailure('start', error);
+    }).then(async () => {
+      if (this.client === client && currentFailureReportingState().enabled) {
+        if (currentFailureReportingState().generation === reporting.generation) reportKxBreadcrumb('language', 'start', { ...details, status: 'success', ready: true });
+        this.syncFailureForwarding();
+      }
     }).finally(() => {
       this.startPromise = undefined;
     });
@@ -150,6 +164,7 @@ export class QLanguageClientController implements vscode.Disposable {
   }
 
   private async stop(): Promise<void> {
+    this.failureForwarding?.dispose(); this.failureForwarding = undefined;
     const client = this.client;
     this.client = undefined;
     if (!client) return;
@@ -167,8 +182,23 @@ export class QLanguageClientController implements vscode.Disposable {
   }
 
   private logFailure(operation: string, error: unknown): void {
+    reportKxFailure('language', operation === 'start' || operation === 'stop' ? operation
+      : operation.startsWith('metadata') ? 'metadata' : 'readiness', error, { surface: 'language', transport: 'lsp', ready: this.isRunning() });
     const kind = error instanceof Error ? error.name : typeof error;
     this.output.appendLine(`[q-language] ${operation} failed (${safeLog(kind)}). Existing q execution remains available.`);
+  }
+  private syncFailureForwarding(): void {
+    const client = this.client;
+    if (!client || this.disposed) return;
+    try {
+      const state = currentFailureReportingState();
+      if (state.enabled && !this.failureForwarding) {
+        this.failureForwarding = client.onNotification(FAILURE_LSP_EVENT, (message: unknown) => {
+          if (this.client === client && !this.disposed) forwardKxFailure(message, 'language');
+        });
+      } else if (!state.enabled) { this.failureForwarding?.dispose(); this.failureForwarding = undefined; }
+      void client.sendNotification(FAILURE_LSP_STATE, state).catch(() => undefined);
+    } catch { /* Optional reporting cannot interrupt language-client startup. */ }
   }
 }
 

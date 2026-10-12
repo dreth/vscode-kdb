@@ -154,7 +154,9 @@ function auditTrackedText(root, policy = CONFIDENTIALITY_POLICY) {
   const records = [];
   for (const relative of files) {
     try {
-      records.push({ content: fs.readFileSync(path.join(root, relative)) });
+      const candidate = path.join(root, relative);
+      if (!fs.statSync(candidate).isFile()) continue;
+      records.push({ content: fs.readFileSync(candidate) });
     } catch (error) {
       if (!error || error.code !== 'ENOENT') throw error;
     }

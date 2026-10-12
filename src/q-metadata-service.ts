@@ -4,14 +4,19 @@ import { ConnectionManager } from './connection-manager';
 import { ConnectionStore } from './connection-store';
 import type { KxDiagnostics } from './diagnostics';
 import {
+  buildRuntimeContextQuery,
   buildServerTableMetaQuery,
+  parseRuntimeBindings,
   parseServerColumns,
   parseServerTableNames,
   parseServerVariables,
+  RUNTIME_PROCESS_ROOT_QUERY,
+  RuntimeBindingMetadata,
   SERVER_TABLES_QUERY,
   SERVER_VARIABLES_QUERY,
   ServerColumnMetadata,
   ServerVariableMetadata,
+  validateRuntimeContext,
   validateServerObjectIdentifier,
 } from './server-explorer-model';
 
@@ -35,6 +40,9 @@ export interface QMetadataRootResponse {
   readonly snapshot: QMetadataSnapshot;
   readonly tables: readonly string[];
   readonly variables: readonly ServerVariableMetadata[];
+  readonly omittedUnsafeNames: number;
+  readonly omittedUnsafeTableNames: number;
+  readonly omittedUnsafeVariableNames: number;
 }
 
 export interface QMetadataTableResponse {
@@ -43,6 +51,15 @@ export interface QMetadataTableResponse {
   readonly snapshot: QMetadataSnapshot;
   readonly table: string;
   readonly columns: readonly ServerColumnMetadata[];
+}
+
+export interface QProcessMetadataResponse {
+  readonly version: 1;
+  readonly kind: 'process';
+  readonly snapshot: QMetadataSnapshot;
+  readonly context: string;
+  readonly bindings: readonly RuntimeBindingMetadata[];
+  readonly omittedUnsafeNames: number;
 }
 
 export type QMetadataResponse = QMetadataRootResponse | QMetadataTableResponse;
@@ -145,6 +162,27 @@ export class QMetadataService implements vscode.Disposable {
     return value;
   }
 
+  public processRoot(signal?: AbortSignal): Promise<QProcessMetadataResponse | undefined> {
+    if (this.disposed) return Promise.resolve(undefined);
+    const snapshot = this.snapshot();
+    return snapshot
+      ? this.loadProcessContext(snapshot, '.', RUNTIME_PROCESS_ROOT_QUERY, signal)
+      : Promise.resolve(undefined);
+  }
+
+  public processContext(
+    context: unknown,
+    signal?: AbortSignal
+  ): Promise<QProcessMetadataResponse | undefined> {
+    if (this.disposed) return Promise.resolve(undefined);
+    const normalizedContext = validateRuntimeContext(context);
+    const query = buildRuntimeContextQuery(normalizedContext);
+    const snapshot = this.snapshot();
+    return snapshot
+      ? this.loadProcessContext(snapshot, normalizedContext, query, signal)
+      : Promise.resolve(undefined);
+  }
+
   public refresh(): void {
     this.invalidate(true);
   }
@@ -186,8 +224,10 @@ export class QMetadataService implements vscode.Disposable {
         signal
       );
       if (!this.matches(snapshot)) return undefined;
-      const tables = parseServerTableNames(tablesValue).names;
-      const variables = parseServerVariables(variablesValue).variables;
+      const parsedTables = parseServerTableNames(tablesValue);
+      const parsedVariables = parseServerVariables(variablesValue);
+      const tables = parsedTables.names;
+      const variables = parsedVariables.variables;
       if (tables.length + variables.length > Q_METADATA_MAX_ROOT_ITEMS) {
         throw new Error('q metadata exceeded the root item cap.');
       }
@@ -197,6 +237,9 @@ export class QMetadataService implements vscode.Disposable {
         snapshot,
         tables: Object.freeze(tables.slice()),
         variables: Object.freeze(variables.map(value => Object.freeze({ ...value }))),
+        omittedUnsafeNames: parsedTables.omittedUnsafeNames + parsedVariables.omittedUnsafeNames,
+        omittedUnsafeTableNames: parsedTables.omittedUnsafeNames,
+        omittedUnsafeVariableNames: parsedVariables.omittedUnsafeNames,
       });
       assertMetadataByteLimit(response);
       this.writeDiagnostic(connection.id, connection.database, 'success', 'root', Date.now() - started);
@@ -247,6 +290,62 @@ export class QMetadataService implements vscode.Disposable {
     }
   }
 
+  private async loadProcessContext(
+    snapshot: QMetadataSnapshot,
+    context: string,
+    query: string,
+    signal?: AbortSignal
+  ): Promise<QProcessMetadataResponse | undefined> {
+    const connection = this.connectionFor(snapshot);
+    if (!connection) return undefined;
+    const operation = context === '.' ? 'process-root' : 'process-context';
+    const started = Date.now();
+    this.writeDiagnostic(connection.id, connection.database, 'start', operation);
+    try {
+      const value = await boundedMetadataWait(
+        requestSignal => this.manager.executeInConfiguredNamespace(
+          connection,
+          query,
+          undefined,
+          requestSignal
+        ),
+        signal
+      );
+      if (!this.matches(snapshot)) return undefined;
+      const parsed = parseRuntimeBindings(value, context);
+      if (parsed.bindings.length > Q_METADATA_MAX_ROOT_ITEMS) {
+        throw new Error('q runtime metadata exceeded the context item cap.');
+      }
+      const response: QProcessMetadataResponse = Object.freeze({
+        version: 1,
+        kind: 'process',
+        snapshot,
+        context,
+        bindings: Object.freeze(parsed.bindings.map(binding => Object.freeze({ ...binding }))),
+        omittedUnsafeNames: parsed.omittedUnsafeNames,
+      });
+      assertMetadataByteLimit(response);
+      this.writeDiagnostic(
+        connection.id,
+        connection.database,
+        'success',
+        operation,
+        Date.now() - started
+      );
+      return response;
+    } catch (error) {
+      this.writeDiagnostic(
+        connection.id,
+        connection.database,
+        signal?.aborted ? 'canceled' : 'failed',
+        operation,
+        Date.now() - started,
+        error
+      );
+      throw error;
+    }
+  }
+
   private connectionFor(snapshot: QMetadataSnapshot) {
     const connection = this.store.activeConnection();
     return connection && this.matches(snapshot) ? connection : undefined;
@@ -287,7 +386,7 @@ export class QMetadataService implements vscode.Disposable {
     connectionId: string,
     namespace: string,
     status: 'start' | 'success' | 'failed' | 'canceled',
-    operation: 'root' | 'table',
+    operation: 'root' | 'table' | 'process-root' | 'process-context',
     durationMs?: number,
     error?: unknown,
   ): void {
@@ -297,7 +396,11 @@ export class QMetadataService implements vscode.Disposable {
         endpoint: `profile:${connectionId}`,
         status,
         durationMs,
-        details: { scope: 'q-language-metadata', operation, namespace },
+        details: {
+          scope: operation.startsWith('process-') ? 'variables-metadata' : 'q-language-metadata',
+          operation,
+          namespace,
+        },
         error,
         includeErrorMessage: false,
       });
@@ -349,7 +452,7 @@ async function boundedMetadataWait<T>(
   }
 }
 
-function assertMetadataByteLimit(value: QMetadataResponse): void {
+function assertMetadataByteLimit(value: QMetadataResponse | QProcessMetadataResponse): void {
   if (Buffer.byteLength(JSON.stringify(value), 'utf8') > Q_METADATA_MAX_BYTES) {
     throw new Error('q metadata exceeded the response byte cap.');
   }

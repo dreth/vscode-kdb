@@ -39,6 +39,7 @@ export interface CellWindow {
 export type RowValue = { [key: string]: unknown };
 export type ArrayDisplayFormat = 'commaSpace' | 'space' | 'raw';
 export interface CellTextOptions {
+  tableDecimalPlaces?: number;
   arrayDisplayFormat?: ArrayDisplayFormat;
   maxChars?: number;
   truncationMarker?: string;
@@ -1206,13 +1207,17 @@ function readableValueText(value: unknown, topLevel: boolean, options: Normalize
   }
 
   if (isQRuntimeValue(value)) {
-    return qValueToGridCellText(value);
+    return qValueToGridCellText(value, options.tableDecimalPlaces);
   }
 
   if (typeof value === 'string') {
     return value;
   }
 
+  if (typeof value === 'number' && !Number.isInteger(value) && Number.isFinite(value) &&
+    Number.isInteger(options.tableDecimalPlaces) && options.tableDecimalPlaces! >= 0 && options.tableDecimalPlaces! <= 12) {
+    return value.toFixed(options.tableDecimalPlaces);
+  }
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     return String(value);
   }
@@ -1524,6 +1529,7 @@ function appendBoundedReadableValue(
       : qValueToBoundedGridCellText)(value, {
       maxChars: Math.max(0, state.limit - state.length),
       maxDepth: Math.max(0, 512 - depth),
+      tableDecimalPlaces: state.qRenderMode === 'grid' ? state.options.tableDecimalPlaces : undefined,
     });
     appendBoundedSanitizedText(state, bounded.text);
     if (bounded.truncated) {
@@ -1536,7 +1542,8 @@ function appendBoundedReadableValue(
     return;
   }
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
-    appendBoundedSanitizedText(state, String(value));
+    appendBoundedSanitizedText(state, state.qRenderMode === 'grid'
+      ? readableValueText(value, topLevel, state.options) : String(value));
     return;
   }
   if (Array.isArray(value)) {
@@ -1923,6 +1930,7 @@ interface NormalizedExportOptions {
 }
 
 interface NormalizedCellTextOptions {
+  tableDecimalPlaces?: number;
   arrayDisplayFormat: ArrayDisplayFormat;
 }
 
@@ -1943,6 +1951,7 @@ function normalizeExportOptions(
 
 function normalizeCellTextOptions(value: CellTextOptions | undefined): NormalizedCellTextOptions {
   return {
+    tableDecimalPlaces: value?.tableDecimalPlaces,
     arrayDisplayFormat: normalizeArrayDisplayFormat(value && value.arrayDisplayFormat),
   };
 }

@@ -1,5 +1,7 @@
 import {
   KX_NOTEBOOK_MIME,
+  portableTableRowCount,
+
   PortableKxResult,
   validatePortableKxResult,
 } from './notebook-contract';
@@ -208,7 +210,8 @@ export type NotebookRendererMessage =
   | { type: 'openLiveResult'; outputId: string; liveId: string; requestId: number }
   | { type: 'updateResultSetting'; key: NotebookResultSettingKey; value: string | number | boolean }
   | { type: 'setResultColumnWidth'; position: number; width: number }
-  | { type: 'resetResultColumnWidths' };
+  | { type: 'resetResultColumnWidths' }
+  | { type: 'openResultSettings' };
 
 export interface NotebookRendererSettingsMessage extends Pick<NotebookSettings, 'presentation'> {
   type: 'settings';
@@ -296,6 +299,8 @@ export interface NotebookLiveBoxStats {
 
 export interface NotebookLiveBoxSeries {
   columnName: string;
+  sourceColumnName?: string;
+  groupValue?: string;
   stats: Array<NotebookLiveBoxStats | null>;
 }
 
@@ -306,6 +311,11 @@ export interface NotebookLiveCandlestick {
   high: number;
   low: number;
   close: number;
+}
+
+export interface NotebookLiveCandlestickSeries {
+  groupValue: string;
+  candlesticks: Array<NotebookLiveCandlestick | null>;
 }
 
 export interface NotebookLiveChartData {
@@ -325,6 +335,8 @@ export interface NotebookLiveChartData {
     close: string;
   };
   candlesticks?: NotebookLiveCandlestick[];
+  candlestickSeries?: NotebookLiveCandlestickSeries[];
+  retainedGroupCount?: number;
   sourceRowCount?: number;
   eligibleRowCount?: number;
   sampledPointCount?: number;
@@ -464,6 +476,9 @@ export function parseNotebookRendererMessage(raw: unknown): NotebookRendererMess
         requestId: raw.requestId,
       }
       : undefined;
+  }
+  if (raw.type === 'openResultSettings') {
+    return hasOnlyKeys(raw, ['type']) ? { type: 'openResultSettings' } : undefined;
   }
   if (raw.type === 'updateResultSetting') {
     return parseResultSettingUpdate(raw);
@@ -619,7 +634,7 @@ export function parseNotebookPortableOutputBinding(
 
 /** Classifies one notebook output using the complete durable KX ownership
  * contract. V2 outputs are actionable only when exactly one owned MIME payload
- * agrees with valid direct/nested binding and live metadata. */
+ * agrees with its valid direct/nested binding and any optional live metadata. */
 export function inspectNotebookKxOutputIdentity(
   metadata: unknown,
   items: readonly { mime: string; data?: Uint8Array; value?: unknown }[]
@@ -665,7 +680,7 @@ export function inspectNotebookKxOutputIdentity(
 
   const raw = notebookOutputItemJson(kxItem);
   const validation = raw === undefined ? undefined : validatePortableKxResult(raw);
-  if (!validation?.ok || validation.value.version !== 2 ||
+  if (!validation?.ok || (validation.value.version !== 2 && validation.value.version !== 3 && validation.value.version !== 4) ||
     validation.value.outputId !== binding.id) {
     return { status: 'invalid', bindingIds };
   }
@@ -712,7 +727,8 @@ function notebookMetadataDeclaresKey(raw: unknown, key: string): boolean {
     (!!nestedMetadata && Object.prototype.hasOwnProperty.call(nestedMetadata, key));
 }
 
-function notebookOutputBindingIdsFromMetadata(raw: unknown): string[] {
+/** Includes malformed direct/nested claims so output lookup fails closed. */
+export function notebookOutputBindingIdsFromMetadata(raw: unknown): string[] {
   if (!isRecord(raw)) {
     return [];
   }
@@ -853,14 +869,17 @@ function parseLiveChartRequest(raw: Record<string, unknown>): NotebookRendererMe
     optionalColumnName(raw.closeColumn),
   ];
   if (raw.chartType === 'candlestick') {
-    if (raw.yColumns.length !== 0 || groupByColumn !== undefined ||
+    if (raw.yColumns.length !== 0 ||
       ohlc.some(column => column === undefined) ||
-      new Set(ohlc as string[]).size !== 4) {
+      new Set(ohlc as string[]).size !== 4 ||
+      (groupByColumn !== undefined &&
+        (groupByColumn === raw.xColumn || (ohlc as string[]).includes(groupByColumn)))) {
       return undefined;
     }
   } else if (raw.yColumns.length < 1 ||
     ohlc.some(column => column !== undefined) ||
-    (raw.chartType === 'box' && groupByColumn !== undefined)) {
+    (groupByColumn !== undefined &&
+      (groupByColumn === raw.xColumn || raw.yColumns.includes(groupByColumn)))) {
     return undefined;
   }
   return {
@@ -1020,10 +1039,10 @@ function parsePreviewExportRequest(
   }
   const payload = validation.value;
   if (!validOptionalSavedIndexes(raw.columnIndexes, payload.schema.columns.length) ||
-    !validOptionalSavedIndexes(raw.rowIndexes, payload.data.rows.length)) {
+    !validOptionalSavedIndexes(raw.rowIndexes, portableTableRowCount(payload))) {
     return undefined;
   }
-  if ((raw.endRow as number) >= payload.data.rows.length ||
+  if ((raw.endRow as number) >= portableTableRowCount(payload) ||
     (raw.endColumn as number) >= payload.schema.columns.length) {
     return undefined;
   }
@@ -1032,7 +1051,7 @@ function parsePreviewExportRequest(
   if (columnIndexes?.some(index => index >= payload.schema.columns.length)) {
     return undefined;
   }
-  if (rowIndexes?.some(index => index >= payload.data.rows.length)) {
+  if (rowIndexes?.some(index => index >= portableTableRowCount(payload))) {
     return undefined;
   }
   if ((columnIndexes && columnIndexes.length !==
@@ -1076,7 +1095,8 @@ function parsePreviewActionRequest(
   }
   const validation = validatePortableKxResult(raw.payload);
   if (!validation.ok ||
-    (raw.type === 'exportPreviewText' && validation.value.kind !== 'qText')) {
+    (raw.type === 'exportPreviewText' && validation.value.kind !== 'qText' &&
+      validation.value.logicalPresentation !== 'standalone-symbol')) {
     return undefined;
   }
   return {
@@ -1426,6 +1446,8 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
     'boxSeries',
     'ohlcColumns',
     'candlesticks',
+    'candlestickSeries',
+    'retainedGroupCount',
     'sourceRowCount',
     'eligibleRowCount',
     'sampledPointCount',
@@ -1443,6 +1465,7 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
     raw.series.length < 1 || raw.series.length > MAX_NOTEBOOK_LIVE_CHART_SERIES ||
     !validOptionalCount(raw.sourceRowCount) || !validOptionalCount(raw.eligibleRowCount) ||
     !validOptionalCount(raw.sampledPointCount) ||
+    !validOptionalCount(raw.retainedGroupCount) ||
     (raw.temporalBucketIntervalMs !== undefined &&
       (!finiteNumber(raw.temporalBucketIntervalMs) || raw.temporalBucketIntervalMs <= 0)) ||
     (raw.temporalBucketOrigin !== undefined && raw.temporalBucketOrigin !== 0) ||
@@ -1498,6 +1521,9 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
   if (raw.xDomain !== undefined && !xDomain) {
     return undefined;
   }
+  if (raw.groupByColumn === raw.xColumn) {
+    return undefined;
+  }
   const boxSeries = parseLiveBoxSeries(raw.boxSeries, raw.x.length);
   if (raw.boxSeries !== undefined && !boxSeries) {
     return undefined;
@@ -1510,17 +1536,65 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
   if (raw.candlesticks !== undefined && !candlesticks) {
     return undefined;
   }
+  const candlestickSeries = parseLiveCandlestickSeries(raw.candlestickSeries, raw.x as number[]);
+  if (raw.candlestickSeries !== undefined && !candlestickSeries) {
+    return undefined;
+  }
   if (raw.chartType === 'candlestick') {
-    if (!ohlcColumns || !candlesticks || candlesticks.length !== raw.x.length ||
-      raw.groupByColumn !== undefined || boxSeries !== undefined) {
+    const grouped = typeof raw.groupByColumn === 'string';
+    const groupValues = candlestickSeries?.map(value => value.groupValue) || [];
+    const returnedItems = candlestickSeries?.reduce(
+      (count, value) => count + value.candlesticks.filter(Boolean).length,
+      0
+    ) || 0;
+    if (!ohlcColumns || boxSeries !== undefined ||
+      (grouped
+        ? (!candlestickSeries || candlesticks !== undefined ||
+          new Set(groupValues).size !== groupValues.length ||
+          raw.retainedGroupCount !== candlestickSeries.length ||
+          raw.series.length !== candlestickSeries.length ||
+          raw.series.some((value, index) => value.groupValue !== groupValues[index]) ||
+          returnedItems > 7_000 || raw.sampledPointCount !== returnedItems)
+        : (!candlesticks || candlesticks.length !== raw.x.length || candlestickSeries !== undefined))) {
       return undefined;
     }
   } else if (raw.chartType === 'box') {
-    if (!boxSeries || raw.groupByColumn !== undefined ||
-      ohlcColumns !== undefined || candlesticks !== undefined) {
+    if (!boxSeries || ohlcColumns !== undefined || candlesticks !== undefined || candlestickSeries !== undefined) {
       return undefined;
     }
-  } else if (boxSeries !== undefined || ohlcColumns !== undefined || candlesticks !== undefined) {
+    if (typeof raw.groupByColumn === 'string') {
+      const groupValues = boxSeries.map(value => value.groupValue).filter((value): value is string => !!value);
+      const retainedGroups = new Set(groupValues);
+      const returnedItems = boxSeries.reduce(
+        (count, value) => count + value.stats.filter(Boolean).length,
+        0
+      );
+      if (groupValues.length !== boxSeries.length || retainedGroups.size > 12 ||
+        raw.retainedGroupCount !== retainedGroups.size || returnedItems > 7_000 ||
+        raw.sampledPointCount !== returnedItems) {
+        return undefined;
+      }
+    }
+  } else if (boxSeries !== undefined || ohlcColumns !== undefined ||
+    candlesticks !== undefined || candlestickSeries !== undefined) {
+    return undefined;
+  }
+  if (typeof raw.groupByColumn === 'string' && raw.chartType !== 'candlestick') {
+    const groupValues = series.map(value => value.groupValue).filter((value): value is string => !!value);
+    if (groupValues.length !== series.length || new Set(groupValues).size > 12) {
+      return undefined;
+    }
+    if (raw.chartType === 'bar') {
+      const returnedItems = series.reduce(
+        (count, value) => count + value.values.filter(item => typeof item === 'number').length,
+        0
+      );
+      if (returnedItems > 7_000 || raw.sampledPointCount !== returnedItems) {
+        return undefined;
+      }
+    }
+  } else if (raw.groupByColumn === undefined &&
+    (series.some(value => value.groupValue !== undefined) || raw.retainedGroupCount !== undefined)) {
     return undefined;
   }
   const warnings = raw.warnings === undefined
@@ -1546,6 +1620,10 @@ function parseLiveChartData(raw: unknown): NotebookLiveChartData | undefined {
     ...(boxSeries ? { boxSeries } : {}),
     ...(ohlcColumns ? { ohlcColumns } : {}),
     ...(candlesticks ? { candlesticks } : {}),
+    ...(candlestickSeries ? { candlestickSeries } : {}),
+    ...(typeof raw.retainedGroupCount === 'number'
+      ? { retainedGroupCount: raw.retainedGroupCount }
+      : {}),
     ...(typeof raw.sourceRowCount === 'number' ? { sourceRowCount: raw.sourceRowCount } : {}),
     ...(typeof raw.eligibleRowCount === 'number' ? { eligibleRowCount: raw.eligibleRowCount } : {}),
     ...(typeof raw.sampledPointCount === 'number' ? { sampledPointCount: raw.sampledPointCount } : {}),
@@ -1581,8 +1659,15 @@ function parseLiveBoxSeries(
   }
   const result: NotebookLiveBoxSeries[] = [];
   for (const value of raw) {
-    if (!isRecord(value) || !hasOnlyKeys(value, ['columnName', 'stats']) ||
+    if (!isRecord(value) || !hasOnlyKeys(value, [
+      'columnName',
+      'sourceColumnName',
+      'groupValue',
+      'stats',
+    ]) ||
       !validColumnName(value.columnName) || !Array.isArray(value.stats) ||
+      !validOptionalColumnName(value.sourceColumnName) ||
+      !validOptionalText(value.groupValue, 512) ||
       value.stats.length !== pointCount) {
       return undefined;
     }
@@ -1616,7 +1701,14 @@ function parseLiveBoxSeries(
         max: rawStats.max,
       });
     }
-    result.push({ columnName: value.columnName, stats });
+    result.push({
+      columnName: value.columnName,
+      ...(typeof value.sourceColumnName === 'string'
+        ? { sourceColumnName: value.sourceColumnName }
+        : {}),
+      ...(typeof value.groupValue === 'string' ? { groupValue: value.groupValue } : {}),
+      stats,
+    });
   }
   return result;
 }
@@ -1668,6 +1760,43 @@ function parseLiveCandlesticks(
   return result;
 }
 
+function parseLiveCandlestickSeries(
+  raw: unknown,
+  xValues: number[]
+): NotebookLiveCandlestickSeries[] | undefined {
+  if (!Array.isArray(raw) || raw.length < 1 || raw.length > 12) {
+    return undefined;
+  }
+  const result: NotebookLiveCandlestickSeries[] = [];
+  let pointCount = 0;
+  for (const value of raw) {
+    if (!isRecord(value) || !hasOnlyKeys(value, ['groupValue', 'candlesticks']) ||
+      !validBoundedText(value.groupValue, 512) || value.groupValue.length === 0 ||
+      !Array.isArray(value.candlesticks) || value.candlesticks.length !== xValues.length) {
+      return undefined;
+    }
+    const candlesticks: Array<NotebookLiveCandlestick | null> = [];
+    for (let index = 0; index < value.candlesticks.length; index++) {
+      const candidate = value.candlesticks[index];
+      if (candidate === null) {
+        candlesticks.push(null);
+        continue;
+      }
+      const parsed = parseLiveCandlesticks([candidate], 1);
+      if (!parsed || parsed[0].x !== xValues[index]) {
+        return undefined;
+      }
+      pointCount += 1;
+      if (pointCount > MAX_NOTEBOOK_LIVE_CHART_POINTS) {
+        return undefined;
+      }
+      candlesticks.push(parsed[0]);
+    }
+    result.push({ groupValue: value.groupValue, candlesticks });
+  }
+  return result;
+}
+
 function parseLiveResultMetadata(raw: unknown): NotebookLiveResultMetadata | undefined {
   if (!isRecord(raw) || !hasOnlyKeys(raw, ['query', 'connectionName', 'elapsedMs', 'messages']) ||
     !validOptionalText(raw.query, 16_384) || !validOptionalText(raw.connectionName, 512) ||
@@ -1703,6 +1832,8 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     'includeRowIndex',
     'copyExportConfirmCellThreshold',
     'elapsedTimeDisplay',
+    'tableDecimalPlaces',
+    'chartScientificNotationThreshold',
     'chartDecimalPlaces',
     'chartMaxSourceRows',
     'qTextSyntaxHighlighting',
@@ -1723,6 +1854,8 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     typeof raw.includeRowIndex !== 'boolean' ||
     !positiveSafeInteger(raw.copyExportConfirmCellThreshold) ||
     (raw.elapsedTimeDisplay !== 'auto' && raw.elapsedTimeDisplay !== 'milliseconds') ||
+    (raw.tableDecimalPlaces !== undefined && !integerInRange(raw.tableDecimalPlaces, -1, 12)) ||
+    (raw.chartScientificNotationThreshold !== undefined && (!finiteNumber(raw.chartScientificNotationThreshold) || raw.chartScientificNotationThreshold <= 0)) ||
     !integerInRange(raw.chartDecimalPlaces, 0, 12) ||
     !positiveSafeInteger(raw.chartMaxSourceRows) ||
     typeof raw.qTextSyntaxHighlighting !== 'boolean' ||
@@ -1746,6 +1879,8 @@ function parseSharedResultSettings(raw: unknown): NotebookSharedKxResultSettings
     includeRowIndex: raw.includeRowIndex,
     copyExportConfirmCellThreshold: raw.copyExportConfirmCellThreshold,
     elapsedTimeDisplay: raw.elapsedTimeDisplay,
+    tableDecimalPlaces: raw.tableDecimalPlaces ?? -1,
+    chartScientificNotationThreshold: raw.chartScientificNotationThreshold ?? 1000000,
     chartDecimalPlaces: raw.chartDecimalPlaces,
     chartMaxSourceRows: raw.chartMaxSourceRows,
     qTextSyntaxHighlighting: raw.qTextSyntaxHighlighting,
@@ -1783,6 +1918,10 @@ function normalizedResultSettingValue(
       return typeof value === 'boolean' ? value : undefined;
     case 'elapsedTimeDisplay':
       return value === 'auto' || value === 'milliseconds' ? value : undefined;
+    case 'tableDecimalPlaces':
+      return integerInRange(value, -1, 12) ? value : undefined;
+    case 'chartScientificNotationThreshold':
+      return finiteNumber(value) && value > 0 ? value : undefined;
     case 'chartDecimalPlaces':
       return integerInRange(value, 0, 12) ? value : undefined;
     case 'copyExportConfirmCellThreshold':

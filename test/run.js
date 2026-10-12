@@ -56,10 +56,13 @@ const {
   attributedPersistenceTable,
   bigEndianLongFixtures,
   dictionaryIdentityValue,
+  emptyAttributedKeyedTableValue,
   emptyAttributedPersistenceTable,
   emptyDictionaryIdentityValue,
   emptyKeyedTableIdentityValue,
   exactRenderingFixtures,
+  multiAttributedKeyedTableValue,
+  multiAttributedTableValue,
   multiKeyedTableIdentityValue,
   nestedUnsupportedPersistenceTable,
   realisticPersistenceTable,
@@ -98,6 +101,7 @@ const {
   clampChartViewport,
   issueChartZoomLifecycleRequest,
   mergeChartPixelGaps,
+  chartSourceGapPixels,
   panChartViewport,
   panChartViewportByPixels,
   planChartAutoRefine,
@@ -126,6 +130,7 @@ const {
   automaticColumnWidthsForLengths,
   displayedSourceColumnPositions,
   hasPositionalColumnWidths,
+  measuredColumnRenderedTextWidth,
   normalizeColumnAutoFitMode,
   normalizePositionalColumnWidths,
   positionalColumnWidthEntries,
@@ -256,6 +261,8 @@ const {
   comparePortableCells,
   createPortableKxResult,
   createPortableKxResultV2,
+  createPortableKxColumnTableV3,
+  createPortableKxPackedTableV4,
   createPortableKxTextResult,
   createPortableKxTextResultV2,
   notebookQTextDisplay,
@@ -272,6 +279,11 @@ const {
   portableCellText,
   portableCellValue,
   portableKxResultBytes,
+  portableTableRowCount,
+  portableTableCell,
+  portableTableRow,
+  portableTableRowIndexes,
+  portableTableRows,
   validatePortableKxResult,
 } = requireOut('notebook-contract');
 const {
@@ -342,11 +354,14 @@ const {
 const { cloneBoundedJson, stableBoundedJson } = requireOut('bounded-json');
 const {
   hasNotebookQMarker,
+  notebookHelperRowLimit,
   notebookQSourceFromMagic,
   notebookQMagicLine,
   safeNotebookByteLimit,
   safeNotebookPresentation,
   safeNotebookRowLimit,
+  shouldRetainLiveNotebookResult,
+  UNLIMITED_NOTEBOOK_ROW_LIMIT,
 } = requireOut('notebook-settings');
 const {
   LiveNotebookResultStore,
@@ -397,19 +412,28 @@ const {
 } = requireOut('notebook-message');
 const {
   DEFAULT_SERVER_PREVIEW_CELL_LIMIT,
+  MAX_RUNTIME_QUALIFIED_NAME_LENGTH,
   MAX_SERVER_PREVIEW_CELL_LIMIT,
   MIN_SERVER_PREVIEW_CELL_LIMIT,
+  RUNTIME_PROCESS_ROOT_QUERY,
   SERVER_TABLES_QUERY,
   SERVER_VARIABLES_QUERY,
+  buildRuntimeBindingPreviewQuery,
+  buildRuntimeContextQuery,
   buildServerPreviewQuery,
   buildServerTableMetaQuery,
+  parseRuntimeBindings,
   parseServerColumns,
   parseServerTableNames,
   parseServerVariables,
+  qualifyRuntimeBinding,
   qMetaTypeName,
+  runtimeBindingKind,
+  runtimeBindingPreviewWarning,
   safeServerPreviewCellLimit,
   serverExplorerSnapshotMatches,
   serverPreviewWarning,
+  validateRuntimeContext,
   validateServerObjectIdentifier,
 } = requireOut('server-explorer-model');
 const {
@@ -425,9 +449,9 @@ const {
   safeHistoryLimit,
   sortHistoryNewestFirst,
 } = requireOut('query-history-model');
+const { executeNotebookScriptWithHistory } = requireOut('notebook-query-history');
 const { QueryConnectionSelectionSession } = requireOut('query-connection-selection');
 const {
-  QNB_MAX_BYTES,
   QnbCodecError,
   decodeQnb,
   encodeQnb,
@@ -435,6 +459,7 @@ const {
 const { QNB_COMPATIBLE_CELLS, QNB_MALFORMED_CASES } = require('./fixtures/qnb');
 
 const tests = [
+  ['null time-series source gaps and static paths', testNullTimeSeriesGaps],
   ['chart resampling density and pan reuse contracts', testChartResamplingContracts],
   ['q list Grid and exact persistence contracts', testQListGridContracts],
   ['q IPC codec and receive buffering', testQIpc],
@@ -450,6 +475,7 @@ const tests = [
   ['shared q language metadata cache and privacy contract', testQMetadataService],
   ['lazy q language client lifecycle and isolation', testQLanguageClientLifecycle],
   ['query history privacy and persistence model', testQueryHistoryModel],
+  ['direct q notebook query history boundary', testNotebookQueryHistoryBoundary],
   ['webview-free server and history tree providers', testTreeProviders],
   ['multiple KX connection tree profiles and active selection', testConnectionsTreeProvider],
   ['query connection prompt, reuse, invalidation, and switching policy', testQueryConnectionSelectionPolicy],
@@ -472,6 +498,10 @@ const tests = [
   ['safe notebook q target metadata and resolution', testNotebookQTargetMetadata],
   ['bounded JSON and result-table interaction helpers', testRendererInteractionHelpers],
   ['portable notebook MIME contract and static fallbacks', testNotebookContract],
+  ['complete columnar notebook contract and exact compatibility', testColumnarNotebookContract],
+  ['native table packed format independent of cardinality', testNativeTablePackingCardinality],
+  ['columnar native and mixed notebook lifecycle', testColumnarNotebookLifecycle],
+  ['standalone symbol qText and exact notebook lifecycle', testStandaloneSymbolQText],
   ['qnb clean-room codec compatibility and safety', testQnbCodec],
   ['notebook renderer sizing, selection, copy, and chart model', testNotebookRendererModel],
   ['live notebook result registry bounds and lifecycle', testLiveNotebookResultStore],
@@ -480,6 +510,7 @@ const tests = [
   ['historical direct q notebook request compatibility', testLegacyQDirectNotebookRequest],
   ['mixed q notebook command and status routing', testMixedQNotebookCommandIntegration],
   ['notebook renderer host output authorization and guarded actions', testNotebookRendererHostActions],
+  ['notebook byte ownership proof reuse and invalidation', testNotebookOutputOwnershipCache],
   ['local data server start/stop concurrency', testLocalDataServerConcurrency],
   ['extension manifest and standalone-source guards', testManifestAndSources],
 ];
@@ -500,6 +531,119 @@ const tests = [
   console.error(error && error.stack ? error.stack : error);
   process.exitCode = 1;
 });
+
+function testNullTimeSeriesGaps() {
+  for (const chartType of ['line', 'step']) for (const nullStart of [18_000, 21_000]) {
+    const epoch = Date.UTC(2026, 0, 1);
+    const table = createColumnarPanelResult(['time','price'], 30_000, (r,c) => c === 0
+      ? new Date(epoch + r * 10) : r >= nullStart && r < 21_500 ? null : 1 + Math.sin(r / 100),
+      ['timestamp','float']);
+    const request = {chartType,xColumn:'time',yColumns:['price'],width:720,maxSourceRows:30_000,
+      version:1,requestId:1,samplingStrategy:'temporal-auto',xMin:epoch,xMax:epoch+19_999*10};
+    const first = buildChartDataWithTemporalPanReuse(table, request);
+    const next = {...request,requestId:2,samplingStrategy:'temporal-fixed',
+      temporalBucketIntervalMs:first.data.temporalBucketIntervalMs,xMin:epoch+3_000*10,xMax:epoch+22_999*10};
+    const panned = buildChartDataWithTemporalPanReuse(table,next,first.cache).data;
+    if (nullStart === 21_000) assert.ok(panned.temporalReusedPointCount > 0,
+      'exercise cached overlap rather than a clean rebuild');
+    else assert.ok(!panned.temporalReusedPointCount, 'missing boundary context keeps the safe clean rebuild');
+    const afterNull = panned.x.findIndex(x => x >= epoch + 21_500 * 10);
+    assert.ok(afterNull > 0);
+    assert.strictEqual(panned.series[0].gapBefore?.[afterNull], true,
+      'cached temporal pan must retain a later-piece or leading-refill null gap');
+  }
+  const manyColumns = ['x', ...Array.from({length:8},(_v,c)=>'y'+c)];
+  const many = createColumnarPanelResult(manyColumns,30_000,(r,c)=>c===0?r:
+    r%16===c-1?null:Math.sin(r/(c+3))+c, ['int',...Array(8).fill('float')]);
+  const request = {chartType:'step',xColumn:'x',yColumns:manyColumns.slice(1),width:720,
+    maxSourceRows:30_000,version:1,requestId:1,samplingStrategy:'point-count',xMin:0,xMax:19_999};
+  const initial = buildChartDataWithTemporalPanReuse(many,request);
+  const merged = buildChartDataWithTemporalPanReuse(many,{...request,requestId:2,xMin:3_000,xMax:22_999},initial.cache).data;
+  assert.ok(merged.temporalReusedPointCount>0);
+  assert.strictEqual(merged.x.length,7000);
+  merged.series.forEach((series,c)=>{
+    let previous;
+    series.values.forEach((v,i)=>{
+      if(!Number.isFinite(v))return;
+      if(previous!==undefined){
+        const firstNull=previous+1+((c-(previous+1)%16+16)%16);
+        if(firstNull<merged.x[i])assert.strictEqual(series.gapBefore?.[i],true,
+          'merge thinning must carry each series null break to its next retained finite value');
+      }
+      previous=merged.x[i];
+    });
+  });
+  for (const ratio of [1, 2]) {
+    const gap = chartSourceGapPixels(50, 50, 1.5, ratio);
+    assert.ok(gap[0] < 50 - 1.5 * ratio / 2 && gap[1] > 50 + 1.5 * ratio / 2);
+    assert.deepStrictEqual(chartSourceGapPixels(20, 50, 1.5, ratio), [20, 50]);
+  }
+  for (const chartType of ['line', 'step']) {
+    for (const offsets of [[0, 1, 2], [0, 0, 1], [0, 1, 1], [0, 0, 0]]) {
+      const table = createColumnarPanelResult(['time', 'price', 'other'], 3, (r, c) =>
+        c === 0 ? qAtom('time', 13 * 3_600_000 + offsets[r])
+          : c === 1 ? qAtom('float', r === 1 ? qSpecial('null') : r === 0 ? 0 : 2)
+            : qAtom('float', r + 10), ['time', 'float', 'float']);
+      const data = buildChartData(table, { chartType, xColumn: 'time',
+        yColumns: ['price', 'other'], width: 720, maxSourceRows: 3 });
+      assert.strictEqual(data.xKind, 'temporal');
+      assert.deepStrictEqual(data.series[0].values, [0, null, 2]);
+      assert.strictEqual(data.series[0].gapBefore?.[2], true,
+        'real nulls must interrupt repeated temporal observations');
+      assert.ok(!data.series[1].gapBefore?.some(Boolean), 'a different series stays continuous');
+      const only = buildChartData(table, { chartType, xColumn: 'time',
+        yColumns: ['price'], width: 720, maxSourceRows: 3 });
+      assert.deepStrictEqual(only.series[0].values, [0, 2]);
+      assert.deepStrictEqual(only.series[0].gapBefore, [false, true], 'omitted all-null rows still break');
+    }
+    const grouped = rowsToColumnarPanelResult([
+      { x: 0, y: 1, g: 'A' }, { x: 0, y: 10, g: 'B' },
+      { x: 0, y: null, g: 'A' }, { x: 0, y: 11, g: 'B' },
+      { x: 0, y: 2, g: 'A' }, { x: 1, y: 12, g: 'B' },
+    ], ['x', 'y', 'g']);
+    const data = buildChartData(grouped, { chartType, xColumn: 'x', yColumns: ['y'],
+      groupByColumn: 'g', width: 720, maxSourceRows: 6 });
+    const a = data.series.find(s => s.groupValue === 'A'), b = data.series.find(s => s.groupValue === 'B');
+    assert.deepStrictEqual(a.values.filter(Number.isFinite), [1, 2]);
+    assert.strictEqual(a.gapBefore?.[1], true, 'group A retains its omitted duplicate-X null');
+    assert.ok(!b.gapBefore?.some(Boolean), 'group B structural holes do not become gaps');
+    for (const rows of [
+      [[0, 0], [1, 1], [2, null], [3, 3], [4, 4]],
+      [[0, 0], [1, 1], [2, ''], [3, 3], [4, 4]],
+      [[0, 0], [1, 1], [2, qAtom('float', qSpecial('null'))], [3, 3], [4, 4]],
+    ]) {
+      const made = createPortableKxResultV2({ columns: ['x', 'y'], rows, marker: 'direct-ipc',
+        chart: { visible: true, type: chartType, xColumn: 'x', yColumns: ['y'] } },
+        { outputId: 'null-static-' + 'a'.repeat(32), persistenceMode: 'full' });
+      assert.strictEqual(made.ok, true, made.error);
+      const html = notebookResultStaticHtml(made.value);
+      assert.strictEqual((html.match(/<polyline /g) || []).length, 2,
+        'static line/step must draw separate finite runs around null/empty values');
+    }
+    const skippedNull = createPortableKxResultV2({ columns: ['x', 'y'], marker: 'direct-ipc',
+      rows: Array.from({ length: 1000 }, (_v, r) => [r, r === 1 ? null : r]),
+      chart: { visible: true, type: chartType, xColumn: 'x', yColumns: ['y'] } },
+      { outputId: 'null-skipped-static-' + 'b'.repeat(32), persistenceMode: 'full' });
+    assert.strictEqual(skippedNull.ok, true, skippedNull.error);
+    assert.strictEqual((notebookResultStaticHtml(skippedNull.value).match(/<polyline /g) || []).length, 2,
+      'static thinning must carry a break even when null row 1 is not sampled');
+    const input = { columns: [{name:'time',type:'time'},{name:'price',type:'float'}],
+      rows: [], rowCount: 5, marker: 'direct-ipc',
+      chart: { visible:true,type:chartType,xColumn:'time',yColumns:['price'] } };
+    const columns = [qVector([0,1,2,3,4], 'time'), qVector([0,1,qSpecial('null'),3,4], 'float')];
+    for (const creator of [createPortableKxColumnTableV3, createPortableKxPackedTableV4]) {
+      const created = creator(input, columns, 'null-column-static-' + 'c'.repeat(32));
+      assert.strictEqual(created.ok, true, created.error);
+      const bytes = JSON.stringify(created.value), reopened = validatePortableKxResult(JSON.parse(bytes));
+      assert.strictEqual(reopened.ok, true, reopened.error);
+      assert.strictEqual((notebookResultStaticHtml(reopened.value).match(/<polyline /g) || []).length, 2);
+      assert.strictEqual(JSON.stringify(created.value), bytes, 'drawing keeps persisted null values exact');
+    }
+    const legacy = createPortableKxResult({ columns: ['x','y'], rows: [[0,0],[1,1],[2,null],[3,3],[4,4]],
+      chart: {visible:true,type:chartType,xColumn:'x',yColumns:['y']} });
+    assert.strictEqual((notebookResultStaticHtml(legacy).match(/<polyline /g)||[]).length,2);
+  }
+}
 
 function testChartResamplingContracts() {
   const epoch = Date.UTC(2000, 0, 1);
@@ -785,6 +929,10 @@ function testQListGridContracts() {
   });
   assert.strictEqual(persisted.ok, true, persisted.ok ? undefined : persisted.error);
   assert.strictEqual(persisted.value.logicalPresentation, 'standalone-list');
+  const listWithColumnAttribute = JSON.parse(JSON.stringify(persisted.value));
+  listWithColumnAttribute.schema.columnAttributes = [{ ordinal: 0, attribute: 1 }];
+  assert.strictEqual(validatePortableKxResult(listWithColumnAttribute).ok, false,
+    'a standalone vector cannot masquerade as an attributed table column');
   assert.strictEqual(isQVector(portableCellValue(persisted.value.data.rows[0][0])), true);
   const reopened = validatePortableKxResult(JSON.parse(JSON.stringify(persisted.value)));
   assert.strictEqual(reopened.ok, true);
@@ -1686,7 +1834,6 @@ function testChartZoomLifecycle() {
       `${chartType} 50,000-point full-domain range must use the same deterministic 7,000-point contract`
     );
   }
-
   const nullHeavyPointTable = createColumnarPanelResult(
     ['x', 'y'],
     50_000,
@@ -1798,6 +1945,187 @@ function testChartZoomLifecycle() {
   assert.ok(!groupB.gapBefore?.some(Boolean),
     'interleaved structural holes from another group must not create real gaps');
 
+  const repeatedGroupedRows = rowsToColumnarPanelResult([
+    { x: 1, y: 10, z: 100, group: 'A' },
+    { x: 1, y: 20, z: 200, group: 'B' },
+    { x: 1, y: 11, z: 101, group: 'A' },
+    { x: 1, y: 21, z: 201, group: 'B' },
+    { x: 1, y: 12, z: 102, group: 'A' },
+  ], ['x', 'y', 'z', 'group']);
+  for (const chartType of ['line', 'scatter', 'step']) {
+    const repeatedGrouped = buildChartData(repeatedGroupedRows, {
+      chartType,
+      xColumn: 'x',
+      yColumns: ['y', 'z'],
+      groupByColumn: 'group',
+      width: 500,
+      maxSourceRows: 5,
+      version: 1,
+      requestId: 50_10501,
+    });
+    assert.deepStrictEqual(repeatedGrouped.x, [1, 1, 1],
+      `${chartType} must retain repeated grouped X occurrence slots`);
+    assert.deepStrictEqual(
+      repeatedGrouped.series.map(series => [series.columnName, series.values]),
+      [
+        ['y [A]', [10, 11, 12]],
+        ['z [A]', [100, 101, 102]],
+        ['y [B]', [20, 21, null]],
+        ['z [B]', [200, 201, null]],
+      ],
+      `${chartType} must preserve source occurrence order and structural alignment`
+    );
+    assert.strictEqual(repeatedGrouped.eligibleRowCount, 5);
+    assert.strictEqual(repeatedGrouped.sampledPointCount, 3);
+    assert.ok(repeatedGrouped.warnings.some(warning =>
+      warning.includes('repeated grouped observations')));
+  }
+  const repeatedGroupedOverLimit = createColumnarPanelResult(
+    ['x', 'y', 'group'],
+    8_001,
+    (rowIndex, columnIndex) => columnIndex === 0
+      ? 1
+      : columnIndex === 1
+        ? rowIndex
+        : 'A',
+    ['int', 'int', 'symbol']
+  );
+  const boundedRepeatedGrouped = buildChartData(repeatedGroupedOverLimit, {
+    chartType: 'line',
+    xColumn: 'x',
+    yColumns: ['y'],
+    groupByColumn: 'group',
+    width: 500,
+    maxSourceRows: 8_001,
+    version: 1,
+    requestId: 50_10502,
+  });
+  assert.strictEqual(boundedRepeatedGrouped.sampledPointCount, 7_000,
+    'repeated grouped occurrence slots must retain the ordinary shared sampling ceiling');
+  assert.strictEqual(boundedRepeatedGrouped.series[0].values[0], 0);
+  assert.strictEqual(boundedRepeatedGrouped.series[0].values.at(-1), 8_000);
+
+  const groupedBoxIsolation = buildChartData(rowsToColumnarPanelResult([
+    { x: 1, y: 1, group: 'A' },
+    { x: 1, y: 100, group: 'B' },
+    { x: 1, y: 3, group: 'A' },
+    { x: 1, y: 200, group: 'B' },
+    { x: 1, y: 999, group: null },
+  ], ['x', 'y', 'group']), {
+    chartType: 'box',
+    xColumn: 'x',
+    yColumns: ['y'],
+    groupByColumn: 'group',
+    width: 500,
+    maxSourceRows: 5,
+    version: 1,
+    requestId: 50_1051,
+  });
+  const groupedBoxA = groupedBoxIsolation.boxSeries.find(series => series.groupValue === 'A');
+  const groupedBoxB = groupedBoxIsolation.boxSeries.find(series => series.groupValue === 'B');
+  assert.deepStrictEqual(groupedBoxA.stats[0], {
+    count: 2, min: 1, q1: 1.5, median: 2, q3: 2.5, max: 3,
+  });
+  assert.deepStrictEqual(groupedBoxB.stats[0], {
+    count: 2, min: 100, q1: 125, median: 150, q3: 175, max: 200,
+  });
+  assert.ok(groupedBoxIsolation.warnings.some(warning => /1 row dropped because group/.test(warning)));
+
+  const groupedCandleIsolation = buildChartData(rowsToColumnarPanelResult([
+    { x: 1, open: 10, high: 14, low: 9, close: 13, group: 'A' },
+    { x: 1, open: 100, high: 104, low: 99, close: 103, group: 'B' },
+    { x: 1, open: 13, high: 16, low: 12, close: 15, group: 'A' },
+    { x: 1, open: 103, high: 106, low: 102, close: 105, group: 'B' },
+  ], ['x', 'open', 'high', 'low', 'close', 'group']), {
+    chartType: 'candlestick',
+    xColumn: 'x',
+    yColumns: [],
+    groupByColumn: 'group',
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    width: 500,
+    maxSourceRows: 4,
+    version: 1,
+    requestId: 50_1052,
+  });
+  assert.deepStrictEqual(groupedCandleIsolation.candlestickSeries.map(series => ({
+    groupValue: series.groupValue,
+    candle: series.candlesticks[0],
+  })), [
+    { groupValue: 'A', candle: { x: 1, xText: '1', open: 10, high: 16, low: 9, close: 15 } },
+    { groupValue: 'B', candle: { x: 1, xText: '1', open: 100, high: 106, low: 99, close: 105 } },
+  ], 'duplicate X values must aggregate independently inside each candlestick group');
+  assert.throws(() => buildChartData(rowsToColumnarPanelResult([
+    { x: 1, open: 10, high: 9, low: 8, close: 10, group: 'BROKEN' },
+  ], ['x', 'open', 'high', 'low', 'close', 'group']), {
+    chartType: 'candlestick',
+    xColumn: 'x',
+    yColumns: [],
+    groupByColumn: 'group',
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    width: 500,
+    maxSourceRows: 1,
+    version: 1,
+    requestId: 50_1053,
+  }), /row 1 \(x 1, group BROKEN\)/,
+  'invalid grouped OHLC rows must report category and row context');
+
+  const cappedGroupRows = Array.from({ length: 15 }, (_value, index) => ({
+    x: index,
+    y1: index + 1,
+    y2: index + 2,
+    y3: index + 3,
+    y4: index + 4,
+    open: index + 10,
+    high: index + 13,
+    low: index + 8,
+    close: index + 11,
+    group: `G${index}`,
+  }));
+  const cappedGroupedBox = buildChartData(rowsToColumnarPanelResult(
+    cappedGroupRows,
+    ['x', 'y1', 'y2', 'y3', 'y4', 'group']
+  ), {
+    chartType: 'box',
+    xColumn: 'x',
+    yColumns: ['y1', 'y2', 'y3', 'y4'],
+    groupByColumn: 'group',
+    width: 10_000,
+    maxSourceRows: 15,
+    version: 1,
+    requestId: 50_1054,
+  });
+  assert.strictEqual(cappedGroupedBox.boxSeries.length, 36);
+  assert.ok(cappedGroupedBox.retainedGroupCount <= 12);
+  assert.ok(cappedGroupedBox.sampledPointCount <= 7000);
+  assert.ok(cappedGroupedBox.warnings.some(warning => /showing first 12/.test(warning)));
+  assert.ok(cappedGroupedBox.warnings.some(warning => /showing first 36/.test(warning)));
+  const cappedGroupedCandle = buildChartData(rowsToColumnarPanelResult(
+    cappedGroupRows,
+    ['x', 'open', 'high', 'low', 'close', 'group']
+  ), {
+    chartType: 'candlestick',
+    xColumn: 'x',
+    yColumns: [],
+    groupByColumn: 'group',
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    width: 10_000,
+    maxSourceRows: 15,
+    version: 1,
+    requestId: 50_1055,
+  });
+  assert.strictEqual(cappedGroupedCandle.candlestickSeries.length, 12);
+  assert.ok(cappedGroupedCandle.sampledPointCount <= 7000);
+  assert.ok(cappedGroupedCandle.warnings.some(warning => /showing first 12/.test(warning)));
+
   const nullHeavyBox = buildChartData(createColumnarPanelResult(
     ['x', 'y'],
     100,
@@ -1908,6 +2236,20 @@ function testChartZoomLifecycle() {
       `${chartType} must explain semantic consolidation separately from eligible-row count`
     );
   }
+  const boundedGroupedBars = buildChartData(semanticallyConsolidatedTable, {
+    chartType: 'bar',
+    xColumn: 'x',
+    yColumns: ['y'],
+    groupByColumn: 'group',
+    width: 10_000,
+    maxSampledPoints: 12_000,
+    maxSourceRows: 10_000,
+    version: 1,
+    requestId: 10_001,
+  });
+  assert.strictEqual(boundedGroupedBars.sampledPointCount, 7000,
+    'grouped bars must share one 7,000-item budget across category series');
+  assert.strictEqual(boundedGroupedBars.x.length, 3500);
   const repeatedXRowCount = 7001;
   const repeatedXCount = 3501;
   const repeatedXTable = createColumnarPanelResult(
@@ -2098,6 +2440,12 @@ function testChartZoomLifecycle() {
   assert.match(panelSource, /\$\{updateHiddenChartSeriesKeys\.toString\(\)\}/);
   assert.match(panelSource, /let chartHiddenSeriesKeys = \[\];/);
   assert.match(panelSource, /let chartRenderedSeriesKeys = \[\];/);
+  assert.match(panelSource, /function refreshChartGroupOptions\(\)/);
+  assert.match(panelSource, /chartGroupField\.hidden = false;/);
+  assert.match(panelSource, /chartGroupColumn\.disabled = eligible\.length === 0;/);
+  assert.doesNotMatch(panelSource, /Group by is unavailable for (?:candlesticks|box)/);
+  assert.match(panelSource, /function chartCandlestickGroups\(\)/);
+  assert.match(panelSource, /const slotWidth = clusterWidth \/ groups\.length;/);
   assert.match(panelSource, /function captureChartSeriesVisibility\(self\)/);
   assert.match(panelSource, /captureChartSeriesVisibility\(chartUPlot\);[\s\S]*?chartUPlot\.destroy\(\)/);
   assert.match(panelSource, /show: chartSeriesVisible\(chartHiddenSeriesKeys, chartRenderedSeriesKeys\[index\]\)/);
@@ -2835,6 +3183,38 @@ async function testQIpc() {
     1,
     'declared temporal q atoms must remain x candidates when null'
   );
+  const scalarGroupOptions = chartColumnOptions(createColumnarPanelResult(
+    ['number', 'time', 'flag', 'id', 'sym', 'nested'],
+    2,
+    (row, column) => [
+      [1, new Date(0), true, '01234567-89ab-cdef-0123-456789abcdef', 'A', [1, 2]],
+      [2, new Date(1000), false, '11234567-89ab-cdef-0123-456789abcdef', 'B', [3, 4]],
+    ][row][column],
+    ['int', 'timestamp', 'boolean', 'guid', 'symbol', 'mixed']
+  ));
+  assert.deepStrictEqual(
+    scalarGroupOptions.groupColumns.map(option => option.columnName),
+    ['number', 'time', 'flag', 'id', 'sym'],
+    'Group by candidates must include stable scalar numeric, temporal, boolean, GUID, and categorical columns'
+  );
+  const complexGroupTable = rowsToColumnarPanelResult([
+    { x: 1, y: 10, nested: [1, 2] },
+    { x: 2, y: 20, nested: { value: 3 } },
+  ], ['x', 'y', 'nested']);
+  assert.ok(!chartColumnOptions(complexGroupTable).groupColumns.some(
+    option => option.columnName === 'nested'
+  ));
+  assert.throws(() => buildChartData(complexGroupTable, {
+    chartType: 'line',
+    xColumn: 'x',
+    yColumns: ['y'],
+    groupByColumn: 'nested',
+    width: 500,
+    maxSourceRows: 2,
+    version: 1,
+    requestId: 212,
+  }), /not eligible as a scalar group-by column/,
+  'forged requests must reject nested or otherwise complex grouping values');
   assert.strictEqual(
     portableQNodeToBoundedLiteral({
       form: 'atom', type: 'long', value: '9'.repeat(1_000_000),
@@ -6207,6 +6587,137 @@ function testServerExplorerModel() {
     ].join('\n'),
     'variables metadata must return names/type atoms without returning remote values'
   );
+  assert.match(RUNTIME_PROCESS_ROOT_QUERY, /rootNames:key `\./);
+  assert.match(RUNTIME_PROCESS_ROOT_QUERY, /namespaceNames:key `;/);
+  assert.match(RUNTIME_PROCESS_ROOT_QUERY, /flip `name`type`namespace/);
+  assert.doesNotMatch(RUNTIME_PROCESS_ROOT_QUERY, /\.Q|\.q|\.z/, 'reserved roots must be filtered structurally by the parser');
+  assert.strictEqual(MAX_RUNTIME_QUALIFIED_NAME_LENGTH, 4_096);
+
+  assert.strictEqual(validateRuntimeContext('.'), '.');
+  assert.strictEqual(validateRuntimeContext('.app'), '.app');
+  assert.strictEqual(validateRuntimeContext('.app.q.deep_2'), '.app.q.deep_2');
+  for (const hostile of ['', 'app', '.app.', '.app..x', '.app.bad;show 1', '.1app']) {
+    assert.throws(() => validateRuntimeContext(hostile), /qualified q namespaces/);
+    assert.throws(() => buildRuntimeContextQuery(hostile), /qualified q namespaces/);
+  }
+  assert.throws(
+    () => validateRuntimeContext(`.${'a'.repeat(MAX_RUNTIME_QUALIFIED_NAME_LENGTH)}`),
+    /qualified q namespaces/
+  );
+  assert.strictEqual(qualifyRuntimeBinding('.', 'rootValue'), 'rootValue');
+  assert.strictEqual(qualifyRuntimeBinding('.app.state', 'value'), '.app.state.value');
+  assert.throws(() => qualifyRuntimeBinding('.app', 'bad;name'), /standard q identifiers/);
+  const appContextQuery = buildRuntimeContextQuery('.app');
+  assert.ok(appContextQuery.endsWith('}[`.app]'));
+  assert.match(appContextQuery, /99h<>objectType/);
+  assert.match(appContextQuery, /101h=type object `/);
+  assert.doesNotMatch(appContextQuery, /payload|state|query/, 'context metadata must not synthesize fixture names');
+
+  const processRoot = parseRuntimeBindings(modelQTable(
+    ['name', 'type', 'namespace'],
+    [
+      { name: 'rootValue', type: -7, namespace: false },
+      { name: 'rootTable', type: 98, namespace: false },
+      { name: 'rootFn', type: 100, namespace: false },
+      { name: 'Q', type: 99, namespace: true },
+      { name: 'q', type: 99, namespace: true },
+      { name: 'z', type: 99, namespace: true },
+      { name: 'qr', type: 99, namespace: true },
+      { name: 'app', type: 99, namespace: true },
+      { name: 'bad;namespace', type: 99, namespace: true },
+    ]
+  ), '.');
+  assert.deepStrictEqual(processRoot, {
+    bindings: [
+      { context: '.', name: 'app', qualifiedName: '.app', kind: 'namespace', qType: 99 },
+      { context: '.', name: 'qr', qualifiedName: '.qr', kind: 'namespace', qType: 99 },
+      { context: '.', name: 'rootFn', qualifiedName: 'rootFn', kind: 'function', qType: 100 },
+      { context: '.', name: 'rootTable', qualifiedName: 'rootTable', kind: 'table', qType: 98 },
+      { context: '.', name: 'rootValue', qualifiedName: 'rootValue', kind: 'variable', qType: -7 },
+    ],
+    omittedUnsafeNames: 1,
+  });
+  assert.strictEqual(
+    processRoot.bindings.some(binding => binding.qualifiedName === '.qr.calculate'),
+    false,
+    'root parsing must not invent bindings beneath a reported namespace'
+  );
+  const withoutQr = parseRuntimeBindings(modelQTable(
+    ['name', 'type', 'namespace'],
+    [{ name: 'app', type: 99, namespace: true }]
+  ), '.');
+  assert.deepStrictEqual(withoutQr.bindings.map(binding => binding.qualifiedName), ['.app']);
+
+  const appBindings = parseRuntimeBindings(modelQTable(
+    ['name', 'type', 'namespace'],
+    [
+      { name: 'payload', type: 99, namespace: false },
+      { name: 'state', type: 99, namespace: true },
+      { name: 'query', type: 100, namespace: false },
+      { name: 'projected', type: 104, namespace: false },
+      { name: 'trade', type: 98, namespace: false },
+      { name: 'future', type: 113, namespace: false },
+      { name: 'bad name', type: 7, namespace: false },
+    ]
+  ), '.app');
+  assert.deepStrictEqual(appBindings, {
+    bindings: [
+      { context: '.app', name: 'state', qualifiedName: '.app.state', kind: 'namespace', qType: 99 },
+      { context: '.app', name: 'future', qualifiedName: '.app.future', kind: 'unknown', qType: 113 },
+      { context: '.app', name: 'payload', qualifiedName: '.app.payload', kind: 'variable', qType: 99 },
+      { context: '.app', name: 'projected', qualifiedName: '.app.projected', kind: 'projection', qType: 104 },
+      { context: '.app', name: 'query', qualifiedName: '.app.query', kind: 'function', qType: 100 },
+      { context: '.app', name: 'trade', qualifiedName: '.app.trade', kind: 'table', qType: 98 },
+    ],
+    omittedUnsafeNames: 1,
+  });
+  assert.strictEqual(appBindings.bindings.find(binding => binding.name === 'payload').kind, 'variable');
+  assert.strictEqual(runtimeBindingKind(undefined, false), 'unknown');
+  assert.strictEqual(runtimeBindingKind(104, false), 'projection');
+  assert.throws(
+    () => parseRuntimeBindings(modelQTable(['name', 'type'], []), '.app'),
+    /unexpected runtime bindings metadata shape/
+  );
+  assert.throws(
+    () => parseRuntimeBindings(modelQTable(
+      ['name', 'type', 'namespace'],
+      [{ name: 'state', type: 7, namespace: true }]
+    ), '.app'),
+    /inconsistent runtime namespace metadata/
+  );
+  assert.throws(
+    () => parseRuntimeBindings(modelQTable(
+      ['name', 'type', 'namespace'],
+      [
+        { name: 'same', type: 7, namespace: false },
+        { name: 'same', type: 7, namespace: false },
+      ]
+    ), '.app'),
+    /duplicate runtime binding metadata/
+  );
+
+  const qualifiedPreview = buildRuntimeBindingPreviewQuery('.qr', 'data', 'variable', 25);
+  assert.ok(qualifiedPreview.endsWith('}[`.qr.data;0b;25]'));
+  assert.match(qualifiedPreview, /objectValue:\$\[rootBinding;\(value `\.\) objectName;value objectName\]/);
+  assert.match(qualifiedPreview, /objectType>=100h/);
+  const rootPreview = buildRuntimeBindingPreviewQuery('.', 'rootValue', 'variable', 3);
+  assert.ok(rootPreview.endsWith('}[`rootValue;1b;3]'));
+  assert.throws(
+    () => buildRuntimeBindingPreviewQuery('.qr', 'calculate', 'function', 25),
+    /limited to tables and data bindings/
+  );
+  assert.throws(
+    () => buildRuntimeBindingPreviewQuery('.qr', 'bad;name', 'variable', 25),
+    /standard q identifiers/
+  );
+  assert.match(runtimeBindingPreviewWarning(
+    { context: '.qr', name: 'data', qualifiedName: '.qr.data', kind: 'variable', qType: 7 },
+    25
+  ), /Preview data binding "\.qr\.data"/);
+  assert.match(runtimeBindingPreviewWarning(
+    { context: '.qr', name: 'trade', qualifiedName: '.qr.trade', kind: 'table', qType: 98 },
+    25
+  ), /Preview table "\.qr\.trade"/);
 
   assert.strictEqual(validateServerObjectIdentifier('trade'), 'trade');
   assert.strictEqual(validateServerObjectIdentifier('Trade_2026'), 'Trade_2026');
@@ -6374,11 +6885,25 @@ async function testQMetadataService() {
     },
     async executeInConfiguredNamespace(connection, query, _timeout, signal) {
       calls.push({ connection, query, signal });
-      if (query === SERVER_TABLES_QUERY) return ['trade', 'quote'];
+      if (query === SERVER_TABLES_QUERY) return ['trade', 'quote', 'bad table'];
       if (query === SERVER_VARIABLES_QUERY) {
         return modelQTable(['name', 'type'], [
           { name: 'calculate', type: 100 },
           { name: 'threshold', type: 9 },
+          { name: 'bad;name', type: 7 },
+        ]);
+      }
+      if (query === RUNTIME_PROCESS_ROOT_QUERY) {
+        return modelQTable(['name', 'type', 'namespace'], [
+          { name: 'Q', type: 99, namespace: true },
+          { name: 'qr', type: 99, namespace: true },
+          { name: 'rootValue', type: 7, namespace: false },
+        ]);
+      }
+      if (query === buildRuntimeContextQuery('.qr')) {
+        return modelQTable(['name', 'type', 'namespace'], [
+          { name: 'calculate', type: 100, namespace: false },
+          { name: 'data', type: 7, namespace: false },
         ]);
       }
       if (query === buildServerTableMetaQuery('trade')) {
@@ -6419,6 +6944,9 @@ async function testQMetadataService() {
   assert.strictEqual(firstRoot, cachedRoot, 'root metadata should reuse the 30-second cache');
   assert.deepStrictEqual(firstRoot.tables, ['quote', 'trade']);
   assert.deepStrictEqual(firstRoot.variables.map(value => value.name), ['calculate', 'threshold']);
+  assert.strictEqual(firstRoot.omittedUnsafeNames, 2);
+  assert.strictEqual(firstRoot.omittedUnsafeTableNames, 1);
+  assert.strictEqual(firstRoot.omittedUnsafeVariableNames, 1);
   assert.strictEqual(calls.length, 2, 'the cached root must not repeat q requests');
 
   const firstTable = await service.request({ version: 1, kind: 'table', table: 'trade' });
@@ -6453,6 +6981,28 @@ async function testQMetadataService() {
   assert.strictEqual(switched.snapshot.connectionId, 'kx-metadata-two');
   assert.strictEqual(switched.snapshot.namespace, '.other');
   assert.strictEqual(calls.length, 7, 'active profile/namespace changes must invalidate the cache');
+
+  const processRootResponse = await service.processRoot();
+  const processContextResponse = await service.processContext('.qr');
+  assert.deepStrictEqual(
+    processRootResponse.bindings.map(binding => binding.qualifiedName),
+    ['.qr', 'rootValue'],
+    'Variables-only process discovery must structurally exclude .Q'
+  );
+  assert.deepStrictEqual(
+    processContextResponse.bindings.map(binding => [binding.qualifiedName, binding.kind]),
+    [['.qr.calculate', 'function'], ['.qr.data', 'variable']]
+  );
+  assert.strictEqual(calls.length, 9, 'process metadata must use dedicated uncached requests');
+  assert.deepStrictEqual(calls.slice(-2).map(call => call.query), [
+    RUNTIME_PROCESS_ROOT_QUERY,
+    buildRuntimeContextQuery('.qr'),
+  ]);
+  assert.strictEqual(
+    firstRoot.variables.some(variable => variable.name === 'rootValue'),
+    false,
+    'configured-namespace language metadata must not be widened by process discovery'
+  );
 
   const blockingStateChanges = new runtime.EventEmitter();
   const blockingConnectionChanges = new runtime.EventEmitter();
@@ -6718,7 +7268,7 @@ async function testQueryHistoryModel() {
   ]) {
     assert.strictEqual(normalizeQueryHistoryEntry(invalid), undefined);
   }
-  for (const kind of ['line', 'selection', 'script']) {
+  for (const kind of ['line', 'selection', 'script', 'notebook']) {
     for (const status of ['succeeded', 'failed', 'canceled']) {
       assert.ok(normalizeQueryHistoryEntry(historyEntry({ id: `${kind}-${status}`, kind, status })));
     }
@@ -6751,6 +7301,7 @@ async function testQueryHistoryModel() {
   assert.strictEqual(historyTransportKind('selection', 'a:1\nb:2'), 'script');
   assert.strictEqual(historyTransportKind('selection', 'a:1\r\nb:2'), 'script');
   assert.strictEqual(historyTransportKind('script', '1+1'), 'script');
+  assert.strictEqual(historyTransportKind('notebook', '1+1'), 'script');
   assert.strictEqual(historyTransportKind({ ...safe, kind: 'selection', queryText: 'x\ny' }), 'script');
 
   const initialMemento = createHistoryMemento([
@@ -6849,6 +7400,140 @@ async function testQueryHistoryModel() {
   assert.strictEqual(QUERY_HISTORY_STORAGE_KEY, 'vscode-kdb.queryHistory.v1');
 }
 
+async function testNotebookQueryHistoryBoundary() {
+  const connection = validateConnection({
+    id: 'kx-notebook-history',
+    name: 'Notebook history q',
+    host: 'localhost',
+    port: 5000,
+    database: '.analytics',
+    username: '',
+  });
+  const capture = { feature: {}, generation: 7 };
+  const records = [];
+  const history = {
+    capture: () => capture,
+    async record(recordCapture, input) {
+      records.push({ capture: recordCapture, input });
+    },
+  };
+  let forwardedIssues = 0;
+  const success = await executeNotebookScriptWithHistory(
+    async (_connection, source, onIssued) => {
+      assert.strictEqual(source, 'a:1\na+1');
+      onIssued();
+      return 42;
+    },
+    history,
+    connection,
+    'a:1\na+1',
+    () => forwardedIssues++,
+    new AbortController().signal
+  );
+  assert.strictEqual(success, 42);
+  assert.strictEqual(forwardedIssues, 1);
+  assert.strictEqual(records.length, 1);
+  assert.strictEqual(records[0].capture, capture);
+  assert.deepStrictEqual(
+    {
+      connectionId: records[0].input.connectionId,
+      connectionName: records[0].input.connectionName,
+      kind: records[0].input.kind,
+      status: records[0].input.status,
+      queryText: records[0].input.queryText,
+    },
+    {
+      connectionId: connection.id,
+      connectionName: connection.name,
+      kind: 'notebook',
+      status: 'succeeded',
+      queryText: 'a:1\na+1',
+    }
+  );
+  assert.ok(Number.isSafeInteger(records[0].input.timestamp));
+  assert.ok(records[0].input.durationMs >= 0);
+
+  const failedBeforeIssue = new Error('before issue');
+  await assert.rejects(
+    executeNotebookScriptWithHistory(
+      async () => { throw failedBeforeIssue; },
+      history,
+      connection,
+      'neverIssued:1',
+      () => forwardedIssues++,
+      new AbortController().signal
+    ),
+    error => error === failedBeforeIssue
+  );
+  assert.strictEqual(records.length, 1, 'pre-issue failures must not be recorded');
+
+  const failedAfterIssue = new Error('after issue');
+  await assert.rejects(
+    executeNotebookScriptWithHistory(
+      async (_connection, _source, onIssued) => {
+        onIssued();
+        throw failedAfterIssue;
+      },
+      history,
+      connection,
+      'failed:1',
+      () => forwardedIssues++,
+      new AbortController().signal
+    ),
+    error => error === failedAfterIssue
+  );
+  assert.strictEqual(records.at(-1).input.status, 'failed');
+
+  const canceled = new AbortController();
+  const canceledError = new Error('canceled after issue');
+  await assert.rejects(
+    executeNotebookScriptWithHistory(
+      async (_connection, _source, onIssued) => {
+        onIssued();
+        canceled.abort();
+        throw canceledError;
+      },
+      history,
+      connection,
+      'canceled:1',
+      () => forwardedIssues++,
+      canceled.signal
+    ),
+    error => error === canceledError
+  );
+  assert.strictEqual(records.at(-1).input.status, 'canceled');
+
+  const writesBeforeDisabled = records.length;
+  assert.strictEqual(await executeNotebookScriptWithHistory(
+    async (_connection, _source, onIssued) => {
+      onIssued();
+      return 7;
+    },
+    { capture: () => undefined, record: history.record },
+    connection,
+    'disabled:1',
+    () => forwardedIssues++,
+    new AbortController().signal
+  ), 7);
+  assert.strictEqual(records.length, writesBeforeDisabled);
+
+  const storageFailureResult = await executeNotebookScriptWithHistory(
+    async (_connection, _source, onIssued) => {
+      onIssued();
+      return 99;
+    },
+    {
+      capture: () => capture,
+      async record() { throw new Error('workspace Memento failed'); },
+    },
+    connection,
+    'storageFailure:1',
+    () => forwardedIssues++,
+    new AbortController().signal
+  );
+  assert.strictEqual(storageFailureResult, 99, 'history storage failure must not replace q success');
+}
+
 async function testTreeProviders() {
   const treeVscode = createVscodeTreeHarness();
   const {
@@ -6858,6 +7543,14 @@ async function testTreeProviders() {
     ServerStatusTreeItem,
   } = requireOutWithMocks('server-explorer', { vscode: treeVscode.vscode });
   const {
+    VariableTreeItem,
+    VariablesContextTreeItem,
+    VariablesFeature,
+    VariablesStatusTreeItem,
+    VariablesTreeProvider,
+  } = requireOutWithMocks('variables', { vscode: treeVscode.vscode });
+  const {
+    DisabledQueryHistoryTreeItem,
     EmptyQueryHistoryTreeItem,
     QueryHistoryFeature,
     QueryHistoryTreeItem,
@@ -7178,6 +7871,307 @@ async function testTreeProviders() {
   );
   timeoutProvider.dispose();
 
+  let variablesActive = validateConnection({
+    id: 'kx-variables',
+    name: 'Variables q',
+    host: 'localhost',
+    port: 5010,
+    database: '.runtime',
+    username: '',
+  });
+  let variablesConnected = false;
+  let currentProcessRoot = modelQTable(['name', 'type', 'namespace'], [
+    { name: 'zeta', type: 9, namespace: false },
+    { name: 'calculate', type: 100, namespace: false },
+    { name: 'rootTable', type: 98, namespace: false },
+    { name: 'alpha', type: -7, namespace: false },
+    { name: 'bad;name', type: 7, namespace: false },
+    { name: 'Q', type: 99, namespace: true },
+    { name: 'q', type: 99, namespace: true },
+    { name: 'qr', type: 99, namespace: true },
+    { name: 'app', type: 99, namespace: true },
+  ]);
+  const contextValues = new Map([
+    [buildRuntimeContextQuery('.qr'), modelQTable(['name', 'type', 'namespace'], [
+      { name: 'calculate', type: 100, namespace: false },
+      { name: 'data', type: 7, namespace: false },
+    ])],
+    [buildRuntimeContextQuery('.app'), modelQTable(['name', 'type', 'namespace'], [
+      { name: 'payload', type: 99, namespace: false },
+      { name: 'q', type: 99, namespace: true },
+    ])],
+    [buildRuntimeContextQuery('.app.q'), modelQTable(['name', 'type', 'namespace'], [
+      { name: 'nestedValue', type: 7, namespace: false },
+    ])],
+  ]);
+  const contextFailures = new Set();
+  const variableCalls = [];
+  const variablesStore = { activeConnection: () => variablesActive };
+  const variablesManager = {
+    isConnected: id => variablesConnected && id === variablesActive?.id,
+    async executeInConfiguredNamespace(connection, query) {
+      variableCalls.push({ connection: { ...connection }, query });
+      if (query === RUNTIME_PROCESS_ROOT_QUERY) return currentProcessRoot;
+      if (contextFailures.has(query)) throw new Error('permission denied');
+      if (contextValues.has(query)) return contextValues.get(query);
+      throw new Error(`unexpected variables query ${query}`);
+    },
+  };
+  const variablesProvider = new VariablesTreeProvider(
+    variablesStore,
+    variablesManager,
+    { event: event => diagnostics.push(event) }
+  );
+  let variableRoot = variablesProvider.getChildren();
+  assert.strictEqual(variableRoot.length, 1);
+  assert.ok(variableRoot[0] instanceof VariablesStatusTreeItem);
+  assert.match(String(variableRoot[0].label), /disconnected/i);
+  assert.deepStrictEqual(variableCalls, [], 'opening Variables must not query q');
+  await variablesProvider.refresh();
+  assert.deepStrictEqual(variableCalls, [], 'disconnected Variables refresh must not query q');
+  variablesConnected = true;
+  await variablesProvider.refresh();
+  assert.deepStrictEqual(variableCalls.map(call => call.query), [RUNTIME_PROCESS_ROOT_QUERY]);
+  variableRoot = variablesProvider.getChildren();
+  assert.deepStrictEqual(variableRoot.map(item => String(item.label)), [
+    'Root (.)',
+    '.app',
+    '.qr',
+    '1 non-standard object name was omitted for safe execution.',
+  ]);
+  assert.ok(variableRoot[0] instanceof VariablesContextTreeItem);
+  assert.ok(variableRoot[1] instanceof VariablesContextTreeItem);
+  const rootContext = variableRoot[0];
+  const rootRows = await variablesProvider.getChildren(rootContext);
+  assert.deepStrictEqual(rootRows.map(item => item.binding?.name), [
+    'alpha',
+    'calculate',
+    'rootTable',
+    'zeta',
+  ]);
+  const alphaRow = rootRows.find(item => item instanceof VariableTreeItem && item.binding.name === 'alpha');
+  const rootFunction = rootRows.find(item => item instanceof VariableTreeItem && item.binding.name === 'calculate');
+  const rootTable = rootRows.find(item => item instanceof VariableTreeItem && item.binding.name === 'rootTable');
+  assert.strictEqual(rootFunction.contextValue, 'vscode-kdb.variables.function');
+  assert.strictEqual(variablesProvider.resolveVariable(rootFunction), undefined);
+  assert.strictEqual(variablesProvider.resolveVariable(alphaRow), alphaRow);
+  assert.strictEqual(variablesProvider.resolveVariable(rootTable), rootTable);
+  assert.strictEqual(
+    variablesProvider.resolveVariable(new VariableTreeItem(
+      alphaRow.binding,
+      alphaRow.snapshot,
+      alphaRow.generation
+    )),
+    undefined,
+    'Variables commands must reject lookalike unowned rows'
+  );
+
+  const qrContext = variableRoot.find(item => item instanceof VariablesContextTreeItem && item.context === '.qr');
+  const qrRows = await variablesProvider.getChildren(qrContext);
+  assert.deepStrictEqual(qrRows.map(item => [String(item.label), item.binding?.kind]), [
+    ['.qr.calculate', 'function'],
+    ['.qr.data', 'variable'],
+  ]);
+  const callsAfterQr = variableCalls.length;
+  await variablesProvider.getChildren(qrContext);
+  assert.strictEqual(variableCalls.length, callsAfterQr, 'namespace children must cache for the refresh generation');
+
+  const appContext = variableRoot.find(item => item instanceof VariablesContextTreeItem && item.context === '.app');
+  const appRows = await variablesProvider.getChildren(appContext);
+  assert.deepStrictEqual(appRows.map(item => [String(item.label), item.binding?.kind]), [
+    ['.app.q', 'namespace'],
+    ['.app.payload', 'variable'],
+  ]);
+  const nestedContext = appRows[0];
+  assert.ok(nestedContext instanceof VariablesContextTreeItem);
+  assert.deepStrictEqual(
+    (await variablesProvider.getChildren(nestedContext)).map(item => String(item.label)),
+    ['.app.q.nestedValue'],
+    'one-character nested namespace segments remain application-visible'
+  );
+
+  contextFailures.add(buildRuntimeContextQuery('.app'));
+  await variablesProvider.refresh();
+  variableRoot = variablesProvider.getChildren();
+  const failedApp = variableRoot.find(item => item instanceof VariablesContextTreeItem && item.context === '.app');
+  let failedChildren = await variablesProvider.getChildren(failedApp);
+  assert.strictEqual(failedChildren.length, 1);
+  assert.match(String(failedChildren[0].label), /permission denied/);
+  contextFailures.delete(buildRuntimeContextQuery('.app'));
+  failedChildren = await variablesProvider.getChildren(failedApp);
+  assert.deepStrictEqual(failedChildren.map(item => String(item.label)), ['.app.q', '.app.payload']);
+
+  await variablesProvider.refresh();
+  variableRoot = variablesProvider.getChildren();
+  const currentRootContext = variableRoot[0];
+  const currentRootRows = await variablesProvider.getChildren(currentRootContext);
+  const currentAlpha = currentRootRows.find(item => item instanceof VariableTreeItem && item.binding.name === 'alpha');
+  assert.strictEqual((await variablesProvider.revalidateVariable(currentAlpha)).id, variablesActive.id);
+  currentProcessRoot = modelQTable(['name', 'type', 'namespace'], [
+    { name: 'alpha', type: 9, namespace: false },
+    { name: 'qr', type: 99, namespace: true },
+  ]);
+  assert.strictEqual(
+    await variablesProvider.revalidateVariable(currentAlpha),
+    undefined,
+    'a same-name data binding with a changed q type must fail closed before preview'
+  );
+  assert.match(String(variablesProvider.getChildren()[0].label), /changed.*Refresh Variables/i);
+
+  currentProcessRoot = modelQTable(['name', 'type', 'namespace'], [
+    { name: 'alpha', type: -7, namespace: false },
+  ]);
+  await variablesProvider.refresh();
+  variableRoot = variablesProvider.getChildren();
+  assert.strictEqual(
+    variableRoot.some(item => item instanceof VariablesContextTreeItem && item.context === '.qr'),
+    false,
+    'an absent namespace must not be invented'
+  );
+  const staleRootContext = variableRoot[0];
+  const staleVariable = (await variablesProvider.getChildren(staleRootContext))[0];
+  variablesActive = { ...variablesActive, database: '.changed' };
+  variablesProvider.connectionStateChanged();
+  assert.strictEqual(variablesProvider.resolveVariable(staleVariable), undefined);
+  assert.match(String(variablesProvider.getChildren()[0].label), /runtime changed/i);
+  variablesProvider.dispose();
+
+  variablesActive = { ...variablesActive, database: '.runtime' };
+  variablesConnected = true;
+  let metadataVariableRefreshes = 0;
+  let configuredRootCalls = 0;
+  const variablesMetadataInvalidated = new treeVscode.vscode.EventEmitter();
+  let processMetadataPayload = {
+    bindings: [
+      { context: '.', name: 'metadataVariable', qualifiedName: 'metadataVariable', kind: 'variable', qType: 7 },
+      { context: '.', name: 'meta', qualifiedName: '.meta', kind: 'namespace', qType: 99 },
+    ],
+    omittedUnsafeNames: 1,
+  };
+  const metadataVariablesProvider = new VariablesTreeProvider(
+    variablesStore,
+    variablesManager,
+    { event: event => diagnostics.push(event) },
+    {
+      onDidInvalidate: variablesMetadataInvalidated.event,
+      async root() {
+        configuredRootCalls++;
+        throw new Error('Variables must not request configured-namespace language metadata');
+      },
+      async processRoot() {
+        metadataVariableRefreshes++;
+        return processMetadataPayload;
+      },
+      async processContext(context) {
+        assert.strictEqual(context, '.meta');
+        return {
+          bindings: [
+            { context: '.meta', name: 'callable', qualifiedName: '.meta.callable', kind: 'function', qType: 100 },
+          ],
+          omittedUnsafeNames: 0,
+        };
+      },
+    }
+  );
+  await metadataVariablesProvider.refresh();
+  const metadataVariableRoot = metadataVariablesProvider.getChildren();
+  assert.strictEqual(metadataVariableRefreshes, 1);
+  assert.strictEqual(configuredRootCalls, 0);
+  const metadataRootContext = metadataVariableRoot[0];
+  assert.deepStrictEqual(
+    (await metadataVariablesProvider.getChildren(metadataRootContext)).map(item => item.binding.name),
+    ['metadataVariable']
+  );
+  const metadataNamespace = metadataVariableRoot.find(item => item instanceof VariablesContextTreeItem && item.context === '.meta');
+  assert.deepStrictEqual(
+    (await metadataVariablesProvider.getChildren(metadataNamespace)).map(item => item.binding.qualifiedName),
+    ['.meta.callable']
+  );
+  assert.match(String(metadataVariableRoot.at(-1).label), /1 non-standard object name was omitted/);
+  const metadataVariable = (await metadataVariablesProvider.getChildren(metadataRootContext))[0];
+  variablesMetadataInvalidated.fire();
+  assert.match(String(metadataVariablesProvider.getChildren()[0].label), /metadata changed/i);
+  assert.strictEqual(
+    metadataVariablesProvider.resolveVariable(metadataVariable),
+    undefined,
+    'shared metadata generation invalidation must retire otherwise matching Variables rows'
+  );
+  processMetadataPayload = { bindings: [], omittedUnsafeNames: 2 };
+  await metadataVariablesProvider.refresh();
+  assert.deepStrictEqual(
+    metadataVariablesProvider.getChildren().map(item => String(item.label)),
+    [
+      'No application bindings found in the q process.',
+      '2 non-standard object names were omitted for safe execution.',
+    ],
+    'an all-unsafe response must retain its explicit omission count'
+  );
+  metadataVariablesProvider.dispose();
+
+  currentProcessRoot = modelQTable(['name', 'type', 'namespace'], [
+    { name: 'alpha', type: -7, namespace: false },
+    { name: 'rootTable', type: 98, namespace: false },
+    { name: 'calculate', type: 100, namespace: false },
+    { name: 'qr', type: 99, namespace: true },
+  ]);
+  const variableTreeChanges = new treeVscode.vscode.EventEmitter();
+  const previews = [];
+  const feature = new VariablesFeature(
+    variablesStore,
+    variablesManager,
+    { onDidChangeTreeData: variableTreeChanges.event },
+    { event: event => diagnostics.push(event) },
+    async (query, expectedConnectionId) => previews.push({ query, expectedConnectionId })
+  );
+  const variablesTreeView = treeVscode.createdTreeViews.find(view => view.id === 'vscode-kdb.variables');
+  assert.ok(variablesTreeView, 'VariablesFeature must register the Variables tree view');
+  await treeVscode.registeredCommands.get('vscode-kdb.refreshVariables')();
+  const variablesFeatureProvider = variablesTreeView.options.treeDataProvider;
+  const featureRootContext = variablesFeatureProvider.getChildren()[0];
+  const featureRows = await variablesFeatureProvider.getChildren(featureRootContext);
+  const featureVariable = featureRows.find(item => item.binding?.name === 'alpha');
+  const featureTable = featureRows.find(item => item.binding?.name === 'rootTable');
+  const featureFunction = featureRows.find(item => item.binding?.name === 'calculate');
+  const originalWarning = treeVscode.vscode.window.showWarningMessage;
+  treeVscode.vscode.window.showWarningMessage = async message => {
+    treeVscode.warnings.push(message);
+    return undefined;
+  };
+  await treeVscode.registeredCommands.get('vscode-kdb.openVariableInResults')(featureVariable);
+  assert.strictEqual(previews.length, 0, 'declining the modal warning must not query the binding');
+  treeVscode.vscode.window.showWarningMessage = async (message, ...options) => {
+    treeVscode.warnings.push(message);
+    return options.includes('Open in KX Results') ? 'Open in KX Results' : undefined;
+  };
+  await treeVscode.registeredCommands.get('vscode-kdb.openVariableInResults')(featureVariable);
+  await treeVscode.registeredCommands.get('vscode-kdb.openVariableInResults')(featureTable);
+  assert.strictEqual(previews.length, 2);
+  assert.ok(previews.every(preview => preview.expectedConnectionId === variablesActive.id));
+  assert.strictEqual(
+    previews[0].query,
+    buildRuntimeBindingPreviewQuery('.', 'alpha', 'variable', 10_000)
+  );
+  assert.strictEqual(
+    previews[1].query,
+    buildRuntimeBindingPreviewQuery('.', 'rootTable', 'table', 10_000)
+  );
+  await treeVscode.registeredCommands.get('vscode-kdb.openVariableInResults')(featureFunction);
+  assert.strictEqual(previews.length, 2, 'a tracked callable must never reach preview');
+  await treeVscode.registeredCommands.get('vscode-kdb.openVariableInResults')(
+    new VariableTreeItem(
+      { context: '.', name: 'bad;name', qualifiedName: 'bad;name', kind: 'variable', qType: 7 },
+      featureVariable.snapshot,
+      featureVariable.generation
+    )
+  );
+  assert.strictEqual(previews.length, 2, 'an unowned unsafe-name row must never reach preview');
+  variablesConnected = false;
+  await treeVscode.registeredCommands.get('vscode-kdb.openVariableInResults')(featureVariable);
+  assert.strictEqual(previews.length, 2, 'a disconnected current row must fail closed');
+  variablesConnected = true;
+  treeVscode.vscode.window.showWarningMessage = originalWarning;
+  feature.dispose();
+
   const historyMemento = createHistoryMemento([
     historyEntry({
       id: 'removed',
@@ -7220,6 +8214,43 @@ async function testTreeProviders() {
   assert.strictEqual(historyProvider.resolveEntry(historyItems[1]), undefined, 'deleted owned items must resolve stale-safe');
   historyProvider.dispose();
 
+  const disabledMemento = createHistoryMemento([historyEntry({ id: 'retained-disabled' })]);
+  const disabledProvider = new QueryHistoryTreeProvider(
+    new QueryHistoryStore(disabledMemento),
+    { connection: () => undefined },
+    () => false
+  );
+  const disabledItems = disabledProvider.getChildren();
+  assert.strictEqual(disabledItems.length, 1);
+  assert.ok(disabledItems[0] instanceof DisabledQueryHistoryTreeItem);
+  assert.strictEqual(disabledProvider.resolveEntry(disabledItems[0]), undefined);
+  assert.strictEqual(disabledMemento.updates.length, 0, 'disabled display must not read-modify-write history');
+  disabledProvider.dispose();
+
+  const toggledMemento = createHistoryMemento([historyEntry({ id: 'retained-toggle' })]);
+  const toggleFeature = new QueryHistoryFeature(
+    new QueryHistoryStore(toggledMemento),
+    { connection: () => undefined },
+    { onDidChangeTreeData: new treeVscode.vscode.EventEmitter().event },
+    async () => undefined,
+    false
+  );
+  const toggleTreeView = treeVscode.createdTreeViews.at(-1);
+  assert.strictEqual(toggleTreeView.id, 'vscode-kdb.queryHistory');
+  const toggleProvider = toggleTreeView.options.treeDataProvider;
+  assert.ok(toggleProvider.getChildren()[0] instanceof DisabledQueryHistoryTreeItem);
+  assert.strictEqual(toggleFeature.capture(), undefined);
+  assert.strictEqual(toggledMemento.updates.length, 0);
+  toggleFeature.setEnabled(true);
+  await eventLoopTurn();
+  assert.ok(toggleProvider.getChildren()[0] instanceof QueryHistoryTreeItem);
+  assert.ok(toggleFeature.capture());
+  toggleFeature.setEnabled(false);
+  assert.ok(toggleProvider.getChildren()[0] instanceof DisabledQueryHistoryTreeItem);
+  assert.strictEqual(toggleFeature.capture(), undefined);
+  assert.strictEqual(toggledMemento.value[0].id, 'retained-toggle');
+  toggleFeature.dispose();
+
   const labelEntry = historyEntry({
     id: 'live-label',
     connectionId: 'kx-live-label',
@@ -7242,7 +8273,8 @@ async function testTreeProviders() {
     { onDidChangeTreeData: connectionTreeChanges.event },
     async () => undefined
   );
-  const historyTreeView = treeVscode.createdTreeViews.find(view => view.id === 'vscode-kdb.queryHistory');
+  const historyTreeView = treeVscode.createdTreeViews
+    .filter(view => view.id === 'vscode-kdb.queryHistory').at(-1);
   assert.ok(historyTreeView, 'QueryHistoryFeature must register its tree view');
   const featureProvider = historyTreeView.options.treeDataProvider;
   assert.match(featureProvider.getChildren()[0].description, /First current label/);
@@ -7617,11 +8649,11 @@ async function testQueryConnectionSelectionPolicy() {
 async function testFeatureControlsLifecycle() {
   const settings = {
     'vscode-kdb.features.serverExplorer': false,
-    'vscode-kdb.features.queryHistory': false,
     'vscode-kdb.queryHistory.maxEntries': 100,
   };
   const contextCommands = [];
   const serverInstances = [];
+  const variableInstances = [];
   const historyInstances = [];
   class FakeServerExplorerFeature {
     constructor(...args) {
@@ -7634,11 +8666,24 @@ async function testFeatureControlsLifecycle() {
       this.disposed = true;
     }
   }
+  class FakeVariablesFeature {
+    constructor(...args) {
+      this.args = args;
+      this.disposed = false;
+      variableInstances.push(this);
+    }
+
+    dispose() {
+      this.disposed = true;
+    }
+  }
   class FakeQueryHistoryFeature {
     constructor(...args) {
       this.args = args;
       this.disposed = false;
       this.pruneCalls = 0;
+      this.enabled = args[4];
+      this.enabledChanges = [];
       historyInstances.push(this);
     }
 
@@ -7650,6 +8695,12 @@ async function testFeatureControlsLifecycle() {
 
     async prune() {
       this.pruneCalls++;
+    }
+
+    setEnabled(enabled) {
+      if (this.enabled === enabled) return;
+      this.enabled = enabled;
+      this.enabledChanges.push(enabled);
     }
 
     dispose() {
@@ -7685,6 +8736,9 @@ async function testFeatureControlsLifecycle() {
     './query-history': {
       QueryHistoryFeature: FakeQueryHistoryFeature,
     },
+    './variables': {
+      VariablesFeature: FakeVariablesFeature,
+    },
   });
   const workspaceState = createHistoryMemento();
   const featureConnectionTree = { onDidChangeTreeData() { return { dispose() {} }; } };
@@ -7698,7 +8752,9 @@ async function testFeatureControlsLifecycle() {
     async () => undefined
   );
   assert.strictEqual(serverInstances.length, 0, 'disabled Server Explorer must not register its view/commands');
-  assert.strictEqual(historyInstances.length, 0, 'disabled Query History must not register its view/commands');
+  assert.strictEqual(variableInstances.length, 1, 'Variables must register independently of Server Explorer');
+  assert.strictEqual(historyInstances.length, 1, 'Query History must register its discoverable view');
+  assert.strictEqual(historyInstances[0].args[4], true, 'Query History capture must default to enabled');
   assert.ok(contextCommands.some(args =>
     args[0] === 'setContext' && args[1] === 'vscode-kdb.serverExplorer.available' && args[2] === false
   ));
@@ -7713,28 +8769,53 @@ async function testFeatureControlsLifecycle() {
   controls.configurationChanged(configurationEvent('vscode-kdb.features.serverExplorer'));
   assert.strictEqual(serverInstances[0].disposed, true);
 
-  settings['vscode-kdb.features.queryHistory'] = true;
+  settings['vscode-kdb.features.queryHistory'] = false;
   controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
   assert.strictEqual(historyInstances.length, 1);
+  assert.strictEqual(historyInstances[0].enabled, false, 'an explicit false must override the enabled default');
   assert.strictEqual(
     historyInstances[0].args[2],
     featureConnectionTree,
     'Query History must observe connection tree changes so stored labels rerender after rename/removal'
   );
   const sharedHistoryStore = historyInstances[0].args[0];
+  settings['vscode-kdb.features.queryHistory'] = true;
+  controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
   controls.configurationChanged(configurationEvent('vscode-kdb.queryHistory.maxEntries'));
   await Promise.resolve();
   assert.strictEqual(historyInstances[0].pruneCalls, 1);
   settings['vscode-kdb.features.queryHistory'] = false;
   controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
-  assert.strictEqual(historyInstances[0].disposed, true);
+  assert.strictEqual(historyInstances[0].disposed, false);
   settings['vscode-kdb.features.queryHistory'] = true;
   controls.configurationChanged(configurationEvent('vscode-kdb.features.queryHistory'));
-  assert.strictEqual(historyInstances.length, 2);
-  assert.strictEqual(historyInstances[1].args[0], sharedHistoryStore, 'toggle cycles must reuse local history storage safely');
+  assert.strictEqual(historyInstances.length, 1, 'toggle cycles must retain one History view/provider');
+  assert.strictEqual(historyInstances[0].args[0], sharedHistoryStore, 'toggle cycles must reuse local history storage safely');
+  assert.deepStrictEqual(
+    historyInstances[0].enabledChanges,
+    [false, true, false, true],
+    'feature reconciliation must gate capture without disposing the discoverable view'
+  );
 
   controls.dispose();
-  assert.strictEqual(historyInstances[1].disposed, true);
+  assert.strictEqual(historyInstances[0].disposed, true);
+  assert.strictEqual(variableInstances[0].disposed, true);
+  settings['vscode-kdb.features.queryHistory'] = false;
+  const reloadedControls = new FeatureControls(
+    { workspaceState },
+    { connection: () => undefined },
+    {},
+    featureConnectionTree,
+    {},
+    async () => undefined,
+    async () => undefined
+  );
+  assert.strictEqual(
+    historyInstances[1].args[4],
+    false,
+    'an explicit Query History opt-out must survive feature recreation'
+  );
+  reloadedControls.dispose();
   settings['vscode-kdb.features.serverExplorer'] = true;
   controls.configurationChanged(configurationEvent('vscode-kdb.features.serverExplorer'));
   assert.strictEqual(serverInstances.length, 1, 'disposed controls must never register features again');
@@ -11692,6 +12773,8 @@ async function createHostedNotebookChartAdapter() {
     includeRowIndex: true,
     copyExportConfirmCellThreshold: 1,
     elapsedTimeDisplay: 'auto',
+    tableDecimalPlaces: -1,
+    chartScientificNotationThreshold: 1000000,
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
     qTextSyntaxHighlighting: false,
@@ -12899,9 +13982,11 @@ async function testResultColumnSizing() {
   assert.strictEqual(normalizeColumnAutoFitMode('visibleRows'), 'visibleRows');
   assert.strictEqual(
     normalizeColumnAutoFitMode('unknown'),
-    'wholeResult',
-    'whole-result sizing must be the safe/default mode'
+    'visibleRows',
+    'visible-row sizing must be the default mode'
   );
+  assert.strictEqual(measuredColumnRenderedTextWidth('iiii', () => 16, 7), 80);
+  assert.strictEqual(measuredColumnRenderedTextWidth('WWWW', () => 120, 7), 152);
 
   assert.deepStrictEqual(normalizePositionalColumnWidths(null), {});
   assert.deepStrictEqual(
@@ -13086,8 +14171,8 @@ async function testResultColumnSizing() {
   );
   assert.strictEqual(
     resolvedColumnWidth(0, 160, { 0: 220 }, true, [500]),
-    220,
-    'a manual drag must remain authoritative over automatic sizing'
+    500,
+    'checked auto-fit must not be masked by stale manual widths'
   );
   assert.strictEqual(
     resolvedColumnWidth(0, 160, {}, false, [500]),
@@ -13366,6 +14451,7 @@ function testKxResultsUiParityContract() {
     'qTextDisplayFormatting',
     'dictionaryDisplayStrategy',
     'listDisplayStrategy',
+    'tableDecimalPlaces',
     'chartDecimalPlaces',
     'chartMaxSourceRows',
   ]);
@@ -13494,6 +14580,8 @@ function testKxResultsUiParityContract() {
   const messageSource = readSource('notebook-message.ts');
   const panelClassContext = {};
   vm.runInNewContext(`
+    const kxReporting = { enabled: false };
+    ${sourceSection(panelSource, '      function guardRendererCallback(', '\n      function reportOwnedRendererFailure(')}
     function element() {
       const classes = new Set();
       const value = {
@@ -13646,6 +14734,13 @@ function testKxResultsUiParityContract() {
   assert.match(panelSource, /function sharedKxResultSettings\(\): SharedKxResultSettings/);
   assert.match(panelSource, /message\.type === 'setResultColumnWidth'/);
   assert.match(panelSource, /message\.type === 'resetResultColumnWidths'/);
+  assert.match(panelSource, /id="fitColumnsNow"[\s\S]*?function fitColumnsNow\(\)/,
+    'ordinary Results must expose an explicit autofit reapply action');
+  assert.match(rendererSource, /Fit columns now[\s\S]*?function fitRendererColumnsNow\(/,
+    'live and saved notebook settings must expose the same autofit reapply action');
+  assert.match(rendererSource,
+    /function fitRendererColumnsNow\([\s\S]*?type: 'setResultColumnWidth'[\s\S]*?type: 'updateResultSetting'[\s\S]*?key: 'autoFitColumns'/,
+    'notebook Fit now must clear current positional widths and enable autofit without a query message');
   assert.match(
     panelSource,
     /if \(resizeState\.moved\) \{[\s\S]*?position:\s*Number\(columnWidthKey\(resizeState\.column\)\),[\s\S]*?width:\s*columnWidth\(resizeState\.column\)/,
@@ -13837,7 +14932,7 @@ function testKxResultsUiParityContract() {
   );
   assert.match(
     panelSource,
-    /settingsFontSize\.addEventListener\('change', \(\) => updateNumberSetting\('fontSize', settingsFontSize, 0, 32\)\)/,
+    /settingsFontSize\.addEventListener\('change', guardRendererCallback\(\(\) => updateNumberSetting\('fontSize', settingsFontSize, 0, 32\)\)\)/,
     'clearing the panel font-size input must continue through the numeric zero update path'
   );
   const panelNumberSettingSource = sourceSection(
@@ -15215,6 +16310,119 @@ function testRendererInteractionHelpers() {
   assert.strictEqual(notebookChartViewportInteractionBlocked('saved', true), false);
 }
 
+function testColumnarNotebookContract() {
+  const id = 'columnar-exact-' + 'a'.repeat(32);
+  const columns = [
+    qVector(['A', 'B', 'C'], 'symbol', 1),
+    qVector(['9007199254740993', '9223372036854775806', qSpecial('null')], 'long'),
+    qVector(['123456789012345678', qSpecial('positiveInfinity'), qSpecial('null')], 'timestamp'),
+    qVector(['-123456789012345678', '123456789012345678', qSpecial('negativeInfinity')], 'timespan'),
+    qVector([qSpecial('negativeZero'), qSpecial('positiveInfinity'), qSpecial('null')], 'float'),
+    qVector([-1, 0, qSpecial('null')], 'date'),
+    qVector([0, 255, 127], 'char'),
+    qVector([0, 255, 127], 'byte'),
+    qVector([false, true, false], 'boolean'),
+    qVector([qSpecial('null'), '00112233-4455-6677-8899-aabbccddeeff', 'ffffffff-ffff-ffff-ffff-ffffffffffff'], 'guid'),
+    qVector([qAtom('symbol', 'µ\n"'), qVector([1, 2], 'int', 2), { qtype: 'generalNull' }], 'mixed', 4),
+    ...['short', 'int', 'month', 'minute', 'second', 'time'].map(type => qVector([-1, 1, qSpecial('null')], type)),
+    ...['real', 'datetime'].map(type => qVector([0.25, qSpecial('negativeZero'), qSpecial('negativeInfinity')], type)),
+  ];
+  const input = {
+    columns: columns.map((column, index) => ({ name: 'c' + index, type: qVectorType(column) })),
+    columnAttributes: [{ ordinal: 0, attribute: 1 }, { ordinal: 10, attribute: 4 }],
+    keyColumnOrdinals: [0, 1], rowCount: 3, rows: [],
+    cellValue: (row, column) => qVectorAtomAt(columns[column], row),
+    rowLimit: 20, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT, marker: 'direct-ipc',
+    label: 'columnar • exact', elapsedMs: 3,
+    chart: { version: 1, visible: true, type: 'line', xColumn: 'c11', yColumns: ['c12'] },
+  };
+  const created = createPortableKxColumnTableV3(input, columns, id);
+  assert.strictEqual(created.ok, true, created.error);
+  const payload = created.value;
+  const rows = createPortableKxResultV2(input, { outputId: id, persistenceMode: 'full' });
+  assert.strictEqual(rows.ok, true, rows.error);
+  assert.strictEqual(rows.value.version, 2, 'ordinary-size row writer stays compatible');
+  assert.strictEqual(payload.version, 3);
+  assert.strictEqual(payload.data.encoding, 'q-columns');
+  assert.strictEqual(payload.data.rows, undefined, 'no per-cell row tree is retained');
+  assert.strictEqual(portableTableRowCount(payload), 3);
+  assert.deepStrictEqual(portableTableRowIndexes(payload), [0, 1, 2]);
+  assert.deepStrictEqual([...portableTableRows(payload)], rows.value.data.rows);
+  assert.deepStrictEqual(portableTableRow(payload, 2), rows.value.data.rows[2]);
+  assert.deepStrictEqual(portableTableRow(payload, 3), []);
+  for (let row = 0; row < 3; row++) for (let column = 0; column < columns.length; column++) {
+    assert.deepStrictEqual(portableTableCell(payload, row, column), rows.value.data.rows[row][column]);
+  }
+  assert.deepStrictEqual(payload.schema, rows.value.schema);
+  assert.deepStrictEqual(payload.result, rows.value.result);
+  assert.deepStrictEqual(payload.provenance, rows.value.provenance);
+  assert.strictEqual(notebookResultToCsv(payload), notebookResultToCsv(rows.value));
+  assert.strictEqual(notebookResultPlainText(payload), notebookResultPlainText(rows.value));
+  assert.strictEqual(notebookResultStaticHtml(payload), notebookResultStaticHtml(rows.value));
+  assert.ok(created.serializedBytes < rows.serializedBytes);
+  const bytes = Buffer.from(JSON.stringify(payload));
+  const persisted = validatePortableKxResult(JSON.parse(bytes));
+  assert.strictEqual(persisted.ok, true, persisted.error);
+  assert.deepStrictEqual(persisted.value, payload);
+  const metadata = { [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id } };
+  assert.strictEqual(inspectNotebookKxOutputIdentity(metadata, [{ mime: KX_NOTEBOOK_MIME, data: bytes }]).status, 'valid');
+  const open = parseNotebookRendererMessage({ type: 'openPreview', outputId: id, payload, requestId: 1 });
+  assert.ok(open, 'v3 remains valid plain-JSON saved-result messaging');
+  assert.strictEqual(open.payload.version, 3);
+  const invalidMutations = [
+    p => { p.data.columns.pop(); },
+    p => { p.data.columns.extra = true; },
+    p => { delete p.data.columns[0]; },
+    p => { p.data.columns[0].values.pop(); },
+    p => { p.data.columns[0].type = 'float'; },
+    p => { p.data.columns[0].values[0] = 1; },
+    p => { p.data.columns[0].attribute = 0; },
+    p => { p.data.columns[0].extra = true; },
+    p => { p.schema.columnAttributes[0].attribute = 5; },
+    p => { p.schema.keyColumnOrdinals = [0, 0]; },
+    p => { p.result.rowCount = 4; p.result.previewRowCount = 4; },
+    p => { p.result.columnCount++; },
+    p => { p.result.truncated = true; },
+    p => { p.persistence.mode = 'preview'; },
+    p => { p.data.rows = []; },
+    p => { p.logicalPresentation = 'standalone-list'; },
+    p => { p.extra = true; },
+    p => { p.outputId = 'bad'; },
+    p => { p.data.columns[10].values[2] = { form: 'generalNull', extra: true }; },
+    p => { p.data.columns[1].values[0] = '9223372036854775808'; },
+    p => { p.version = 2; },
+  ];
+  for (const mutate of invalidMutations) {
+    const broken = JSON.parse(bytes); mutate(broken);
+    assert.strictEqual(validatePortableKxResult(broken).ok, false, String(mutate));
+    assert.strictEqual(inspectNotebookKxOutputIdentity(metadata,
+      [{ mime: KX_NOTEBOOK_MIME, value: broken }]).status, 'invalid');
+  }
+  assert.strictEqual(validatePortableKxResult({ ...rows.value, version: 3 }).ok, false,
+    'v3 does not silently accept a mislabeled v2 row payload');
+  const empty = createPortableKxColumnTableV3({ ...input, rowCount: 0, chart: undefined },
+    columns.map(column => qVector([], qVectorType(column), qVectorAttribute(column))), id);
+  assert.strictEqual(empty.ok, true, empty.error);
+  assert.strictEqual(portableTableRowCount(empty.value), 0);
+  assert.deepStrictEqual(empty.value.schema, payload.schema);
+  const originalStringify = JSON.stringify;
+  JSON.stringify = () => { throw new RangeError('Invalid string length'); };
+  try {
+    const failed = createPortableKxResultV2({ ...input, rowCount: 0 }, { outputId: id, persistenceMode: 'full' });
+    assert.strictEqual(failed.ok, false);
+    assert.match(failed.error, /JavaScript string or allocation limit/);
+  } finally { JSON.stringify = originalStringify; }
+  const runtime = createNotebookControllerRuntime();
+  runtime.vscode.NotebookCellOutputItem.text = () => { throw new RangeError('test output allocation'); };
+  const controller = requireOutWithMocks('notebook-controller', { vscode: runtime.vscode });
+  assert.throws(() => controller.directQResultOutputItems(qAtom('long', '1'),
+    { rowLimit: 20, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT }, {},
+    { name: 'fixture', database: '' }, 1, id),
+    error => error.constructor.name === 'NotebookResultEncodingError' &&
+      /JavaScript string or allocation limit/.test(error.message) &&
+      !/Test Connection/.test(error.message));
+}
+
 function testNotebookContract() {
   const panelSource = readSource('kx-results-panel.ts');
   assert.strictEqual(KX_NOTEBOOK_MIME, 'application/vnd.kx.result+json');
@@ -15223,7 +16431,10 @@ function testNotebookContract() {
   assert.strictEqual(safeNotebookPresentation('panel'), 'panel');
   assert.strictEqual(safeNotebookPresentation('both'), 'both');
   assert.strictEqual(safeNotebookRowLimit(undefined), DEFAULT_NOTEBOOK_ROW_LIMIT);
-  assert.strictEqual(safeNotebookRowLimit(-5), MIN_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookRowLimit(0), UNLIMITED_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookRowLimit(-5), UNLIMITED_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookRowLimit(0.5), DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(safeNotebookRowLimit('0'), DEFAULT_NOTEBOOK_ROW_LIMIT);
   assert.strictEqual(safeNotebookRowLimit(MAX_NOTEBOOK_ROW_LIMIT + 1), MAX_NOTEBOOK_ROW_LIMIT);
   assert.strictEqual(safeNotebookByteLimit(undefined), DEFAULT_NOTEBOOK_BYTE_LIMIT);
   assert.strictEqual(safeNotebookByteLimit(1), MIN_NOTEBOOK_BYTE_LIMIT);
@@ -15240,6 +16451,12 @@ function testNotebookContract() {
   assert.strictEqual(notebookQSourceFromMagic('select from t'), undefined);
   assert.strictEqual(notebookQMagicLine({ rowLimit: 25, byteLimit: 20000 }),
     '%%q --max-rows 25 --max-bytes 20000');
+  assert.strictEqual(notebookHelperRowLimit({ rowLimit: 0 }), DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(notebookHelperRowLimit({ rowLimit: 25 }), 25);
+  assert.strictEqual(notebookQMagicLine({ rowLimit: 0, byteLimit: 20000 }),
+    '%%q --max-rows 20 --max-bytes 20000');
+  assert.strictEqual(shouldRetainLiveNotebookResult({ rowLimit: 0 }), false);
+  assert.strictEqual(shouldRetainLiveNotebookResult({ rowLimit: 1 }), true);
 
   const source = '<script>alert("source")</script>\n([] sym:`A`B; px:10 20; ts:2026.01.01 2026.01.02)';
   const payload = createPortableKxResult({
@@ -15688,9 +16905,91 @@ function testNotebookContract() {
     deserializeQPayload(attributedPersistenceTable())
   );
   assert.strictEqual(attributedTablePanel.mode, 'grid');
-  assert.match(attributedTablePanel.exactPersistenceIssue, /q table column 1/i);
-  assert.match(attributedTablePanel.exactPersistenceIssue, /q int vector attribute 1/i);
-  assert.match(attributedTablePanel.exactPersistenceIssue, /value `s#\(1 2i\)/i);
+  assert.strictEqual(attributedTablePanel.exactPersistenceIssue, undefined);
+  assert.deepStrictEqual(attributedTablePanel.columnAttributes, [{ ordinal: 0, attribute: 1 }]);
+  const multiAttributedPanel = qValueToLosslessPortablePanel(
+    deserializeQPayload(multiAttributedTableValue())
+  );
+  assert.deepStrictEqual(multiAttributedPanel.columnAttributes, [
+    { ordinal: 0, attribute: 1 },
+    { ordinal: 2, attribute: 2 },
+  ]);
+  const multiAttributedPortable = createPortableKxResultV2({
+    columns: multiAttributedPanel.cols.map((name, index) => ({
+      name, type: multiAttributedPanel.result.columnTypes[index],
+    })),
+    columnAttributes: multiAttributedPanel.columnAttributes,
+    rows: [],
+    cellValue: (rowIndex, columnIndex) =>
+      multiAttributedPanel.result.cellValue(rowIndex, columnIndex),
+    rowCount: multiAttributedPanel.result.rowCount,
+    marker: 'direct-ipc',
+  }, { outputId: `multi-attributed-${'a'.repeat(32)}`, persistenceMode: 'full' });
+  assert.strictEqual(multiAttributedPortable.ok, true,
+    multiAttributedPortable.ok ? undefined : multiAttributedPortable.error);
+  assert.deepStrictEqual(multiAttributedPortable.value.schema.columnAttributes,
+    multiAttributedPanel.columnAttributes);
+  assert.deepStrictEqual(multiAttributedPortable.value.schema.columns.map(column => column.type),
+    ['symbol', 'int', 'int']);
+  const reopenedAttributed = validatePortableKxResult(
+    JSON.parse(JSON.stringify(multiAttributedPortable.value))
+  );
+  assert.strictEqual(reopenedAttributed.ok, true);
+  assert.deepStrictEqual(reopenedAttributed.value.schema.columnAttributes,
+    multiAttributedPanel.columnAttributes);
+  assert.deepStrictEqual(reopenedAttributed.value.data.rows.map(row => row.map(portableCellText)),
+    [['`EURAUD', '101', '1'], ['`EURGBP', '102', '2'], ['`GBPAUD', '103', '3']]);
+  assert.strictEqual(fullV2.value.schema.columnAttributes, undefined);
+  for (const badAttributes of [
+    [{ ordinal: 0, attribute: 1 }, { ordinal: 0, attribute: 2 }],
+    [{ ordinal: 1, attribute: 2 }, { ordinal: 0, attribute: 1 }],
+    [{ ordinal: 3, attribute: 1 }],
+    [{ ordinal: 0.5, attribute: 1 }],
+    [{ ordinal: 0, attribute: 0 }],
+    [{ ordinal: 0, attribute: 5 }],
+    [{ ordinal: 0, attribute: '1' }],
+    [{ ordinal: 0, attribute: 1, extra: true }],
+    [],
+  ]) {
+    const malformed = JSON.parse(JSON.stringify(multiAttributedPortable.value));
+    malformed.schema.columnAttributes = badAttributes;
+    assert.strictEqual(validatePortableKxResult(malformed).ok, false,
+      `reject malformed q column attributes ${JSON.stringify(badAttributes)}`);
+    assert.strictEqual(createPortableKxResultV2({
+      columns: multiAttributedPanel.cols.map((name, index) => ({
+        name, type: multiAttributedPanel.result.columnTypes[index],
+      })),
+      columnAttributes: badAttributes,
+      rows: [], rowCount: 0, marker: 'direct-ipc',
+    }, { outputId: `invalid-attributed-${'i'.repeat(32)}`, persistenceMode: 'full' }).ok,
+    false);
+  }
+  const sparseAttributes = [];
+  sparseAttributes.length = 1;
+  const sparseAttributed = JSON.parse(JSON.stringify(multiAttributedPortable.value));
+  sparseAttributed.schema.columnAttributes = sparseAttributes;
+  assert.strictEqual(validatePortableKxResult(sparseAttributed).ok, false);
+  const decoratedAttributes = [{ ordinal: 0, attribute: 1 }];
+  decoratedAttributes.extra = true;
+  const decoratedAttributed = JSON.parse(JSON.stringify(multiAttributedPortable.value));
+  decoratedAttributed.schema.columnAttributes = decoratedAttributes;
+  assert.strictEqual(validatePortableKxResult(decoratedAttributed).ok, false);
+  const wrongTypeAttributed = JSON.parse(JSON.stringify(multiAttributedPortable.value));
+  wrongTypeAttributed.schema.columns[0].type = 'unsupported';
+  assert.strictEqual(validatePortableKxResult(wrongTypeAttributed).ok, false);
+  const v1Attributed = JSON.parse(JSON.stringify(payload));
+  v1Attributed.schema.columnAttributes = [{ ordinal: 0, attribute: 1 }];
+  assert.strictEqual(validatePortableKxResult(v1Attributed).ok, false);
+  const previewAttributed = JSON.parse(JSON.stringify(previewV2.value));
+  previewAttributed.schema.columnAttributes = [{ ordinal: 0, attribute: 1 }];
+  assert.strictEqual(validatePortableKxResult(previewAttributed).ok, false);
+  assert.strictEqual(createPortableKxResultV2({
+    columns: [{ name: 'sym', type: 'symbol' }],
+    rows: [['EURAUD']],
+    columnAttributes: [{ ordinal: 0, attribute: 1 }],
+    marker: 'direct-ipc',
+  }, { outputId: `preview-attributed-${'p'.repeat(32)}`, persistenceMode: 'preview' }).ok,
+  false);
   const dictionaryPanel = qValueToLosslessPortablePanel(
     deserializeQPayload(dictionaryIdentityValue())
   );
@@ -15775,13 +17074,75 @@ function testNotebookContract() {
     deserializeQPayload(attributedKeyedTableIdentityValue())
   );
   assert.strictEqual(attributedKeyedPanel.mode, 'grid');
-  assert.match(attributedKeyedPanel.exactPersistenceIssue, /q keyed table column 1/i);
-  assert.match(attributedKeyedPanel.exactPersistenceIssue, /q symbol vector attribute 1/i);
+  assert.strictEqual(attributedKeyedPanel.exactPersistenceIssue, undefined);
+  assert.deepStrictEqual(attributedKeyedPanel.columnAttributes,
+    [{ ordinal: 0, attribute: 1 }]);
+  const multiAttributedKeyedPanel = qValueToLosslessPortablePanel(
+    deserializeQPayload(multiAttributedKeyedTableValue())
+  );
+  assert.deepStrictEqual(multiAttributedKeyedPanel.columnAttributes, [
+    { ordinal: 0, attribute: 1 }, { ordinal: 1, attribute: 2 },
+  ]);
+  assert.deepStrictEqual(multiAttributedKeyedPanel.result.keyColumnOrdinals, [0]);
+  const attributedKeyedPortable = createPortableKxResultV2({
+    columns: multiAttributedKeyedPanel.cols.map((name, index) => ({
+      name, type: multiAttributedKeyedPanel.result.columnTypes[index],
+    })),
+    keyColumnOrdinals: multiAttributedKeyedPanel.result.keyColumnOrdinals,
+    columnAttributes: multiAttributedKeyedPanel.columnAttributes,
+    rows: [],
+    cellValue: (rowIndex, columnIndex) =>
+      multiAttributedKeyedPanel.result.cellValue(rowIndex, columnIndex),
+    rowCount: multiAttributedKeyedPanel.result.rowCount,
+    marker: 'direct-ipc',
+  }, { outputId: `attributed-keyed-${'k'.repeat(32)}`, persistenceMode: 'full' });
+  assert.strictEqual(attributedKeyedPortable.ok, true,
+    attributedKeyedPortable.ok ? undefined : attributedKeyedPortable.error);
+  const reopenedAttributedKeyed = validatePortableKxResult(
+    JSON.parse(JSON.stringify(attributedKeyedPortable.value))
+  );
+  assert.strictEqual(reopenedAttributedKeyed.ok, true);
+  assert.deepStrictEqual(reopenedAttributedKeyed.value.schema.columnAttributes,
+    multiAttributedKeyedPanel.columnAttributes);
+  const directAttributedKeyed = qValueToColumnarPanel(
+    deserializeQPayload(multiAttributedKeyedTableValue())
+  ).result;
+  const savedAttributedKeyed = createColumnarPanelResult(
+    reopenedAttributedKeyed.value.schema.columns.map(column => column.name),
+    reopenedAttributedKeyed.value.data.rows.length,
+    (rowIndex, columnIndex) => portableCellValue(
+      reopenedAttributedKeyed.value.data.rows[rowIndex][columnIndex]
+    ),
+    reopenedAttributedKeyed.value.schema.columns.map(column => column.type),
+    reopenedAttributedKeyed.value.schema.keyColumnOrdinals
+  );
+  const attributedRange = {
+    startRow: 0, endRow: 2, startColumn: 0, endColumn: 2,
+  };
+  assert.deepStrictEqual(savedAttributedKeyed.columns, directAttributedKeyed.columns);
+  assert.deepStrictEqual(savedAttributedKeyed.columnTypes, directAttributedKeyed.columnTypes);
+  assert.deepStrictEqual(savedAttributedKeyed.keyColumnOrdinals,
+    directAttributedKeyed.keyColumnOrdinals);
+  assert.deepStrictEqual(
+    savedAttributedKeyed.cellWindow({ start: 0, end: 2 }, { start: 0, end: 2 }).cells,
+    directAttributedKeyed.cellWindow({ start: 0, end: 2 }, { start: 0, end: 2 }).cells
+  );
+  assert.strictEqual(savedAttributedKeyed.toText('csv', attributedRange, false),
+    directAttributedKeyed.toText('csv', attributedRange, false));
+  const attributedChartRequest = {
+    chartType: 'line', xColumn: 'size', yColumns: ['price'],
+    width: 640, version: 1, requestId: 1,
+  };
+  const directAttributedChart = buildChartData(directAttributedKeyed, attributedChartRequest);
+  const savedAttributedChart = buildChartData(savedAttributedKeyed, attributedChartRequest);
+  assert.deepStrictEqual(savedAttributedChart.x, directAttributedChart.x);
+  assert.deepStrictEqual(savedAttributedChart.series, directAttributedChart.series);
   const emptyAttributedPanel = qValueToLosslessPortablePanel(
     deserializeQPayload(emptyAttributedPersistenceTable())
   );
   assert.strictEqual(emptyAttributedPanel.result.rowCount, 0);
-  assert.match(emptyAttributedPanel.exactPersistenceIssue, /q int vector attribute 1/i);
+  assert.deepStrictEqual(emptyAttributedPanel.columnAttributes,
+    [{ ordinal: 0, attribute: 1 }]);
   const emptyDictionaryPanel = qValueToLosslessPortablePanel(
     deserializeQPayload(emptyDictionaryIdentityValue())
   );
@@ -16579,7 +17940,7 @@ function testNotebookContract() {
     ...candlestickRequest,
     closeColumn: 'open',
   }), undefined);
-  assert.strictEqual(parseNotebookRendererMessage({
+  const groupedBoxRequest = {
     ...candlestickRequest,
     chartType: 'box',
     yColumns: ['price'],
@@ -16588,7 +17949,26 @@ function testNotebookContract() {
     highColumn: undefined,
     lowColumn: undefined,
     closeColumn: undefined,
-  }), undefined, 'box charts must not advertise unsupported grouping');
+  };
+  delete groupedBoxRequest.openColumn;
+  delete groupedBoxRequest.highColumn;
+  delete groupedBoxRequest.lowColumn;
+  delete groupedBoxRequest.closeColumn;
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage(groupedBoxRequest),
+    groupedBoxRequest,
+    'box charts must accept the shared Group by request contract'
+  );
+  const groupedCandlestickRequest = { ...candlestickRequest, groupByColumn: 'sym' };
+  assert.deepStrictEqual(
+    parseNotebookRendererMessage(groupedCandlestickRequest),
+    groupedCandlestickRequest,
+    'candlestick charts must accept a Group by column distinct from X and OHLC roles'
+  );
+  assert.strictEqual(parseNotebookRendererMessage({
+    ...groupedCandlestickRequest,
+    groupByColumn: 'close',
+  }), undefined, 'candlestick Group by cannot reuse an OHLC role');
   const liveCopyRequest = {
     type: 'copyLiveRange',
     outputId,
@@ -16767,6 +18147,8 @@ function testNotebookContract() {
     includeRowIndex: true,
     copyExportConfirmCellThreshold: 1_000_000,
     elapsedTimeDisplay: 'auto',
+    tableDecimalPlaces: -1,
+    chartScientificNotationThreshold: 1000000,
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
     qTextSyntaxHighlighting: false,
@@ -16783,6 +18165,19 @@ function testNotebookContract() {
     completeSettingsMessage,
     'shared durable KX result settings must survive the validated host-to-renderer path'
   );
+  const legacyPrecisionSettings = { ...completeResultSettings };
+  delete legacyPrecisionSettings.tableDecimalPlaces;
+  delete legacyPrecisionSettings.chartScientificNotationThreshold;
+  assert.deepStrictEqual(
+    parseNotebookRendererHostMessage({ ...completeSettingsMessage, resultSettings: legacyPrecisionSettings }),
+    completeSettingsMessage,
+    'older settings messages must acquire backward-compatible display defaults'
+  );
+  for (const [key, value] of [['tableDecimalPlaces', 13], ['tableDecimalPlaces', 1.5], ['chartScientificNotationThreshold', 0], ['chartScientificNotationThreshold', Infinity]]) {
+    assert.strictEqual(parseNotebookRendererHostMessage({
+      ...completeSettingsMessage, resultSettings: { ...completeResultSettings, [key]: value },
+    }), undefined, 'invalid explicit numeric display settings must be rejected');
+  }
   const staleDisplayStrategySettings = {
     ...completeSettingsMessage,
     resultSettings: {
@@ -16959,6 +18354,62 @@ function testNotebookContract() {
     requestId: 10,
     data: candleData,
   });
+  const groupedCandleData = {
+    ...candleData,
+    groupByColumn: 'sym',
+    series: [
+      { columnName: 'OHLC [A]', sourceColumnName: 'close', groupValue: 'A', values: [11, null] },
+      { columnName: 'OHLC [B]', sourceColumnName: 'close', groupValue: 'B', values: [null, 12] },
+    ],
+    candlesticks: undefined,
+    candlestickSeries: [
+      {
+        groupValue: 'A',
+        candlesticks: [
+          { x: 1, xText: 't1', open: 10, high: 12, low: 9, close: 11 },
+          null,
+        ],
+      },
+      {
+        groupValue: 'B',
+        candlesticks: [
+          null,
+          { x: 2, xText: 't2', open: 11, high: 13, low: 10, close: 12 },
+        ],
+      },
+    ],
+    retainedGroupCount: 2,
+    algorithm: 'ohlc-grouped/2',
+  };
+  delete groupedCandleData.candlesticks;
+  assert.deepStrictEqual(parseNotebookRendererHostMessage({
+    type: 'liveChart',
+    liveId,
+    requestId: 10,
+    data: groupedCandleData,
+  }), {
+    type: 'liveChart',
+    liveId,
+    requestId: 10,
+    data: groupedCandleData,
+  }, 'grouped candlestick responses must preserve aligned category series');
+  assert.strictEqual(parseNotebookRendererHostMessage({
+    type: 'liveChart',
+    liveId,
+    requestId: 10,
+    data: {
+      ...groupedCandleData,
+      candlestickSeries: groupedCandleData.candlestickSeries.map((series, index) => index === 0
+        ? { ...series, candlesticks: series.candlesticks.slice(0, 1) }
+        : series),
+    },
+  }), undefined, 'grouped candlestick payloads must reject misaligned candle slots');
+  assert.strictEqual(parseNotebookRendererHostMessage({
+    type: 'liveChart',
+    liveId,
+    requestId: 10,
+    data: { ...groupedCandleData, retainedGroupCount: 1 },
+  }), undefined, 'grouped candlestick payloads must reject inconsistent category counts');
   const gapChartData = {
     chartType: 'line',
     xColumn: 'time',
@@ -17216,6 +18667,34 @@ function testNotebookContract() {
     /Static candlestick chart rendering is unavailable/,
     'the static fallback must disclose its boundary instead of drawing a fake line chart'
   );
+  const groupedBoxPayload = createPortableKxResult({
+    columns: ['time', 'price', 'sym'],
+    rows: [[1, 10, 'A'], [1, 20, 'B']],
+    chart: {
+      visible: true,
+      type: 'box',
+      xColumn: 'time',
+      yColumns: ['price'],
+      groupByColumn: 'sym',
+    },
+  });
+  assert.strictEqual(groupedBoxPayload.chart.groupByColumn, 'sym');
+  assert.strictEqual(validatePortableKxResult(groupedBoxPayload).ok, true);
+  const groupedCandlestickPayload = createPortableKxResult({
+    columns: ['time', 'open', 'high', 'low', 'close', 'sym'],
+    rows: [[1, 10, 12, 9, 11, 'A'], [2, 11, 13, 10, 12, 'B']],
+    chart: {
+      ...candlestickPayload.chart,
+      groupByColumn: 'sym',
+    },
+  });
+  assert.strictEqual(groupedCandlestickPayload.chart.groupByColumn, 'sym');
+  assert.strictEqual(validatePortableKxResult(groupedCandlestickPayload).ok, true);
+  assert.match(
+    notebookResultStaticHtml(groupedCandlestickPayload),
+    /Static grouped candlestick chart rendering is unavailable/,
+    'the static fallback must keep grouped candlesticks explicitly interactive-only'
+  );
 
   const byteBounded = createPortableKxResult({
     columns: ['value'],
@@ -17367,10 +18846,29 @@ function testNotebookContract() {
   assert.match(rendererSource, /validatePortableKxResult\(raw\)/);
   assert.match(rendererSource, /context\.postMessage\?\.\(\{ type: 'ready' \}\)/);
   assert.match(rendererSource, /type: 'openPreview'/);
+  assert.match(
+    rendererSource,
+    /if \(state\.liveId && state\.outputId\) \{\s*requestLiveResult\(context, state\);\s*\}/,
+    'a complete durable-only output must render from saved MIME without requesting a live result'
+  );
   assert.match(rendererSource, /type: 'copyLiveRange'/);
   assert.match(rendererSource, /multiColumnControl/);
   assert.match(rendererSource, /\[\.\.\.KX_RESULT_CHART_TYPE_OPTIONS\]/);
   assert.match(rendererSource, /labelledSelectOptions\([\s\S]*?'Group by'/);
+  assert.match(
+    rendererSource,
+    /chartColumns\(state\.payload, visibleSavedColumnIndexes\(state\)\)/,
+    'saved chart candidates must use every explicitly visible column, not the virtualized DOM window'
+  );
+  assert.match(
+    rendererSource,
+    /'chart:live:group',[\s\S]*?controlModel\.groupColumns\.length === 0/
+  );
+  assert.match(
+    rendererSource,
+    /'chart:saved:group',[\s\S]*?controlModel\.groupColumns\.length === 0/,
+    'Group by controls must remain visible and disable when only None is available'
+  );
   for (const label of ['Open', 'High', 'Low', 'Close']) {
     assert.ok(rendererSource.includes(`['${label}',`), `${label} candlestick selector must exist`);
   }
@@ -18214,6 +19712,48 @@ function testNotebookContract() {
 }
 
 async function testQnbCodec() {
+  const { compactQnbJsonText, QnbJsonTextError } = requireOut('qnb-json-text');
+  const validJsonTexts = [
+    'null', 'true', 'false', '-0', '1.25e+2', '9007199254740993',
+    ' { "x" : [null, true, false, -1.2e-5], "x": 2 } ',
+    JSON.stringify({ unicode: 'µ 😀', escapes: '\\"\n\r\t', '__proto__': 'data' }, null, '\t'),
+    '{"\\u0078": "\\uD800", "\\\\": "\/"}',
+    JSON.stringify({ ['k'.repeat(512)]: 'allowed' }),
+    '['.repeat(64) + '0' + ']'.repeat(64),
+  ];
+  for (const text of validJsonTexts) {
+    assert.deepStrictEqual(JSON.parse(compactQnbJsonText(text, 64).text),
+      JSON.parse(JSON.stringify(JSON.parse(text))), 'JSON text save must preserve parsed semantics');
+  }
+  for (const text of ['', ' ', '01', '+1', '.1', '1.', '1e', '--1', 'NaN', 'Infinity',
+    'null true', '[1,]', '{"x":1,}', '{x:1}', '{"x" 1}', '"bad\nstring"',
+    '"\\x"', '"\\u00zz"', '"unterminated', '[', '{', '\u00a0null']) {
+    assert.throws(() => compactQnbJsonText(text, 64), QnbJsonTextError, text);
+  }
+  for (const text of ['1e999', '{"x":-1e999}',
+    JSON.stringify({ ['k'.repeat(513)]: 0 }), '['.repeat(65) + '0' + ']'.repeat(65)]) {
+    assert.throws(() => compactQnbJsonText(text, 64), error =>
+      error instanceof QnbJsonTextError && error.syntax === false, text);
+  }
+  // Deterministic nested values exercise punctuation, escaping, arrays, numbers,
+  // and unknown fields against the native parser/stringifier.
+  let seed = 7;
+  const next = () => (seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0);
+  const randomJson = depth => {
+    switch (depth ? next() % 6 : next() % 4) {
+      case 0: return null;
+      case 1: return !!(next() % 2);
+      case 2: return (next() - 2147483648) / 17;
+      case 3: return `string µ😀\\\n\t"${next()}`;
+      case 4: return Array.from({ length: next() % 5 }, () => randomJson(depth - 1));
+      default: return Object.fromEntries(Array.from({ length: next() % 5 }, (_, i) =>
+        [`field${i}\\"`, randomJson(depth - 1)]));
+    }
+  };
+  for (let i = 0; i < 150; i++) {
+    const value = randomJson(5);
+    assert.deepStrictEqual(JSON.parse(compactQnbJsonText(JSON.stringify(value, null, '\t'), 64).text), value);
+  }
   const bytes = new TextEncoder().encode(JSON.stringify(QNB_COMPATIBLE_CELLS));
   const decoded = decodeQnb(bytes);
   assert.strictEqual(decoded.cells.length, 3);
@@ -18243,6 +19783,22 @@ async function testQnbCodec() {
   assert(Array.isArray(rawRoundTrip), 'qnb top level must remain a cell array');
   assert.strictEqual(rawRoundTrip[2].language, 'q');
   assert.strictEqual(rawRoundTrip[1].value.endsWith('\n'), false);
+  assert.strictEqual(new TextDecoder().decode(encoded), `${JSON.stringify(rawRoundTrip)}\n`,
+    'saved qnb JSON must not expand typed cells with indentation');
+  assert.deepStrictEqual(
+    decodeQnb(new TextEncoder().encode(JSON.stringify(QNB_COMPATIBLE_CELLS, null, 2))),
+    decoded,
+    'existing indented notebooks must remain compatible'
+  );
+  const inheritedJsonHook = Object.assign(Object.create({ toJSON: () => 'lost value' }), {
+    visible: 'keep',
+  });
+  const normalizedOutput = JSON.parse(new TextDecoder().decode(encodeQnb({ cells: [{
+    ...decoded.cells[0],
+    outputs: [{ mime: 'application/json', value: inheritedJsonHook, unknown: {} }],
+  }] })))[0].outputs[0].value;
+  assert.deepStrictEqual(normalizedOutput, { visible: 'keep' },
+    'generic codec encoding must retain normalization of non-JSON prototypes');
 
   const blankInputs = [
     new Uint8Array(),
@@ -18288,10 +19844,6 @@ async function testQnbCodec() {
     () => decodeQnb(new TextEncoder().encode(value)),
     error => error instanceof QnbCodecError
   ));
-  assert.throws(
-    () => decodeQnb(new Uint8Array(QNB_MAX_BYTES + 1)),
-    error => error instanceof QnbCodecError
-  );
   assert.throws(
     () => decodeQnb(Uint8Array.from([0xff])),
     error => error instanceof QnbCodecError && /UTF-8/.test(error.message)
@@ -18400,6 +19952,8 @@ async function testQnbCodec() {
     QnbNotebookSerializer,
   } = requireOutWithMocks('qnb-notebook', { vscode: notebookVscode });
   const serializer = new QnbNotebookSerializer();
+  const saveDiagnostics = [];
+  const loggedSerializer = new QnbNotebookSerializer({ appendLine: line => saveDiagnostics.push(JSON.parse(line)) });
   const notebookData = await serializer.deserializeNotebook(bytes, {});
   assert.strictEqual(notebookData.cells[2].languageId, 'q');
   const legacy = notebookData.cells[0].outputs[2];
@@ -18410,6 +19964,106 @@ async function testQnbCodec() {
   const serializerRoundTrip = decodeQnb(await serializer.serializeNotebook(notebookData, {}));
   assert.deepStrictEqual(serializerRoundTrip, decoded,
     'the visible legacy fallback must not become a second persisted qnb output');
+
+  const largeResult = createPortableKxTextResultV2({
+    text: 'q'.repeat(16 * 1024 * 1024 + 1),
+    rowLimit: 1,
+    byteLimit: MIN_NOTEBOOK_BYTE_LIMIT,
+    marker: 'direct-ipc',
+  }, { outputId: `large-qnb-${'a'.repeat(32)}`, persistenceMode: 'full' });
+  assert.strictEqual(largeResult.ok, true);
+  const largeCell = new NotebookCellData(2, 'largeResult[]', 'q');
+  largeCell.outputs = [new NotebookCellOutput([
+    new NotebookCellOutputItem(
+      new TextEncoder().encode(JSON.stringify(largeResult.value)),
+      KX_NOTEBOOK_MIME
+    ),
+  ], {
+    'vscode-kdb.outputBinding': { version: 2, id: largeResult.value.outputId },
+  })];
+  const largeBytes = await serializer.serializeNotebook(new NotebookData([largeCell]), {});
+  assert(largeBytes.byteLength > 16 * 1024 * 1024);
+  const reopenedLarge = await serializer.deserializeNotebook(largeBytes, {});
+  const reopenedLargePayload = JSON.parse(new TextDecoder().decode(
+    reopenedLarge.cells[0].outputs[0].items[0].data
+  ));
+  assert.strictEqual(reopenedLargePayload.data.text, largeResult.value.data.text);
+  assert.strictEqual(reopenedLargePayload.outputId, largeResult.value.outputId);
+  assert.strictEqual(validatePortableKxResult(reopenedLargePayload).ok, true);
+
+  const typedTable = createPortableKxResultV2({
+    marker: 'direct-ipc', rowCount: 3000,
+    columns: [
+      { name: 'id', type: 'long' }, { name: 'sym', type: 'symbol' },
+      { name: 'nested', type: 'int[]' }, { name: 'price', type: 'float' },
+    ],
+    rows: Array.from({ length: 3000 }, (_, row) => [
+      qAtom('long', String(row)), qAtom('symbol', `SYM${String(row).padStart(4, '0')}`),
+      qVector([row, row + 1], 'int'), qAtom('float', row / 7),
+    ]),
+    keyColumnOrdinals: [1], columnAttributes: [{ ordinal: 1, attribute: 1 }],
+  }, { outputId: `typed-qnb-${'b'.repeat(32)}`, persistenceMode: 'full' });
+  assert.strictEqual(typedTable.ok, true);
+  const typedItem = new NotebookCellOutputItem(
+    new TextEncoder().encode(JSON.stringify(typedTable.value)), KX_NOTEBOOK_MIME
+  );
+  const typedCell = new NotebookCellData(2, 'typedTable[]\n', 'q');
+  const typedMetadata = {
+    'vscode-kdb.liveResult': { version: 1, id: 'session-only' },
+    'vscode-kdb.outputBinding': { version: 2, id: typedTable.value.outputId },
+    custom: 'keep',
+  };
+  typedCell.outputs = [new NotebookCellOutput([typedItem], typedMetadata)];
+  const metadataBefore = JSON.stringify(typedMetadata);
+  const itemBefore = typedItem.data.slice();
+  const typedBytes = await loggedSerializer.serializeNotebook(new NotebookData([typedCell]), {});
+  assert(typedBytes.byteLength < typedItem.data.byteLength * 1.01,
+    'a many-cell typed table must remain close to the compact MIME size');
+  const typedRaw = JSON.parse(new TextDecoder().decode(typedBytes))[0];
+  assert.strictEqual(typedRaw.outputs[0].metadata['vscode-kdb.liveResult'], undefined);
+  assert.strictEqual(typedRaw.outputs[0].metadata.custom, 'keep');
+  assert.strictEqual(typedRaw.outputs[0].metadata['vscode-kdb.outputBinding'].id,
+    typedTable.value.outputId);
+  assert.strictEqual(JSON.stringify(typedMetadata), metadataBefore);
+  assert.deepStrictEqual(typedItem.data, itemBefore, 'saving must not mutate output bytes');
+  const typedReopened = await serializer.deserializeNotebook(typedBytes, {});
+  const typedPayload = JSON.parse(new TextDecoder().decode(
+    typedReopened.cells[0].outputs[0].items[0].data
+  ));
+  assert.strictEqual(typedReopened.cells[0].value, typedCell.value);
+  assert.deepStrictEqual(typedPayload, typedTable.value,
+    'compact qnb save/reopen must preserve every typed cell, key ordinal, and attribute');
+  assert.strictEqual(validatePortableKxResult(typedPayload).ok, true);
+  const prettyTypedItem = new NotebookCellOutputItem(
+    new TextEncoder().encode(JSON.stringify(typedTable.value, undefined, '\t')), KX_NOTEBOOK_MIME);
+  typedCell.outputs[0].items = [prettyTypedItem];
+  const nativeJsonParse = JSON.parse;
+  let prettySaved;
+  try {
+    JSON.parse = text => {
+      assert(text.length < 65536, 'saving must not parse a complete large output into another object tree');
+      return nativeJsonParse(text);
+    };
+    prettySaved = await loggedSerializer.serializeNotebook(new NotebookData([typedCell]), {});
+  } finally { JSON.parse = nativeJsonParse; }
+  assert.deepStrictEqual(prettySaved, typedBytes, 'real VS Code indented MIME must save to the same compact bytes');
+  assert.deepStrictEqual(await serializer.serializeNotebook(new NotebookData([typedCell]), {}), prettySaved,
+    'repeated saves must preserve exact bytes');
+  assert.strictEqual(saveDiagnostics[0].status, 'start');
+  assert.strictEqual(saveDiagnostics[1].status, 'serialized');
+  assert.strictEqual(saveDiagnostics[1].serializedBytes, typedBytes.byteLength);
+  assert.strictEqual(saveDiagnostics[2].inputBytes, prettyTypedItem.data.byteLength);
+  assert.deepStrictEqual(Object.keys(saveDiagnostics[0]).sort(), ['cells', 'durationMs', 'inputBytes', 'phase', 'status']);
+  assert(!JSON.stringify(saveDiagnostics).includes('typedTable'), 'save diagnostics must omit source and values');
+  const invalidItem = new NotebookCellOutputItem(new Uint8Array([255]), KX_NOTEBOOK_MIME);
+  typedCell.outputs[0].items = [invalidItem];
+  await assert.rejects(loggedSerializer.serializeNotebook(new NotebookData([typedCell]), {}));
+  assert.strictEqual(saveDiagnostics.at(-1).status, 'failed');
+  typedCell.outputs[0].items = [new NotebookCellOutputItem(new TextEncoder().encode('{broken'), KX_NOTEBOOK_MIME)];
+  const fallbackSaved = decodeQnb(await serializer.serializeNotebook(new NotebookData([typedCell]), {}));
+  assert.strictEqual(fallbackSaved.cells[0].outputs[0].value, '{broken', 'unparseable new JSON MIME keeps legacy text fallback');
+  typedCell.outputs[0].items = [new NotebookCellOutputItem(new TextEncoder().encode('{"x":1e999}'), KX_NOTEBOOK_MIME)];
+  await assert.rejects(serializer.serializeNotebook(new NotebookData([typedCell]), {}), /non-finite/);
 
   const blankNotebookData = await serializer.deserializeNotebook(new Uint8Array(), {});
   assert.strictEqual(blankNotebookData.cells.length, 1);
@@ -18825,7 +20479,7 @@ function testNotebookRendererModel() {
       ...preservedChart.configuration,
       chartType: 'candlestick',
       yColumns: ['price'],
-      groupByColumn: '',
+      groupByColumn: 'sym',
       closeColumn: 'removed',
     },
     ['time'],
@@ -18836,13 +20490,14 @@ function testNotebookRendererModel() {
   assert.strictEqual(reconciledCandle.configuration.visible, true);
   assert.strictEqual(reconciledCandle.configuration.chartType, 'candlestick');
   assert.strictEqual(reconciledCandle.configuration.closeColumn, 'close');
+  assert.strictEqual(reconciledCandle.configuration.groupByColumn, 'sym');
   const chartControlExpectations = {
     line: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
     scatter: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
     step: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
     bar: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
-    box: { usesGenericY: true, supportsGroupBy: false, usesOhlc: false },
-    candlestick: { usesGenericY: false, supportsGroupBy: false, usesOhlc: true },
+    box: { usesGenericY: true, supportsGroupBy: true, usesOhlc: false },
+    candlestick: { usesGenericY: false, supportsGroupBy: true, usesOhlc: true },
   };
   for (const [chartType, expectedCapabilities] of Object.entries(chartControlExpectations)) {
     const controls = notebookChartControlModel(
@@ -18850,7 +20505,7 @@ function testNotebookRendererModel() {
         chartType,
         xColumn: 'time',
         yColumns: chartType === 'candlestick' ? [] : ['price', 'size'],
-        groupByColumn: chartType === 'box' || chartType === 'candlestick' ? '' : 'sym',
+        groupByColumn: 'sym',
         openColumn: 'open',
         highColumn: 'high',
         lowColumn: 'low',
@@ -18902,6 +20557,39 @@ function testNotebookRendererModel() {
       ['sym']
     ).validationMessage,
     /Group by column is unavailable/
+  );
+  const noDistinctGroup = notebookChartControlModel(
+    {
+      chartType: 'box',
+      xColumn: 'time',
+      yColumns: ['price'],
+      groupByColumn: '',
+    },
+    ['time'],
+    ['price'],
+    ['time', 'price']
+  );
+  assert.strictEqual(noDistinctGroup.capabilities.supportsGroupBy, true);
+  assert.deepStrictEqual(noDistinctGroup.groupColumns, [],
+    'Group by remains supported but disabled when every candidate has an active chart role');
+  assert.match(
+    notebookChartControlModel(
+      {
+        chartType: 'candlestick',
+        xColumn: 'time',
+        yColumns: [],
+        groupByColumn: 'close',
+        openColumn: 'open',
+        highColumn: 'high',
+        lowColumn: 'low',
+        closeColumn: 'close',
+      },
+      ['time'],
+      ['open', 'high', 'low', 'close'],
+      ['close', 'sym']
+    ).validationMessage,
+    /Group by column is unavailable/,
+    'candlestick controls must reject a group column that also fills an OHLC role'
   );
   assert.strictEqual(notebookCellSelected(selection, 4, 2), true);
   assert.strictEqual(notebookCellSelected(selection, 6, 2), false);
@@ -20096,6 +21784,35 @@ async function testLiveNotebookResultStore() {
   });
   assert.strictEqual(boxChart.chartType, 'box');
   assert.strictEqual(boxChart.boxSeries.length, 2);
+  const groupedBoxChart = store.chart(chartId, notebookUri, {
+    requestId: 91,
+    chartType: 'box',
+    xColumn: 'time',
+    yColumns: ['price', 'size'],
+    groupByColumn: 'sym',
+    maxPoints: 20,
+  });
+  assert.strictEqual(groupedBoxChart.groupByColumn, 'sym');
+  assert.ok(groupedBoxChart.boxSeries.length > 2);
+  assert.ok(groupedBoxChart.boxSeries.every(series => series.groupValue));
+  const groupedBoxHost = liveChartMessage(
+    store,
+    notebookUri,
+    {
+      type: 'requestLiveChart',
+      liveId: chartId,
+      requestId: 92,
+      chartType: 'box',
+      xColumn: 'time',
+      yColumns: ['price', 'size'],
+      groupByColumn: 'sym',
+      maxPoints: 20,
+    },
+    hostDisplayOptions,
+    { chartMaxSourceRows: 120 }
+  );
+  assert.strictEqual(groupedBoxHost.error, undefined);
+  assert.deepStrictEqual(parseNotebookRendererHostMessage(groupedBoxHost), groupedBoxHost);
   const candleChart = store.chart(chartId, notebookUri, {
     requestId: 10,
     chartType: 'candlestick',
@@ -20115,6 +21832,28 @@ async function testLiveNotebookResultStore() {
     close: 'close',
   });
   assert.ok(candleChart.candlesticks.length <= 20);
+  const groupedCandleChart = store.chart(chartId, notebookUri, {
+    requestId: 101,
+    chartType: 'candlestick',
+    xColumn: 'time',
+    yColumns: [],
+    groupByColumn: 'sym',
+    openColumn: 'open',
+    highColumn: 'high',
+    lowColumn: 'low',
+    closeColumn: 'close',
+    maxPoints: 20,
+  });
+  assert.strictEqual(groupedCandleChart.groupByColumn, 'sym');
+  assert.ok(groupedCandleChart.candlestickSeries.length > 1);
+  assert.strictEqual(
+    groupedCandleChart.candlestickSeries.reduce(
+      (count, series) => count + series.candlesticks.filter(Boolean).length,
+      0
+    ),
+    groupedCandleChart.sampledPointCount,
+    'grouped candlesticks must share one total sampled-item budget'
+  );
   const candleHost = liveChartMessage(
     store,
     notebookUri,
@@ -20137,6 +21876,29 @@ async function testLiveNotebookResultStore() {
   assert.strictEqual(candleHost.error, undefined);
   assert.strictEqual(candleHost.data.chartType, 'candlestick');
   assert.deepStrictEqual(parseNotebookRendererHostMessage(candleHost), candleHost);
+  const groupedCandleHost = liveChartMessage(
+    store,
+    notebookUri,
+    {
+      type: 'requestLiveChart',
+      liveId: chartId,
+      requestId: 111,
+      chartType: 'candlestick',
+      xColumn: 'time',
+      yColumns: [],
+      groupByColumn: 'sym',
+      openColumn: 'open',
+      highColumn: 'high',
+      lowColumn: 'low',
+      closeColumn: 'close',
+      maxPoints: 20,
+    },
+    hostDisplayOptions,
+    { chartMaxSourceRows: 120 }
+  );
+  assert.strictEqual(groupedCandleHost.error, undefined);
+  assert.strictEqual(groupedCandleHost.data.groupByColumn, 'sym');
+  assert.deepStrictEqual(parseNotebookRendererHostMessage(groupedCandleHost), groupedCandleHost);
   assert.strictEqual(store.chart(chartId, otherNotebookUri, {
     requestId: 1,
     chartType: 'line',
@@ -20490,6 +22252,205 @@ function liveRegistration(notebookUri, cellUri, value, outputId) {
   };
 }
 
+async function testStandaloneSymbolQText() {
+  const symbols = [qAtom('symbol', 'hola'), qAtom('symbol', 'hola ciao'),
+    qAtom('symbol', 'a"\\\nµ'), qAtom('symbol', qSpecial('null'))];
+  for (const atom of symbols) {
+    const expected = qValueToLiteral(atom);
+    for (const strategy of ['grid', 'qText']) {
+      assert.strictEqual(qValuePrefersQText(atom), true);
+      const panel = qValueToColumnarPanel(atom, { listDisplayStrategy: strategy });
+      assert.strictEqual(panel.mode, 'text'); assert.strictEqual(panel.text, expected);
+    }
+    const portable = qValueToLosslessPortablePanel(atom);
+    assert.strictEqual(portable.logicalPresentation, 'standalone-symbol');
+    assert.strictEqual(portable.result.cellValue(0, 0), atom);
+    const created = createPortableKxResultV2({
+      columns: [{ name: 'value', type: 'symbol' }], rows: [[atom]], rowCount: 1,
+      logicalPresentation: portable.logicalPresentation, marker: 'direct-ipc',
+      rowLimit: 20, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT,
+    }, { outputId: 'symbol-output-' + 's'.repeat(32), persistenceMode: 'full' });
+    assert(created.ok, created.error);
+    const canonical = JSON.stringify(created.value), reopened = JSON.parse(canonical);
+    assert(validatePortableKxResult(reopened).ok);
+    assert.deepStrictEqual(portableCellValue(portableTableCell(reopened, 0, 0)), atom);
+    const displayed = portableKxResultForGridDisplay(reopened);
+    assert.strictEqual(displayed.kind, 'qText'); assert.strictEqual(displayed.data.text, expected);
+    assert.strictEqual(displayed.outputId, reopened.outputId);
+    assert(validatePortableKxResult(displayed).ok);
+    assert(notebookResultStaticHtml(reopened).includes('<pre>'));
+    assert(notebookResultPlainText(reopened).includes(expected));
+    assert.strictEqual(JSON.stringify(reopened), canonical, 'display must not rewrite canonical output');
+    const oldTable = { ...reopened }; delete oldTable.logicalPresentation;
+    assert.strictEqual(portableKxResultForGridDisplay(oldTable), oldTable, 'unmarked tables stay tables');
+    for (const mutate of [
+      p => { p.persistence.mode = 'preview'; },
+      p => { p.schema.columns[0].type = 'char'; },
+      p => { p.data.rows[0][0].value = { form: 'atom', type: 'int', value: 1 }; },
+      p => { p.data.rows[0][0].value = { form: 'vector', type: 'symbol', attribute: 0, values: ['hola'] }; },
+      p => { p.data.rows.push(p.data.rows[0]); p.result.rowCount = p.result.previewRowCount = 2; },
+      p => { p.schema.keyColumnOrdinals = [0]; },
+      p => { p.schema.columnAttributes = [{ ordinal: 0, attribute: 1 }]; },
+      p => { p.chart = { version: 1, visible: true, type: 'line', xColumn: 'value', yColumns: ['value'] }; },
+    ]) {
+      const invalid = JSON.parse(canonical); mutate(invalid);
+      assert.strictEqual(validatePortableKxResult(invalid).ok, false, 'invalid standalone marker must fail closed');
+    }
+  }
+  for (const values of [[], ['hola'], ['hola', 'ciao']]) {
+    const vector = qVector(values, 'symbol');
+    const grid = qValueToColumnarPanel(vector, { listDisplayStrategy: 'grid' });
+    assert.strictEqual(grid.mode, 'grid'); assert.strictEqual(grid.result.rowCount, values.length);
+    assert.strictEqual(qValueToColumnarPanel(vector, { listDisplayStrategy: 'qText' }).text, qValueToLiteral(vector));
+    assert.strictEqual(qValueToLosslessPortablePanel(vector).logicalPresentation, 'standalone-list');
+  }
+  const table = deserializeQPayload(qTable(['sym'], [symbolVector(['hola'])]));
+  const panel = qValueToColumnarPanel(table);
+  assert.strictEqual(panel.mode, 'grid'); assert.strictEqual(panel.result.cellText(0, 0), '`hola');
+  assert.strictEqual(qValueToLosslessPortablePanel(table).logicalPresentation, undefined);
+  assert.strictEqual(panel.result.toText('tsv', { startRow: 0, endRow: 0, startColumn: 0, endColumn: 0 }, false), 'hola');
+  const dict = qValueToColumnarPanel({ qtype: 'dict', entries: [{ key: symbols[0], value: symbols[1] }] });
+  assert.strictEqual(dict.mode, 'grid'); assert.strictEqual(dict.result.cellText(0, 0), '`hola');
+  assert.strictEqual(qValueToColumnarPanel(qVector(symbols, 'mixed')).result.cellText(0, 1), '`hola');
+
+  for (const native of [true, false]) for (const limit of [20, 0]) {
+    const runtime = createNotebookControllerRuntime();
+    runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', limit);
+    const controller = requireOutWithMocks('notebook-controller', { vscode: runtime.vscode });
+    const bridge = createDirectQNotebookBridgeHarness();
+    bridge.connection = { id: 'symbols', name: 'symbols', host: '127.0.0.1', port: 5001, database: '' };
+    bridge.connected = true;
+    bridge.executeImpl = async (_target, _source, issued) => { issued(); return deserializeQPayload(hex('f5686f6c6100')); };
+    const store = new LiveNotebookResultStore(), runner = new controller.KxQNotebookController(bridge, store);
+    const notebook = runtime.notebook(`file:///symbol-${native}-${limit}.${native ? 'qnb' : 'ipynb'}`,
+      native ? controller.KX_QNB_NOTEBOOK_TYPE : controller.KX_Q_NOTEBOOK_TYPE);
+    let cell = runtime.cell({ source: '`hola', uri: `vscode-notebook-cell:///symbol/${native}/${limit}` });
+    cell.notebook = notebook; notebook.cells.push(cell);
+    if (native) {
+      runtime.controllers[0].selectionEmitter.fire({ notebook, selected: true });
+      await runtime.controllers[0].executeHandler([cell], notebook, runtime.controllers[0]);
+    } else { assert.strictEqual(await runner.runCell(cell, bridge.connection.id), 'executed'); cell = runtime.replacementFor(cell); }
+    const output = runtime.outputFor(cell), payload = notebookOutputItem(output, KX_NOTEBOOK_MIME).value;
+    assert.strictEqual(payload.logicalPresentation, 'standalone-symbol');
+    assert.strictEqual(controller.notebookCellHasExpectedKxIdentity(cell, [output]), true);
+    const liveId = output.metadata[controller.KX_NOTEBOOK_LIVE_METADATA_KEY]?.id;
+    assert.strictEqual(!!liveId, limit > 0);
+    if (liveId) { assert.strictEqual(store.view(liveId, notebook.uri.toString()).mode, 'text');
+      assert.strictEqual(store.fullText(liveId, notebook.uri.toString()), '`hola'); }
+    const file = [{ kind: 2, language: 'q', value: '`hola', outputs: [{ mime: KX_NOTEBOOK_MIME, value: payload }] }];
+    const reopened = decodeQnb(encodeQnb(decodeQnb(new TextEncoder().encode(JSON.stringify(file)))));
+    const saved = reopened.cells[0].outputs[0].value;
+    assert.deepStrictEqual(saved, payload);
+    assert.strictEqual(portableKxResultForGridDisplay(saved).data.text, '`hola');
+    assert.strictEqual(bridge.calls.length, 1, 'save/reopen/display never execute q');
+    store.closeNotebook(notebook.uri.toString()); runner.dispose();
+  }
+}
+
+function testNativeTablePackingCardinality() {
+  const runtime = createNotebookControllerRuntime();
+  const { directQPortableResult } = requireOutWithMocks('notebook-controller', { vscode: runtime.vscode });
+  const connection = { name: 'packing-regression', database: '.' };
+  const types = ['symbol', 'long', 'mixed', ...Array(11).fill('int')];
+  for (const rows of [0, 1, 60_000, 71_428, 71_429]) {
+    const table = {
+      qtype: 'table', columns: types.map((_t, c) => 'c' + c), columnTypes: types,
+      columnData: types.map((type, c) => qVector(Array.from({ length: rows }, (_v, r) =>
+        c === 0 ? 'XAUUSD' : c === 1 ? '9223372036854775806'
+          : c === 2 ? qVector([r, r + 1], 'int', 1) : r + c), type, c === 0 ? 1 : 0)),
+      rowCount: rows,
+    };
+    Object.defineProperty(table, 'rows', { get() { throw Error('native table rows must stay lazy'); } });
+    for (const rowLimit of [0, 20]) {
+      const created = directQPortableResult(table, { rowLimit, byteLimit: 1_000_000 }, {},
+        connection, 1, 'packing-cardinality-' + 'a'.repeat(32));
+      assert.strictEqual(created.ok, true, created.error);
+      assert.strictEqual(created.value.version, 4, `native ${rows} x 14 must always pack`);
+      assert.strictEqual(portableTableRowCount(created.value), rows);
+      assert.strictEqual(created.value.result.truncated, false);
+      assert.deepStrictEqual(created.value.schema.columnAttributes, [{ ordinal: 0, attribute: 1 }]);
+      const reopened = validatePortableKxResult(JSON.parse(JSON.stringify(created.value)));
+      assert.strictEqual(reopened.ok, true, reopened.error);
+      for (const row of new Set([0, Math.floor(rows / 2), rows - 1])) {
+        if (row < 0 || row >= rows) continue;
+        for (let col = 0; col < types.length; col++) assert.deepStrictEqual(
+          portableTableCell(reopened.value, row, col).value,
+          qValueToPortableNode(qVectorAtomAt(table.columnData[col], row)));
+      }
+    }
+  }
+  const fallback = directQPortableResult(modelQTable(['value'], [{ value: 1 }]),
+    { rowLimit: 20, byteLimit: 1_000_000 }, {}, connection, 1, 'packing-fallback-' + 'b'.repeat(32));
+  assert.strictEqual(fallback.ok, true, fallback.error);
+  assert.strictEqual(fallback.value.version, 2, 'plain rows have no authoritative native vectors');
+}
+
+async function testColumnarNotebookLifecycle() {
+  for (const packed of [false, true]) for (const native of [true, false]) for (const limit of [20, 0]) {
+    const runtime = createNotebookControllerRuntime();
+    runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', limit);
+    const controllerModule = requireOutWithMocks('notebook-controller', { vscode: runtime.vscode });
+    const bridge = createDirectQNotebookBridgeHarness();
+    bridge.connection = { id: 'columnar', name: 'columnar', host: '127.0.0.1', port: 5001, database: '' };
+    bridge.connected = true;
+    bridge.executeImpl = async (_target, _source, issued) => {
+      issued(); return deserializeQPayload(multiAttributedKeyedTableValue());
+    };
+    const store = new LiveNotebookResultStore();
+    const runner = new controllerModule.KxQNotebookController(bridge, store);
+    // Exercise both historical v3 and current v4 lifecycle readers with a small fixture.
+    runner.directQResultOutputItems = (value, settings, options, connection, elapsed, id) => {
+      const header = controllerModule.directQPortableResult(value, settings, options, connection, elapsed, id);
+      assert(header.ok, header.error);
+      const panel = qValueToLosslessPortablePanel(value);
+      const payload = (packed ? createPortableKxPackedTableV4 : createPortableKxColumnTableV3)({
+        columns: header.value.schema.columns, rows: [], rowCount: panel.result.rowCount,
+        columnAttributes: header.value.schema.columnAttributes,
+        keyColumnOrdinals: header.value.schema.keyColumnOrdinals,
+        marker: 'direct-ipc', rowLimit: 20, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT,
+      }, panel.qColumns, id);
+      assert(payload.ok, payload.error);
+      return controllerModule.notebookOutputItems(payload.value, DEFAULT_NOTEBOOK_BYTE_LIMIT);
+    };
+    const notebook = runtime.notebook(`file:///columnar-${native}-${limit}.${native ? 'qnb' : 'ipynb'}`,
+      native ? controllerModule.KX_QNB_NOTEBOOK_TYPE : controllerModule.KX_Q_NOTEBOOK_TYPE);
+    let cell = runtime.cell({ source: 'columnar[]', uri: `vscode-notebook-cell:///columnar/${native}/${limit}` });
+    cell.notebook = notebook; notebook.cells.push(cell);
+    if (native) runtime.controllers[0].selectionEmitter.fire({ notebook, selected: true });
+    if (native) await runtime.controllers[0].executeHandler([cell], notebook, runtime.controllers[0]);
+    else assert.strictEqual(await runner.runCell(cell, bridge.connection.id), 'executed');
+    if (!native) cell = runtime.replacementFor(cell);
+    const output = runtime.outputFor(cell), payload = notebookOutputItem(output, KX_NOTEBOOK_MIME).value;
+    assert.strictEqual(payload.version, packed ? 4 : 3);
+    assert.deepStrictEqual([...portableTableRows(payload)].map(row => row.map(portableCellText)),
+      [['`EURAUD', '1', '101'], ['`EURGBP', '2', '102'], ['`GBPAUD', '3', '103']]);
+    assert.strictEqual(output.metadata[controllerModule.KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY].id, payload.outputId);
+    assert.strictEqual(controllerModule.notebookCellHasExpectedKxIdentity(cell, [output]), true);
+    const liveId = output.metadata[controllerModule.KX_NOTEBOOK_LIVE_METADATA_KEY]?.id;
+    assert.strictEqual(!!liveId, limit > 0);
+    if (liveId) {
+      assert.strictEqual(store.has(liveId, notebook.uri.toString(), cell.document.uri.toString()), true);
+      assert.strictEqual(store.has(liveId, 'file:///foreign.qnb', cell.document.uri.toString()), false);
+    }
+    const firstId = payload.outputId;
+    if (native) await runtime.controllers[0].executeHandler([cell], notebook, runtime.controllers[0]);
+    else assert.strictEqual(await runner.runCell(cell, bridge.connection.id), 'executed');
+    if (!native) cell = runtime.replacementFor(cell);
+    const second = runtime.outputFor(cell);
+    assert.notStrictEqual(notebookOutputItem(second, KX_NOTEBOOK_MIME).value.outputId, firstId);
+    assert.strictEqual(bridge.calls.length, 2, 'only explicit runs issue q');
+    if (liveId) assert.strictEqual(store.has(liveId, notebook.uri.toString()), false);
+    runtime.emitNotebookCellOutputs(cell, []);
+    const secondLive = second.metadata[controllerModule.KX_NOTEBOOK_LIVE_METADATA_KEY]?.id;
+    assert.strictEqual(controllerModule.notebookCellHasExpectedKxIdentity(cell, [second]), false);
+    // Store retirement on native clear/close is owned by notebook integration,
+    // covered by its existing runtime suite; the runner owns replacement.
+    store.closeNotebook(notebook.uri.toString());
+    if (secondLive) assert.strictEqual(store.has(secondLive, notebook.uri.toString()), false);
+    runtime.closeNotebook(notebook); runner.dispose();
+  }
+}
+
 async function testDirectQNotebookController() {
   const runtime = createNotebookControllerRuntime();
   const {
@@ -20577,8 +22538,10 @@ async function testDirectQNotebookController() {
     1,
     `attributed-controller-${'a'.repeat(32)}`
   );
-  assert.strictEqual(attributedFull.ok, false);
-  assert.match(attributedFull.error, /q table column 1.*q int vector attribute 1/i);
+  assert.strictEqual(attributedFull.ok, true,
+    attributedFull.ok ? undefined : attributedFull.error);
+  assert.deepStrictEqual(attributedFull.value.schema.columnAttributes,
+    [{ ordinal: 0, attribute: 1 }]);
   const dictionaryFull = directQPortableResult(
     deserializeQPayload(dictionaryIdentityValue()),
     { rowLimit: 20, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT },
@@ -20617,8 +22580,27 @@ async function testDirectQNotebookController() {
     1,
     `attributed-keyed-controller-${'y'.repeat(24)}`
   );
-  assert.strictEqual(attributedKeyedFull.ok, false);
-  assert.match(attributedKeyedFull.error, /q keyed table column 1.*attribute 1/i);
+  assert.strictEqual(attributedKeyedFull.ok, true,
+    attributedKeyedFull.ok ? undefined : attributedKeyedFull.error);
+  assert.deepStrictEqual(attributedKeyedFull.value.schema.keyColumnOrdinals, [0]);
+  assert.deepStrictEqual(attributedKeyedFull.value.schema.columnAttributes,
+    [{ ordinal: 0, attribute: 1 }]);
+  const zeroModeAttributedKeyed = directQPortableResult(
+    deserializeQPayload(multiAttributedKeyedTableValue()),
+    { rowLimit: 0, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT },
+    {}, connection, 1, `zero-attributed-keyed-${'m'.repeat(32)}`
+  );
+  assert.strictEqual(zeroModeAttributedKeyed.ok, true,
+    zeroModeAttributedKeyed.ok ? undefined : zeroModeAttributedKeyed.error);
+  assert.deepStrictEqual(zeroModeAttributedKeyed.value.schema.columnAttributes, [
+    { ordinal: 0, attribute: 1 }, { ordinal: 1, attribute: 2 },
+  ]);
+  assert.deepStrictEqual(zeroModeAttributedKeyed.value.schema.keyColumnOrdinals, [0]);
+  assert.deepStrictEqual(
+    validatePortableKxResult(JSON.parse(JSON.stringify(zeroModeAttributedKeyed.value)))
+      .value.schema.columnAttributes,
+    zeroModeAttributedKeyed.value.schema.columnAttributes
+  );
   const emptyAttributedFull = directQPortableResult(
     deserializeQPayload(emptyAttributedPersistenceTable()),
     { rowLimit: 20, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT },
@@ -20627,8 +22609,24 @@ async function testDirectQNotebookController() {
     1,
     `empty-attributed-controller-${'z'.repeat(32)}`
   );
-  assert.strictEqual(emptyAttributedFull.ok, false);
-  assert.match(emptyAttributedFull.error, /q int vector attribute 1/i);
+  assert.strictEqual(emptyAttributedFull.ok, true,
+    emptyAttributedFull.ok ? undefined : emptyAttributedFull.error);
+  assert.strictEqual(emptyAttributedFull.value.result.rowCount, 0);
+  assert.deepStrictEqual(emptyAttributedFull.value.schema.columnAttributes,
+    [{ ordinal: 0, attribute: 1 }]);
+  const emptyAttributedKeyedFull = directQPortableResult(
+    deserializeQPayload(emptyAttributedKeyedTableValue()),
+    { rowLimit: 20, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT },
+    {}, connection, 1, `empty-attributed-keyed-${'e'.repeat(32)}`
+  );
+  assert.strictEqual(emptyAttributedKeyedFull.ok, true,
+    emptyAttributedKeyedFull.ok ? undefined : emptyAttributedKeyedFull.error);
+  assert.deepStrictEqual(emptyAttributedKeyedFull.value.schema.columns.map(column => column.type),
+    ['symbol', 'int']);
+  assert.deepStrictEqual(emptyAttributedKeyedFull.value.schema.keyColumnOrdinals, [0]);
+  assert.deepStrictEqual(emptyAttributedKeyedFull.value.schema.columnAttributes, [
+    { ordinal: 0, attribute: 1 }, { ordinal: 1, attribute: 2 },
+  ]);
   bridge.connection = connection;
   bridge.connectionList = [connection, secondConnection];
   bridge.connected = false;
@@ -20820,6 +22818,25 @@ async function testDirectQNotebookController() {
   assert.strictEqual(scalarFull.value.result.truncated, false);
   assert.strictEqual(portableCellText(scalarFull.value.data.rows[0][0]), '2');
 
+  const unlimitedList = directQPortableResult(
+    qVector(Array.from({ length: 5_000 }, (_value, index) => index), 'int'),
+    { rowLimit: 0, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT },
+    {},
+    connection,
+    3,
+    `unlimited-list-${'u'.repeat(32)}`
+  );
+  assert.strictEqual(unlimitedList.ok, true, unlimitedList.ok ? undefined : unlimitedList.error);
+  assert.strictEqual(unlimitedList.value.logicalPresentation, 'standalone-list');
+  assert.strictEqual(unlimitedList.value.persistence.mode, 'full');
+  assert.strictEqual(unlimitedList.value.result.truncated, false);
+  assert.strictEqual(unlimitedList.value.persistence.previewRowLimit, DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.ok(
+    unlimitedList.serializedBytes > MIN_NOTEBOOK_BYTE_LIMIT,
+    'the zero-mode standalone-list fixture must exceed the configured static byte limit'
+  );
+  assert.strictEqual(validatePortableKxResult(JSON.parse(JSON.stringify(unlimitedList.value))).ok, true);
+
   const largeRows = Array.from({ length: 60_000 }, (_value, index) => ({
     sym: ['AAPL', 'MSFT', 'IBM', 'KX'][index % 4],
     price: 100 + (index % 10_000) / 100,
@@ -20849,7 +22866,7 @@ async function testDirectQNotebookController() {
   );
   const largePortable = directQPortableResult(
     modelQTable(['sym', 'price', 'size', 'venue'], largeRows),
-    { rowLimit: 20, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT },
+    { rowLimit: 0, byteLimit: DEFAULT_NOTEBOOK_BYTE_LIMIT },
     {},
     connection,
     49,
@@ -20871,6 +22888,17 @@ async function testDirectQNotebookController() {
   assert.strictEqual(largePortable.value.result.previewRowCount, 60_000);
   assert.strictEqual(largePortable.value.data.rows.length, 60_000);
   assert.strictEqual(largePortable.value.result.truncated, false);
+  assert.strictEqual(
+    largePortable.value.persistence.previewRowLimit,
+    DEFAULT_NOTEBOOK_ROW_LIMIT,
+    'zero mode must retain positive MIME v2 compatibility metadata'
+  );
+  assert.strictEqual(largePortable.value.result.rowLimit, DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(
+    validatePortableKxResult(JSON.parse(JSON.stringify(largePortable.value))).ok,
+    true,
+    'zero-mode full output must reopen through the unchanged v2 validator'
+  );
   assert.ok(
     largePortable.serializedBytes > DEFAULT_NOTEBOOK_BYTE_LIMIT,
     `exact 60,000-row Direct IPC payload must exercise the large-output path; measured ${largePortable.serializedBytes} bytes`
@@ -20891,10 +22919,10 @@ async function testDirectQNotebookController() {
   assert.ok(defaultFullItem, notebookErrorText(defaultFullOutput));
   const defaultFullPayload = defaultFullItem.value;
   assert.strictEqual(defaultFullPayload.persistence.mode, 'full');
-  assert.strictEqual(defaultFullPayload.data.rows.length, 1);
+  assert.strictEqual(portableTableRowCount(defaultFullPayload), 1);
   assert.strictEqual(defaultFullPayload.result.truncated, false);
   assert.strictEqual(
-    defaultFullPayload.data.rows[0].every(cell => cell.kind === 'q'),
+    portableTableRow(defaultFullPayload, 0).every(cell => cell.kind === 'q'),
     true,
     'the selected pure-q controller must persist exact IPC-decoded typed cells in full mode'
   );
@@ -20903,12 +22931,12 @@ async function testDirectQNotebookController() {
   );
   assert.strictEqual(reopenedControllerFull.ok, true);
   assert.deepStrictEqual(
-    reopenedControllerFull.value.data.rows[0].slice(0, 2).map(cell => portableCellText(cell)),
+    portableTableRow(reopenedControllerFull.value, 0).slice(0, 2).map(cell => portableCellText(cell)),
     ['`hello', '"hello"'],
     'a reopened pure-q controller result must retain symbol-vs-char identity'
   );
   assert.strictEqual(
-    portableCellText(reopenedControllerFull.value.data.rows[0][9]),
+    portableCellText(portableTableRow(reopenedControllerFull.value, 0)[9]),
     '1 2',
     'a nested typed-vector cell must reopen with the same concise grid display'
   );
@@ -20916,6 +22944,48 @@ async function testDirectQNotebookController() {
     !JSON.stringify(defaultFullOutput).includes(connection.username),
     'connection credentials must never be serialized into durable notebook output'
   );
+  qnbRegistered.selectionEmitter.fire({ notebook: existingQnbNotebook, selected: true });
+  for (const rowLimit of [20, 0]) {
+    runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', rowLimit);
+    bridge.executeImpl = async (_connection, source, onIssued) => {
+      assert.strictEqual(source, 'attributedKeyed[]');
+      onIssued();
+      return deserializeQPayload(multiAttributedKeyedTableValue());
+    };
+    const attributedQnbCell = runtime.cell({
+      languageId: 'q',
+      source: 'attributedKeyed[]',
+      uri: `vscode-notebook-cell:///attributed-qnb/${rowLimit}`,
+    });
+    attributedQnbCell.notebook = existingQnbNotebook;
+    const callsBeforeAttributed = bridge.calls.length;
+    await qnbRegistered.executeHandler(
+      [attributedQnbCell], existingQnbNotebook, qnbRegistered
+    );
+    assert.strictEqual(bridge.calls.length, callsBeforeAttributed + 1);
+    const attributedOutput = runtime.outputFor(attributedQnbCell);
+    const attributedItem = notebookOutputItem(attributedOutput, KX_NOTEBOOK_MIME);
+    assert.ok(attributedItem, notebookErrorText(attributedOutput));
+    const attributedPayload = attributedItem.value;
+    assert.strictEqual(
+      attributedOutput.metadata[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY].id,
+      attributedPayload.outputId
+    );
+    assert.deepStrictEqual(attributedPayload.schema.keyColumnOrdinals, [0]);
+    assert.deepStrictEqual(attributedPayload.schema.columnAttributes, [
+      { ordinal: 0, attribute: 1 }, { ordinal: 1, attribute: 2 },
+    ]);
+    assert.deepStrictEqual([...portableTableRows(attributedPayload)].map(row => row.map(portableCellText)),
+      [['`EURAUD', '1', '101'], ['`EURGBP', '2', '102'], ['`GBPAUD', '3', '103']]);
+    assert.strictEqual(
+      validatePortableKxResult(JSON.parse(JSON.stringify(attributedPayload))).ok,
+      true
+    );
+    assert.strictEqual(
+      !!attributedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY], rowLimit > 0
+    );
+  }
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 20);
   let repeatedRun = 0;
   bridge.executeImpl = async (_connection, source, onIssued, _signal, shouldIssue) => {
     assert.strictEqual(source, 'repeatFresh[]');
@@ -20953,6 +23023,61 @@ async function testDirectQNotebookController() {
     liveResults.view(secondRepeatedLiveId, notebook.uri.toString()).table.cellValue(0, 0),
     'fresh-2'
   );
+
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 0);
+  const allocatedLiveIdsBeforeZeroRun = liveId;
+  await registered.executeHandler([repeatedCell], notebook, registered);
+  const zeroRepeatedOutput = runtime.outputFor(repeatedCell);
+  const zeroRepeatedPayload = notebookOutputItem(zeroRepeatedOutput, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(new TextDecoder().decode(notebookOutputItem(zeroRepeatedOutput, KX_NOTEBOOK_MIME).data),
+    JSON.stringify(zeroRepeatedPayload), 'Direct IPC MIME must bypass VS Code JSON factory indentation');
+  assert.strictEqual(repeatedRun, 3, 'zero mode must issue a fresh q query instead of reusing a result');
+  assert.strictEqual(zeroRepeatedPayload.persistence.mode, 'full');
+  assert.strictEqual(zeroRepeatedPayload.result.truncated, false);
+  assert.strictEqual(portableCellText(zeroRepeatedPayload.data.rows[0][0]), 'fresh-3');
+  assert.notStrictEqual(zeroRepeatedPayload.outputId, secondRepeatedPayload.outputId);
+  assert.strictEqual(
+    zeroRepeatedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY],
+    undefined,
+    'zero mode must not emit a session-bound live ID'
+  );
+  assert.strictEqual(liveId, allocatedLiveIdsBeforeZeroRun, 'zero mode must not allocate a live record');
+  assert.strictEqual(
+    liveResults.has(secondRepeatedLiveId, notebook.uri.toString()),
+    false,
+    'committing a zero-mode run must retire the prior positive-mode live record'
+  );
+  const zeroRepeatedIdentity = inspectNotebookKxOutputIdentity(
+    zeroRepeatedOutput.metadata,
+    zeroRepeatedOutput.items
+  );
+  assert.strictEqual(zeroRepeatedIdentity.status, 'valid');
+  assert.strictEqual(zeroRepeatedIdentity.identity.live, undefined);
+  assert.strictEqual(zeroRepeatedIdentity.identity.binding.id, zeroRepeatedPayload.outputId);
+  registered.selectionEmitter.fire({ notebook, selected: false });
+  const zeroMixedCell = runtime.cell({
+    languageId: 'q',
+    source: 'repeatFresh[]',
+    uri: 'vscode-notebook-cell:///native-q/zero-mixed',
+  });
+  zeroMixedCell.notebook = notebook;
+  const liveIdsBeforeZeroMixedRun = liveId;
+  assert.strictEqual(await directController.runCell(zeroMixedCell, connection.id), 'executed');
+  const zeroMixedReplacement = runtime.replacementFor(zeroMixedCell);
+  const zeroMixedOutput = runtime.outputFor(zeroMixedReplacement);
+  const zeroMixedPayload = notebookOutputItem(zeroMixedOutput, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(repeatedRun, 4, 'mixed zero mode must issue current source exactly once');
+  assert.strictEqual(portableCellText(zeroMixedPayload.data.rows[0][0]), 'fresh-4');
+  assert.strictEqual(zeroMixedPayload.result.truncated, false);
+  assert.strictEqual(zeroMixedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY], undefined);
+  assert.strictEqual(liveId, liveIdsBeforeZeroMixedRun, 'mixed zero mode must not stage a live record');
+  const zeroMixedIdentity = inspectNotebookKxOutputIdentity(
+    zeroMixedOutput.metadata,
+    zeroMixedOutput.items
+  );
+  assert.strictEqual(zeroMixedIdentity.status, 'valid');
+  assert.strictEqual(zeroMixedIdentity.identity.live, undefined);
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 2);
 
   registered.selectionEmitter.fire({ notebook, selected: false });
   assert.strictEqual(
@@ -21104,6 +23229,46 @@ async function testDirectQNotebookController() {
     liveResults.view(mixedLiveId, notebook.uri.toString()).query,
     mixedFullSource
   );
+
+  for (const rowLimit of [20, 0]) {
+    runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', rowLimit);
+    bridge.executeImpl = async (_target, source, onIssued) => {
+      assert.strictEqual(source, 'mixedAttributed[]');
+      onIssued();
+      return deserializeQPayload(multiAttributedKeyedTableValue());
+    };
+    const attributedMixedCell = runtime.cell({
+      languageId: 'q',
+      source: 'mixedAttributed[]',
+      uri: `vscode-notebook-cell:///attributed-mixed/${rowLimit}`,
+    });
+    attributedMixedCell.notebook = notebook;
+    const callsBeforeAttributed = bridge.calls.length;
+    assert.strictEqual(
+      await directController.runCell(attributedMixedCell, secondConnection.id), 'executed'
+    );
+    assert.strictEqual(bridge.calls.length, callsBeforeAttributed + 1);
+    const attributedReplacement = runtime.replacementFor(attributedMixedCell);
+    assert.strictEqual(attributedReplacement.document.getText(), 'mixedAttributed[]');
+    assert.strictEqual(attributedReplacement.document.languageId, 'q');
+    const attributedOutput = runtime.outputFor(attributedReplacement);
+    const attributedPayload = notebookOutputItem(attributedOutput, KX_NOTEBOOK_MIME).value;
+    assert.strictEqual(
+      attributedOutput.metadata[KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY].id,
+      attributedPayload.outputId
+    );
+    assert.deepStrictEqual(attributedPayload.schema.keyColumnOrdinals, [0]);
+    assert.deepStrictEqual(attributedPayload.schema.columnAttributes, [
+      { ordinal: 0, attribute: 1 }, { ordinal: 1, attribute: 2 },
+    ]);
+    assert.strictEqual(
+      validatePortableKxResult(JSON.parse(JSON.stringify(attributedPayload))).ok,
+      true
+    );
+    assert.strictEqual(
+      !!attributedOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY], rowLimit > 0
+    );
+  }
 
   runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 20);
   runtime.setConfiguration('vscode-kdb.notebook.maxOutputBytes', DEFAULT_NOTEBOOK_BYTE_LIMIT);
@@ -21805,6 +23970,25 @@ async function testDirectQNotebookController() {
   bridge.errorImpl = async error => error instanceof Error ? error.message : String(error);
   bridge.executeImpl = async (_connection, _source, onIssued) => {
     onIssued();
+    return deserializeQPayload(dictionaryIdentityValue());
+  };
+  const encodingFailureCell = runtime.cell({
+    languageId: 'q',
+    source: 'unsupportedDictionary[]',
+    uri: 'vscode-notebook-cell:///native-q/encoding-failure',
+  });
+  const callsBeforeEncodingFailure = bridge.calls.length;
+  await registered.executeHandler([encodingFailureCell], notebook, registered);
+  assert.strictEqual(bridge.calls.length, callsBeforeEncodingFailure + 1);
+  const encodingFailureOutput = runtime.outputFor(encodingFailureCell);
+  const encodingFailureText = notebookErrorText(encodingFailureOutput);
+  assert.match(encodingFailureText, /returned a result.*could not be encoded/i);
+  assert.match(encodingFailureText, /q type dictionary/i);
+  assert.doesNotMatch(encodingFailureText, /Test Connection/i);
+  assert.strictEqual(notebookOutputItem(encodingFailureOutput, KX_NOTEBOOK_MIME), undefined);
+
+  bridge.executeImpl = async (_connection, _source, onIssued) => {
+    onIssued();
     return 42;
   };
   const scalarCell = runtime.cell({
@@ -21870,6 +24054,23 @@ async function testDirectQNotebookController() {
   assert.strictEqual(noValueLiveView.mode, 'text');
   assert.strictEqual(noValueLiveView.text, '::');
   assert.deepStrictEqual(noValueExecution.endCalls.map(call => call.success), [true]);
+
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 0);
+  const liveIdsBeforeZeroQText = liveId;
+  const zeroQTextCell = runtime.cell({
+    languageId: 'q',
+    source: 'zeroQText[]',
+    uri: 'vscode-notebook-cell:///native-q/zero-qtext',
+  });
+  await registered.executeHandler([zeroQTextCell], notebook, registered);
+  const zeroQTextOutput = runtime.outputFor(zeroQTextCell);
+  const zeroQTextPayload = notebookOutputItem(zeroQTextOutput, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(zeroQTextPayload.kind, 'qText');
+  assert.strictEqual(zeroQTextPayload.data.text, '::');
+  assert.strictEqual(zeroQTextPayload.persistence.previewRowLimit, DEFAULT_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(zeroQTextOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY], undefined);
+  assert.strictEqual(liveId, liveIdsBeforeZeroQText, 'zero-mode qText must not allocate a live record');
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 2);
 
   bridge.executeImpl = async (_connection, _source, onIssued) => {
     onIssued();
@@ -22026,24 +24227,30 @@ async function testDirectQNotebookController() {
     }
   );
   retainedCell.outputs = [retainedOutput];
-  const stagedIdBeforeFailure = liveId;
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 0);
+  const liveIdBeforeZeroFailure = liveId;
   runtime.controls.applyEditResult = false;
   assert.strictEqual(await directController.runCell(retainedCell, connection.id), 'write-failed');
   runtime.controls.applyEditResult = true;
-  assert.strictEqual(liveId, stagedIdBeforeFailure + 1);
-  const failedStagedId = `controller-live-${String(liveId).padStart(24, '0')}`;
+  assert.strictEqual(liveId, liveIdBeforeZeroFailure, 'failed zero mode must not allocate a live record');
   assert.strictEqual(
     liveResults.has(retainedLiveId, notebook.uri.toString()),
     true,
     'a failed notebook edit must retain the prior displayed live result'
   );
-  assert.strictEqual(
-    liveResults.has(failedStagedId, notebook.uri.toString()),
-    false,
-    'a failed notebook edit must remove only its staged live result'
-  );
   assert.deepStrictEqual(retainedCell.outputs, [retainedOutput]);
   assert.strictEqual(runtime.replacementFor(retainedCell), undefined);
+  assert.strictEqual(await directController.runCell(retainedCell, connection.id), 'executed');
+  const retainedZeroReplacement = runtime.replacementFor(retainedCell);
+  const retainedZeroOutput = runtime.outputFor(retainedZeroReplacement);
+  assert.strictEqual(retainedZeroOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY], undefined);
+  assert.strictEqual(liveId, liveIdBeforeZeroFailure, 'successful zero mode must not allocate a live record');
+  assert.strictEqual(
+    liveResults.has(retainedLiveId, notebook.uri.toString()),
+    false,
+    'a successfully committed zero-mode replacement must retire the prior live binding'
+  );
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 2);
 
   bridge.executeImpl = async () => {
     throw new Error('connection failed before q issue');
@@ -22393,10 +24600,23 @@ async function testDirectQNotebookController() {
   );
   assert.strictEqual(bridge.calls.length, callsBeforeQnb);
   assert.strictEqual(runtime.workspaceEdits.length, editsBeforeQnb);
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 0);
+  const liveIdsBeforeQnbZeroRun = liveId;
   await qnbRegistered.executeHandler([qnbCell], qnbNotebook, qnbRegistered);
   assert.strictEqual(bridge.calls.length, callsBeforeQnb + 1);
   assert.strictEqual(bridge.calls.at(-1).source, 'qnbNative[]');
-  assert.ok(notebookOutputItem(runtime.outputFor(qnbCell), KX_NOTEBOOK_MIME));
+  const qnbZeroOutput = runtime.outputFor(qnbCell);
+  const qnbZeroPayload = notebookOutputItem(qnbZeroOutput, KX_NOTEBOOK_MIME).value;
+  assert.strictEqual(qnbZeroPayload.persistence.mode, 'full');
+  assert.strictEqual(qnbZeroPayload.result.truncated, false);
+  assert.strictEqual(qnbZeroOutput.metadata[KX_NOTEBOOK_LIVE_METADATA_KEY], undefined);
+  assert.strictEqual(liveId, liveIdsBeforeQnbZeroRun, 'qnb zero mode must not allocate a live record');
+  assert.strictEqual(
+    inspectNotebookKxOutputIdentity(qnbZeroOutput.metadata, qnbZeroOutput.items).status,
+    'valid',
+    'qnb zero mode must retain durable output ownership without a live ID'
+  );
+  runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 2);
 
   const qnbMagicCell = runtime.cell({
     languageId: 'q',
@@ -23364,6 +25584,7 @@ async function testDirectQNotebookRendererReruns() {
   const outputIds = [
     `renderer-rerun-output-one-${'c'.repeat(32)}`,
     `renderer-rerun-output-two-${'d'.repeat(32)}`,
+    `renderer-rerun-output-three-${'e'.repeat(32)}`,
   ];
   const liveResults = new LiveNotebookResultStore(8, () => liveIds.shift());
   const bridge = createDirectQNotebookBridgeHarness();
@@ -23515,11 +25736,125 @@ async function testDirectQNotebookRendererReruns() {
       [['29', 'fresh-tail-2']],
       'the second live result must retain complete replacement data beyond the saved preview'
     );
+
+    runtime.setConfiguration('vscode-kdb.notebook.maxOutputRows', 0);
+    await rerun(secondPayload, secondPayload.outputId, 803);
+    const zeroPayload = portableOutput(notebook.cellAt(0));
+    const zeroOutput = notebook.cellAt(0).outputs[0];
+    assert.strictEqual(zeroOutput.metadata[NOTEBOOK_LIVE_RESULT_METADATA_KEY], undefined);
+    assert.strictEqual(zeroPayload.persistence.mode, 'full');
+    assert.strictEqual(zeroPayload.result.truncated, false);
+    assert.strictEqual(zeroPayload.data.rows.length, 30);
+    assert.strictEqual(portableCellText(zeroPayload.data.rows[29][1]), 'fresh-tail-3');
+    assert.notStrictEqual(zeroPayload.outputId, secondPayload.outputId);
+    assert.strictEqual(bridge.calls.length, 3, 'zero-mode renderer rerun must issue one fresh q call');
+    assert.deepStrictEqual(bridge.calls.map(call => call.source), [source, source, source]);
+    assert.strictEqual(
+      liveResults.has(secondLiveId, notebook.uri.toString()),
+      false,
+      'a committed zero-mode renderer rerun must retire the prior live result'
+    );
   } finally {
     integration.dispose();
     runner.dispose();
     liveResults.clear();
   }
+}
+
+function testNotebookOutputOwnershipCache() {
+  const { NotebookOutputOwnershipCache } = requireOut('notebook-output-ownership');
+  const outputId = 'proof-output-' + 'a'.repeat(32);
+  const liveId = 'proof-live-' + 'b'.repeat(32);
+  const binding = { version: 1, id: outputId };
+  const live = { version: 1, id: liveId };
+  const payload = createPortableKxResultV2({
+    columns: ['sym'], rows: [['BEFORE']], rowCount: 1,
+    rowLimit: 1, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT, marker: 'direct-ipc',
+  }, { outputId, persistenceMode: 'full' }).value;
+  const metadata = {
+    [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: binding,
+    [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: live,
+  };
+  const bytes = Buffer.from(JSON.stringify(payload));
+  const items = [{ mime: KX_NOTEBOOK_MIME, data: bytes }];
+  const cache = new NotebookOutputOwnershipCache(1, 2);
+  const originalParse = JSON.parse;
+  let parses = 0;
+  JSON.parse = function(...args) { parses++; return Reflect.apply(originalParse, this, args); };
+  try {
+    for (let index = 0; index < 100; index++) {
+      assert.deepStrictEqual(cache.inspect(metadata, items), {
+        status: 'valid', identity: { binding, live },
+      });
+    }
+    assert.strictEqual(parses, 1, 'even an output larger than the cache budget reuses validation');
+    const nested = { metadata: { ...metadata } };
+    assert.strictEqual(cache.inspect(nested, items).status, 'valid');
+    assert.strictEqual(parses, 1, 'Jupyter metadata normalization keeps the same byte proof');
+    const newLive = { version: 1, id: 'new-live-' + 'c'.repeat(32) };
+    assert.deepStrictEqual(cache.inspect({ ...metadata, [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: newLive }, items).identity.live,
+      newLive, 'a proof never caches session metadata');
+
+    const badMetadata = [
+      { ...metadata, [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: undefined },
+      { ...metadata, metadata: { [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: newLive } },
+      { ...metadata, metadata: { [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { ...binding, id: 'foreign-' + 'd'.repeat(32) } } },
+      { ...metadata, [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { ...binding, extra: true } },
+      { [NOTEBOOK_LIVE_RESULT_METADATA_KEY]: live },
+      { ...metadata, [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { ...binding, id: 'foreign-' + 'd'.repeat(32) } },
+    ];
+    for (const bad of badMetadata) {
+      assert.deepStrictEqual(cache.inspect(bad, items), inspectNotebookKxOutputIdentity(bad, items),
+        'cached output retains canonical malformed/conflicting metadata classification');
+    }
+    assert.deepStrictEqual(cache.inspect(metadata, [...items, ...items]),
+      inspectNotebookKxOutputIdentity(metadata, [...items, ...items]));
+    const oversizedItems = Array.from({ length: 2001 }, () => items[0]);
+    assert.deepStrictEqual(cache.inspect(metadata, oversizedItems),
+      inspectNotebookKxOutputIdentity(metadata, oversizedItems));
+    assert.deepStrictEqual(cache.inspect(metadata, []), inspectNotebookKxOutputIdentity(metadata, []));
+
+    // Same Buffer, same length: reject content mutation, including slice aliasing.
+    const offset = bytes.indexOf('BEFORE');
+    assert.ok(offset > 0);
+    bytes.write('AFTER!', offset);
+    const beforeMutation = parses;
+    assert.strictEqual(cache.inspect(metadata, items).status, 'valid');
+    assert.strictEqual(parses, beforeMutation + 1, 'changed borrowed bytes require complete validation');
+    const qVersion = bytes.indexOf('"version":2');
+    bytes[qVersion + '"version":'.length] = 49;
+    assert.strictEqual(cache.inspect(metadata, items).status, 'invalid', 'a same-buffer version mutation cannot reuse the proof');
+    bytes[qVersion + '"version":'.length] = 50;
+    assert.strictEqual(cache.inspect(metadata, items).status, 'valid');
+    cache.clear();
+    const beforeClear = parses;
+    assert.strictEqual(cache.inspect(metadata, items).status, 'valid');
+    assert.strictEqual(parses, beforeClear + 1, 'close/dispose clears proofs');
+    const replacementItems = [{ mime: KX_NOTEBOOK_MIME, data: Buffer.from(bytes) }];
+    const beforeReplacement = parses;
+    assert.strictEqual(cache.inspect(metadata, replacementItems).status, 'valid');
+    assert.strictEqual(parses, beforeReplacement + 1, 'replacement output requires its own proof');
+    cache.inspect(metadata, items);
+    assert.strictEqual(parses, beforeReplacement + 2, 'budget eviction drops earlier proof');
+    const countCache = new NotebookOutputOwnershipCache(1024 * 1024, 2);
+    const copies = [0, 1, 2].map(() => [{ mime: KX_NOTEBOOK_MIME, data: Buffer.from(bytes) }]);
+    const beforeEntryLimit = parses;
+    copies.forEach(copy => countCache.inspect(metadata, copy));
+    countCache.inspect(metadata, copies[1]);
+    assert.strictEqual(parses, beforeEntryLimit + 3);
+    countCache.inspect(metadata, copies[0]);
+    assert.strictEqual(parses, beforeEntryLimit + 4, 'entry limit evicts the oldest byte proof');
+    countCache.clear();
+    const objectItems = [{ mime: KX_NOTEBOOK_MIME, data: bytes, value: payload }];
+    assert.strictEqual(cache.inspect(metadata, objectItems).status, 'valid');
+    payload.outputId = 'foreign-' + 'e'.repeat(32);
+    assert.strictEqual(cache.inspect(metadata, objectItems).status, 'invalid', 'mutable value-backed output bypasses the byte cache');
+    const legacy = createPortableKxResult({ columns: ['sym'], rows: [['LEGACY']], rowCount: 1,
+      rowLimit: 1, byteLimit: MIN_NOTEBOOK_BYTE_LIMIT, marker: '%%q' });
+    assert.deepStrictEqual(cache.inspect({}, [{ mime: KX_NOTEBOOK_MIME, data: Buffer.from(JSON.stringify(legacy)) }]),
+      { status: 'legacy' });
+    assert.deepStrictEqual(cache.inspect({}, []), { status: 'none' });
+  } finally { JSON.parse = originalParse; cache.clear(); }
 }
 
 async function testNotebookRendererHostActions() {
@@ -23541,6 +25876,8 @@ async function testNotebookRendererHostActions() {
     includeRowIndex: true,
     copyExportConfirmCellThreshold: 1,
     elapsedTimeDisplay: 'auto',
+    tableDecimalPlaces: -1,
+    chartScientificNotationThreshold: 1000000,
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
     qTextSyntaxHighlighting: false,
@@ -23644,6 +25981,7 @@ async function testNotebookRendererHostActions() {
       { name: 'qNull', type: 'int' },
       { name: 'qInf', type: 'float' },
     ],
+    columnAttributes: [{ ordinal: 0, attribute: 1 }],
     rows: [],
     cellValue: (_rowIndex, columnIndex) => [
       qAtom('symbol', 'SAVED'),
@@ -23663,6 +26001,8 @@ async function testNotebookRendererHostActions() {
   });
   assert.strictEqual(savedQPayloadResult.ok, true);
   const savedQPayload = savedQPayloadResult.value;
+  assert.deepStrictEqual(savedQPayload.schema.columnAttributes,
+    [{ ordinal: 0, attribute: 1 }]);
   const largeHostRowCount = 60_000;
   const largeHostPayloadResult = createPortableKxResultV2({
     columns: [
@@ -23916,6 +26256,50 @@ async function testNotebookRendererHostActions() {
     assert.strictEqual(liveResultMessages[0].rowCount, 3);
     assert.strictEqual(liveResultMessages[1].requestId, 202);
     assert.strictEqual(liveResultMessages[1].lengths.length, 12);
+
+    const slice = requestId => runtime.emitRendererMessage(editor, {
+      type: 'requestLiveSlice', outputId: largeBindingId, liveId: largeLiveId,
+      requestId, startRow: 59950, endRow: 59999, startColumn: 0, endColumn: 1,
+      columnIndexes: [0, 1],
+    });
+    await slice(2000000);
+    const unrelatedCell = runtime.cell(notebook, notebook.cells.length, 'q', 'unrelated saved output');
+    unrelatedCell.outputs = [{
+      metadata: { [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: 'unrelated-' + 'u'.repeat(32) } },
+      items: [{ mime: KX_NOTEBOOK_MIME, data: Buffer.from(encodedLargeHostPayload) }],
+    }];
+    notebook.cells.push(unrelatedCell);
+    notebook.cellCount = notebook.cells.length;
+    const { QnbNotebookSerializer } = requireOutWithMocks('qnb-notebook', { vscode: runtime.vscode });
+    const originalParse = JSON.parse;
+    let largeParseAttempts = 0;
+    JSON.parse = function(text, ...args) {
+      if (typeof text === 'string' && text.length >= 1000000) {
+        largeParseAttempts++;
+      }
+      assert.ok(typeof text !== 'string' || text.length < 1000000,
+        'live slice authentication and saving must not reparse unchanged large MIME output');
+      return Reflect.apply(originalParse, this, [text, ...args]);
+    };
+    try {
+      const saving = new QnbNotebookSerializer().serializeNotebook({ cells: [{
+        kind: 2, value: largeHostCell.document.getText(), languageId: 'q',
+        metadata: {}, outputs: largeHostCell.outputs,
+      }] }, {});
+      for (let index = 0; index < 100; index++) {
+        await slice(2000001 + index);
+        const response = runtime.postedMessages.at(-1).message;
+        assert.strictEqual(response.error, undefined);
+        assert.strictEqual(response.cells.length, 50);
+        assert.deepStrictEqual(response.cells.at(-1), ['59999', '`TAIL']);
+      }
+      assert.ok((await saving).byteLength > 1000000);
+      assert.strictEqual(largeParseAttempts, 0, 'unrelated large outputs are not parsed by scoped live requests');
+    } finally {
+      JSON.parse = originalParse;
+      notebook.cells.pop();
+      notebook.cellCount = notebook.cells.length;
+    }
 
     firstCell.outputs[0].metadata = {
       [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: firstBindingId },
@@ -24386,6 +26770,35 @@ async function testNotebookRendererHostActions() {
       'saved notebook TSV export must quote analyst text and use blank q nulls'
     );
 
+    const symbolId = 'host-symbol-' + 's'.repeat(32);
+    const symbolResult = createPortableKxResultV2({
+      columns: [{ name: 'value', type: 'symbol' }], rows: [[qAtom('symbol', 'hola')]],
+      marker: 'direct-ipc', logicalPresentation: 'standalone-symbol',
+    }, { outputId: symbolId, persistenceMode: 'full' });
+    assert(symbolResult.ok, symbolResult.error);
+    const symbolPayload = symbolResult.value;
+    const symbolCell = runtime.cell(notebook, notebook.cells.length, 'q', '`hola');
+    symbolCell.outputs = [{ metadata: { [NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: { version: 1, id: symbolId } },
+      items: [{ mime: KX_NOTEBOOK_MIME, data: new TextEncoder().encode(JSON.stringify(symbolPayload)) }] }];
+    notebook.cells.push(symbolCell); notebook.cellCount = notebook.cells.length;
+    runtime.setSaveDialogUri(testUri('file:///workspace/symbol.txt'));
+    const symbolExportIndex = runtime.savedFiles.length;
+    await runtime.emitRendererMessage(editor, { type: 'exportPreviewText', outputId: symbolId,
+      payload: symbolPayload, requestId: 701 });
+    assert.strictEqual(new TextDecoder().decode(runtime.savedFiles[symbolExportIndex].content), '`hola');
+    const wrongSymbol = JSON.parse(JSON.stringify(symbolPayload)); wrongSymbol.data.rows[0][0].value.value = 'foreign';
+    await runtime.emitRendererMessage(editor, { type: 'exportPreviewText', outputId: symbolId,
+      payload: wrongSymbol, requestId: 702 });
+    assert.strictEqual(runtime.savedFiles.length, symbolExportIndex + 1, 'changed source cannot export');
+    const symbolPanelIndex = panelCalls.length;
+    await runtime.emitRendererMessage(editor, { type: 'openPreview', outputId: symbolId,
+      payload: symbolPayload, requestId: 703 });
+    assert.strictEqual(panelCalls.length, symbolPanelIndex + 1, 'saved symbol opens Results');
+    assert.strictEqual(panelCalls.at(-1)[1].mode, 'text');
+    assert.strictEqual(panelCalls.at(-1)[1].text, '`hola');
+    panelCalls.pop(); // Keep the following fixture's exact action counts independent.
+    notebook.cells.pop(); notebook.cellCount = notebook.cells.length;
+
     runtime.setSaveDialogUri(testUri('file:///workspace/bound-chart.png'));
     const boundChartExportIndex = runtime.savedFiles.length;
     await runtime.emitRendererMessage(editor, {
@@ -24542,13 +26955,32 @@ async function testNotebookRendererHostActions() {
       'a unique truly-unbound legacy/Python payload remains actionable'
     );
 
+    const runsBeforeSavedQOpen = runCalls.length;
     await runtime.emitRendererMessage(editor, {
       type: 'openPreview',
-      outputId: secondBindingId,
+      outputId: savedQBindingId,
       requestId: 221,
-      payload: secondPayload,
+      payload: savedQPayload,
     });
     assert.strictEqual(panelCalls.length, 1);
+    assert.strictEqual(
+      panelCalls.at(-1)[1].table.rowCount,
+      1,
+      'a complete durable-only q output must reconstruct in KX Results without a live record'
+    );
+    assert.deepStrictEqual(
+      panelCalls.at(-1)[1].table.columns,
+      savedQPayload.schema.columns.map(column => column.name)
+    );
+    assert.deepStrictEqual(savedQPayload.schema.columnAttributes,
+      [{ ordinal: 0, attribute: 1 }],
+      'saved KX Results handoff must not mutate attributed source metadata'
+    );
+    assert.strictEqual(
+      runCalls.length,
+      runsBeforeSavedQOpen,
+      'opening a complete durable-only q output must not execute q'
+    );
     assert.deepStrictEqual(runtime.postedMessages.at(-1).message, {
       type: 'actionResult',
       requestId: 221,
@@ -25149,11 +27581,11 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.29');
+  assert.strictEqual(manifest.version, '0.2.44');
   assert.strictEqual(
     manifest.scripts.package,
     'npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies ' +
-      '--out vscode-kdb-0.2.29.vsix && npm run audit:vsix-confidentiality'
+      '--out vscode-kdb-0.2.44.vsix && npm run audit:vsix-confidentiality'
   );
   assert.strictEqual(manifest.scripts['package:vsix'], manifest.scripts.package);
   assert.strictEqual(
@@ -25175,11 +27607,11 @@ function testManifestAndSources() {
   );
   assert.strictEqual(
     manifest.scripts['compile:assets'],
-    'node scripts/copy-webview-assets.js'
+    'node scripts/copy-webview-assets.js && node scripts/generate-failure-build.js'
   );
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.29');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.29');
+  assert.strictEqual(packageLock.version, '0.2.44');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.44');
   const compiledExtensionBundle = fs.readFileSync(
     path.join(ROOT, 'out', 'extension.js'),
     'utf8'
@@ -25542,10 +27974,18 @@ function testManifestAndSources() {
   assert.strictEqual(serverExplorerView.name, 'KX Server Explorer');
   assert.match(serverExplorerView.when, /config\.vscode-kdb\.features\.serverExplorer/);
   assert.match(serverExplorerView.when, /vscode-kdb\.serverExplorer\.available/);
+  const variablesView = viewGroups.find(view => view && view.id === 'vscode-kdb.variables');
+  assert.ok(variablesView, 'KX Variables view contribution is missing');
+  assert.strictEqual(variablesView.name, 'KX Variables');
+  assert.strictEqual(variablesView.when, undefined, 'KX Variables must remain discoverable without opt-in');
+  assert.strictEqual(variablesView.visibility, 'visible', 'KX Variables must be default-visible');
   const queryHistoryView = viewGroups.find(view => view && view.id === 'vscode-kdb.queryHistory');
   assert.ok(queryHistoryView, 'KX Query History view contribution is missing');
   assert.strictEqual(queryHistoryView.name, 'KX Query History');
-  assert.match(queryHistoryView.when, /config\.vscode-kdb\.features\.queryHistory/);
+  assert.strictEqual(queryHistoryView.when, undefined, 'Query History view must remain discoverable while capture is off');
+  assert.strictEqual(queryHistoryView.visibility, 'visible', 'Query History must be default-visible');
+  const connectionsView = viewGroups.find(view => view && view.id === 'vscode-kdb.connections');
+  assert.strictEqual(connectionsView.visibility, 'visible', 'KX Connections must remain default-visible');
 
   const commandById = Object.fromEntries(commands.map(command => [command.command, command]));
   const resultSettings = contributions.configuration.properties;
@@ -25655,6 +28095,8 @@ function testManifestAndSources() {
   historyCommandIds.forEach(id => {
     assert.match(commandById[id].enablement, /config\.vscode-kdb\.features\.queryHistory/);
   });
+  assert.ok(commandById['vscode-kdb.refreshVariables']);
+  assert.ok(commandById['vscode-kdb.openVariableInResults']);
   const menus = contributions.menus || {};
   const allMenuItems = Object.values(menus).flat();
   const notebookCellTitleItems = menus['notebook/cell/title'] || [];
@@ -25784,6 +28226,16 @@ function testManifestAndSources() {
     'Preview must be contributed only for table and variable tree contexts'
   );
   assert.ok(!previewContextItems[0].when.includes('function'));
+  const variableOpenItems = (menus['view/item/context'] || [])
+    .filter(item => item.command === 'vscode-kdb.openVariableInResults');
+  assert.strictEqual(variableOpenItems.length, 1);
+  assert.strictEqual(variableOpenItems[0].group, 'inline@1');
+  assert.match(variableOpenItems[0].when, /view == vscode-kdb\.variables/);
+  assert.ok(variableOpenItems[0].when.includes('vscode-kdb\\.variables\\.(variable|table)'));
+  assert.ok(!variableOpenItems[0].when.includes('function'));
+  assert.ok((menus['view/title'] || []).some(item =>
+    item.command === 'vscode-kdb.refreshVariables' && item.when === 'view == vscode-kdb.variables'
+  ));
   const paletteItems = (menus.commandPalette || []);
   assert.match(
     paletteItems.find(item => item.command === 'vscode-kdb.refreshServerExplorer').when,
@@ -25791,6 +28243,7 @@ function testManifestAndSources() {
   );
   for (const itemOnlyId of [
     'vscode-kdb.previewServerObject',
+    'vscode-kdb.openVariableInResults',
     'vscode-kdb.rerunQueryHistoryEntry',
     'vscode-kdb.copyQueryHistoryEntry',
     'vscode-kdb.insertQueryHistoryEntry',
@@ -25815,7 +28268,7 @@ function testManifestAndSources() {
   const autoFitModeSetting =
     configurationProperties['vscode-kdb.results.viewer.autoFitMode'];
   assert.strictEqual(autoFitModeSetting.type, 'string');
-  assert.strictEqual(autoFitModeSetting.default, 'wholeResult');
+  assert.strictEqual(autoFitModeSetting.default, 'visibleRows');
   assert.deepStrictEqual(autoFitModeSetting.enum, ['wholeResult', 'visibleRows']);
   assert.match(autoFitModeSetting.description, /Rows used/i);
   const columnWidthsSetting =
@@ -25893,13 +28346,14 @@ function testManifestAndSources() {
   const notebookRowLimit = configurationProperties['vscode-kdb.notebook.maxOutputRows'];
   assert.strictEqual(notebookRowLimit.type, 'integer');
   assert.strictEqual(notebookRowLimit.default, DEFAULT_NOTEBOOK_ROW_LIMIT);
-  assert.strictEqual(notebookRowLimit.minimum, MIN_NOTEBOOK_ROW_LIMIT);
+  assert.strictEqual(notebookRowLimit.minimum, UNLIMITED_NOTEBOOK_ROW_LIMIT);
   assert.strictEqual(notebookRowLimit.maximum, MAX_NOTEBOOK_ROW_LIMIT);
   assert.strictEqual(notebookRowLimit.default, 20);
   assert.match(notebookRowLimit.description, /%%q/);
   assert.match(notebookRowLimit.description, /Python %%q helper/i);
-  assert.match(notebookRowLimit.description, /never limits first-party Direct IPC rich output/i);
-  assert.match(notebookRowLimit.description, /every exactly representable row/i);
+  assert.match(notebookRowLimit.description, /Set to 0/i);
+  assert.match(notebookRowLimit.description, /without retaining a duplicate session-bound live-result cache/i);
+  assert.match(notebookRowLimit.description, /always persists every exactly representable row/i);
   const notebookByteLimit = configurationProperties['vscode-kdb.notebook.maxOutputBytes'];
   assert.strictEqual(notebookByteLimit.type, 'integer');
   assert.strictEqual(notebookByteLimit.default, DEFAULT_NOTEBOOK_BYTE_LIMIT);
@@ -25926,8 +28380,9 @@ function testManifestAndSources() {
   const historyFeatureSetting = configurationProperties['vscode-kdb.features.queryHistory'];
   assert.strictEqual(historyFeatureSetting.type, 'boolean');
   assert.strictEqual(historyFeatureSetting.scope, 'window');
-  assert.strictEqual(historyFeatureSetting.default, false);
-  assert.match(historyFeatureSetting.description, /Disabled by default/);
+  assert.strictEqual(historyFeatureSetting.default, true);
+  assert.match(historyFeatureSetting.description, /Enabled by default/);
+  assert.match(historyFeatureSetting.description, /disable/i);
   assert.match(historyFeatureSetting.description, /local VS Code workspace extension storage/i);
   assert.match(historyFeatureSetting.description, /not sent as telemetry/i);
   assert.match(historyFeatureSetting.description, /not.*Settings Sync/i);
@@ -26190,6 +28645,7 @@ function testManifestAndSources() {
   );
   const featureControlsSource = readSource('feature-controls.ts');
   const serverExplorerSource = readSource('server-explorer.ts');
+  const variablesSource = readSource('variables.ts');
   const historySource = readSource('query-history.ts');
   const historyModelSource = readSource('query-history-model.ts');
   const notebookIntegrationSource = readSource('notebook-integration.ts');
@@ -26214,7 +28670,7 @@ function testManifestAndSources() {
     'live whole-result measurement must yield cooperatively and reject stale work'
   );
   assert.match(extensionSource, /new KxQNotebookRunner\(/);
-  assert.match(extensionSource, /directQNotebookBridge\(store, manager, tree\)/);
+  assert.match(extensionSource, /directQNotebookBridge\(store, manager, tree, undefined, notebookHistory\)/);
   assert.match(
     extensionSource,
     /context\.extensionMode !== vscode\.ExtensionMode\.Test/
@@ -26334,8 +28790,11 @@ function testManifestAndSources() {
   assert.ok(!/sendTelemetry|createTelemetryLogger|TelemetryLogger|\bfetch\s*\(|XMLHttpRequest/.test(
     `${historySource}\n${historyModelSource}`
   ), 'query history must not transmit query contents or telemetry');
-  assert.ok(!/createWebviewPanel|WebviewPanel|\.webview\b/.test(`${serverExplorerSource}\n${historySource}`));
+  assert.ok(!/createWebviewPanel|WebviewPanel|\.webview\b/.test(
+    `${serverExplorerSource}\n${variablesSource}\n${historySource}`
+  ));
   assert.ok(!/setInterval\s*\(/.test(serverExplorerSource), 'Server Explorer must remain manual-refresh by default');
+  assert.ok(!/setInterval\s*\(/.test(variablesSource), 'Variables must remain manual-refresh');
   assert.match(serverExplorerSource, /executeInConfiguredNamespace/);
   assert.match(serverExplorerSource, /showWarningMessage\([\s\S]*?\{ modal: true \}[\s\S]*?'Preview'/);
   const serverPreviewSource = sourceSection(
@@ -26366,9 +28825,17 @@ function testManifestAndSources() {
     /await runPreview\([\s\S]*?buildServerPreviewQuery\(confirmedItem\.objectName, confirmedItem\.kind, limit\)[\s\S]*?stillCurrent\.id/
   );
   assert.match(featureControlsSource, /get<boolean>\('serverExplorer', false\)/);
-  assert.match(featureControlsSource, /get<boolean>\('queryHistory', false\)/);
+  assert.match(featureControlsSource, /get<boolean>\('queryHistory', true\)/);
   assert.match(featureControlsSource, /this\.serverExplorer\.dispose\(\)/);
   assert.match(featureControlsSource, /this\.queryHistory\.dispose\(\)/);
+  assert.match(featureControlsSource, /new VariablesFeature\(/);
+  assert.match(featureControlsSource, /this\.queryHistory\.setEnabled\(/);
+  assert.match(variablesSource, /showWarningMessage\([\s\S]*?\{ modal: true \}[\s\S]*?'Open in KX Results'/);
+  assert.match(
+    variablesSource,
+    /buildRuntimeBindingPreviewQuery\([\s\S]*?item\.binding\.context[\s\S]*?item\.binding\.name[\s\S]*?item\.binding\.kind/
+  );
+  assert.match(variablesSource, /this\.provider\.revalidateVariable\(item\)/);
   assert.match(extensionSource, /historyKind: hasSelection \? 'selection' : 'line'/);
   assert.match(extensionSource, /historyKind: 'script'/);
   assert.match(extensionSource, /manager\.executeInConfiguredNamespace\(connection, text, onIssued\)/);
@@ -26971,12 +29438,12 @@ function createNotebookIntegrationRuntime() {
         return {
           kind: 'json',
           mime,
-          data: new TextEncoder().encode(JSON.stringify(value)),
+          data: new TextEncoder().encode(JSON.stringify(value, undefined, '\t')),
         };
       },
       text(value, mime = 'text/plain') {
         return {
-          kind: 'text',
+          kind: mime === KX_NOTEBOOK_MIME ? 'json' : 'text',
           mime,
           data: new TextEncoder().encode(value),
         };
@@ -27608,10 +30075,12 @@ function createNotebookControllerRuntime() {
     },
     NotebookCellOutputItem: {
       json(value, mime) {
-        return { kind: 'json', mime, value };
+        return { kind: 'json', mime, value, data: new TextEncoder().encode(JSON.stringify(value, undefined, '\t')) };
       },
       text(value, mime = 'text/plain') {
-        return { kind: 'text', mime, value };
+        return mime === KX_NOTEBOOK_MIME
+          ? { kind: 'json', mime, value: JSON.parse(value), data: new TextEncoder().encode(value) }
+          : { kind: 'text', mime, value };
       },
       error(error) {
         return {
@@ -28121,6 +30590,11 @@ function createVscodeTreeHarness() {
       MarkdownString,
       TreeItemCollapsibleState: { None: 0, Collapsed: 1, Expanded: 2 },
       ProgressLocation: { Notification: 15 },
+      workspace: {
+        getConfiguration() {
+          return { get: (_key, fallback) => fallback };
+        },
+      },
       commands: {
         registerCommand(id, handler) {
           registeredCommands.set(id, handler);

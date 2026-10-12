@@ -91,6 +91,16 @@ export class ChartFrameCoalescer<T> {
   }
 }
 
+/** A coincident real gap still needs a clip wider than the series stroke. */
+export function chartSourceGapPixels(from: number, to: number, strokeWidth: number, pixelRatio: number): ChartPixelGap {
+  const start = Math.min(from, to), end = Math.max(from, to);
+  if (end > start) return [start, end];
+  const ratio = Number.isFinite(pixelRatio) && pixelRatio > 0 ? pixelRatio : 1;
+  const width = Number.isFinite(strokeWidth) && strokeWidth > 0 ? strokeWidth : 1.5;
+  const padding = width * ratio / 2 + 1;
+  return [start - padding, end + padding];
+}
+
 /** Sort and coalesce native/custom uPlot clip intervals. */
 export function mergeChartPixelGaps(gaps: readonly ChartPixelGap[]): ChartPixelGap[] {
   if (gaps.length < 2) {

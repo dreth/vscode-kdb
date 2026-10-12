@@ -1,4 +1,5 @@
 import { readFile, readdir, stat } from 'fs/promises';
+import { FAILURE_LSP_EVENT, FAILURE_LSP_STATE, ReportingState, safeFailure } from '../../src/failure-record';
 import { join, relative, resolve, sep } from 'path';
 import { pathToFileURL, fileURLToPath } from 'url';
 import {
@@ -63,6 +64,7 @@ import { QLanguageSettings, normalizeQLanguageSettings } from './settings';
 import { workspaceDirectoryExcluded, workspacePathIncluded } from './workspace';
 
 class QLanguageServer {
+  private failureReporting: ReportingState = { enabled: false, generation: 0 };
   private readonly documents = new TextDocuments(TextDocument);
   private readonly notebooks = new NotebookDocuments(this.documents);
   private readonly sources = new Map<string, QSource>();
@@ -79,6 +81,12 @@ class QLanguageServer {
   private readonly runtimeFailureKinds = new Set<string>();
 
   public constructor(private readonly connection: Connection) {
+    this.connection.onNotification(FAILURE_LSP_STATE, (state: unknown) => {
+      if (state && typeof state === 'object' && 'enabled' in state && 'generation' in state &&
+        typeof state.enabled === 'boolean' && typeof state.generation === 'number' && Number.isSafeInteger(state.generation)) {
+        this.failureReporting = { enabled: state.enabled, generation: state.generation };
+      }
+    });
     this.connection.onInitialize(params => this.initialize(params));
     this.connection.onInitialized(() => this.initialized());
     this.connection.onShutdown(() => this.shutdown());
@@ -92,7 +100,7 @@ class QLanguageServer {
     this.documents.onDidChangeContent(event => this.documentChanged(event.document));
     this.documents.onDidClose(event => this.documentClosed(event.document.uri));
 
-    this.connection.onCompletion(async (params, token) => {
+    this.connection.onCompletion(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       const workspace = await this.workspaceSources(token.isCancellationRequested);
@@ -108,8 +116,8 @@ class QLanguageServer {
         ? await this.runtimeTable(source, tableName, root, token)
         : undefined;
       return mergeCompletions(offline, runtimeCompletions(source, params.position, root, table));
-    });
-    this.connection.onHover(async (params, token) => {
+    }));
+    this.connection.onHover(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return null;
       return qHover(
@@ -118,27 +126,27 @@ class QLanguageServer {
         await this.relatedSources(source, token.isCancellationRequested)
       ) ??
         runtimeHover(source, params.position, await this.runtimeRoot(source, token));
-    });
-    this.connection.onSignatureHelp(async (params, token) => {
+    }));
+    this.connection.onSignatureHelp(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return null;
       return qSignatureHelp(source, params.position);
-    });
-    this.connection.onDocumentSymbol(async (params, token) => {
+    }));
+    this.connection.onDocumentSymbol(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qDocumentSymbols(source)];
-    });
-    this.connection.onWorkspaceSymbol(async (params, token) => {
+    }));
+    this.connection.onWorkspaceSymbol(this.guardProvider(async (params, token) => {
       const sources = await this.workspaceSources(token.isCancellationRequested);
       return token.isCancellationRequested ? [] : [...qWorkspaceSymbols(sources, params.query)];
-    });
-    this.connection.onDefinition(async (params, token) => {
+    }));
+    this.connection.onDefinition(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qDefinition(source, params.position, await this.relatedSources(source, token.isCancellationRequested))];
-    });
-    this.connection.onReferences(async (params, token) => {
+    }));
+    this.connection.onReferences(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qReferences(
@@ -147,13 +155,13 @@ class QLanguageServer {
         await this.relatedSources(source, token.isCancellationRequested),
         params.context.includeDeclaration
       )];
-    });
-    this.connection.onDocumentHighlight(async (params, token) => {
+    }));
+    this.connection.onDocumentHighlight(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qHighlights(source, params.position)];
-    });
-    this.connection.onPrepareRename(async (params, token) => {
+    }));
+    this.connection.onPrepareRename(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return null;
       return qPrepareRename(
@@ -161,55 +169,55 @@ class QLanguageServer {
         params.position,
         await this.relatedSources(source, token.isCancellationRequested)
       );
-    });
-    this.connection.onRenameRequest(async (params, token) => {
+    }));
+    this.connection.onRenameRequest(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return null;
       return qRename(source, params.position, params.newName,
         await this.relatedSources(source, token.isCancellationRequested));
-    });
-    this.connection.languages.semanticTokens.on(async (params, token) => {
+    }));
+    this.connection.languages.semanticTokens.on(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return { data: [] };
       return qSemanticTokens(source);
-    });
-    this.connection.onFoldingRanges(async (params, token) => {
+    }));
+    this.connection.onFoldingRanges(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qFoldingRanges(source)];
-    });
-    this.connection.onSelectionRanges(async (params, token) => {
+    }));
+    this.connection.onSelectionRanges(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qSelectionRanges(source, params.positions)];
-    });
-    this.connection.onDocumentFormatting(async (params, token) => {
+    }));
+    this.connection.onDocumentFormatting(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       const result = formatQDocument(source, params.options);
       if (result.skipped) this.logSkip('document formatting', result.skipped);
       return [...result.edits];
-    });
-    this.connection.onDocumentRangeFormatting(async (params, token) => {
+    }));
+    this.connection.onDocumentRangeFormatting(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       const result = formatQRange(source, params.options, params.range);
       if (result.skipped) this.logSkip('range formatting', result.skipped);
       return [...result.edits];
-    });
-    this.connection.languages.callHierarchy.onPrepare(async (params, token) => {
+    }));
+    this.connection.languages.callHierarchy.onPrepare(this.guardProvider(async (params, token) => {
       const source = await this.currentSource(params.textDocument.uri);
       if (!source || token.isCancellationRequested || await this.oversized(source)) return [];
       return [...qPrepareCallHierarchy(source, params.position)];
-    });
-    this.connection.languages.callHierarchy.onIncomingCalls(async (params, token) =>
+    }));
+    this.connection.languages.callHierarchy.onIncomingCalls(this.guardProvider(async (params, token) =>
       token.isCancellationRequested
         ? []
-        : [...qIncomingCalls(params.item, await this.workspaceSources(token.isCancellationRequested))]);
-    this.connection.languages.callHierarchy.onOutgoingCalls(async (params, token) =>
+        : [...qIncomingCalls(params.item, await this.workspaceSources(token.isCancellationRequested))]));
+    this.connection.languages.callHierarchy.onOutgoingCalls(this.guardProvider(async (params, token) =>
       token.isCancellationRequested
         ? []
-        : [...qOutgoingCalls(params.item, await this.workspaceSources(token.isCancellationRequested))]);
+        : [...qOutgoingCalls(params.item, await this.workspaceSources(token.isCancellationRequested))]));
     this.connection.onRequest('vscode-kdb/qLanguageReady', () => true);
     this.connection.onRequest(Q_METADATA_REFRESH_METHOD, () => {
       this.clearRuntimeMetadata();
@@ -261,7 +269,7 @@ class QLanguageServer {
           ? { workspaceFolders: { supported: true, changeNotifications: true } }
           : undefined,
       },
-      serverInfo: { name: 'KX q Language Server', version: '0.2.29' },
+      serverInfo: { name: 'KX q Language Server', version: '0.2.43' },
     };
   }
 
@@ -547,7 +555,37 @@ class QLanguageServer {
     this.connection.console.info(`[q-language] ${operation} skipped: ${safeLog(reason)}`);
   }
 
+  private guardProvider<T extends unknown[], R>(callback: (...args: T) => Promise<R>): (...args: T) => Promise<R> {
+    return async (...args: T): Promise<R> => {
+      const reporting = this.failureReporting;
+      const params = args[0] as { textDocument?: { uri?: string } } | undefined;
+      const uri = reporting.enabled ? params?.textDocument?.uri : undefined;
+      const version = uri ? this.documents.get(uri)?.version : undefined;
+      try { return await callback(...args); }
+      catch (error) {
+        const token = args[1] as CancellationToken | undefined;
+        if (reporting.enabled && this.failureReporting.generation === reporting.generation &&
+          (!uri || this.documents.get(uri)?.version === version) && !token?.isCancellationRequested) {
+          this.logFailure('provider implementation', error);
+        }
+        throw error;
+      }
+    };
+  }
+
   private logFailure(operation: string, error: unknown): void {
+    if (this.failureReporting.enabled) {
+      try {
+        if ((error as NodeJS.ErrnoException | undefined)?.code !== 'ENOENT') {
+          void this.connection.sendNotification(FAILURE_LSP_EVENT, { type: 'kxFailure',
+            generation: this.failureReporting.generation, component: 'language',
+            operation: operation.includes('diagnostic') ? 'analysis' : 'protocol',
+            details: { surface: 'language', transport: 'lsp', status: 'failed' },
+            failure: safeFailure(error, [resolve(__dirname, '..').replace(/\\/g, '/') + '/']),
+          }).catch(() => undefined);
+        }
+      } catch { /* Optional forwarding cannot change language-service outcomes. */ }
+    }
     const detail = error instanceof Error ? error.name : typeof error;
     this.connection.console.error(`[q-language] ${operation} failed (${safeLog(detail)}).`);
   }

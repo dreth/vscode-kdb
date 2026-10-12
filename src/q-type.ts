@@ -14,6 +14,7 @@ const Q_TYPE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
   char: 'char',
   string: 'char',
   symbol: 'symbol',
+  guid: 'guid',
   timestamp: 'timestamp',
   month: 'month',
   date: 'date',

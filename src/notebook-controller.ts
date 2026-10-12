@@ -1,5 +1,8 @@
 import * as crypto from 'crypto';
+import { deflateSync } from 'node:zlib';
 import * as vscode from 'vscode';
+import { reportKxFailure, reportKxFailureLazy, reportKxBreadcrumb, newFailureOperationId } from './failure-record';
+import { isQVector } from './q-value';
 import { connectionEndpoint, KxConnection } from './connection';
 import {
   KX_NOTEBOOK_MIME,
@@ -8,6 +11,7 @@ import {
   NotebookResultInput,
   PortableKxResult,
   createPortableKxResultV2,
+  createPortableKxPackedTableV4,
   createPortableKxTextResultV2,
   notebookResultPlainText,
   validatePortableKxResult,
@@ -15,8 +19,10 @@ import {
 import {
   NotebookSettings,
   hasNotebookQMarker,
+  notebookHelperRowLimit,
   safeNotebookByteLimit,
   safeNotebookRowLimit,
+  shouldRetainLiveNotebookResult,
 } from './notebook-settings';
 import {
   LiveNotebookResultRegistration,
@@ -47,6 +53,8 @@ export const ENABLE_DIRECT_NOTEBOOK_CONTROLLER_SETTING =
 
 const CANCELED_AFTER_ISSUE_SUFFIX =
   'was canceled locally. Direct IPC server work already sent may continue.';
+
+class NotebookResultEncodingError extends Error {}
 
 export type DirectQCellRunResult =
   | 'executed'
@@ -82,16 +90,16 @@ type CellOutputReplacement =
   | vscode.NotebookCellOutput
   | readonly vscode.NotebookCellOutput[];
 
-interface PreparedLiveResult {
+interface PreparedKxResult {
   items: vscode.NotebookCellOutputItem[];
   outputId: string;
-  registration: Omit<LiveNotebookResultRegistration, 'cellUri'>;
+  liveRegistration?: Omit<LiveNotebookResultRegistration, 'cellUri'>;
 }
 
 interface PreparedCellResult {
   success: boolean | undefined;
   output?: CellOutputReplacement;
-  live?: PreparedLiveResult;
+  result?: PreparedKxResult;
   canceled?: 'before-issue' | 'after-issue';
   stale?: boolean;
   issued?: boolean;
@@ -115,7 +123,7 @@ interface MixedOutputWriteResult {
 }
 
 interface KxOutputIdentity {
-  liveId: string;
+  liveId?: string;
   outputId: string;
   payload: PortableKxResult;
 }
@@ -534,6 +542,11 @@ export class KxQNotebookRunner implements vscode.Disposable {
               this.liveResults.remove(liveResultId, snapshot.notebook.uri.toString());
               return 'write-failed';
             }
+          } else {
+            this.liveResults.removeCell(
+              snapshot.notebook.uri.toString(),
+              snapshot.cellUri
+            );
           }
           return cancellationPrepared ? 'canceled' : 'executed';
         } catch {
@@ -558,6 +571,9 @@ export class KxQNotebookRunner implements vscode.Disposable {
     snapshot: MixedCellSnapshot,
     failure: DirectQCellRunFailureDetail
   ): void {
+    if (!snapshot.notebook.isClosed) {
+      reportKxFailureLazy('notebook', 'commit', () => new Error('Notebook output commit failed'), { issued: failure.issued, surface: 'live-notebook', phase: 'commit' });
+    }
     this.lastRunFailures.set(mixedCellExecutionKey(snapshot), failure);
   }
 
@@ -906,6 +922,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
       await execution.replaceOutput(materialized.output);
       success = prepared.success;
     } catch (error) {
+      if (!execution.token.isCancellationRequested) reportKxFailure('notebook', 'commit', error, { surface: 'live-notebook', phase: 'commit', canceled: false });
       if (liveResultId) {
         this.liveResults.removeCell(
           notebook.uri.toString(),
@@ -936,6 +953,10 @@ export class KxQNotebookRunner implements vscode.Disposable {
     isStillCurrent?: () => boolean
   ): Promise<PreparedCellResult> {
     let issued = false;
+    const operationId = newFailureOperationId();
+    const started = Date.now();
+    const reportingDetails = { operationId, surface: 'live-notebook', transport: 'ipc',
+      executionMode: notebook.notebookType === KX_QNB_NOTEBOOK_TYPE ? 'q-only' : 'direct' };
     const canceledOutput = (): PreparedCellResult => ({
       success: undefined,
       issued,
@@ -985,6 +1006,7 @@ export class KxQNotebookRunner implements vscode.Disposable {
       if (isStillCurrent && !isStillCurrent()) {
         return { success: undefined, output: [], stale: true };
       }
+      reportKxBreadcrumb('notebook', 'query', { ...reportingDetails, status: 'start', issued });
       const startedAt = Date.now();
       const value = await this.bridge.executeScript(
         connection,
@@ -1002,27 +1024,34 @@ export class KxQNotebookRunner implements vscode.Disposable {
       const elapsedMs = Date.now() - startedAt;
       const settings = directNotebookSettings();
       const outputId = this.uniqueOutputId();
+      reportKxBreadcrumb('notebook', 'encode', { ...reportingDetails, status: 'start', issued, durationMs: elapsedMs });
+      const items = this.directQResultOutputItems(
+        value,
+        settings,
+        directQResultDisplayOptions(),
+        connection,
+        elapsedMs,
+        outputId
+      );
+      reportKxBreadcrumb('notebook', 'encode', { ...reportingDetails, status: 'success', issued, outputCount: items.length, durationMs: Date.now() - started });
       return {
         success: true,
         issued,
-        live: {
-          items: this.directQResultOutputItems(
-            value,
-            settings,
-            directQResultDisplayOptions(),
-            connection,
-            elapsedMs,
-            outputId
-          ),
+        result: {
+          items,
           outputId,
-          registration: {
-            notebookUri: notebook.uri.toString(),
-            outputId,
-            query: source,
-            connectionName: `${connection.name} • Direct IPC • ${connection.database}`,
-            elapsedMs,
-            value,
-          },
+          ...(shouldRetainLiveNotebookResult(settings)
+            ? {
+              liveRegistration: {
+                notebookUri: notebook.uri.toString(),
+                outputId,
+                query: source,
+                connectionName: `${connection.name} • Direct IPC • ${connection.database}`,
+                elapsedMs,
+                value,
+              },
+            }
+            : {}),
         },
       };
     } catch (error) {
@@ -1031,6 +1060,17 @@ export class KxQNotebookRunner implements vscode.Disposable {
       }
       if (!issued && isStillCurrent && !isStillCurrent()) {
         return { success: undefined, output: [], stale: true };
+      }
+      reportKxFailure('notebook', error instanceof NotebookResultEncodingError ? 'encode' : 'query', error, { ...reportingDetails, issued, canceled: false, stale: false, durationMs: Date.now() - started });
+      if (error instanceof NotebookResultEncodingError) {
+        return {
+          success: false,
+          issued,
+          output: errorOutput(
+            `${runLabel} returned a result, but complete notebook output could not be encoded: ` +
+            boundedNotebookText(error.message, 4096)
+          ),
+        };
       }
       const detail = await this.safeErrorMessage(error, connection);
       const context = connection
@@ -1057,23 +1097,32 @@ export class KxQNotebookRunner implements vscode.Disposable {
       outputId?: string;
       liveRegistration?: LiveNotebookResultRegistration;
     } {
-    if (!prepared.live) {
+    if (!prepared.result) {
       return { output: prepared.output ?? [] };
     }
+    if (!prepared.result.liveRegistration) {
+      return {
+        output: new vscode.NotebookCellOutput(
+          prepared.result.items,
+          outputBindingMetadata(prepared.result.outputId)
+        ),
+        outputId: prepared.result.outputId,
+      };
+    }
     const registration: LiveNotebookResultRegistration = {
-      ...prepared.live.registration,
+      ...prepared.result.liveRegistration,
       cellUri,
     };
     const liveResultId = stage
-      ? this.liveResults.stage(registration, prepared.live.outputId)
-      : this.liveResults.register(registration, prepared.live.outputId);
+      ? this.liveResults.stage(registration, prepared.result.outputId)
+      : this.liveResults.register(registration, prepared.result.outputId);
     return {
       output: new vscode.NotebookCellOutput(
-        prepared.live.items,
-        liveResultOutputMetadata(liveResultId, prepared.live.outputId)
+        prepared.result.items,
+        liveResultOutputMetadata(liveResultId, prepared.result.outputId)
       ),
       liveResultId,
-      outputId: prepared.live.outputId,
+      outputId: prepared.result.outputId,
       liveRegistration: registration,
     };
   }
@@ -1185,18 +1234,25 @@ export function directQResultOutputItems(
   elapsedMs: number,
   outputId = crypto.randomBytes(24).toString('hex')
 ): vscode.NotebookCellOutputItem[] {
-  const created = directQPortableResult(
-    value,
-    settings,
-    displayOptions,
-    connection,
-    elapsedMs,
-    outputId
-  );
-  if (!created.ok) {
-    throw new Error(created.error);
+  try {
+    const created = directQPortableResult(
+      value,
+      settings,
+      displayOptions,
+      connection,
+      elapsedMs,
+      outputId
+    );
+    if (!created.ok) {
+      throw new NotebookResultEncodingError(created.error);
+    }
+    return notebookOutputItems(created.value, settings.byteLimit);
+  } catch (error) {
+    if (error instanceof NotebookResultEncodingError) throw error;
+    throw new NotebookResultEncodingError(error instanceof RangeError
+      ? 'Complete notebook output exceeds a JavaScript string or allocation limit. No result was truncated.'
+      : 'Complete notebook output could not be encoded. No result was truncated.');
   }
-  return notebookOutputItems(created.value, settings.byteLimit);
 }
 
 export function directQPortableResult(
@@ -1227,7 +1283,7 @@ export function directQPortableResult(
   if (panel.mode === 'text') {
     const input: NotebookTextResultInput = {
       text: panel.text,
-      rowLimit: settings.rowLimit,
+      rowLimit: notebookHelperRowLimit(settings),
       byteLimit: settings.byteLimit,
       label: `${connection.name} • Direct IPC • ${connection.database}`,
       elapsedMs,
@@ -1243,19 +1299,25 @@ export function directQPortableResult(
     ...(panel.result.keyColumnOrdinals === undefined
       ? {}
       : { keyColumnOrdinals: panel.result.keyColumnOrdinals }),
+    ...(panel.columnAttributes === undefined
+      ? {}
+      : { columnAttributes: panel.columnAttributes }),
     ...(panel.logicalPresentation === undefined
       ? {}
       : { logicalPresentation: panel.logicalPresentation }),
     rows: [],
     cellValue: (rowIndex, columnIndex) => panel.result.cellValue(rowIndex, columnIndex),
     rowCount: panel.result.rowCount,
-    rowLimit: settings.rowLimit,
+    rowLimit: notebookHelperRowLimit(settings),
     byteLimit: settings.byteLimit,
     label: `${connection.name} • Direct IPC • ${connection.database}`,
     elapsedMs,
     marker: 'direct-ipc',
   };
-  return createPortableKxResultV2(input, { outputId, persistenceMode: 'full' });
+  return panel.qColumns?.length === panel.result.columns.length &&
+    panel.qColumns.every(isQVector)
+    ? createPortableKxPackedTableV4(input, panel.qColumns, outputId, bytes => deflateSync(bytes, { level: 6 }))
+    : createPortableKxResultV2(input, { outputId, persistenceMode: 'full' });
 }
 
 export function notebookOutputItems(
@@ -1269,7 +1331,8 @@ export function notebookOutputItems(
   const payload = validation.value;
   const plainText = boundedNotebookText(notebookResultPlainText(payload), byteLimit);
   return [
-    vscode.NotebookCellOutputItem.json(payload, KX_NOTEBOOK_MIME),
+    // VS Code's json factory indents every typed node. Keep transport bytes compact.
+    vscode.NotebookCellOutputItem.text(JSON.stringify(payload), KX_NOTEBOOK_MIME),
     vscode.NotebookCellOutputItem.text(plainText, 'text/plain'),
   ];
 }
@@ -1289,6 +1352,16 @@ export function liveResultOutputMetadata(
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(liveId)) {
     throw new Error('Live KX notebook result identifier is invalid.');
   }
+  return {
+    ...outputBindingMetadata(outputId),
+    [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
+      version: 1,
+      id: liveId,
+    },
+  };
+}
+
+export function outputBindingMetadata(outputId: string): { [key: string]: unknown } {
   if (!/^[A-Za-z0-9_-]{32,128}$/.test(outputId)) {
     throw new Error('KX notebook output identifier is invalid.');
   }
@@ -1299,10 +1372,6 @@ export function liveResultOutputMetadata(
     [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
     metadata: {
       [KX_NOTEBOOK_OUTPUT_BINDING_METADATA_KEY]: outputReference,
-    },
-    [KX_NOTEBOOK_LIVE_METADATA_KEY]: {
-      version: 1,
-      id: liveId,
     },
   };
 }
@@ -1510,11 +1579,13 @@ function notebookOutputKxIdentity(
   output: vscode.NotebookCellOutput
 ): ParsedKxOutputIdentity {
   const inspected = inspectNotebookKxOutputIdentity(output.metadata, output.items);
-  if (inspected.status === 'valid' && inspected.identity.live) {
+  if (inspected.status === 'valid') {
     return {
       status: 'valid',
       identity: {
-        liveId: inspected.identity.live.id,
+        ...(inspected.identity.live
+          ? { liveId: inspected.identity.live.id }
+          : {}),
         outputId: inspected.identity.binding.id,
         payload: inspected.identity.payload,
       },

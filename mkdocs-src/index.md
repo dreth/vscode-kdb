@@ -23,7 +23,7 @@ Implemented foundations include:
 - leading **Make q Cell (KX)** / **Run q Cell (KX)** actions, q-cell status, a notebook-level active-profile chooser, and selected-command-mode or text-focused q-cell shortcuts for mixed Python notebooks, plus an optional default-off public pure-q `NotebookController`, with shared complete-cell execution, profile/session/namespace continuity, immediately bound full live results, automatic complete portable-v2 persistence for exactly representable new Direct IPC output, bounded historical/Python-helper previews, and no private Jupyter API;
 - actual q `TextDocument.languageId` editing aids, safe restore-to-notebook-default, honest bounded compatibility with the released `kx-notebook==0.1.0` Python `%%q` route, an explicit confirmed rerun-as-new-Direct-IPC action, and a real VS Code NotebookRenderer for `application/vnd.kx.result+json` v1/v2; direct output stores KX MIME plus `text/plain`, while companion output adds static HTML/text fallbacks;
 - a disabled-by-default, manual-refresh Server Explorer for current-namespace tables, safe variable/function categories, on-demand `meta`, confirmed bounded table/variable previews, and metadata-only functions/projections;
-- disabled-by-default, workspace-local Query History for actually issued editor runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;
+- default-on, explicitly disableable workspace-local Query History for actually issued editor and first-party direct-notebook runs, with rerun/copy/insert/delete/confirmed-clear actions and no result persistence or telemetry;
 - grid and q-text results, correct q no-value/empty classification, selective concise q-aware grid text, q-native qText, a shared analyst-friendly table copy/export boundary, stable logical-row striping, disabled-by-default safe qText highlighting/conservative display formatting, virtual scrolling, selection, search, sorting, hidden columns, and large-result safeguards;
 - KX Results-aligned notebook tables with shared toolbar/output formats/settings, stable two-axis scrolling, Search/navigation, visible-column controls, range copy/export, explicit live-versus-saved state, and exact live panel handoff;
 - panel and notebook line/scatter/step/bar/box/candlestick charts with shared q numeric/temporal column classification, temporal X choices, numeric Y/OHLC requirements, a keyboard-accessible full-X overview navigator, exact 7,000-point ordinary-series reduction, automatic settled-range live refinement, original-domain Reset zoom, PNG export, and legend-hidden state preserved across refreshes;
@@ -36,7 +36,7 @@ Built-in Python Run is never rerouted to KX. SSH/TLS setup, gateways, remote adm
 
 ## Requirements
 
-- VS Code `1.101.0` or newer for extension 0.2.29. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
+- VS Code `1.101.0` or newer for extension 0.2.44. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
 - A reachable kdb+/q process listening for q IPC.
 - Credentials accepted by that process, if authentication is enabled.
 - For the optional Python-kernel notebook route only: Python 3.9-3.13, IPython, and separately installed `kx-notebook==0.1.0` (`import kx_notebook`). Direct q IPC is built in; profiles, callbacks, PyKX, and a loopback broker are explicit alternatives.
@@ -54,7 +54,7 @@ SQLTools is not required.
 5. Inspect, chart, copy, or export the result in **KX Results**.
 6. For q-only work, create/open a `.qnb` and use normal Run with its dedicated KX q controller. In mixed `.ipynb`, keep Python selected, use **Make q Cell (KX)**, activate the shared q connection, then use **Run q Cell (KX)**.
 7. Open **View > Output** and select **KX** when diagnosing lifecycle or IPC failures.
-8. Optionally enable Server Explorer or Query History in Settings; both default off to avoid surprise metadata queries or query-text persistence.
+8. Query History is enabled by default and can be explicitly disabled when local query-text persistence is not wanted. Server Explorer remains optional and disabled by default.
 
 ## Documentation map
 

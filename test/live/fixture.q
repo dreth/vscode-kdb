@@ -6,6 +6,13 @@ trade:([] sym:`AAPL`MSFT; size:100 250i)
 rootVector:til 8
 rootFunction:{x+1}
 
+.qr.calculate:{x+10}
+.qr.data:til 12
+.qr.runtimeTable:([] sym:`AAPL`MSFT; size:100 250i)
+.app.payload:`a`b!1 2
+.app.state.value:99
+.app.q.nestedValue:7
+
 \d .analytics
 answer:42
 quote:([] sym:`AAPL`MSFT`IBM; size:100 250 400)

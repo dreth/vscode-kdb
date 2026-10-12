@@ -4,6 +4,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vscode = require('vscode');
+const { exerciseFailureReporting } = require('./failure-reporting');
 
 const EXTENSION_ID = 'DanielAlonso.vscode-kdb';
 const CONNECTIONS_SETTING = 'connections';
@@ -60,6 +61,8 @@ async function waitFor(label, predicate, timeoutMs = 5000) {
   }
   assert.fail(`timed out waiting for ${label}`);
 }
+
+
 
 async function closeNotebookTab(uri) {
   const uriText = uri.toString();
@@ -398,6 +401,7 @@ async function exerciseQnbSaveReopen(testApi) {
     const qnbCellUri = notebook.cellAt(0).document.uri.toString();
     const siblingCellUri = notebook.cellAt(1).document.uri.toString();
     const callsBefore = testApi.notebookQueryCalls().length;
+    const historyBefore = testApi.queryHistoryEntries().length;
     testApi.queueNotebookTable(
       ['row', 'value'],
       [[0, 'native-qnb-output'], [1, 'persisted-qnb-output']]
@@ -417,6 +421,25 @@ async function exerciseQnbSaveReopen(testApi) {
       connectionId: profile.id,
       source: 'show enlist 4\n',
     });
+    await waitFor(
+      'native qnb Query History entry',
+      () => testApi.queryHistoryEntries().length === historyBefore + 1
+    );
+    assert.deepStrictEqual(
+      {
+        connectionId: testApi.queryHistoryEntries()[0].connectionId,
+        kind: testApi.queryHistoryEntries()[0].kind,
+        status: testApi.queryHistoryEntries()[0].status,
+        queryText: testApi.queryHistoryEntries()[0].queryText,
+      },
+      {
+        connectionId: profile.id,
+        kind: 'notebook',
+        status: 'succeeded',
+        queryText: 'show enlist 4\n',
+      },
+      'native qnb execution must produce one source-only history entry'
+    );
     assert.strictEqual(
       notebook.cellAt(0).document.uri.toString(),
       qnbCellUri,
@@ -996,12 +1019,32 @@ async function exerciseRepeatedIdenticalMixedQ(testApi) {
         postRaceQCell.document.uri.toString()
     );
     const textFocusedCallsBefore = testApi.notebookQueryCalls().length;
+    const textFocusedHistoryBefore = testApi.queryHistoryEntries().length;
     await vscode.commands.executeCommand(RUN_Q_NOTEBOOK_CELL_COMMAND, postRaceQCell);
     const afterFirst = notebook.cellAt(0);
     assert.strictEqual(
       testApi.notebookQueryCalls().length,
       textFocusedCallsBefore + 1,
       'a text-focused mixed q gesture must issue exactly one q request'
+    );
+    await waitFor(
+      'mixed q Query History entry',
+      () => testApi.queryHistoryEntries().length === textFocusedHistoryBefore + 1
+    );
+    assert.deepStrictEqual(
+      {
+        connectionId: testApi.queryHistoryEntries()[0].connectionId,
+        kind: testApi.queryHistoryEntries()[0].kind,
+        status: testApi.queryHistoryEntries()[0].status,
+        queryText: testApi.queryHistoryEntries()[0].queryText,
+      },
+      {
+        connectionId: profile.id,
+        kind: 'notebook',
+        status: 'succeeded',
+        queryText: source,
+      },
+      'mixed-Jupyter Direct IPC execution must produce exactly one source-only history entry'
     );
     assert.strictEqual(
       vscode.window.activeTextEditor?.document.uri.toString(),
@@ -1605,22 +1648,35 @@ async function run() {
       'KX Extension Host reopen assertions passed: fresh-process .ipynb load, persisted-only output identity, native Chromium input, sort/null order, resize, bar-chart navigator/viewport races, and owned AX grid semantics.'
     );
   } else {
+    const historyConfiguration = vscode.workspace.getConfiguration('vscode-kdb.features');
+    const previousHistory = historyConfiguration.inspect('queryHistory')?.globalValue;
     console.log('KX Extension Host phase: connection store');
     await exerciseConnectionStore(testApi);
     console.log('KX Extension Host phase: direct controller lifecycle');
     await exerciseDirectControllerLifecycle(testApi);
     console.log('KX Extension Host phase: q language server');
     await exerciseQLanguageServer(testApi);
-    console.log('KX Extension Host phase: blank qnb bootstrap');
-    await exerciseBlankQnbBootstrap(testApi);
-    console.log('KX Extension Host phase: qnb save/reopen');
-    await exerciseQnbSaveReopen(testApi);
-    console.log('KX Extension Host phase: notebook cell language');
-    await exerciseNotebookCellLanguageCommands();
-    console.log('KX Extension Host phase: durable mixed notebook');
-    await exerciseDurableMixedNotebook();
-    console.log('KX Extension Host phase: repeated mixed q');
-    await exerciseRepeatedIdenticalMixedQ(testApi);
+    console.log('KX Extension Host phase: automatic failure reporting');
+    await exerciseFailureReporting(testApi);
+    await historyConfiguration.update('queryHistory', true, vscode.ConfigurationTarget.Global);
+    try {
+      console.log('KX Extension Host phase: blank qnb bootstrap');
+      await exerciseBlankQnbBootstrap(testApi);
+      console.log('KX Extension Host phase: qnb save/reopen');
+      await exerciseQnbSaveReopen(testApi);
+      console.log('KX Extension Host phase: notebook cell language');
+      await exerciseNotebookCellLanguageCommands();
+      console.log('KX Extension Host phase: durable mixed notebook');
+      await exerciseDurableMixedNotebook();
+      console.log('KX Extension Host phase: repeated mixed q');
+      await exerciseRepeatedIdenticalMixedQ(testApi);
+    } finally {
+      await historyConfiguration.update(
+        'queryHistory',
+        previousHistory,
+        vscode.ConfigurationTarget.Global
+      );
+    }
     console.log(
       'KX Extension Host save assertions passed: activation/store lifecycle, active query connection selection, q language commands, durable mixed-notebook reopen, stale-race protection, repeated mixed-q identities, and actual .ipynb save/tab close.'
     );

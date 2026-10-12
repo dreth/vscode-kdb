@@ -1,3 +1,5 @@
+import { formatNumericAxis } from '../src/number-display';
+import { FAILURE_STATE_MESSAGE, ReportingState, safeFailure, safeOperationDetails } from '../src/failure-record';
 import uPlot from 'uplot';
 import uPlotCss from 'uplot/dist/uPlot.min.css';
 import type { ActivationFunction, OutputItem, RendererContext } from 'vscode-notebook-renderer';
@@ -33,6 +35,7 @@ import {
   isValidChartRange,
   issueChartZoomLifecycleRequest,
   mergeChartPixelGaps,
+  chartSourceGapPixels,
   panChartViewport,
   panChartViewportByPixels,
   planChartAutoRefine,
@@ -52,6 +55,7 @@ import {
   KX_COLUMN_MIN_WIDTH,
   VariableColumnMetrics,
   automaticColumnWidthsForLengths,
+  measuredColumnRenderedTextWidth,
 
   normalizePositionalColumnWidths,
   resolvedColumnWidth,
@@ -68,6 +72,12 @@ import {
   NotebookChartSpec,
   NotebookChartType,
   PortableKxResult,
+  portableTableRowCount,
+  portableTableRowIndexes,
+  portableTableCell,
+  portableTableRow,
+  portableTableRows,
+
   PortableKxTableResult,
   comparePortableCells,
   isHistoricalDirectPreview,
@@ -148,6 +158,7 @@ import {
   updateHeaderPointer,
 } from '../src/result-table-interaction';
 import {
+  KX_RESULT_SETTING_DEFINITIONS,
   KX_RESULT_CHART_TYPE_OPTIONS,
   KX_RESULT_EXPORT_FORMATS,
 
@@ -406,23 +417,66 @@ let presentation: NotebookPresentation = 'inline';
 let requestSequence = 0;
 let domSequence = 0;
 let resultSettings: NotebookSharedKxResultSettings = defaultResultSettings();
+let failureReporting: ReportingState = { enabled: false, generation: 0 };
+let failureContext: RendererContext<RendererState> | undefined;
+let reportedFailures: WeakSet<object> | undefined;
+
+function reportRendererFailure(error: unknown, operation: 'render' | 'action', details?: unknown): void {
+  if (!failureReporting.enabled || !failureContext?.postMessage) return;
+  if (error && typeof error === 'object') {
+    if (reportedFailures?.has(error)) return;
+    reportedFailures?.add(error);
+  }
+  try { failureContext.postMessage({ type: 'kxFailure', generation: failureReporting.generation,
+    component: 'notebook-renderer', operation, details: { transport: 'renderer', phase: operation, status: 'failed', ...safeOperationDetails(details) }, failure: safeFailure(error) }); }
+  catch { /* Reporting cannot interrupt rendering. */ }
+}
+function guardRendererCallback<T extends (...args: any[]) => any>(callback: T): T {
+  return function(this: unknown, ...args: Parameters<T>): ReturnType<T> {
+    if (!failureReporting.enabled) return callback.apply(this, args);
+    try {
+      const result = callback.apply(this, args);
+      if (result && typeof result.then === 'function') {
+        return result.catch((error: unknown) => { reportRendererFailure(error, 'action'); throw error; });
+      }
+      return result;
+    } catch (error) { reportRendererFailure(error, 'action'); throw error; }
+  } as T;
+}
 
 export const activate: ActivationFunction<RendererState> = context => {
+  failureReporting = { enabled: false, generation: 0 };
+  reportedFailures = undefined;
+  failureContext = context;
   installStyles();
   const restored = context.getState();
   if (isPresentation(restored?.presentation)) {
     presentation = restored.presentation;
   }
   context.onDidReceiveMessage?.(event => {
+    if (event && typeof event === 'object' && 'type' in event && event.type === FAILURE_STATE_MESSAGE) {
+      const state = event as { enabled?: unknown; generation?: unknown };
+      if (typeof state.enabled === 'boolean' && typeof state.generation === 'number' && Number.isSafeInteger(state.generation)) {
+        if (failureReporting.enabled !== state.enabled || failureReporting.generation !== state.generation) {
+          reportedFailures = state.enabled ? new WeakSet() : undefined;
+        }
+        failureReporting = { enabled: state.enabled, generation: state.generation };
+      }
+      return;
+    }
+    try {
     const message = parseNotebookRendererHostMessage(event);
     if (message) {
       receiveHostMessage(context, message);
     }
+    } catch (error) { reportRendererFailure(error, 'action'); throw error; }
   });
   context.postMessage?.({ type: 'ready' });
 
   return {
     renderOutputItem(outputItem, element) {
+      const reportingDetails: Record<string, unknown> = {};
+      try {
       const previousState = disposeOutputItemState(outputItem.id, context);
       element.replaceChildren();
       const sourcePayload = portablePayload(outputItem, element);
@@ -438,19 +492,21 @@ export const activate: ActivationFunction<RendererState> = context => {
         ? inspectedIdentity.identity
         : undefined;
       const liveReference = identity?.live;
+      if (failureReporting.enabled) Object.assign(reportingDetails, { surface: liveReference ? 'live-notebook' : 'saved-notebook',
+        live: !!liveReference, saved: !liveReference, mimeVersion: payload.version });
       const outputBinding = identity?.binding;
       const boundOutputId = outputBinding?.id;
-      const outputId = payload.version === 2
+      const outputId = payload.version >= 2
         ? (boundOutputId === payload.outputId ? boundOutputId : undefined)
         : boundOutputId;
-      const rendererOutputId = payload.version === 2 && payload.outputId
+      const rendererOutputId = payload.version >= 2 && payload.outputId
         ? payload.outputId
         : previousState && previousState.outputId === outputId
           ? previousState.rendererOutputId
           : legacyOutputId();
       const previousOrder = previousState?.rendererOutputId === rendererOutputId
         ? outputColumnOrderSnapshot(previousState)
-        : payload.version === 2
+        : payload.version >= 2
           ? columnOrderCache.get(rendererOutputId)
           : undefined;
       const nextSavedSchema = payload.kind === 'table'
@@ -593,6 +649,7 @@ export const activate: ActivationFunction<RendererState> = context => {
       if (state.liveId && state.outputId) {
         requestLiveResult(context, state);
       }
+      } catch (error) { reportRendererFailure(error, 'render', reportingDetails); throw error; }
     },
     disposeOutputItem(id) {
       if (id === undefined) {
@@ -617,7 +674,8 @@ function receiveHostMessage(
     const conversionChanged =
       previous.dictionaryDisplayStrategy !== resultSettings.dictionaryDisplayStrategy ||
       previous.listDisplayStrategy !== resultSettings.listDisplayStrategy;
-    const sliceTextChanged = previous.arrayDisplayFormat !== resultSettings.arrayDisplayFormat;
+    const sliceTextChanged = previous.arrayDisplayFormat !== resultSettings.arrayDisplayFormat ||
+      previous.tableDecimalPlaces !== resultSettings.tableDecimalPlaces;
     const wholeResultSizingNeedsRefresh =
       resultSettings.autoFitColumns &&
       resultSettings.autoFitMode === 'wholeResult' &&
@@ -1368,7 +1426,7 @@ function renderLiveTableTools(
     withFocusKey(chartToggle, 'toolbar:live:chart-toggle');
     primary.append(chartToggle);
   }
-  primary.append(resultColumnControl(context, state, 'live'));
+  primary.append(resultColumnControl(context, state, 'live'), resultQuickSettings(context, state, 'live'));
   const selectionStatus = node(
     'span',
     'kx-selection-summary',
@@ -1394,14 +1452,14 @@ function renderLiveTableTools(
   searchStatus.setAttribute('aria-live', 'polite');
   input.setAttribute('aria-describedby', searchStatus.id);
   input.value = state.liveSearch.query;
-  input.addEventListener('input', () => {
+  input.addEventListener('input', guardRendererCallback(() => {
     state.liveSearch = {
       ...emptyLiveSearch(),
       query: input.value.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS),
     };
     scheduleLiveSearch(context, state);
-  });
-  input.addEventListener('keydown', event => {
+  }));
+  input.addEventListener('keydown', guardRendererCallback(event => {
     if (event.key === 'Enter') {
       event.preventDefault();
       const action = notebookSearchEnterAction(
@@ -1419,7 +1477,7 @@ function renderLiveTableTools(
       state.liveSearch = emptyLiveSearch();
       requestLiveSearch(context, state);
     }
-  });
+  }));
   input.title = 'Enter: next match; Shift+Enter: previous match';
   const previous = button(KX_RESULT_UI_LABELS.previousMatch, () =>
     moveLiveSearchMatch(context, state, -1));
@@ -1478,7 +1536,7 @@ function renderLiveGrid(
   viewport.scrollTop = state.liveScrollTop;
   viewport.scrollLeft = state.liveScrollLeft;
   refreshLiveViewport(context, state);
-  viewport.addEventListener('scroll', () => {
+  viewport.addEventListener('scroll', guardRendererCallback(() => {
     if (viewport.scrollTop === state.liveScrollTop &&
       viewport.scrollLeft === state.liveScrollLeft) {
       return;
@@ -1486,11 +1544,11 @@ function renderLiveGrid(
     state.liveScrollTop = viewport.scrollTop;
     state.liveScrollLeft = viewport.scrollLeft;
     scheduleLiveViewportRender(context, state);
-  }, { passive: true });
-  viewport.addEventListener('mouseup', () => {
+  }), { passive: true });
+  viewport.addEventListener('mouseup', guardRendererCallback(() => {
     updateLiveSelectionClasses(state);
-  });
-  viewport.addEventListener('keydown', event => handleLiveGridKeydown(context, state, event));
+  }));
+  viewport.addEventListener('keydown', guardRendererCallback(event => handleLiveGridKeydown(context, state, event)));
   state.liveViewportResizeObserver = new ResizeObserver(() => {
     const height = Math.round(viewport.offsetHeight || 0);
     if (height >= 1) {
@@ -1511,14 +1569,57 @@ interface LiveWindow {
   endColumn: number;
 }
 
+function resultSizingCharacterWidth(state: OutputState): number {
+  const root = state.element.querySelector('.kx-root') || state.element;
+  const style = getComputedStyle(root);
+  const size = resultSettings.fontSize || parseFloat(style.fontSize) || 13;
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) { return Math.max(7, size * 0.58); }
+  ctx.font = `bold ${size}px ${style.fontFamily || 'sans-serif'}`;
+  return Math.max(7, ctx.measureText('W').width);
+}
+
+function renderedColumnWidths(
+  state: OutputState,
+  headers: readonly string[],
+  rows: readonly (readonly string[])[],
+  headerExtra = 18
+): number[] {
+  const root = state.element.querySelector('.kx-root') || state.element;
+  const style = getComputedStyle(root);
+  const size = resultSettings.fontSize || parseFloat(style.fontSize) || 13;
+  const ctx = document.createElement('canvas').getContext('2d');
+  if (!ctx) {
+    return automaticColumnWidthsForLengths(
+      headers.map((header, index) => Math.max(header.length, ...rows.map(row => (row[index] || '').length))),
+      size, 7, resultSizingCharacterWidth(state)
+    );
+  }
+  const family = style.fontFamily || 'sans-serif';
+  const measure = (value: string, bold: boolean): number => {
+    ctx.font = `${bold ? '600 ' : ''}${size}px ${family}`;
+    return ctx.measureText(value).width;
+  };
+  return headers.map((header, index) => {
+    let width = measuredColumnRenderedTextWidth(header, value => measure(value, true), 7, headerExtra);
+    for (const row of rows) {
+      width = Math.max(width, measuredColumnRenderedTextWidth(row[index] || '', value => measure(value, false), 7));
+    }
+    return width;
+  });
+}
+
 function liveColumnWidths(state: OutputState): number[] {
   const visibleSourceIndexes = visibleLiveColumnIndexes(state);
   const visibleAutomaticWidths = resultSettings.autoFitColumns
-    ? automaticColumnWidthsForLengths(
-      liveColumnTextLengths(state),
-      resultSettings.fontSize,
-      7
-    )
+    ? resultSettings.autoFitMode === 'visibleRows'
+      ? liveVisibleColumnWidths(state)
+      : automaticColumnWidthsForLengths(
+        liveColumnTextLengths(state),
+        resultSettings.fontSize,
+        7,
+        resultSizingCharacterWidth(state)
+      )
     : [];
   const automaticWidths: number[] = [];
   visibleSourceIndexes.forEach((sourceIndex, position) => {
@@ -1526,7 +1627,7 @@ function liveColumnWidths(state: OutputState): number[] {
   });
   return visibleSourceIndexes.map(sourceIndex => {
     const outputWidth = state.liveManualColumnWidths.get(sourceIndex);
-    return outputWidth ?? resolvedColumnWidth(
+    return (!resultSettings.autoFitColumns ? outputWidth : undefined) ?? resolvedColumnWidth(
       sourceIndex,
       resultSettings.cellWidth,
       resultSettings.columnWidths,
@@ -1534,6 +1635,26 @@ function liveColumnWidths(state: OutputState): number[] {
       automaticWidths
     );
   });
+}
+
+function liveVisibleColumnWidths(state: OutputState): number[] {
+  const slice = state.liveSlice;
+  const first = Math.floor(Math.max(0, liveVirtualScrollTop(state) - LIVE_HEADER_HEIGHT) / resultSettings.rowHeight);
+  const last = Math.ceil((liveVirtualScrollTop(state) + liveViewportHeight(state) - LIVE_HEADER_HEIGHT) / resultSettings.rowHeight);
+  const rows: string[][] = [];
+  if (slice) {
+    for (let offset = 0; offset < slice.cells.length; offset += 1) {
+      const rowIndex = slice.startRow + offset;
+      if (rowIndex < first || rowIndex >= last) { continue; }
+      const row = state.liveColumns.map((_column, columnIndex) =>
+        columnIndex >= slice.startColumn && columnIndex <= slice.endColumn
+          ? String(slice.cells[offset]?.[columnIndex - slice.startColumn] || '')
+          : ''
+      );
+      rows.push(row);
+    }
+  }
+  return renderedColumnWidths(state, state.liveColumns, rows, 30);
 }
 
 function liveColumnTextLengths(state: OutputState): number[] {
@@ -1613,6 +1734,8 @@ function refreshLiveViewport(
     viewport.clientWidth || 720,
     viewport.clientHeight || liveViewportHeight(state)
   );
+  const scrollTop = state.liveScrollTop;
+  const scrollLeft = state.liveScrollLeft;
   canvas.replaceChildren();
   renderLiveHeaders(
     context,
@@ -1623,6 +1746,8 @@ function refreshLiveViewport(
     columnMetrics
   );
   renderLiveCells(state, canvas, window, columnMetrics);
+  viewport.scrollTop = scrollTop;
+  viewport.scrollLeft = scrollLeft;
   syncLiveActiveDescendant(state);
   if (state.liveRowCount === 0) {
     const empty = node('div', 'kx-live-empty', '0 rows');
@@ -1940,7 +2065,7 @@ function renderLiveCells(
       if (activeSearchRow(state, rowIndex)) {
         cell.classList.add('is-search-match');
       }
-      cell.addEventListener('mousedown', event => {
+      cell.addEventListener('mousedown', guardRendererCallback(event => {
         if (event.button !== 0) {
           return;
         }
@@ -1954,8 +2079,8 @@ function renderLiveCells(
         state.liveViewport?.focus({ preventScroll: true });
         updateLiveSelectionClasses(state);
         event.preventDefault();
-      });
-      cell.addEventListener('mouseenter', event => {
+      }));
+      cell.addEventListener('mouseenter', guardRendererCallback(event => {
         if ((event.buttons & 1) && state.liveSelection) {
           state.liveSelection = notebookSelectionForCell(
             state.liveSelection,
@@ -1965,7 +2090,7 @@ function renderLiveCells(
           );
           updateLiveSelectionClasses(state);
         }
-      });
+      }));
       placeLiveCell(
         cell,
         rowIndexWidth + columnMetrics.lefts[columnIndex],
@@ -2106,7 +2231,8 @@ function renderLiveChart(
         markLiveChartDirty(chart);
         renderState(context, state);
       },
-      'chart:live:group'
+      'chart:live:group',
+      controlModel.groupColumns.length === 0
     ));
   }
   if (capabilities.usesOhlc) {
@@ -2249,24 +2375,25 @@ function liveChartDataStatus(data: NotebookLiveChartData): string {
   const shown = data.sampledPointCount ?? data.x.length;
   const eligible = data.eligibleRowCount;
   const samplingLevel = chartSamplingLevelStatus(data);
+  const grouped = data.groupByColumn ? ` grouped by ${data.groupByColumn}` : '';
   if (data.chartType === 'candlestick') {
     return `Showing ${shown.toLocaleString()} candles${eligible === undefined
       ? ''
-      : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
+      : ` from ${eligible.toLocaleString()} eligible rows`}${grouped}.${samplingLevel}`;
   }
   if (data.chartType === 'box') {
-    return `Showing ${shown.toLocaleString()} box groups${eligible === undefined
+    return `Showing ${shown.toLocaleString()} boxes${eligible === undefined
       ? ''
-      : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
+      : ` from ${eligible.toLocaleString()} eligible rows`}${grouped}.${samplingLevel}`;
   }
   if (data.chartType === 'bar') {
-    return `Showing ${shown.toLocaleString()} rendered bar groups${eligible === undefined
+    return `Showing ${shown.toLocaleString()} rendered bars${eligible === undefined
       ? ''
-      : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
+      : ` from ${eligible.toLocaleString()} eligible rows`}${grouped}.${samplingLevel}`;
   }
   return `Showing ${shown.toLocaleString()} rendered points${eligible === undefined
     ? ''
-    : ` from ${eligible.toLocaleString()} eligible rows`}.${samplingLevel}`;
+    : ` from ${eligible.toLocaleString()} eligible rows`}${grouped}.${samplingLevel}`;
 }
 
 function chartSamplingLevelStatus(data: NotebookLiveChartData): string {
@@ -2620,11 +2747,11 @@ function renderSavedTable(
     TABLE_PAGE_SIZE,
     Math.floor(MAX_TABLE_PAGE_CELLS / Math.max(1, visibleColumns.length))
   ));
-  const lastPageStart = payload.data.rows.length === 0
+  const lastPageStart = portableTableRowCount(payload) === 0
     ? 0
-    : Math.floor((payload.data.rows.length - 1) / pageSize) * pageSize;
+    : Math.floor((portableTableRowCount(payload) - 1) / pageSize) * pageSize;
   const pageStart = Math.min(state.savedTablePageStart, lastPageStart);
-  const pageEnd = Math.min(payload.data.rows.length, pageStart + pageSize);
+  const pageEnd = Math.min(portableTableRowCount(payload), pageStart + pageSize);
   const savedCellTextLimit = notebookSavedCellTextLimit(
     pageEnd - pageStart,
     visibleColumns.length,
@@ -2637,7 +2764,8 @@ function renderSavedTable(
     visibleColumns,
     rowOrder,
     pageStart,
-    pageEnd
+    pageEnd,
+    savedCellTextLimit
   );
   const currentActionCellCount = () =>
     savedActionPlan(state, payload).cellCount;
@@ -2717,7 +2845,7 @@ function renderSavedTable(
     withFocusKey(chartToggle, 'toolbar:saved:chart-toggle');
     primary.append(chartToggle);
   }
-  primary.append(resultColumnControl(context, state, 'saved'));
+  primary.append(resultColumnControl(context, state, 'saved'), resultQuickSettings(context, state, 'saved'));
   const selectionStatus = node(
     'span',
     'kx-selection-summary',
@@ -2760,7 +2888,7 @@ function renderSavedTable(
     previousSearch.disabled = disabled;
     nextSearch.disabled = disabled;
   };
-  searchInput.addEventListener('input', () => {
+  searchInput.addEventListener('input', guardRendererCallback(() => {
     state.savedSearch.query = searchInput.value.slice(0, MAX_NOTEBOOK_LIVE_SEARCH_CHARS);
     state.savedSearch.activeIndex = -1;
     startSavedSearch(
@@ -2776,8 +2904,8 @@ function renderSavedTable(
         syncSavedSearchNavigation();
       }
     );
-  });
-  searchInput.addEventListener('keydown', event => {
+  }));
+  searchInput.addEventListener('keydown', guardRendererCallback(event => {
     if (event.key === 'Escape' && searchInput.value) {
       event.preventDefault();
       searchInput.value = '';
@@ -2813,7 +2941,7 @@ function renderSavedTable(
       return;
     }
     moveSavedSearch(action === 'previous' ? -1 : 1);
-  });
+  }));
   const moveSavedSearch = (delta: -1 | 1): void => {
     state.savedSearch.activeIndex = notebookMovedSearchMatchIndex(
       state.savedSearch.activeIndex,
@@ -2906,14 +3034,14 @@ function renderSavedTable(
   );
   wrap.setAttribute('role', 'grid');
   wrap.setAttribute('aria-multiselectable', 'true');
-  wrap.setAttribute('aria-rowcount', String(payload.data.rows.length + 1));
+  wrap.setAttribute('aria-rowcount', String(portableTableRowCount(payload) + 1));
   wrap.setAttribute(
     'aria-colcount',
     String(visibleColumns.length + (resultSettings.showRowIndex ? 1 : 0))
   );
   wrap.style.setProperty('--kx-row-height', `${resultSettings.rowHeight}px`);
   wrap.style.height = `${state.savedViewportHeight ?? notebookGridDefaultHeight(
-    Math.min(TABLE_PAGE_SIZE, payload.data.rows.length),
+    Math.min(TABLE_PAGE_SIZE, portableTableRowCount(payload)),
     resultSettings.rowHeight,
     Math.max(SAVED_HEADER_HEIGHT, resultSettings.rowHeight)
   )}px`;
@@ -2944,11 +3072,11 @@ function renderSavedTable(
     corner.className = 'kx-saved-row-index kx-saved-corner';
     corner.scope = 'col';
     const selectAll = button('#', () => {
-      if (payload.data.rows.length > 0 && visibleColumns.length > 0) {
+      if (portableTableRowCount(payload) > 0 && visibleColumns.length > 0) {
         state.savedSelection = {
           anchorRow: 0,
           anchorColumn: 0,
-          focusRow: payload.data.rows.length - 1,
+          focusRow: portableTableRowCount(payload) - 1,
           focusColumn: visibleColumns.length - 1,
         };
         updateSavedSelectionClasses(wrap, state.savedSelection);
@@ -2968,7 +3096,7 @@ function renderSavedTable(
     const selectedHeader = resultColumnFullySelected(
       state.savedSelection,
       columnIndex,
-      payload.data.rows.length
+      portableTableRowCount(payload)
     );
     const th = document.createElement('th');
     decorateDisplayedColumn(th, displayOrdinal, sourceColumnIndex, {
@@ -3022,7 +3150,7 @@ function renderSavedTable(
         state.savedSelection = fullColumnSelection(
           state.savedSelection,
           columnIndex,
-          payload.data.rows.length,
+          portableTableRowCount(payload),
           extend
         );
         updateSavedSelectionClasses(wrap, state.savedSelection);
@@ -3091,7 +3219,7 @@ function renderSavedTable(
   const body = document.createElement('tbody');
   rowOrder.slice(pageStart, pageEnd).forEach((sourceRow, pageIndex) => {
     const rowIndex = pageStart + pageIndex;
-    const row = payload.data.rows[sourceRow];
+    const row = portableTableRow(payload, sourceRow);
     const tr = document.createElement('tr');
     tr.dataset.row = String(rowIndex);
     tr.setAttribute('role', 'row');
@@ -3122,7 +3250,7 @@ function renderSavedTable(
       const cellText = portableCellToBoundedText(
         cell,
         savedCellTextLimit,
-        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
+        { arrayDisplayFormat: resultSettings.arrayDisplayFormat, tableDecimalPlaces: resultSettings.tableDecimalPlaces }
       ).text;
       const td = node('td', '', cellText);
       decorateDisplayedColumn(td, displayOrdinal, sourceColumnIndex, {
@@ -3154,7 +3282,7 @@ function renderSavedTable(
       if (activeSavedSearchRow(state.savedSearch, rowIndex)) {
         td.classList.add('is-search-match');
       }
-      td.addEventListener('mousedown', event => {
+      td.addEventListener('mousedown', guardRendererCallback(event => {
         if (event.button !== 0) {
           return;
         }
@@ -3169,8 +3297,8 @@ function renderSavedTable(
         updateCopyButtons();
         wrap.focus({ preventScroll: true });
         event.preventDefault();
-      });
-      td.addEventListener('mouseenter', event => {
+      }));
+      td.addEventListener('mouseenter', guardRendererCallback(event => {
         if ((event.buttons & 1) && state.savedSelection) {
           state.savedSelection = notebookSelectionForCell(
             state.savedSelection,
@@ -3182,7 +3310,7 @@ function renderSavedTable(
           syncSavedActiveDescendant(wrap, state.savedSelection, state);
           updateCopyButtons();
         }
-      });
+      }));
       tr.append(td);
     });
     body.append(tr);
@@ -3193,11 +3321,27 @@ function renderSavedTable(
   wrap.scrollTop = state.savedScrollTop;
   wrap.scrollLeft = state.savedScrollLeft;
   syncSavedActiveDescendant(wrap, state.savedSelection, state);
-  wrap.addEventListener('scroll', () => {
+  let fittedFirstRow = Math.floor(state.savedScrollTop / resultSettings.rowHeight);
+  wrap.addEventListener('scroll', guardRendererCallback(() => {
     state.savedScrollTop = wrap.scrollTop;
     state.savedScrollLeft = wrap.scrollLeft;
-  }, { passive: true });
-  wrap.addEventListener('keydown', event => {
+    const firstRow = Math.floor(state.savedScrollTop / resultSettings.rowHeight);
+    if (resultSettings.autoFitColumns && resultSettings.autoFitMode === 'visibleRows' &&
+      firstRow !== fittedFirstRow && wrap.isConnected) {
+      fittedFirstRow = firstRow;
+      const widths = savedColumnWidths(
+        state, payload, visibleColumns, rowOrder, pageStart, pageEnd, savedCellTextLimit
+      );
+      const indexOffset = resultSettings.showRowIndex ? 1 : 0;
+      visibleColumns.forEach((_sourceIndex, position) => {
+        (colgroup.children[position + indexOffset] as HTMLTableColElement).style.width =
+          `${widths[position]}px`;
+      });
+      table.style.width = `${widths.reduce((total, width) => total + width, 0) +
+        (resultSettings.showRowIndex ? LIVE_ROW_INDEX_WIDTH : 0)}px`;
+    }
+  }), { passive: true });
+  wrap.addEventListener('keydown', guardRendererCallback(event => {
     const moves: Record<string, [number, number]> = {
       ArrowUp: [-1, 0],
       ArrowDown: [1, 0],
@@ -3219,7 +3363,7 @@ function renderSavedTable(
       move[0],
       move[1],
       event.shiftKey,
-      payload.data.rows.length,
+      portableTableRowCount(payload),
       visibleColumns.length
     );
     if (!selection) {
@@ -3245,8 +3389,8 @@ function renderSavedTable(
     revealSavedSelection(wrap, state.savedSelection, state);
     updateCopyButtons();
     event.preventDefault();
-  });
-  if (payload.data.rows.length > pageSize) {
+  }));
+  if (portableTableRowCount(payload) > pageSize) {
     const pagination = node('div', 'kx-pagination');
     const previous = button('Previous page', () => {
       state.savedTablePageStart = Math.max(0, pageStart - pageSize);
@@ -3259,10 +3403,10 @@ function renderSavedTable(
       renderState(context, state);
     });
     withFocusKey(next, 'pagination:saved:next');
-    next.disabled = pageEnd >= state.payload.data.rows.length;
+    next.disabled = pageEnd >= portableTableRowCount(state.payload);
     pagination.append(
       previous,
-      node('span', 'kx-meta', `Rows ${pageStart + 1}-${pageEnd} of ${payload.data.rows.length}`),
+      node('span', 'kx-meta', `Rows ${pageStart + 1}-${pageEnd} of ${portableTableRowCount(payload)}`),
       next
     );
     root.append(pagination);
@@ -3273,7 +3417,7 @@ function savedRowOrder(state: OutputState, payload: PortableKxTableResult): read
   const column = state.savedSortColumn;
   const direction = state.savedSortDirection;
   if (column === undefined || !direction) {
-    return payload.data.rows.map((_row, index) => index);
+    return portableTableRowIndexes(payload);
   }
   const cached = state.savedRowOrderCache;
   if (cached?.payload === payload && cached.column === column &&
@@ -3281,10 +3425,10 @@ function savedRowOrder(state: OutputState, payload: PortableKxTableResult): read
     return cached.order;
   }
   const order = notebookSavedRowOrder(
-    payload.data.rows.length,
+    portableTableRowCount(payload),
     (left, right) => comparePortableCells(
-      payload.data.rows[left][column],
-      payload.data.rows[right][column],
+      portableTableCell(payload, left, column),
+      portableTableCell(payload, right, column),
       direction
     )
   );
@@ -3385,7 +3529,7 @@ function startSavedSearch(
     }
     const startedAt = performance.now();
     const { complete } = scanNotebookSavedSearchChunk(search, {
-      rowCount: payload.data.rows.length,
+      rowCount: portableTableRowCount(payload),
       query,
       maximumMatches: SAVED_SEARCH_MAX_MATCHES,
       maximumCells: SAVED_SEARCH_MAX_CELLS,
@@ -3395,9 +3539,9 @@ function startSavedSearch(
       columnCount: () => visibleColumns.length,
       cellText: (sourceRow, column) => {
         const rendered = portableCellToBoundedText(
-          payload.data.rows[sourceRow][visibleColumns[column]],
+          portableTableCell(payload, sourceRow, visibleColumns[column]),
           SAVED_SEARCH_CELL_TEXT_CHAR_LIMIT,
-          { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
+          { arrayDisplayFormat: resultSettings.arrayDisplayFormat, tableDecimalPlaces: resultSettings.tableDecimalPlaces }
         );
         search.partial ||= rendered.truncated;
         return rendered.text;
@@ -3512,29 +3656,24 @@ function savedColumnWidths(
   visibleColumns: readonly number[],
   rowOrder: readonly number[],
   pageStart: number,
-  pageEnd: number
+  pageEnd: number,
+  textLimit: number
 ): number[] {
   let automaticWidths: number[] = [];
   const configuredWidths = visibleColumns.map(index => resultSettings.columnWidths[index]);
   if (resultSettings.autoFitColumns) {
-    const sourceLengths = resultSettings.autoFitMode === 'wholeResult'
-      ? savedWholeResultColumnTextLengths(state, payload, visibleColumns)
-      : savedVisibleRowColumnTextLengths(
-        payload,
-        visibleColumns,
-        rowOrder,
-        pageStart,
-        pageEnd
+    automaticWidths = resultSettings.autoFitMode === 'visibleRows'
+      ? savedVisibleColumnWidths(state, payload, visibleColumns, rowOrder, pageStart, pageEnd, textLimit)
+      : automaticColumnWidthsForLengths(
+        savedWholeResultColumnTextLengths(state, payload, visibleColumns),
+        resultSettings.fontSize,
+        7,
+        resultSizingCharacterWidth(state)
       );
-    automaticWidths = automaticColumnWidthsForLengths(
-      sourceLengths,
-      resultSettings.fontSize,
-      7
-    );
   }
   return visibleColumns.map((sourceIndex, position) => {
     const outputWidth = state.savedManualColumnWidths.get(sourceIndex);
-    return outputWidth ?? resolvedColumnWidth(
+    return (!resultSettings.autoFitColumns ? outputWidth : undefined) ?? resolvedColumnWidth(
       position,
       resultSettings.cellWidth,
       configuredWidths,
@@ -3542,6 +3681,32 @@ function savedColumnWidths(
       automaticWidths
     );
   });
+}
+
+function savedVisibleColumnWidths(
+  state: OutputState,
+  payload: PortableKxTableResult,
+  visibleColumns: readonly number[],
+  rowOrder: readonly number[],
+  pageStart: number,
+  pageEnd: number,
+  textLimit: number
+): number[] {
+  const first = Math.min(pageEnd, pageStart + Math.floor(state.savedScrollTop / resultSettings.rowHeight));
+  const height = state.savedViewport?.clientHeight || state.savedViewportHeight ||
+    Math.min(window.innerHeight * 0.75, 900);
+  const headerHeight = Math.max(44, resultSettings.rowHeight);
+  const last = Math.min(pageEnd, pageStart + Math.ceil((state.savedScrollTop + height - headerHeight) / resultSettings.rowHeight));
+  const rows: string[][] = [visibleColumns.map(index => payload.schema.columns[index].type)];
+  for (let displayRow = first; displayRow < last; displayRow += 1) {
+    const row = portableTableRow(payload, rowOrder[displayRow]);
+    if (!row) { continue; }
+    rows.push(visibleColumns.map(index => portableCellToBoundedText(
+      row[index], textLimit,
+      { arrayDisplayFormat: resultSettings.arrayDisplayFormat, tableDecimalPlaces: resultSettings.tableDecimalPlaces }
+    ).text));
+  }
+  return renderedColumnWidths(state, visibleColumns.map(index => payload.schema.columns[index].name), rows);
 }
 
 function savedWholeResultColumnTextLengths(
@@ -3562,7 +3727,7 @@ function savedWholeResultColumnTextLengths(
       Math.max(column.name.length, column.type.length)
     );
   });
-  for (const row of payload.data.rows) {
+  for (const row of portableTableRows(payload)) {
     visibleColumns.forEach((sourceIndex, position) => {
       if (lengths[position] >= KX_COLUMN_AUTO_TEXT_CHAR_LIMIT) {
         return;
@@ -3570,7 +3735,7 @@ function savedWholeResultColumnTextLengths(
       const rendered = portableCellToBoundedText(
         row[sourceIndex],
         KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
-        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
+        { arrayDisplayFormat: resultSettings.arrayDisplayFormat, tableDecimalPlaces: resultSettings.tableDecimalPlaces }
       );
       lengths[position] = rendered.truncated
         ? KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
@@ -3583,42 +3748,6 @@ function savedWholeResultColumnTextLengths(
     lengths,
   };
   return lengths.slice();
-}
-
-function savedVisibleRowColumnTextLengths(
-  payload: PortableKxTableResult,
-  visibleColumns: readonly number[],
-  rowOrder: readonly number[],
-  pageStart: number,
-  pageEnd: number
-): number[] {
-  const lengths = visibleColumns.map(sourceIndex => {
-    const column = payload.schema.columns[sourceIndex];
-    return Math.min(
-      KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
-      Math.max(column.name.length, column.type.length)
-    );
-  });
-  for (let displayRow = pageStart; displayRow < pageEnd; displayRow += 1) {
-    const row = payload.data.rows[rowOrder[displayRow]];
-    if (!row) {
-      continue;
-    }
-    visibleColumns.forEach((sourceIndex, position) => {
-      if (lengths[position] >= KX_COLUMN_AUTO_TEXT_CHAR_LIMIT) {
-        return;
-      }
-      const rendered = portableCellToBoundedText(
-        row[sourceIndex],
-        KX_COLUMN_AUTO_TEXT_CHAR_LIMIT,
-        { arrayDisplayFormat: resultSettings.arrayDisplayFormat }
-      );
-      lengths[position] = rendered.truncated
-        ? KX_COLUMN_AUTO_TEXT_CHAR_LIMIT
-        : Math.max(lengths[position], rendered.text.length);
-    });
-  }
-  return lengths;
 }
 
 function renderSavedChartControls(
@@ -3635,7 +3764,7 @@ function renderSavedChartControls(
     root.append(node('div', 'kx-notice', 'Chart unavailable: the saved rows have no usable numeric series.'));
     return;
   }
-  const candidates = chartColumns(state.payload, renderedSavedColumnIndexes(state));
+  const candidates = chartColumns(state.payload, visibleSavedColumnIndexes(state));
   const controlModel = notebookChartControlModel(
     {
       chartType: chart.type,
@@ -3725,7 +3854,8 @@ function renderSavedChartControls(
         chart.groupByColumn = value || undefined;
         renderState(context, state);
       },
-      'chart:saved:group'
+      'chart:saved:group',
+      controlModel.groupColumns.length === 0
     ));
   }
   if (capabilities.usesOhlc) {
@@ -3851,23 +3981,27 @@ function drawNotebookChart(
   state.plotSeriesKeys = keys;
   const series: uPlot.Series[] = [{ label: data.xColumn }];
   if (data.chartType === 'candlestick') {
-    const color = (): CanvasRenderingContext2D['strokeStyle'] =>
-      cssColor(host, '--vscode-charts-green', '#2ea043');
-    series.push({
-      label: 'OHLC',
-      show: chartSeriesVisible(state.hiddenChartSeriesKeys, keys[0]),
-      stroke: color,
-      width: 0,
-      points: { show: false },
-      value: (_self, _rawValue, _seriesIndex, index) => {
-        const candle = index === null || index === undefined
-          ? undefined
-          : data.candlesticks?.[index];
-        return candle
-          ? `O ${formatChartNumber(candle.open)} H ${formatChartNumber(candle.high)} ` +
-            `L ${formatChartNumber(candle.low)} C ${formatChartNumber(candle.close)}`
-          : '';
-      },
+    notebookCandlestickGroups(data).forEach((group, groupIndex) => {
+      const colorIndex = groupIndex % colors.length;
+      const color = (): CanvasRenderingContext2D['strokeStyle'] => group.groupValue
+        ? chartColors(host)[colorIndex]
+        : cssColor(host, '--vscode-charts-green', '#2ea043');
+      series.push({
+        label: group.groupValue || 'OHLC',
+        show: chartSeriesVisible(state.hiddenChartSeriesKeys, keys[groupIndex]),
+        stroke: color,
+        width: 0,
+        points: { show: false },
+        value: (_self, _rawValue, _seriesIndex, index) => {
+          const candle = index === null || index === undefined
+            ? undefined
+            : group.candlesticks[index];
+          return candle
+            ? `O ${formatChartNumber(candle.open)} H ${formatChartNumber(candle.high)} ` +
+              `L ${formatChartNumber(candle.low)} C ${formatChartNumber(candle.close)}`
+            : '';
+        },
+      });
     });
   } else {
     data.series.forEach((item, index) => {
@@ -3908,7 +4042,8 @@ function drawNotebookChart(
   const aligned = data.chartType === 'candlestick'
     ? [
       data.x,
-      data.candlesticks?.map(candle => candle.close) || [],
+      ...notebookCandlestickGroups(data).map(group =>
+        group.candlesticks.map(candle => candle?.close ?? null)),
     ] as uPlot.AlignedData
     : [
       data.x,
@@ -3973,8 +4108,11 @@ function notebookSeriesSourceGaps(
       if (previous >= indexStart) {
         uPlot.addGap(
           gaps,
-          plot.valToPos(xValues[previous], 'x', true),
-          plot.valToPos(xValues[index], 'x', true)
+          ...chartSourceGapPixels(
+            plot.valToPos(xValues[previous], 'x', true),
+            plot.valToPos(xValues[index], 'x', true),
+            plot.series[_seriesIndex].width || 1.5, uPlot.pxRatio
+          )
         );
       }
     }
@@ -3985,14 +4123,26 @@ function notebookSeriesSourceGaps(
 function notebookChartSeriesKeys(data: NotebookLiveChartData): string[] {
   if (data.chartType === 'candlestick') {
     const roles = data.ohlcColumns;
-    return [
+    return notebookCandlestickGroups(data).map(group =>
       `candlestick\0${roles?.open || ''}\0${roles?.high || ''}\0` +
-      `${roles?.low || ''}\0${roles?.close || ''}`,
-    ];
+      `${roles?.low || ''}\0${roles?.close || ''}\0${group.groupValue}`
+    );
   }
   return data.series.map(series =>
     `${series.sourceColumnName || series.columnName}\0${series.groupValue || ''}\0${series.columnName}`
   );
+}
+
+function notebookCandlestickGroups(data: NotebookLiveChartData): Array<{
+  groupValue: string;
+  candlesticks: Array<NonNullable<NotebookLiveChartData['candlesticks']>[number] | null>;
+}> {
+  if (data.candlestickSeries?.length) {
+    return data.candlestickSeries;
+  }
+  return data.candlesticks?.length
+    ? [{ groupValue: '', candlesticks: data.candlesticks }]
+    : [];
 }
 
 function capturePlotSeriesVisibility(state: OutputState, plot = state.plot): void {
@@ -4050,6 +4200,7 @@ function createPlot(
     }
   } catch (error) {
     console.error('KX notebook chart rendering failed', error);
+    reportRendererFailure(error, 'render');
     state.chartProgrammaticScale = false;
     destroyPlot(state);
     host.replaceChildren(node('div', 'kx-notice', 'Chart rendering failed; the result table remains available.'));
@@ -4072,7 +4223,7 @@ function decoratePlotLegendAccessibility(plot: uPlot): void {
     label.dataset.kxSeriesIndex = String(seriesIndex);
     if (label.dataset.kxKeyboardToggle !== 'true') {
       label.dataset.kxKeyboardToggle = 'true';
-      label.addEventListener('keydown', event => {
+      label.addEventListener('keydown', guardRendererCallback(event => {
         if (!chartLegendToggleKey(event.key)) {
           return;
         }
@@ -4082,7 +4233,7 @@ function decoratePlotLegendAccessibility(plot: uPlot): void {
         if (Number.isSafeInteger(index) && index > 0 && index < plot.series.length) {
           plot.setSeries(index, { show: plot.series[index].show === false });
         }
-      });
+      }));
     }
   });
   syncPlotLegendColors(plot);
@@ -4461,10 +4612,10 @@ function installNotebookChartNavigator(
     event.preventDefault();
     event.stopPropagation();
   };
-  elements.window.addEventListener('pointerdown', event => begin(event, 'window'));
-  elements.start.addEventListener('pointerdown', event => begin(event, 'start'));
-  elements.end.addEventListener('pointerdown', event => begin(event, 'end'));
-  elements.root.addEventListener('pointerdown', event => {
+  elements.window.addEventListener('pointerdown', guardRendererCallback(event => begin(event, 'window')));
+  elements.start.addEventListener('pointerdown', guardRendererCallback(event => begin(event, 'start')));
+  elements.end.addEventListener('pointerdown', guardRendererCallback(event => begin(event, 'end')));
+  elements.root.addEventListener('pointerdown', guardRendererCallback(event => {
     if (event.button !== 0 || blocked() ||
       event.target === elements.window || event.target === elements.start ||
       event.target === elements.end) {
@@ -4485,7 +4636,7 @@ function installNotebookChartNavigator(
       elements.window.focus({ preventScroll: true });
     }
     event.preventDefault();
-  });
+  }));
   const keyboard = (event: KeyboardEvent, part: ChartNavigatorPart): void => {
     if (blocked()) {
       return;
@@ -4513,9 +4664,9 @@ function installNotebookChartNavigator(
     event.preventDefault();
     event.stopPropagation();
   };
-  elements.window.addEventListener('keydown', event => keyboard(event, 'window'));
-  elements.start.addEventListener('keydown', event => keyboard(event, 'start'));
-  elements.end.addEventListener('keydown', event => keyboard(event, 'end'));
+  elements.window.addEventListener('keydown', guardRendererCallback(event => keyboard(event, 'window')));
+  elements.start.addEventListener('keydown', guardRendererCallback(event => keyboard(event, 'start')));
+  elements.end.addEventListener('keydown', guardRendererCallback(event => keyboard(event, 'end')));
 }
 
 function notebookChartNavigatorBlocked(
@@ -4628,11 +4779,23 @@ function renderNotebookChartNavigatorOverview(
   data: NotebookLiveChartData,
   fullRange: PlotScaleRange
 ): void {
-  let values: readonly (number | null)[] =
-    data.candlesticks?.map(candle => candle.close) || [];
+  let values: readonly (number | null)[] = [];
   let gapFlags: readonly boolean[] = [];
   let gapBefore: readonly boolean[] = [];
-  if (data.chartType !== 'candlestick') {
+  if (data.chartType === 'candlestick') {
+    let bestFinite = -1;
+    notebookCandlestickGroups(data).forEach(group => {
+      const candidate = group.candlesticks.map(candle => candle?.close ?? null);
+      const candidateFinite = candidate.reduce<number>(
+        (count, value) => count + (typeof value === 'number' && Number.isFinite(value) ? 1 : 0),
+        0
+      );
+      if (candidateFinite > bestFinite) {
+        bestFinite = candidateFinite;
+        values = candidate;
+      }
+    });
+  } else {
     let bestFinite = -1;
     values = [];
     data.series.forEach(series => {
@@ -4730,7 +4893,7 @@ function installNotebookChartViewport(
         ? 'Chart plot. Drag to pan x. Switch to zoom mode to drag-zoom. Arrow keys pan. Home resets zoom.'
         : 'Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.'
   );
-  host.addEventListener('keydown', event => {
+  host.addEventListener('keydown', guardRendererCallback(event => {
     if (blocked && (event.key === 'Home' || event.key === 'ArrowLeft' ||
       event.key === 'ArrowRight')) {
       event.preventDefault();
@@ -4744,14 +4907,14 @@ function installNotebookChartViewport(
       panNotebookChart(context, state, event.key === 'ArrowLeft' ? -0.2 : 0.2);
       event.preventDefault();
     }
-  });
-  host.addEventListener('dblclick', event => {
+  }));
+  host.addEventListener('dblclick', guardRendererCallback(event => {
     if (!blocked) {
       resetNotebookChartViewport(context, state);
     }
     event.preventDefault();
     event.stopPropagation();
-  });
+  }));
 
   let panStart: { x: number; range: PlotScaleRange } | undefined;
   const move = (event: MouseEvent): void => {
@@ -4794,7 +4957,7 @@ function installNotebookChartViewport(
     }
     event.preventDefault();
   };
-  host.addEventListener('mousedown', event => {
+  host.addEventListener('mousedown', guardRendererCallback(event => {
     if (blocked && event.button === 0) {
       event.preventDefault();
       event.stopPropagation();
@@ -4814,7 +4977,7 @@ function installNotebookChartViewport(
     window.addEventListener('mouseup', finish, true);
     event.preventDefault();
     event.stopPropagation();
-  }, true);
+  }), true);
 }
 
 function syncNotebookChartViewportDataset(
@@ -5049,6 +5212,7 @@ function notebookPlotOptions(
   return {
     width: Math.max(1, Math.floor(host.getBoundingClientRect().width || 720)),
     height,
+    padding: [16, plot => temporal ? 64 : numericXAxisEndPadding(plot), 8, 8],
     ms: 1,
     series,
     scales: {
@@ -5092,12 +5256,15 @@ function notebookPlotOptions(
     axes: [
       {
         scale: 'x',
+        font: `${resultSettings.fontSize || 13}px sans-serif`,
+        ...(!temporal ? { values: (_plot: uPlot, splits: number[]) => splits.map(value => formatChartNumber(value)) } : {}),
         stroke: axisColor,
         grid: { stroke: gridColor, width: 0.5 },
         ticks: { stroke: gridColor, width: 0.5 },
       },
       {
         scale: 'y',
+        font: `${resultSettings.fontSize || 13}px sans-serif`,
         stroke: axisColor,
         grid: { stroke: gridColor, width: 0.5 },
         ticks: { stroke: gridColor, width: 0.5 },
@@ -5160,7 +5327,9 @@ function drawClusteredBars(plot: uPlot, colors: string[]): void {
   if (xValues.length === 0 || seriesCount === 0) {
     return;
   }
-  const ratio = window.devicePixelRatio || 1;
+  plot.ctx.save();
+  plot.ctx.font = `${resultSettings.fontSize || 13}px sans-serif`;
+  const ratio = 1;
   const zero = plot.valToPos(0, 'y', true);
   const context = plot.ctx;
   context.save();
@@ -5219,41 +5388,58 @@ function drawNotebookCandlesticks(
   data: NotebookLiveChartData,
   host: HTMLElement
 ): void {
-  if (!data.candlesticks?.length || plot.series[1]?.show === false) {
+  const groups = notebookCandlestickGroups(data);
+  if (groups.length === 0) {
     return;
   }
-  const ratio = window.devicePixelRatio || 1;
+  plot.ctx.save();
+  plot.ctx.font = `${resultSettings.fontSize || 13}px sans-serif`;
+  const ratio = 1;
   const up = cssColor(host, '--vscode-charts-green', '#2ea043');
   const down = cssColor(host, '--vscode-charts-red', '#d73a49');
   const hollow = cssColor(host, '--vscode-editor-background', '#1e1e1e');
+  const categoryColors = chartColors(host);
   const context = plot.ctx;
   context.save();
   context.beginPath();
   context.rect(plot.bbox.left, plot.bbox.top, plot.bbox.width, plot.bbox.height);
   context.clip();
-  data.candlesticks.forEach((candle, index) => {
-    const center = plot.valToPos(candle.x, 'x', true);
-    const bodyWidth = Math.max(
-      1 * ratio,
-      Math.min(18 * ratio, notebookLocalXGap(plot, data.x, index, 16 * ratio) * 0.68)
-    );
-    const high = plot.valToPos(candle.high, 'y', true);
-    const low = plot.valToPos(candle.low, 'y', true);
-    const open = plot.valToPos(candle.open, 'y', true);
-    const close = plot.valToPos(candle.close, 'y', true);
-    const rising = candle.close >= candle.open;
-    const color = rising ? up : down;
-    const top = Math.min(open, close);
-    const height = Math.max(1 * ratio, Math.abs(close - open));
-    context.strokeStyle = color;
-    context.fillStyle = rising ? hollow : color;
-    context.lineWidth = Math.max(1, ratio);
-    context.beginPath();
-    context.moveTo(center, high);
-    context.lineTo(center, low);
-    context.stroke();
-    context.fillRect(center - bodyWidth / 2, top, bodyWidth, height);
-    context.strokeRect(center - bodyWidth / 2, top, bodyWidth, height);
+  groups.forEach((group, groupIndex) => {
+    if (plot.series[groupIndex + 1]?.show === false) {
+      return;
+    }
+    group.candlesticks.forEach((candle, index) => {
+      if (!candle) {
+        return;
+      }
+      const xCenter = plot.valToPos(candle.x, 'x', true);
+      const clusterWidth = Math.max(
+        1 * ratio,
+        Math.min(22 * ratio, notebookLocalXGap(plot, data.x, index, 16 * ratio) * 0.78)
+      );
+      const slotWidth = clusterWidth / groups.length;
+      const bodyWidth = Math.max(1 * ratio, Math.min(18 * ratio, slotWidth * 0.72));
+      const center = xCenter - clusterWidth / 2 + slotWidth * groupIndex + slotWidth / 2;
+      const high = plot.valToPos(candle.high, 'y', true);
+      const low = plot.valToPos(candle.low, 'y', true);
+      const open = plot.valToPos(candle.open, 'y', true);
+      const close = plot.valToPos(candle.close, 'y', true);
+      const rising = candle.close >= candle.open;
+      const color = group.groupValue
+        ? categoryColors[groupIndex % categoryColors.length]
+        : (rising ? up : down);
+      const top = Math.min(open, close);
+      const height = Math.max(1 * ratio, Math.abs(close - open));
+      context.strokeStyle = color;
+      context.fillStyle = rising ? hollow : color;
+      context.lineWidth = Math.max(1, ratio);
+      context.beginPath();
+      context.moveTo(center, high);
+      context.lineTo(center, low);
+      context.stroke();
+      context.fillRect(center - bodyWidth / 2, top, bodyWidth, height);
+      context.strokeRect(center - bodyWidth / 2, top, bodyWidth, height);
+    });
   });
   context.restore();
 }
@@ -5266,7 +5452,9 @@ function drawNotebookBoxes(
   if (!data.boxSeries?.length) {
     return;
   }
-  const ratio = window.devicePixelRatio || 1;
+  plot.ctx.save();
+  plot.ctx.font = `${resultSettings.fontSize || 13}px sans-serif`;
+  const ratio = 1;
   const seriesCount = data.boxSeries.length;
   const context = plot.ctx;
   context.save();
@@ -5372,13 +5560,12 @@ function notebookChartYRange(
     plot.series[index + 1]?.show !== false &&
     chartSeriesVisible(state.hiddenChartSeriesKeys, notebookChartSeriesKeys(data)[index]);
   if (data.chartType === 'candlestick') {
-    return chartYRangeForVisibleX(data.x, [{
-      visible: visible(0),
-      extents: (data.candlesticks || []).map(candle => ({
-        min: candle.low,
-        max: candle.high,
-      })),
-    }], { min: xMin, max: xMax });
+    return chartYRangeForVisibleX(data.x, notebookCandlestickGroups(data).map((group, index) => ({
+      visible: visible(index),
+      extents: group.candlesticks.map(candle => candle
+        ? { min: candle.low, max: candle.high }
+        : null),
+    })), { min: xMin, max: xMax });
   }
   if (data.chartType === 'box') {
     return chartYRangeForVisibleX(
@@ -5404,28 +5591,29 @@ function notebookChartYRange(
 }
 
 function formatChartNumber(value: number): string {
-  if (!Number.isFinite(value)) {
-    return '';
-  }
-  const normalized = Object.is(value, -0) ? 0 : value;
-  const places = Math.max(0, Math.min(12, resultSettings.chartDecimalPlaces));
-  const abs = Math.abs(normalized);
-  return abs !== 0 && (abs >= 1_000_000 || abs < 0.001)
-    ? normalized.toExponential(places)
-    : normalized.toLocaleString(undefined, {
-      minimumFractionDigits: places,
-      maximumFractionDigits: places,
-    });
+  return formatNumericAxis(value, resultSettings.chartDecimalPlaces, resultSettings.chartScientificNotationThreshold);
+}
+
+function numericXAxisEndPadding(plot: uPlot): number {
+  plot.ctx.save();
+  plot.ctx.font = `${resultSettings.fontSize || 13}px sans-serif`;
+  const width = Math.max(...[plot.scales.x.min, plot.scales.x.max].map(value =>
+    plot.ctx.measureText(formatChartNumber(value ?? NaN)).width));
+  plot.ctx.restore();
+  return Math.max(16, Math.ceil(width / 2 + 12));
 }
 
 function chartYAxisSize(plot: uPlot, values: readonly unknown[] | undefined): number {
   if (!Array.isArray(values) || !plot.ctx) {
     return 60;
   }
-  const ratio = window.devicePixelRatio || 1;
+  plot.ctx.save();
+  plot.ctx.font = `${resultSettings.fontSize || 13}px sans-serif`;
+  const ratio = 1;
   const maxLabelWidth = values.reduce<number>((width, value) =>
     Math.max(width, plot.ctx.measureText(String(value ?? '')).width / ratio), 0);
-  return Math.max(48, Math.min(220, Math.ceil(maxLabelWidth + 18)));
+  plot.ctx.restore();
+  return Math.max(48, Math.ceil(maxLabelWidth + 24));
 }
 
 function minimumPositiveStep(values: number[]): number | undefined {
@@ -5541,14 +5729,6 @@ function visibleSavedColumnIndexes(state: OutputState): number[] {
   );
 }
 
-function renderedSavedColumnIndexes(state: OutputState): number[] {
-  return notebookSavedColumnWindow(
-    visibleSavedColumnIndexes(state),
-    state.savedColumnWindowStart,
-    SAVED_COLUMN_WINDOW_SIZE
-  ).columns;
-}
-
 function syncLiveVisibleColumns(state: OutputState): void {
   state.liveColumns = visibleLiveColumnIndexes(state)
     .map(index => state.liveAllColumns[index]);
@@ -5582,7 +5762,7 @@ function resultFormatSelect(
     option.selected = format.value === selected;
     select.append(option);
   });
-  select.addEventListener('change', () => onChange(select.value as ExportFormat));
+  select.addEventListener('change', guardRendererCallback(() => onChange(select.value as ExportFormat)));
   return select;
 }
 
@@ -5599,7 +5779,7 @@ function settingToggle(
   if (focusKey) {
     withFocusKey(input, focusKey);
   }
-  input.addEventListener('change', () => onChange(input.checked));
+  input.addEventListener('change', guardRendererCallback(() => onChange(input.checked)));
   wrapper.append(input, document.createTextNode(label));
   return wrapper;
 }
@@ -5759,7 +5939,7 @@ function resultColumnControl(
     checkbox.checked = !hidden.has(sourceIndex);
     withFocusKey(checkbox, `${detailsKey}:column:${sourceIndex}:visible`);
     checkbox.setAttribute('aria-label', `Show column ${names[sourceIndex]}`);
-    checkbox.addEventListener('change', () => {
+    checkbox.addEventListener('change', guardRendererCallback(() => {
       const next = new Set(hidden);
       if (checkbox.checked) {
         next.delete(sourceIndex);
@@ -5767,7 +5947,7 @@ function resultColumnControl(
         next.add(sourceIndex);
       }
       apply(order.slice(), [...next]);
-    });
+    }));
     label.append(checkbox, document.createTextNode(names[sourceIndex] || `Column ${sourceIndex + 1}`));
     const up = titledButton('↑', `Move ${names[sourceIndex]} left`, () =>
       apply(moveKxResultColumn(order, sourceIndex, -1), [...hidden]));
@@ -5808,7 +5988,7 @@ function columnResizeHandle(
   handle.setAttribute('aria-valuenow', String(Math.round(currentWidth)));
   handle.dataset.position = String(position);
   handle.dataset.kxSourceOrdinal = String(position);
-  handle.addEventListener('mousedown', event => {
+  handle.addEventListener('mousedown', guardRendererCallback(event => {
     if (event.button !== 0) {
       return;
     }
@@ -5846,13 +6026,13 @@ function columnResizeHandle(
     window.addEventListener('mouseup', finish);
     event.stopPropagation();
     event.preventDefault();
-  });
-  handle.addEventListener('dblclick', event => {
+  }));
+  handle.addEventListener('dblclick', guardRendererCallback(event => {
     applyRendererColumnWidth(context, state, source, position, 0);
     event.stopPropagation();
     event.preventDefault();
-  });
-  handle.addEventListener('keydown', event => {
+  }));
+  handle.addEventListener('keydown', guardRendererCallback(event => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' &&
       event.key !== 'Delete' && event.key !== 'Backspace') {
       return;
@@ -5870,11 +6050,11 @@ function columnResizeHandle(
     focusResultResizeHandle(state, position);
     event.stopPropagation();
     event.preventDefault();
-  });
-  handle.addEventListener('click', event => {
+  }));
+  handle.addEventListener('click', guardRendererCallback(event => {
     event.stopPropagation();
     event.preventDefault();
-  });
+  }));
   return handle;
 }
 
@@ -5885,6 +6065,10 @@ function applyRendererColumnWidth(
   position: number,
   width: number
 ): void {
+  if (width !== 0 && resultSettings.autoFitColumns) {
+    resultSettings = { ...resultSettings, autoFitColumns: false };
+    context.postMessage?.({ type: 'updateResultSetting', key: 'autoFitColumns', value: false });
+  }
   const manualWidths = source === 'live'
     ? state.liveManualColumnWidths
     : state.savedManualColumnWidths;
@@ -5913,6 +6097,121 @@ function applyRendererColumnWidth(
   });
 }
 
+
+function resultQuickSettings(
+  context: RendererContext<RendererState>, state: OutputState, source: 'live' | 'saved'
+): HTMLDetailsElement {
+  const detailsKey = `settings:${source}`;
+  const details = persistentDetails(state, document.createElement('details'), detailsKey);
+  details.className = 'kx-settings';
+  const summary = document.createElement('summary');
+  summary.textContent = 'Settings';
+  withFocusKey(summary, `${detailsKey}:summary`);
+  const panel = node('div', 'kx-settings-panel');
+  const close = button('Close', () => { details.open = false; summary.focus(); });
+  panel.append(close, button('Extension settings', () => context.postMessage?.({ type: 'openResultSettings' })));
+  details.addEventListener('keydown', guardRendererCallback(event => {
+    if (event.key === 'Escape') { details.open = false; summary.focus(); event.stopPropagation(); }
+  }));
+  for (const definition of KX_RESULT_SETTING_DEFINITIONS.filter(item => item.quick !== false)) {
+    const label = document.createElement('label');
+    label.className = 'kx-control';
+    label.append(document.createTextNode(definition.label));
+    const input = definition.control === 'select'
+      ? document.createElement('select') : document.createElement('input');
+    const value = resultSettings[definition.key];
+    if (input instanceof HTMLSelectElement) {
+      for (const option of definition.values || []) {
+        const item = document.createElement('option');
+        item.value = String(option.value); item.textContent = option.label;
+        input.append(item);
+      }
+      input.value = String(value);
+    } else {
+      input.type = definition.control === 'checkbox' ? 'checkbox' : 'number';
+      if (input.type === 'checkbox') { input.checked = value === true; }
+      else {
+        input.min = String(definition.minimum ?? 0); input.max = String(definition.maximum ?? Number.MAX_SAFE_INTEGER);
+        input.step = '1';
+        input.value = value === definition.autoValue ? '' : String(value);
+        input.placeholder = definition.autoLabel || '';
+      }
+    }
+    withFocusKey(input, `${detailsKey}:${definition.key}`);
+    input.setAttribute('aria-label', definition.label);
+    input.addEventListener('change', guardRendererCallback(() => {
+      const next = input instanceof HTMLInputElement && input.type === 'checkbox' ? input.checked
+        : definition.control === 'number' ? (input.value === '' && definition.autoValue !== undefined ? definition.autoValue : Number(input.value))
+        : input.value;
+      if (definition.key === 'autoFitColumns' && next === true && !resultSettings.autoFitColumns) {
+        const positions = source === 'live' ? visibleLiveColumnIndexes(state)
+          : state.payload.kind === 'table' ? state.payload.schema.columns.map((_col, index) => index) : [];
+        for (const position of positions) {
+          state.liveManualColumnWidths.delete(position);
+          state.savedManualColumnWidths.delete(position);
+          if (resultSettings.columnWidths[position] !== undefined) {
+            delete resultSettings.columnWidths[position];
+            context.postMessage?.({ type: 'setResultColumnWidth', position, width: 0 });
+          }
+        }
+      }
+      if (definition.key === 'density' || definition.key === 'cellWidth') {
+        stateRegistry.forEach(output => {
+          output.liveManualColumnWidths.clear();
+          output.savedManualColumnWidths.clear();
+        });
+      }
+      context.postMessage?.({ type: 'updateResultSetting', key: definition.key, value: next });
+    }));
+    label.append(input); panel.append(label);
+  }
+  const fitNow = button('Fit columns now', () => {
+    fitRendererColumnsNow(context, state, source);
+  });
+  fitNow.setAttribute('aria-label', 'Fit columns now');
+  fitNow.disabled = source === 'live'
+    ? visibleLiveColumnIndexes(state).length === 0
+    : state.payload.kind !== 'table' || state.payload.schema.columns.length === 0;
+  panel.append(fitNow);
+  details.append(summary, panel);
+  keepDetailsPanelInsideResult(details, panel);
+  return details;
+}
+
+function fitRendererColumnsNow(
+  context: RendererContext<RendererState>,
+  state: OutputState,
+  source: 'live' | 'saved'
+): void {
+  const positions = source === 'live'
+    ? visibleLiveColumnIndexes(state)
+    : state.payload.kind === 'table'
+      ? state.payload.schema.columns.map((_column, index) => index)
+      : [];
+  const nextWidths = normalizePositionalColumnWidths(resultSettings.columnWidths);
+  for (const position of positions) {
+    const hadOverride = state.liveManualColumnWidths.has(position) ||
+      state.savedManualColumnWidths.has(position) ||
+      nextWidths[position] !== undefined;
+    state.liveManualColumnWidths.delete(position);
+    state.savedManualColumnWidths.delete(position);
+    delete nextWidths[position];
+    if (hadOverride) {
+      context.postMessage?.({ type: 'setResultColumnWidth', position, width: 0 });
+    }
+  }
+  resultSettings = {
+    ...resultSettings,
+    autoFitColumns: true,
+    columnWidths: nextWidths,
+  };
+  renderState(context, state);
+  context.postMessage?.({
+    type: 'updateResultSetting',
+    key: 'autoFitColumns',
+    value: true,
+  });
+}
 
 function updateResultSetting(
   context: RendererContext<RendererState>,
@@ -6122,7 +6421,7 @@ function ensureSavedChartSpec(state: OutputState): void {
   if (state.savedChart || state.payload.kind !== 'table') {
     return;
   }
-  const candidates = chartColumns(state.payload, renderedSavedColumnIndexes(state));
+  const candidates = chartColumns(state.payload, visibleSavedColumnIndexes(state));
   const xColumn = candidates.x.find(name => candidates.numeric.some(candidate => candidate !== name));
   const yColumn = candidates.numeric.find(name => name !== xColumn);
   if (!xColumn || !yColumn) {
@@ -6146,7 +6445,7 @@ function reconcileSavedChartsForColumns(state: OutputState): void {
     state.savedPreparedChart = undefined;
     return;
   }
-  const candidates = chartColumns(state.payload, renderedSavedColumnIndexes(state));
+  const candidates = chartColumns(state.payload, visibleSavedColumnIndexes(state));
   if (state.savedChart) {
     const reconciled = reconcileSavedChartSpec(state.savedChart, candidates);
     state.savedChart = reconciled.compatible ? state.savedChart : reconciled.chart;
@@ -6437,14 +6736,14 @@ function savedActionPlan(
   ).columns;
   const range = selection || {
     startRow: 0,
-    endRow: Math.max(0, payload.data.rows.length - 1),
+    endRow: Math.max(0, portableTableRowCount(payload) - 1),
     startColumn: 0,
     endColumn: Math.max(0, allVisibleColumns.length - 1),
   };
   const columnIndexes = selection
     ? windowColumns.slice(selection.startColumn, selection.endColumn + 1)
     : allVisibleColumns;
-  if (payload.data.rows.length === 0 || columnIndexes.length === 0) {
+  if (portableTableRowCount(payload) === 0 || columnIndexes.length === 0) {
     return { range, columnIndexes, cellCount: 0 };
   }
   return {
@@ -6701,11 +7000,11 @@ function portableTable(
 ): ColumnarPanelResult {
   return createColumnarPanelResult(
     columnIndexes.map(index => payload.schema.columns[index].name),
-    payload.data.rows.length,
+    portableTableRowCount(payload),
     (rowIndex, columnIndex) =>
-      portableCellChartValue(payload.data.rows[rowIndex][columnIndexes[columnIndex]]),
+      portableCellChartValue(portableTableCell(payload, rowIndex, columnIndexes[columnIndex])),
     columnIndexes.map(index => portableCellChartColumnType(
-      payload.data.rows[0]?.[index],
+      portableTableRow(payload, 0)?.[index],
       payload.schema.columns[index].type
     )),
     payload.schema.keyColumnOrdinals === undefined
@@ -6919,7 +7218,7 @@ function persistentDetails(
 ): HTMLDetailsElement {
   details.dataset.kxDetailsKey = key;
   details.open = state.openDetailsKeys.includes(key);
-  details.addEventListener('toggle', () => {
+  details.addEventListener('toggle', guardRendererCallback(() => {
     const open = new Set(state.openDetailsKeys);
     if (details.open) {
       open.add(key);
@@ -6927,7 +7226,7 @@ function persistentDetails(
       open.delete(key);
     }
     state.openDetailsKeys = [...open];
-  });
+  }));
   return details;
 }
 
@@ -6995,7 +7294,7 @@ function disposeDetachedState(
   state: OutputState,
   _context?: RendererContext<RendererState>
 ): void {
-  if (state.payload.version === 2) {
+  if (state.payload.version >= 2) {
     columnOrderCache.remember(outputColumnOrderSnapshot(state));
   }
   clearLiveChartAutoRefine(state.liveChart, true);
@@ -7138,7 +7437,7 @@ function configureResultHeader(
     event.preventDefault();
   };
 
-  header.addEventListener('mousedown', event => {
+  header.addEventListener('mousedown', guardRendererCallback(event => {
     if (event.button !== 0 || event.target !== header) {
       return;
     }
@@ -7149,11 +7448,11 @@ function configureResultHeader(
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', finish);
     event.preventDefault();
-  });
-  header.addEventListener('click', event => {
+  }));
+  header.addEventListener('click', guardRendererCallback(event => {
     event.preventDefault();
-  });
-  header.addEventListener('keydown', event => {
+  }));
+  header.addEventListener('keydown', guardRendererCallback(event => {
     if (event.altKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
       const movePlan = moveResultColumnBy(
         options.columnCount,
@@ -7178,7 +7477,7 @@ function configureResultHeader(
       event.preventDefault();
       event.stopPropagation();
     }
-  });
+  }));
 }
 
 function fullColumnSelection(
@@ -7275,7 +7574,7 @@ function button(text: string, action: (event: MouseEvent) => void): HTMLButtonEl
   const element = document.createElement('button');
   element.type = 'button';
   element.textContent = text;
-  element.addEventListener('click', event => action(event));
+  element.addEventListener('click', guardRendererCallback(event => action(event)));
   return element;
 }
 
@@ -7306,7 +7605,7 @@ function labelledSelect(
     option.selected = value === selected;
     select.append(option);
   });
-  select.addEventListener('change', () => onChange(select.value));
+  select.addEventListener('change', guardRendererCallback(() => onChange(select.value)));
   wrapper.append(select);
   return wrapper;
 }
@@ -7316,11 +7615,13 @@ function labelledSelectOptions(
   values: Array<{ value: string; label: string }>,
   selected: string,
   onChange: (value: string) => void,
-  focusKey?: string
+  focusKey?: string,
+  disabled = false
 ): HTMLLabelElement {
   const wrapper = node('label', 'kx-control');
   wrapper.append(node('span', '', label));
   const select = document.createElement('select');
+  select.disabled = disabled;
   if (focusKey) {
     withFocusKey(select, focusKey);
   }
@@ -7331,7 +7632,7 @@ function labelledSelectOptions(
     option.selected = value.value === selected;
     select.append(option);
   });
-  select.addEventListener('change', () => onChange(select.value));
+  select.addEventListener('change', guardRendererCallback(() => onChange(select.value)));
   wrapper.append(select);
   return wrapper;
 }
@@ -7365,7 +7666,7 @@ function multiColumnControl(
     if (focusKeyPrefix) {
       withFocusKey(input, `${focusKeyPrefix}:column:${value}`);
     }
-    input.addEventListener('change', () => onChange(value, input.checked));
+    input.addEventListener('change', guardRendererCallback(() => onChange(value, input.checked)));
     const colorKey = node('span', 'kx-series-swatches');
     colorKey.setAttribute('aria-hidden', 'true');
     (swatches.get(value) || []).forEach(color => {
@@ -7380,7 +7681,7 @@ function multiColumnControl(
     list.append(node('span', 'kx-meta', 'No numeric series'));
   }
   details.append(list);
-  details.addEventListener('toggle', () => onToggle(details.open));
+  details.addEventListener('toggle', guardRendererCallback(() => onToggle(details.open)));
   keepDetailsPanelInsideResult(details, list);
   return details;
 }
@@ -7429,7 +7730,7 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
     cellWidth: 160,
     columnWidths: {},
     autoFitColumns: true,
-    autoFitMode: 'wholeResult',
+    autoFitMode: 'visibleRows',
     rowHeight: 28,
     fontSize: 0,
     density: 'standard',
@@ -7438,6 +7739,8 @@ function defaultResultSettings(): NotebookSharedKxResultSettings {
     includeRowIndex: true,
     copyExportConfirmCellThreshold: 1_000_000,
     elapsedTimeDisplay: 'auto',
+    tableDecimalPlaces: -1,
+    chartScientificNotationThreshold: 1000000,
     chartDecimalPlaces: 4,
     chartMaxSourceRows: 2_000_000,
     qTextSyntaxHighlighting: false,
@@ -7461,7 +7764,7 @@ function notebookSavedChartSourceRowLimit(payload: PortableKxTableResult): numbe
 }
 
 function savedChartSourceLimitMessage(payload: PortableKxTableResult): string {
-  const rowCount = payload.data.rows.length;
+  const rowCount = portableTableRowCount(payload);
   const limit = notebookSavedChartSourceRowLimit(payload);
   return rowCount > limit
     ? `Chart source has ${rowCount.toLocaleString()} rows; limit the q result or ` +
@@ -7478,9 +7781,9 @@ const rendererCss = `
 .kx-notice,.kx-panel-mode,.kx-error{margin:7px 0;padding:6px 8px;border-left:3px solid var(--vscode-notificationsWarningIcon-foreground,#cca700);background:var(--vscode-textBlockQuote-background)}.kx-error{border-left-color:var(--vscode-errorForeground,#f14c4c)}
 .kx-messages{margin:5px 0;color:var(--vscode-descriptionForeground)}.kx-source{margin:6px 0}.kx-source pre{white-space:pre-wrap;max-height:150px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:6px}
 .kx-qtext{white-space:pre-wrap;max-height:520px;overflow:auto;background:var(--vscode-textCodeBlock-background);padding:8px;border:1px solid var(--vscode-panel-border,#555)}.kx-q-comment{color:var(--vscode-editorCodeLens-foreground)}.kx-q-string,.kx-q-symbol{color:var(--vscode-debugTokenExpression-string)}.kx-q-number,.kx-q-temporal{color:var(--vscode-debugTokenExpression-number)}.kx-q-keyword,.kx-q-command{color:var(--vscode-debugTokenExpression-name);font-weight:600}.kx-q-builtin,.kx-q-system,.kx-q-namespace{color:var(--vscode-symbolIcon-functionForeground)}.kx-q-operator{color:var(--vscode-symbolIcon-operatorForeground)}
-.kx-live-viewport{position:relative;overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;contain:strict;box-sizing:border-box;outline:none}.kx-live-viewport:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-live-canvas{position:relative;min-width:100%}.kx-live-row{position:absolute;left:0}.kx-live-header-row{z-index:3}.kx-live-cell,.kx-live-empty{box-sizing:border-box;position:absolute;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 7px;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);user-select:none}.kx-live-empty{color:var(--vscode-descriptionForeground)}button.kx-live-cell{text-align:left;border-radius:0}.kx-live-header{z-index:3;font-weight:600;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-row-index{z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-corner{z-index:4}.kx-live-cell.is-loading{color:transparent;background:linear-gradient(90deg,var(--vscode-editor-background),var(--vscode-editorWidget-background),var(--vscode-editor-background))}.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{color:var(--vscode-list-activeSelectionForeground,var(--vscode-editor-foreground));background:var(--vscode-list-activeSelectionBackground,#094771);box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-live-cell.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}
+.kx-live-viewport{position:relative;overflow:auto;overflow-anchor:none;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;contain:strict;box-sizing:border-box;outline:none}.kx-live-viewport:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-live-canvas{position:relative;min-width:100%}.kx-live-row{position:absolute;left:0}.kx-live-header-row{z-index:3}.kx-live-cell,.kx-live-empty{box-sizing:border-box;position:absolute;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:4px 7px;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);color:var(--vscode-editor-foreground);user-select:none}.kx-live-empty{color:var(--vscode-descriptionForeground)}button.kx-live-cell{text-align:left;border-radius:0}.kx-live-header{z-index:3;font-weight:600;background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-row-index{z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-live-corner{z-index:4}.kx-live-cell.is-loading{color:transparent;background:linear-gradient(90deg,var(--vscode-editor-background),var(--vscode-editorWidget-background),var(--vscode-editor-background))}.kx-live-cell.is-selected,.kx-table-wrap td.is-selected{color:var(--vscode-list-activeSelectionForeground,var(--vscode-editor-foreground));background:var(--vscode-list-activeSelectionBackground,#094771);box-shadow:inset 0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-live-cell.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}
 .kx-live-header{padding:0!important}.kx-live-sort{display:block;width:100%;height:100%;padding:4px 16px 4px 7px!important;border:0!important;border-radius:0!important;background:transparent!important;color:inherit!important;text-align:left;font-weight:600}.kx-live-sort:focus-visible,.kx-saved-sort:focus-visible,.kx-column-resize-handle:focus-visible{outline:2px solid var(--vscode-focusBorder,#007fd4);outline-offset:-2px}.kx-live-sort.is-reordering,.kx-saved-sort.is-reordering{cursor:grabbing;opacity:.72}
-.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}.kx-table-wrap .is-selected-header .kx-column-type{color:inherit}
+.kx-table-tools{margin-top:5px}.kx-table-wrap td.is-search-match:not(.is-selected){background:var(--vscode-editor-findMatchHighlightBackground,#ea5c0055)}.kx-table-wrap{overflow:auto;overflow-anchor:none;resize:vertical;min-height:72px;max-height:min(75vh,900px);border:1px solid var(--vscode-panel-border,#555);margin:6px 0;box-sizing:border-box;outline:none}.kx-table-wrap:focus{border-color:var(--vscode-focusBorder,#007fd4)}.kx-table-wrap table{border-collapse:separate;border-spacing:0;table-layout:fixed}.kx-table-wrap th,.kx-table-wrap td{box-sizing:border-box;border-right:1px solid var(--vscode-panel-border,#555);border-bottom:1px solid var(--vscode-panel-border,#555);padding:3px 7px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:left;height:var(--kx-row-height,28px)}.kx-table-wrap thead th{position:sticky;top:0;z-index:3;height:max(44px,var(--kx-row-height,28px));background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background))}.kx-table-wrap .kx-saved-row-index{position:sticky;left:0;z-index:2;text-align:right;color:var(--vscode-descriptionForeground);background:var(--vscode-editorGroupHeader-tabsBackground,var(--vscode-editor-background));font-weight:normal}.kx-table-wrap .kx-saved-corner{top:0;z-index:4}.kx-saved-sort{display:block;width:100%;padding:0!important;border:0!important;background:transparent!important;text-align:left;color:inherit!important;font-weight:600}.kx-column-type{display:block;color:var(--vscode-descriptionForeground);font-size:.78em;font-weight:normal}.kx-table-wrap .is-selected-header .kx-column-type{color:inherit}
 .kx-column-resize-handle{position:absolute;top:0;right:-3px;z-index:8;width:9px;height:100%;cursor:col-resize}.kx-column-resize-handle:hover,.kx-column-resize-handle:focus-visible{background:var(--vscode-focusBorder,#007fd4);opacity:.55}.kx-column-resize-guide{position:fixed;top:0;bottom:0;z-index:2147483647;width:1px;pointer-events:none;background:var(--vscode-focusBorder,#007fd4)}
 .kx-control{display:flex;flex-direction:column;gap:2px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-control select,.kx-control input{color:var(--vscode-foreground);min-width:90px}.kx-control.is-auto input::placeholder{color:var(--vscode-input-placeholderForeground,var(--vscode-descriptionForeground));opacity:1}.kx-series-control{position:relative;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-series-control>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-series-list{position:absolute;z-index:15;top:calc(100% + 2px);left:0;display:grid;gap:4px;max-height:min(220px,45vh);min-width:180px;max-width:min(320px,80vw);overflow:auto;padding:7px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 14px var(--vscode-widget-shadow,#0008)}.kx-series-option{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}.kx-series-name{min-width:0;overflow:hidden;text-overflow:ellipsis}.kx-series-swatches{display:inline-flex;align-items:center;gap:2px;flex:0 0 auto;overflow:visible!important}.kx-series-swatch{display:inline-block;width:10px;height:10px;flex:0 0 10px;border:1px solid var(--vscode-contrastBorder,var(--vscode-panel-border,transparent));border-radius:2px;box-sizing:border-box}.kx-chart-panel{border-top:1px solid var(--vscode-panel-border,#555);padding-top:7px;margin-top:7px}.kx-chart-host{width:100%;height:auto;margin-top:6px;overflow:hidden;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editor-background);box-sizing:border-box;outline:none}.kx-chart-host:focus-visible{border-color:var(--vscode-focusBorder,#007fd4);box-shadow:0 0 0 1px var(--vscode-focusBorder,#007fd4)}.kx-chart-host[aria-disabled=true]{cursor:not-allowed}.kx-chart-canvas{width:100%;height:280px;overflow:hidden}.kx-chart-host .uplot{max-width:100%;font-family:var(--vscode-font-family,system-ui,sans-serif);color:var(--vscode-editor-foreground);background:var(--vscode-editor-background)}.kx-chart-host .u-wrap{background:var(--vscode-editor-background)}.kx-chart-host .u-axis,.kx-chart-host .u-legend{color:var(--vscode-charts-foreground,var(--vscode-editor-foreground))}.kx-chart-host .u-select{background:var(--vscode-list-activeSelectionBackground,rgba(80,140,220,.22))}.kx-chart-host .u-cursor-x,.kx-chart-host .u-cursor-y{border-color:var(--vscode-focusBorder,#607d8b)}.kx-chart-legend{max-height:96px;overflow:auto;border-top:1px solid var(--vscode-charts-lines,var(--vscode-panel-border,#555));background:var(--vscode-editor-background)}.kx-chart-host .u-legend{display:block;width:100%;margin:0;padding:3px 5px;text-align:left;font:inherit}.kx-chart-host .u-legend tbody{display:flex;align-items:center;gap:2px 10px;flex-wrap:wrap}.kx-chart-host .u-legend .u-series{display:block;margin:0}.kx-chart-host .u-legend .u-series>th{display:flex;align-items:center;max-width:min(240px,75vw);padding:3px 4px;border-radius:2px;outline-offset:-1px;color:var(--vscode-editor-foreground)!important}.kx-chart-host .u-legend .u-marker{width:14px;height:10px;flex:0 0 14px;margin-right:5px;border-radius:2px;box-shadow:0 0 0 1px var(--vscode-contrastBorder,var(--vscode-editor-foreground))}.kx-chart-host .u-legend .kx-series-hidden>th{text-decoration:line-through;opacity:.48}.kx-chart-host .u-legend .kx-series-hidden .u-marker{filter:grayscale(1)}.kx-status{min-height:1.2em;margin-top:5px;color:var(--vscode-descriptionForeground);font-size:.9em}.kx-empty{padding:8px;color:var(--vscode-descriptionForeground)}
 .kx-settings{position:relative}.kx-settings>summary{cursor:pointer;border:1px solid var(--vscode-panel-border,#777);border-radius:3px;padding:3px 7px;list-style:none}.kx-settings-panel{position:absolute;top:calc(100% + 2px);right:0;z-index:25;display:grid;grid-template-columns:repeat(2,minmax(130px,1fr));gap:7px;width:min(430px,80vw);max-height:min(360px,60vh);overflow:auto;padding:9px;border:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background);box-shadow:0 4px 18px var(--vscode-widget-shadow,transparent)}.kx-settings-header{position:sticky;top:-9px;z-index:2;grid-column:1/-1;display:flex;align-items:center;justify-content:space-between;gap:8px;margin:-9px -9px 2px;padding:8px 9px;border-bottom:1px solid var(--vscode-panel-border,#555);background:var(--vscode-editorWidget-background)}.kx-settings-close{margin-left:auto}.kx-setting-checkbox{display:flex;align-items:center;gap:5px;font-size:.9em}

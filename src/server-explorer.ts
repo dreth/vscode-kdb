@@ -351,7 +351,7 @@ export class ServerExplorerTreeProvider implements vscode.TreeDataProvider<Serve
         return;
       }
       const parsedTables = metadata
-        ? { names: [...metadata.tables], omittedUnsafeNames: 0 }
+        ? { names: [...metadata.tables], omittedUnsafeNames: metadata.omittedUnsafeNames ?? 0 }
         : parseServerTableNames(tablesValue!);
       const parsedVariables = metadata
         ? { variables: [...metadata.variables], omittedUnsafeNames: 0 }

@@ -598,6 +598,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#automatic-failure-reporting" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Automatic failure reporting
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#connections-and-diagnostics" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -883,6 +894,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#automatic-failure-reporting" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Automatic failure reporting
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#connections-and-diagnostics" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -1094,25 +1116,25 @@
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputRows</code></td>
 <td><code>20</code></td>
-<td>Integer <code>1</code>-<code>10000</code></td>
-<td>Row value written by the optional Tag/Prepare editing aid into its <code>%%q --max-rows</code> marker for the separate Python helper. It never limits first-party Direct IPC rich output. <code>kx-notebook==0.1.0</code> separately validates the explicit marker value.</td>
+<td>Integer <code>0</code>-<code>10000</code></td>
+<td>First-party Direct IPC rich output is always complete. Positive values also retain the decoded result in the session live cache and are written by Tag/Prepare into the Python helper's <code>%%q --max-rows</code> marker. <code>0</code> skips that duplicate live cache; Tag/Prepare uses a bounded <code>20</code>-row helper fallback.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.notebook.maxOutputBytes</code></td>
 <td><code>1000000</code></td>
 <td>Integer <code>16384</code>-<code>10000000</code></td>
-<td>Bounds the first-party Direct IPC <code>text/plain</code> fallback and the byte value written into an optional <code>%%q --max-bytes</code> helper marker. It never truncates the authoritative Direct IPC rich v2 payload. <code>kx-notebook==0.1.0</code> separately applies its explicit byte limit to its bounded MIME/static output.</td>
+<td>Bounds the first-party Direct IPC <code>text/plain</code> fallback and the byte value written into an optional <code>%%q --max-bytes</code> helper marker. It never truncates the authoritative Direct IPC rich v2/v3/v4 payload. <code>kx-notebook==0.1.0</code> separately applies its explicit byte limit to its bounded MIME/static output.</td>
 </tr>
 </tbody>
 </table>
 <p><strong>KX: Tag Notebook Cell as q</strong> is an optional editing aid: it first sets actual q language mode, then persists the current row/byte values in one <code>%%q</code> marker and nested <code>vscode-kdb</code> metadata. It preserves an existing marker, cell code, and unrelated metadata. A q-language cell without the marker exposes <strong>Prepare this q cell for the active Python kernel</strong>, which performs only marker/metadata preparation. Neither command is required by released <code>kx-notebook==0.1.0</code>.</p>
-<p>These settings are not server-side q limits. Every successful first-party Direct IPC execution automatically stores a complete strict portable-v2 rich payload with a fresh output ID. Versioned exact q cells retain q atoms, typed/mixed vectors and attributes, symbols/chars, raw longs/temporals, sentinels, and nested typed values. Optional validated keyed-table source ordinals preserve structural key-column styling after save/reopen; older payloads without them remain unhighlighted. Exact representability failures include q type and bounded value detail and are reported without JSON stringification, silent rich-output truncation, or substitution of a preview under a complete label. Whole-table-column attributes and top-level dictionary container identity are currently explicit unsupported cases because flattening them would not be exact.</p>
-<p>Portable output excludes extension-managed connection credentials, session objects, and IPC handles. User-returned q values remain eligible for exact persistence. Output metadata may contain a random targeting ID so actions bind to the exact output; that ID contains no result or connection data and cannot restore a live result. Every run executes current source, gets fresh output/live IDs, and binds its live record to the notebook and exact current cell/output. The record is atomically moved across supported output rewrites; rerun, native <strong>Clear Cell Output</strong>/<strong>Clear All Outputs</strong>, output or cell removal, notebook close, and deactivation remove it, and the registry is capped at 512 oldest-first records. KX adds no custom clear command or button. Bounded first-party v1/v2 Direct IPC previews already saved in notebooks remain readable as <strong>Historical saved preview</strong>; rerunning executes current source and replaces one with a complete new output rather than recovering its omitted rows.</p>
+<p>These settings are not server-side q limits. Every successful first-party Direct IPC execution automatically stores a complete strict portable-v2/v3/v4 rich payload with a fresh output ID. Versioned exact q cells retain q atoms, typed/mixed vectors and attributes, symbols/chars, raw longs/temporals, sentinels, and nested typed values. Optional validated keyed-table source ordinals preserve structural key-column styling after save/reopen; older payloads without them remain unhighlighted. Exact representability failures include q type and bounded value detail and are reported without JSON stringification, silent rich-output truncation, or substitution of a preview under a complete label. Supported whole-table-column attributes persist exactly. Top-level dictionary container identity remains unsupported because flattening it would not be exact.</p>
+<p>Portable output excludes extension-managed connection credentials, session objects, and IPC handles. User-returned q values remain eligible for exact persistence. Output metadata contains a random targeting ID so actions bind to the exact output; that ID contains no result or connection data and cannot restore a live result. Every run executes current source and gets a fresh output ID. With a positive row setting it also gets and binds a fresh live ID; with <code>0</code>, no new decoded q value is registered, staged, or retained after the complete output is built. A successful zero-mode replacement retires any prior positive-mode live binding; a failed replacement leaves the still-displayed prior output and its valid binding intact. KX adds no custom clear command or button. Bounded first-party v1/v2 Direct IPC previews already saved in notebooks remain readable as <strong>Historical saved preview</strong>; rerunning executes current source and replaces one with a complete new output rather than recovering its omitted rows.</p>
 <p>Mixed <strong>Run q Cell (KX)</strong> and the optional pure-q controller reject a leading <code>%%q</code>; they run ordinary complete-cell q. Both use only the starred active KX profile; legacy notebook target metadata is ignored and connected non-active profiles are never selected. Both inherit the active profile's effective query timeout—its <code>queryTimeoutMs</code> override or the <code>3600000</code> millisecond (60-minute) global default—without an independent 30-second notebook query ceiling. The mixed action does not switch the Python controller. When a tracked q cell is selected in notebook command mode or its editor has text focus, guarded <code>Ctrl+Enter</code> / <code>Cmd+Enter</code> runs and stays, <code>Shift+Enter</code> runs and moves next, and <code>Alt+Enter</code> / <code>Option+Enter</code> runs and inserts below. No-argument commands prefer that selection over a stale active text editor, and move/insert is relative to the executed cell only after an executed result. Python, Markdown, ordinary editors, and output focus keep their normal behavior.</p>
 <p>The released Python <code>%%q</code> companion is a distinct Python-kernel-owned route: start with and keep a Python-language cell, load <code>kx_notebook</code>, connect with <code>%kx connect</code> or select another explicit evaluator, and use normal Jupyter Run. A durable extension Direct IPC cell stays q-language instead; do not switch one cell back and forth. The companion does not share the extension Direct IPC session or receive its live record/output binding. Its bounded MIME output cannot supply omitted rows to the extension. <strong>Run %%q live with KX</strong> explicitly reruns the body as a new extension-selected Direct IPC execution after confirmation; it does not call Jupyter Run, reuse the helper session, or change the selected Python kernel.</p>
 <p><code>inline</code> is the default released-companion experience. For companion output, <code>panel</code> uses the saved-output KX Results panel and <code>both</code> retains inline output plus that handoff. Companion output has no extension live-result record/output binding, so the panel source is only the bounded saved payload. First-party Direct IPC output remains inline, persists completely, and exposes its concise KX Results button. User-resized inline table height and output-local sort/search/selection/chart configuration/zoom/navigator state persist only for that rendered result in the current notebook session. Notebook output has no result-settings panel: durable density/sizing, display strategies, qText/array formatting, elapsed time, and chart guardrails come from the same <code>vscode-kdb.results.*</code> configuration used by the full KX Results panel and VS Code Settings.</p>
 <h2 id="feature-controls">Feature Controls</h2>
-<p>Server Explorer and Query History are independent, window-scoped, and disabled by default. This avoids unexpected remote metadata work, sidebar noise, or local persistence of sensitive query text.</p>
+<p>KX Variables and Query History are always-visible runtime views beside Connections. Variables performs no remote work until explicit refresh. Query History capture is enabled by default and can be explicitly disabled; the optional Server Explorer remains independently disabled by default.</p>
 <table>
 <thead>
 <tr>
@@ -1133,13 +1155,13 @@
 <td><code>vscode-kdb.serverExplorer.previewCellLimit</code></td>
 <td><code>10000</code></td>
 <td>Integer <code>1</code>-<code>1000000</code></td>
-<td>Server-side table/variable Preview cap: approximate table cells or outer list/dictionary items. Every preview still confirms because scalars and nested values can be large; functions/projections are metadata-only.</td>
+<td>Shared server-side Results-open cap: approximate cells for tables and outer items for lists/dictionaries. Every table/variable action still confirms because scalars and nested values can be large; functions/projections are metadata-only.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.features.queryHistory</code></td>
-<td><code>false</code></td>
+<td><code>true</code></td>
 <td>Boolean</td>
-<td>Records actually issued editor query text in local workspace extension storage. Disabling stops writes and hides its view/commands, but retained entries require re-enabling and running <strong>KX: Clear Query History</strong> to erase them.</td>
+<td>Records actually issued editor and first-party Direct IPC notebook q text in local workspace extension storage. Set to <code>false</code> to opt out. The view remains visible while disabled but does not read, display, delete, or add retained entries; re-enable it to use entry actions or <strong>KX: Clear Query History</strong>.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.queryHistory.maxEntries</code></td>
@@ -1149,8 +1171,40 @@
 </tr>
 </tbody>
 </table>
-<p>Server Explorer applies the active connection's configured namespace and never auto-refreshes or installs persistent server code. Preview accepts only standard q identifiers and warns before materialization. Local cancellation stops waiting but does not interrupt q work already sent.</p>
-<p>Query History uses VS Code workspace <code>Memento</code>, not a syncable/global setting. It is not registered for Settings Sync and is not transmitted as telemetry. Stored fields are exact query text, stable connection ID and recorded label, timestamp, editor execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. Passwords and results are excluded. Query text can be commercially or personally sensitive, so enable the feature only in workspaces where local persistence is acceptable.</p>
+<p>KX Variables inspects the active q process only after explicit refresh and namespace expansion. It shows current root bindings and multi-character application namespaces, structurally excludes KX-reserved one-character top-level namespaces, and never synthesizes absent example bindings. Data and table bindings can open through a confirmed, bounded, fully qualified Results preview; functions, projections, namespaces, and unknown types remain metadata-only. Server Explorer and connected language intelligence remain scoped to the active connection's configured namespace. Neither feature auto-refreshes or installs persistent server code. Local cancellation stops waiting but does not claim to interrupt q work already sent.</p>
+<p>Query History uses VS Code workspace <code>Memento</code>, not a syncable/global setting. It is not registered for Settings Sync and is not transmitted as telemetry. Stored fields are exact query text, stable connection ID and recorded label, timestamp, editor or <code>notebook</code> execution kind, status (<code>succeeded</code>, <code>failed</code>, or <code>canceled</code> after an issued run's local wait is canceled), and duration. First-party Direct IPC <code>.qnb</code> and mixed-Jupyter q cells are included; metadata/preview operations, renderer actions, and Python-owned <code>%%q</code> are excluded. Passwords, zero-mode MIME payloads, live metadata, and all other results are excluded. Query text can be commercially or personally sensitive, so set <code>vscode-kdb.features.queryHistory</code> to <code>false</code> in workspaces where local persistence is not acceptable.</p>
+<h2 id="automatic-failure-reporting">Automatic failure reporting</h2>
+<table>
+<thead>
+<tr>
+<th>Setting</th>
+<th>Default</th>
+<th>Use</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>vscode-kdb.diagnostics.sentryDsn</code></td>
+<td><code>""</code></td>
+<td>GlitchTip/Sentry project DSN. Automatically reports KX-owned failures when configured.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.diagnostics.reportServerUrl</code></td>
+<td><code>""</code></td>
+<td>Full HTTP(S) URL receiving versioned diagnostic JSON by POST. Independent of Sentry.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.diagnostics.failSilently</code></td>
+<td><code>true</code></td>
+<td>Suppress reporter-status notices; no reporting popup is shown. Set <code>false</code> for bounded local notices in Output &gt; KX.</td>
+</tr>
+</tbody>
+</table>
+<p>All reporting settings are machine-scoped: configure them in <strong>User</strong> settings, or <strong>Remote User</strong> settings for the host running KX. Workspace and Workspace Folder values cannot enable or redirect reporting. There is no built-in destination, manual-report command, or implicit environment-variable opt-in. Clear a destination to disable it without reloading VS Code. Removing the last destination also stops remote context collection and discards pending reports. Local KX Output diagnostics remain active.</p>
+<p>When configured, reports include KX/VS Code/runtime/OS versions, execution/remote kind, allowlisted KX settings, up to 200 installed extension IDs/versions, process/host uptime, CPU/resource counters, free/total RAM, process memory and V8 heap summaries, packaged dependency versions and SHA-256 build identity. Operation context includes available surface, phase/status, transport/protocol, timings/limits, attempts, result shape counts and cancellation/readiness flags. KX start/success/failure breadcrumbs carry safe details and ephemeral operation IDs. Standard Sentry runtime/OS contexts and searchable surface/build/error-category tags accompany the detailed KX context. Unavailable data is marked explicitly. No extra q queries, user-file reads, Python commands or background resource polling are performed for reporting.</p>
+<p>Reports exclude credentials, DSN keys, authorization headers, connection identities/endpoints, query/document source, arbitrary q traceback messages, result values/column names, notebook contents/URIs, personal identifiers and absolute paths. Unstructured error messages are omitted; safe exception types/codes and KX frame coordinates remain available. VS Code's own failures, other extensions' failures, ordinary q Problems findings, routine cancellation and stale-result rejection are excluded. Reopening saved errors does not replay them. New KX saved-output renderer exceptions require an enabled host messaging bridge; rendering without that bridge remains available.</p>
+<p>Each destination has a five-second request timeout, one concurrent delivery, at most 20 pending events including the current send, ten attempts per rolling minute and at least 60-second equivalent-failure suppression. Reports/events are limited to 256 KiB; breadcrumbs are limited to 100 safe entries and 64 KiB. Optional resource details, excess extension inventory, then older breadcrumbs are reduced deterministically when needed to fit both wire formats, preserving the primary exception and owned frames with omission markers. False and zero values are retained; unavailable fields are identified explicitly. Delivery is best effort: failed reports and that destination's pending queue are dropped without retry, persistent spooling or interruption of extension operations. A delivery failure starts a one-hour cooldown for that destination. New failures during the cooldown are dropped before collecting report context; only a new failure recorded after the hour triggers another delivery attempt. No timer, background connectivity probe or failed-event replay is used. Other configured destinations stay independent. Delivery/connectivity failures in the reporting transport never become incidents. By default, <code>failSilently</code> suppresses reporter-status notices, and no reporting failure produces a popup. Clearing/replacing a destination revokes pending work; requests already received by a server cannot be recalled. Normal TLS verification is retained and redirects are not followed.</p>
+<p>See <a href="../troubleshooting/#configure-glitchtip-or-sentry">Troubleshooting</a> for project setup and the JSON receiver contract.</p>
 <h2 id="connections-and-diagnostics">Connections and diagnostics</h2>
 <h3 id="legacy-import-input">Legacy import input</h3>
 <p><code>sqltools.connections</code> is not a KX setting and is not contributed, written, watched, or synchronized by this extension. <strong>KX: Import SQLTools KDB Connections</strong> may inspect an already-existing value through VS Code's configuration API only when the user invokes the command. It reviews matching legacy KDB candidates from user, workspace, and workspace-folder scopes; SQLTools itself can be absent.</p>
@@ -1305,9 +1359,9 @@
 </tr>
 <tr>
 <td><code>vscode-kdb.results.viewer.autoFitMode</code></td>
-<td><code>wholeResult</code></td>
+<td><code>visibleRows</code></td>
 <td><code>wholeResult</code>, <code>visibleRows</code></td>
-<td>Measure the complete available result once, or adapt to currently rendered rows.</td>
+<td>Fit on-screen headers and cells by default, or opt into stable whole-result widths.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.results.viewer.columnWidths</code></td>
@@ -1353,7 +1407,7 @@
 </tr>
 </tbody>
 </table>
-<p>These settings choose supported top-level layouts and array formatting; they do not erase q cell metadata. Functions and standalone numeric q atoms always use qText so their type-preserving q representation is not mistaken for a one-cell grid. Numeric values nested in tables, lists, and dictionaries remain structured. Temporal atoms retain their temporal semantics. Default grid cells use concise q-aware text: symbols remain backticked, character vectors quoted, singleton vectors use <code>enlist</code>, and empty typed, nested, or special values retain distinguishing syntax. qText, IPC, and exact portable v2 persistence remain type-preserving. Table copy/export is intentionally different: it uses ordinary analyst strings, numbers, booleans, portable temporal values, and format-specific null/infinity handling without mutating the source value.</p>
+<p>These settings choose supported top-level layouts and array formatting; they do not erase q cell metadata. Functions and standalone numeric or symbol q atoms always use qText so their type-preserving q representation is not mistaken for a one-cell grid. Numeric values nested in tables, lists, and dictionaries remain structured. Temporal atoms retain their temporal semantics. Default grid cells use concise q-aware text: symbols remain backticked, character vectors quoted, singleton vectors use <code>enlist</code>, and empty typed, nested, or special values retain distinguishing syntax. qText, IPC, and exact portable v2/v3/v4 persistence remain type-preserving. Table copy/export is intentionally different: it uses ordinary analyst strings, numbers, booleans, portable temporal values, and format-specific null/infinity handling without mutating the source value.</p>
 <p>True q tables and keyed tables remain grids. q-text has a large-character safety cap and marks truncation. Both readability settings are disabled by default, do not affect source editors or execute q, and propagate to open/reused result panels and live direct notebook results.</p>
 <p>The KX Results panel and notebook renderer use the same <code>vscode-kdb.results.*</code> schema for density/dimensions, positional widths/auto-fit, row-index display, output defaults, copy/export and large-sort guardrails, elapsed time, qText/value strategies, and chart precision/source limits. A supported change made in either surface updates the same global setting and propagates to open panels and KX notebook outputs. <code>showColumnSummaryStatistics</code> is the explicit panel-only exception: it is durable under the same namespace but does not imply notebook summary computation or UI. The two legacy chart sampling keys remain schema-compatible but are deprecated and ignored as described below. <code>vscode-kdb.notebook.*</code> remains separate only for genuine notebook lifecycle/presentation concerns such as direct-controller registration, Direct IPC fallback limits, optional helper markers, and companion-output presentation. Per-output selection, visible-column order, sort, search, height, chart selection, hidden series, zoom, and navigator window are transient and are not written into <code>.ipynb</code>.</p>
 <p>Font size keeps its existing numeric storage contract. A value of <code>0</code> still means “use the VS Code default,” but notebook Settings presents that state as <strong>Auto</strong> rather than an ambiguous raw zero. Entering <code>0</code> or clearing the field writes <code>0</code>; no second preference or per-output font-size state is created.</p>
@@ -1438,7 +1492,7 @@
 </tbody>
 </table>
 <p>Width precedence is: a manual positional width, then the selected auto-fit result when enabled, then the active density's base <code>cellWidth</code>. <strong>Whole result</strong> scans the complete available displayed table once, including array/list values outside the virtual viewport, and remains stable while scrolling. <strong>Visible rows</strong> deliberately recomputes from the current virtual slice or saved-result page. For a bounded Python-helper or historical Direct IPC preview, “whole result” means all persisted rows; omitted rows are unavailable.</p>
-<p>Dragging a header edge writes its zero-based original/source position to the global sparse <code>columnWidths</code> map. Hiding or reordering a column does not retarget its width; the same ordinal source slot is reused across later query schemas, panels, notebook outputs, and VS Code/machine restarts. The map has no notebook-transport column cap, so every ordinary-panel source position can persist independently. Double-click the edge to clear one position or use <strong>Reset column widths</strong> to clear all positions. Manual widths remain authoritative even while auto-fit is enabled.</p>
+<p>Dragging a header edge writes its zero-based original/source position to the global sparse <code>columnWidths</code> map. Hiding or reordering a column does not retarget its width; the same ordinal source slot is reused across later query schemas, panels, notebook outputs, and VS Code/machine restarts. The map has no notebook-transport column cap, so every ordinary-panel source position can persist independently. Double-click the edge to clear one position or use <strong>Reset column widths</strong> to clear all positions. Manual widths remain authoritative while auto-fit is enabled. Explicitly turning auto-fit off and back on, or selecting <strong>Fit columns now</strong>, clears widths for the current columns and fits them again; ordinary reloads preserve manual widths. <strong>Fit columns now</strong> also works while auto-fit is already checked and does not rerun q.</p>
 <p>The <strong>Cell width</strong> textbox edits the active density's all-column base preset. Changing it or switching density intentionally clears all positional manual widths, including column zero. With auto-fit unchecked, the base preset then applies to every data column; with auto-fit enabled, its selected scope supplies non-manual widths.</p>
 <h2 id="charting">Charting</h2>
 <table>
@@ -1454,6 +1508,16 @@
 <td><code>vscode-kdb.results.viewer.chartMaxSourceRows</code></td>
 <td><code>2000000</code></td>
 <td>Maximum source rows scanned for a built-in chart; minimum <code>1</code>.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.results.viewer.tableDecimalPlaces</code></td>
+<td><code>-1</code></td>
+<td>Table floating-point display precision: <code>-1</code> is Auto; <code>0</code>–<code>12</code> rounds display only. Also available in quick settings.</td>
+</tr>
+<tr>
+<td><code>vscode-kdb.results.viewer.chartScientificNotationThreshold</code></td>
+<td><code>1000000</code></td>
+<td>Positive absolute numeric X/Y magnitude at which scientific notation starts. Temporal X labels retain time formatting.</td>
 </tr>
 <tr>
 <td><code>vscode-kdb.results.viewer.chartDecimalPlaces</code></td>
@@ -1472,7 +1536,7 @@
 </tr>
 </tbody>
 </table>
-<p>Initial/full and every settled absolute navigator or main-plot range render all eligible finite points below 7,000. At or above 7,000, ordinary line, scatter, and step views use deterministic reduction to exactly 7,000 plotted points when chart semantics do not genuinely consolidate them. Bar grouping, duplicate-X consolidation, box buckets, and candlestick aggregation can produce fewer visual groups or candles; status distinguishes those rendered items from eligible source rows. The navigator adds no Y-range policy. The deprecated keys stay in the schema so existing user/workspace configuration remains valid, but overrides are ignored.</p>
+<p>Initial/full and every settled absolute navigator or main-plot range render all eligible finite points below 7,000. At or above 7,000, ordinary line, scatter, and step views use deterministic reduction to exactly 7,000 plotted points when chart semantics do not genuinely consolidate them. Bar grouping, duplicate-X consolidation, box buckets, and candlestick aggregation can produce fewer visual groups or candles; grouped charts retain at most 12 categories and 36 generated series, with one shared family visual-item budget. Status distinguishes those rendered items from eligible source rows. The navigator adds no Y-range policy. The deprecated keys stay in the schema so existing user/workspace configuration remains valid, but overrides are ignored.</p>
 <h2 id="copy-export-and-warnings">Copy, export, and warnings</h2>
 <table>
 <thead>
@@ -1526,7 +1590,7 @@
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">"vscode-kdb.features.serverExplorer"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"vscode-kdb.serverExplorer.previewCellLimit"</span><span class="p">:</span><span class="w"> </span><span class="mi">10000</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">"vscode-kdb.features.queryHistory"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"vscode-kdb.features.queryHistory"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"vscode-kdb.queryHistory.maxEntries"</span><span class="p">:</span><span class="w"> </span><span class="mi">100</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"vscode-kdb.notebook.presentation"</span><span class="p">:</span><span class="w"> </span><span class="s2">"inline"</span><span class="p">,</span>
 <span class="w">  </span><span class="nt">"vscode-kdb.notebook.enableDirectController"</span><span class="p">:</span><span class="w"> </span><span class="kc">false</span><span class="p">,</span>
@@ -1548,6 +1612,7 @@
 <span class="w">  </span><span class="nt">"vscode-kdb.results.copyExportConfirmCellThreshold"</span><span class="p">:</span><span class="w"> </span><span class="mi">1000000</span>
 <span class="p">}</span>
 </code></pre></div>
+<p>Row/cell guardrails, warning preferences, elapsed-time format, and array separators are configured here in extension settings. Results and notebook quick settings retain separate table and chart decimal controls. Turning autofit on clears manual widths for the current columns; ordinary reloads preserve manual resizing.</p>
 
 
 

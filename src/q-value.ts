@@ -1,3 +1,5 @@
+import { tableDecimalPlaces as normalizeTableDecimals } from './number-display';
+
 export const Q_TYPE_NAMES = Object.freeze([
   'boolean',
   'guid',
@@ -46,6 +48,7 @@ export interface QGeneralNullValue {
 export type QBoundedLiteralLimit = 'chars' | 'items' | 'depth' | 'cycle' | 'unsupported';
 
 export interface QBoundedLiteralOptions {
+  tableDecimalPlaces?: number;
   maxChars?: number;
   maxItems?: number;
   maxDepth?: number;
@@ -318,14 +321,14 @@ export function qValueToLiteral(value: unknown): string {
  * retaining syntax that communicates shape (symbols, char vectors, enlist,
  * empty typed vectors, attributes, and nested/mixed values).
  */
-export function qValueToGridCellText(value: unknown): string {
+export function qValueToGridCellText(value: unknown, tableDecimalPlaces = -1): string {
   const issue = qRuntimeTreeIssue(value, new Set<object>());
   if (issue) {
     return isQVector(value)
       ? `[q ${qVectorType(value)} vector; ${value.length} items; ${issue}]`
       : `[${issue}]`;
   }
-  return qRuntimeGridCellText(value);
+  return qRuntimeGridCellText(value, tableDecimalPlaces);
 }
 
 /**
@@ -371,7 +374,7 @@ export function qValueToBoundedGridCellText(
   let limits = [...state.limits];
   let exact: string | undefined;
   if (limits.length === 0) {
-    exact = qRuntimeGridCellText(value);
+    exact = qRuntimeGridCellText(value, state.tableDecimalPlaces);
     if (exact.length > state.maxChars) {
       state.limits.add('chars');
       limits = [...state.limits];
@@ -427,7 +430,7 @@ export function portableQNodeToBoundedGridCellText(
   let limits = [...state.limits];
   let exact: string | undefined;
   if (limits.length === 0) {
-    exact = qRuntimeGridCellText(runtimeFromPortableNode(node as PortableQNode));
+    exact = qRuntimeGridCellText(runtimeFromPortableNode(node as PortableQNode), state.tableDecimalPlaces);
     if (exact.length > state.maxChars) {
       state.limits.add('chars');
       limits = [...state.limits];
@@ -543,6 +546,7 @@ function runtimeFromPortableNode(node: PortableQNode): unknown {
 }
 
 interface QBoundedLiteralState {
+  tableDecimalPlaces: number;
   chunks: string[];
   length: number;
   maxChars: number;
@@ -565,6 +569,7 @@ function boundedQState(
     maxItems: nonNegativeBoundedOption(options.maxItems, Number.MAX_SAFE_INTEGER),
     maxDepth: nonNegativeBoundedOption(options.maxDepth, MAX_PORTABLE_Q_DEPTH),
     renderMode,
+    tableDecimalPlaces: normalizeTableDecimals(options.tableDecimalPlaces),
     limits: new Set<QBoundedLiteralLimit>(),
     seen: new Set<object>(),
   };
@@ -1078,7 +1083,7 @@ function appendBoundedQGridVectorBody(
 
 function appendBoundedQAtom(state: QBoundedLiteralState, atom: QAtom): void {
   if (state.renderMode === 'grid') {
-    appendBoundedQText(state, qGridAtomText(atom));
+    appendBoundedQText(state, qGridAtomText(atom, state.tableDecimalPlaces));
     return;
   }
   if (atom.type === 'symbol' && !isSpecial(atom.value)) {
@@ -1268,20 +1273,20 @@ function qRuntimeLiteral(value: unknown): string {
   throw new TypeError(`Unsupported ${qShallowValueKind(value)} value in q literal.`);
 }
 
-function qRuntimeGridCellText(value: unknown): string {
+function qRuntimeGridCellText(value: unknown, places = -1): string {
   if (isQGeneralNull(value)) {
     return '::';
   }
   if (isQAtom(value)) {
-    return qGridAtomText(value);
+    return qGridAtomText(value, places);
   }
   if (isQVector(value)) {
-    return qGridVectorText(value);
+    return qGridVectorText(value, places);
   }
   throw new TypeError(`Unsupported ${qShallowValueKind(value)} value in q grid cell.`);
 }
 
-function qGridVectorText(value: unknown[]): string {
+function qGridVectorText(value: unknown[], places = -1): string {
   const type = qVectorType(value)!;
   const attribute = qVectorAttribute(value) || 0;
   let text: string;
@@ -1289,10 +1294,10 @@ function qGridVectorText(value: unknown[]): string {
     text = type === 'mixed' ? '()' : `"${qTypeCastCode(type)}"$()`;
   } else if (value.length === 1) {
     const item = type === 'mixed' ? value[0] : qVectorAtomAt(value, 0);
-    const itemText = qRuntimeGridCellText(item);
+    const itemText = qRuntimeGridCellText(item, places);
     text = `enlist ${isQVector(item) || isQGeneralNull(item) ? `(${itemText})` : itemText}`;
   } else if (type === 'mixed') {
-    text = `(${value.map(qRuntimeGridCellText).join(';')})`;
+    text = `(${value.map(item => qRuntimeGridCellText(item, places)).join(';')})`;
   } else if (type === 'char') {
     text = qStringLiteral(qCharVectorText(value));
   } else if (type === 'symbol') {
@@ -1303,13 +1308,18 @@ function qGridVectorText(value: unknown[]): string {
       if (!isQAtom(atom)) {
         throw new TypeError(`Invalid ${type} q vector item ${index}.`);
       }
-      return qGridAtomText(atom);
+      return qGridAtomText(atom, places);
     }).join(' ');
   }
   return attribute === 0 ? text : `${qAttributeLiteral(attribute)}#(${text})`;
 }
 
-function qGridAtomText(atom: QAtom): string {
+function qGridAtomText(atom: QAtom, places = -1): string {
+  const precision = normalizeTableDecimals(places);
+  if (precision >= 0 && (atom.type === 'real' || atom.type === 'float') &&
+    typeof atom.value === 'number' && Number.isFinite(atom.value)) {
+    return atom.value.toFixed(precision);
+  }
   if (isSpecial(atom.value)) {
     if (atom.type === 'symbol') {
       return '`';
@@ -1813,6 +1823,11 @@ function clockDisplay(
 
 function pad2(value: number): string {
   return Math.trunc(value).toString().padStart(2, '0');
+}
+
+/** Shared exact scalar validation for packed notebook columns. */
+export function isPortableQScalar(type: QTypeName, value: unknown): value is QScalarValue {
+  return validScalar(type, value);
 }
 
 function validScalar(type: QTypeName, value: unknown): value is QScalarValue {

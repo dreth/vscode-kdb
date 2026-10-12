@@ -1,3 +1,4 @@
+import { isFailureOperation, reportKxFailure, reportKxBreadcrumb } from './failure-record';
 export const KX_OUTPUT_CHANNEL_NAME = 'KX';
 export const REDACTED_DIAGNOSTIC_VALUE = '[redacted]';
 
@@ -31,6 +32,12 @@ export class KxDiagnostics {
   ) {}
 
   public event(event: KxDiagnosticEvent): void {
+    if (isFailureOperation(event.phase)) {
+      const details = { ...event.details, phase: event.phase, status: event.status, durationMs: event.durationMs,
+        transport: 'ipc' };
+      if (event.status === 'failed' && event.error !== undefined) reportKxFailure('ipc', event.phase, event.error, details);
+      else reportKxBreadcrumb('ipc', event.phase, details);
+    }
     const secrets = normalizedSecrets(event.secrets);
     const payload: DiagnosticDetails = {
       ...sanitizeDiagnosticDetails(event.details || {}, secrets),

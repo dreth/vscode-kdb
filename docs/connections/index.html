@@ -481,6 +481,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#runtime-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Runtime Variables
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#focused-server-explorer" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -966,6 +977,17 @@
 </li>
 
         <li class="md-nav__item">
+  <a href="#runtime-variables" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Runtime Variables
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
   <a href="#focused-server-explorer" class="md-nav__link">
     <span class="md-ellipsis">
 
@@ -1191,6 +1213,13 @@
 <p>During discovery, the importer inspects the password field of a matching legacy KDB profile only to classify it as absent, present, or invalid; the value is not returned in the candidate model or retained through review. After that profile is selected and the modal copy choice is confirmed, KX re-reads only its exact scoped source entry, validates the password, immediately hands it to the normal SecretStorage transaction, and releases the source snapshot. It is never retained as a KX setting. Workspace-scoped source data receives the same validation as every other untrusted configuration value.</p>
 <h2 id="network-security">Network security</h2>
 <p>Direct q IPC is plaintext in transit, including handshake credentials and query traffic. The standalone release does not implement TLS, SSH configuration, gateways, brokers, or remote orchestration. Use loopback, a trusted private network, or a separately managed secure tunnel whose lifecycle remains outside the extension.</p>
+<h2 id="runtime-variables">Runtime Variables</h2>
+<p><strong>KX Variables</strong> is an always-visible tree beside <strong>KX Connections</strong>. It does not poll or connect automatically. Select <strong>KX: Refresh Variables</strong> to inspect the active connected direct q IPC process. Refresh lists current root bindings and multi-character application namespace roots; expand a namespace to load its immediate bindings and nested namespaces on demand. Successful children are cached only for that refresh generation.</p>
+<p>Discovery fetches safe names and q type/classification metadata without returning data values. The tree includes data, tables, functions, projections, and conservatively classified unknown bindings that actually exist at request time. It never creates expected entries: for example, <code>.demo.calculate</code> appears only if q currently reports <code>.demo</code> and then <code>calculate</code>. Ordinary dictionaries remain data leaves rather than being traversed as namespaces.</p>
+<p>All one-character top-level namespaces and their descendants are excluded because q reserves that namespace class for KX; this structurally covers <code>.Q</code>, <code>.q</code>, <code>.z</code>, <code>.h</code>, <code>.j</code>, <code>.m</code>, and version-dependent system roots without relying on a fixed list. One-character nested namespaces beneath a multi-character application root remain visible. An inactive or disconnected profile, an empty process or context, omitted non-standard names, cancellation, bounds, permission/query errors, and a changed active connection or namespace each produce an explicit status instead of stale rows.</p>
+<p>Connections, Variables, and Query History appear as separate native collapsible sections in the same KX sidebar. Drag section headers to reorder them, and use <strong>… &gt; Views</strong> or a header context menu to show or hide them. VS Code owns and persists this layout; no KX-specific ordering setting is required.</p>
+<p>Hover or keyboard-focus a current data or table row to reveal <strong>Open Binding in KX Results</strong>. Functions, projections, namespaces, and unknown types are visible metadata but are never actionable. The action shows a modal warning because scalars and nested values can still be large, then revalidates the exact fully qualified binding and active connection/namespace before issuing a bounded absolute-path preview through the normal KX Results pipeline. <code>vscode-kdb.serverExplorer.previewCellLimit</code> supplies the shared bound for table cells and outer list/dictionary items. Every path segment must be a standard q identifier, and a binding that disappeared or changed kind must be refreshed rather than opened from an old row.</p>
+<p>KX Variables is the process-wide binding and namespace inventory. The optional Server Explorer remains a separate configured-namespace view with grouped tables/functions and on-demand table-column metadata; connected language intelligence also remains configured-namespace-only. These consumers share identifier, classification, bounds, confirmation, and stale-generation safety without receiving the Variables view's process-wide names.</p>
 <h2 id="focused-server-explorer">Focused Server Explorer</h2>
 <p><code>vscode-kdb.features.serverExplorer</code> defaults to <code>false</code>. When enabled, <strong>KX Server Explorer</strong> is a separate tree under the KX activity bar whenever an active direct q IPC profile exists. A disconnected profile leaves a clear reconnect status instead of stale metadata; requests require it to be connected. The connection tree remains responsible only for connection state and lifecycle.</p>
 <p>The explorer never polls. Select <strong>KX: Refresh Server Explorer</strong> to query the active profile's configured namespace. Refresh uses q-native <code>tables[]</code> for table names and obtains names plus safe q type metadata for the <strong>Variables &amp; Functions</strong> category without fetching the remote values. Only safely recognized function type codes are labelled as functions; unknown or other objects are conservatively labelled as variables. Non-standard names that cannot be executed safely are omitted and reported.</p>

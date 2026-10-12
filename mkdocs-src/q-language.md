@@ -1,6 +1,6 @@
 # q language tooling
 
-KX for VS Code 0.2.29 provides one offline-first q authoring model for `.q` files, q-language Jupyter cells, and every code cell in a `.qnb` notebook. It requires VS Code 1.101 or newer because the bundled language stack targets the Extension Host's Node 22 runtime. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
+KX for VS Code 0.2.44 provides one offline-first q authoring model for `.q` files, q-language Jupyter cells, and every code cell in a `.qnb` notebook. It requires VS Code 1.101 or newer because the bundled language stack targets the Extension Host's Node 22 runtime. Extension 0.2.23 remains the fallback for VS Code 1.96–1.100.
 
 ## Included features
 

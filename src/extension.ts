@@ -1,4 +1,8 @@
 import * as vscode from 'vscode';
+import { initializeFailureReporting } from './failure-reporting-host';
+import { reportKxFailure, reportKxBreadcrumb, newFailureOperationId, configureFailureObserver } from './failure-record';
+import type { FailureReporter } from './failure-reporting';
+import { notebookOutputOwnershipCache } from './notebook-output-ownership';
 import { connectionEndpoint, KxConnection } from './connection';
 import { ConnectionCommands } from './connection-commands';
 import { ConnectionManager } from './connection-manager';
@@ -22,6 +26,10 @@ import {
   KxQNotebookRunner,
 } from './notebook-controller';
 import {
+  executeNotebookScriptWithHistory,
+  NotebookHistoryAdapter,
+} from './notebook-query-history';
+import {
   LiveNotebookResultStore,
   LiveNotebookSlice,
   LiveNotebookSliceRequest,
@@ -40,7 +48,9 @@ import {
   historyRerunRequiresConfirmation,
   historyTransportKind,
   QueryHistoryEntry,
+  QUERY_HISTORY_STORAGE_KEY,
   QueryHistoryStatus,
+  normalizeQueryHistoryEntries,
 } from './query-history-model';
 import { qSelectionExecutionKind, selectedTextOrCurrentLine } from './q-text';
 import { QLanguageClientController } from './q-language-client';
@@ -49,9 +59,13 @@ import { QnbNotebookSupport } from './qnb-notebook';
 import { QueryConnectionSelectionSession } from './query-connection-selection';
 
 let activeConnectionManager: ConnectionManager | undefined;
+let activeFailureReporter: FailureReporter | undefined;
 const queryConnectionSelectionSession = new QueryConnectionSelectionSession();
 
 export interface KxExtensionHostTestApi {
+  reportingState(): { enabled: boolean; generation: number };
+  reportSyntheticFailure(): string | undefined;
+  waitForFailureReports(): Promise<void>;
   connections(): readonly KxConnection[];
   connection(id: string): KxConnection | undefined;
   activeConnectionId(): string | undefined;
@@ -73,6 +87,7 @@ export interface KxExtensionHostTestApi {
   ): void;
   holdNextNotebookQuery(): ExtensionHostNotebookQueryGate;
   notebookQueryCalls(): readonly { connectionId: string; source: string }[];
+  queryHistoryEntries(): readonly QueryHistoryEntry[];
   resultsPanelSnapshot(): {
     panelCount: number;
     visible: boolean;
@@ -108,8 +123,10 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   const extensionHostNotebookExecutorEnabled = extensionHostTestEnabled &&
     process.env.VSCODE_KDB_EXTENSION_HOST_NOTEBOOK_EXECUTOR === '1';
   const output = vscode.window.createOutputChannel(KX_OUTPUT_CHANNEL_NAME);
+  const reporter = initializeFailureReporting(context, output);
+  activeFailureReporter = reporter;
   const diagnostics = new KxDiagnostics(output);
-  const qnbNotebooks = new QnbNotebookSupport();
+  const qnbNotebooks = new QnbNotebookSupport(output);
   configurePerfOutput(value => output.appendLine(value));
   const store = new ConnectionStore(context);
   const manager = new ConnectionManager(store, diagnostics);
@@ -123,14 +140,22 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   const qLanguage = new QLanguageClientController(context, output, qMetadata);
   const connectionCommands = new ConnectionCommands(store, manager, tree);
   const liveNotebookResults = new LiveNotebookResultStore();
+  let features: FeatureControls | undefined;
+  const notebookHistory: NotebookHistoryAdapter = {
+    capture: () => features?.captureHistory(),
+    record: (capture, input) => features
+      ? features.recordHistory(capture, input)
+      : Promise.resolve(),
+  };
   const notebookBridge = extensionHostNotebookExecutorEnabled && extensionHostNotebookExecutor
     ? directQNotebookBridge(
       store,
       manager,
       tree,
-      extensionHostNotebookExecutor.executeScript
+      extensionHostNotebookExecutor.executeScript,
+      notebookHistory
     )
-    : directQNotebookBridge(store, manager, tree);
+    : directQNotebookBridge(store, manager, tree, undefined, notebookHistory);
   const notebookRunner = new KxQNotebookRunner(
     notebookBridge,
     liveNotebookResults
@@ -148,7 +173,6 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
   connectionCommands.register(context);
   updatePerfTraceSetting();
 
-  let features!: FeatureControls;
   features = new FeatureControls(
     context,
     store,
@@ -160,7 +184,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       store,
       manager,
       diagnostics,
-      features,
+      features!,
       query,
       {
         mode: 'new',
@@ -174,7 +198,7 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       store,
       manager,
       diagnostics,
-      features,
+      features!,
       entry.queryText,
       {
         mode: 'replace',
@@ -200,18 +224,26 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
     qnbNotebooks,
     notebookRunner,
     notebookIntegration,
-    { dispose: () => liveNotebookResults.clear() },
-    vscode.workspace.onDidCloseNotebookDocument(notebook =>
-      liveNotebookResults.closeNotebook(notebook.uri.toString())),
+    { dispose: () => { liveNotebookResults.clear(); notebookOutputOwnershipCache.clear(); } },
+    vscode.workspace.onDidCloseNotebookDocument(notebook => {
+      liveNotebookResults.closeNotebook(notebook.uri.toString());
+      notebookOutputOwnershipCache.clear();
+    }),
     vscode.workspace.onDidChangeNotebookDocument(event => {
       const notebookUri = event.notebook.uri.toString();
       for (const change of event.contentChanges) {
+        if (change.removedCells.length > 0) {
+          notebookOutputOwnershipCache.clear();
+        }
         for (const cell of change.removedCells) {
           liveNotebookResults.removeCell(notebookUri, cell.document.uri.toString());
         }
       }
       for (const change of event.cellChanges) {
         if (change.outputs !== undefined) {
+          if (change.cell.outputs.length === 0) {
+            notebookOutputOwnershipCache.clear();
+          }
           reconcileLiveNotebookCellOutputs(
             liveNotebookResults,
             notebookUri,
@@ -223,11 +255,11 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
     }),
     { dispose: () => configurePerfOutput(undefined) },
     vscode.commands.registerCommand('vscode-kdb.runSelectionOrCurrentLine', () =>
-      runSelectionOrCurrentLine(context, store, manager, diagnostics, features, 'replace')),
+      runSelectionOrCurrentLine(context, store, manager, diagnostics, features!, 'replace')),
     vscode.commands.registerCommand('vscode-kdb.runScript', () =>
-      runScript(context, store, manager, diagnostics, features, 'replace')),
+      runScript(context, store, manager, diagnostics, features!, 'replace')),
     vscode.commands.registerCommand('vscode-kdb.runSelectionInNewResult', () =>
-      runSelectionOrCurrentLine(context, store, manager, diagnostics, features, 'new')),
+      runSelectionOrCurrentLine(context, store, manager, diagnostics, features!, 'new')),
     vscode.commands.registerCommand('vscode-kdb.copyResultSelection', () =>
       KxResultsPanel.copySelectionFromActivePanel()),
     vscode.commands.registerCommand('vscode-kdb.openLocalDataServer', () =>
@@ -298,6 +330,12 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
         extensionHostNotebookExecutor.queueTable(columns, rows),
       holdNextNotebookQuery: () => extensionHostNotebookExecutor.holdNextQuery(),
       notebookQueryCalls: () => extensionHostNotebookExecutor.calls(),
+      queryHistoryEntries: () => normalizeQueryHistoryEntries(
+        context.workspaceState.get<unknown>(QUERY_HISTORY_STORAGE_KEY),
+        vscode.workspace
+          .getConfiguration('vscode-kdb.queryHistory')
+          .get<unknown>('maxEntries')
+      ),
       resultsPanelSnapshot: () => KxResultsPanel.extensionHostTestSnapshot(),
       hasLiveNotebookResult: (liveId: string, notebookUri: string) =>
         liveNotebookResults.has(liveId, notebookUri),
@@ -317,11 +355,32 @@ export function activate(context: vscode.ExtensionContext): KxExtensionExports |
       },
       qLanguageServerRunning: () => qLanguage.isRunning(),
       qLanguageServerReady: () => qLanguage.ready(),
+      reportingState: () => reporter.state,
+      reportSyntheticFailure: () => {
+        if (!reporter.state.enabled) return undefined;
+        const operationId = newFailureOperationId();
+        const details = { operationId, surface: 'results', transport: 'ipc', executionMode: 'query',
+          attemptCount: 1, protocolVersion: 3, connected: true, ready: true, issued: true,
+          canceled: false, stale: false, timeoutMs: 30000, durationMs: 12, queryChars: 0 };
+        reporter.breadcrumb('ipc', 'connect', { ...details, phase: 'connect', status: 'start' });
+        reporter.breadcrumb('ipc', 'handshake', { ...details, phase: 'handshake', status: 'success' });
+        reporter.breadcrumb('editor', 'query', { ...details, phase: 'query', status: 'start' });
+        const cause = Object.assign(new Error('PRIVATE_FIXTURE_QUERY_TOKEN_PATH'), { code: 'ECONNRESET' });
+        try { throw new TypeError('Synthetic KX-owned reporting smoke test', { cause }); }
+        catch (error) {
+          reporter.breadcrumb('editor', 'query', { ...details, phase: 'query', status: 'failed' });
+          return reporter.capture('editor', 'query', error, details);
+        }
+      },
+      waitForFailureReports: () => reporter.idle(),
     }),
   });
 }
 
 export async function deactivate(): Promise<void> {
+  activeFailureReporter?.dispose();
+  activeFailureReporter = undefined;
+  configureFailureObserver(undefined, { enabled: false, generation: 0 });
   configurePerfOutput(undefined);
   KxResultsPanel.stopAllLocalDataServers();
   const manager = activeConnectionManager;
@@ -486,6 +545,9 @@ async function executeQText(
   );
   const version = panel.currentVersion();
   const started = Date.now();
+  const operationId = newFailureOperationId();
+  const reportingDetails = { operationId, surface: 'results', transport: 'ipc', executionMode: request.transport, queryChars: text.length };
+  reportKxBreadcrumb('editor', 'query', { ...reportingDetails, status: 'start' });
   const historyCapture = request.historyKind ? features.captureHistory() : undefined;
   let issued = false;
   let issuedAt = started;
@@ -585,6 +647,7 @@ async function executeQText(
     if (canceled || !panel.isLoadingVersion(version)) {
       return;
     }
+    reportKxBreadcrumb('editor', 'query', { ...reportingDetails, status: 'success', issued, durationMs: Date.now() - started });
     const panelResult = toPanelResult(value, text, connection.name, Date.now() - started);
     panel.showResult(panelResult);
   } catch (error) {
@@ -597,6 +660,7 @@ async function executeQText(
     if (!panel.isLoadingVersion(version)) {
       return;
     }
+    reportKxFailure('editor', 'query', error, { ...reportingDetails, issued, canceled, stale: false, durationMs: Date.now() - started });
     const message = error instanceof Error ? error.message : String(error);
     const messages = [
       `q failed on ${connection.name} (${connectionEndpoint(connection)}).`,
@@ -717,15 +781,21 @@ function directQNotebookBridge(
   store: ConnectionStore,
   manager: ConnectionManager,
   tree: ConnectionsTreeProvider,
-  executeScriptOverride?: DirectQNotebookBridge['executeScript']
+  executeScriptOverride?: DirectQNotebookBridge['executeScript'],
+  history?: NotebookHistoryAdapter
 ): DirectQNotebookBridge {
+  const executeScript = executeScriptOverride ?? ((connection, source, onIssued, signal, shouldIssue) =>
+    manager.executeScript(connection, source, onIssued, signal, shouldIssue));
   return {
     activeConnection: () => store.activeConnection(),
     connections: () => store.connections(),
     connectionById: connectionId => store.connection(connectionId),
     isConnected: connectionId => manager.isConnected(connectionId),
-    executeScript: executeScriptOverride ?? ((connection, source, onIssued, signal, shouldIssue) =>
-      manager.executeScript(connection, source, onIssued, signal, shouldIssue)),
+    executeScript: (...args) => executeNotebookScriptWithHistory(
+      executeScript,
+      history,
+      ...args
+    ),
     errorMessage: async (error, connection) => {
       const secrets: string[] = [];
       let secretLookupFailed = false;

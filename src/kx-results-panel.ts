@@ -1,6 +1,9 @@
 import * as os from 'os';
 import * as path from 'path';
+import { tableDecimalPlaces, scientificNotationThreshold, formatNumericAxis } from './number-display';
 import * as vscode from 'vscode';
+import { currentFailureReportingState, onFailureReportingChanged, forwardKxFailure,
+  reportKxFailure, FailureOperation, FAILURE_STATE_MESSAGE } from './failure-record';
 import {
   CHART_MAX_SOURCE_ROWS,
   ChartDataError,
@@ -28,6 +31,7 @@ import {
   isValidChartRange,
   issueChartZoomLifecycleRequest,
   mergeChartPixelGaps,
+  chartSourceGapPixels,
   panChartViewport,
   panChartViewportByPixels,
   recenterChartNavigatorRange,
@@ -239,7 +243,7 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   cellWidth: 160,
   columnWidths: {},
   autoFitColumns: true,
-  autoFitMode: 'wholeResult',
+  autoFitMode: 'visibleRows',
   rowHeight: 28,
   fontSize: 0,
   density: 'standard',
@@ -253,6 +257,8 @@ const DEFAULT_PANEL_SETTINGS: KxPanelSettings = {
   copyExportConfirmCellThreshold: COPY_EXPORT_CONFIRM_CELL_THRESHOLD,
   localDataServerFullExportCellLimit: LOCAL_DATA_SERVER_FULL_EXPORT_CELL_LIMIT,
   elapsedTimeDisplay: 'auto',
+  tableDecimalPlaces: -1,
+  chartScientificNotationThreshold: 1000000,
   chartDecimalPlaces: CHART_DECIMAL_PLACES_DEFAULT,
   chartMaxSourceRows: CHART_MAX_SOURCE_ROWS,
   qTextSyntaxHighlighting: false,
@@ -332,6 +338,7 @@ export class KxResultsPanel {
     version: number;
     table: ColumnarPanelResult;
     arrayDisplayFormat: ArrayDisplayFormat;
+    tableDecimalPlaces: number;
     lengths: number[];
   } | undefined;
   private wholeResultColumnLengthScan: {
@@ -339,6 +346,7 @@ export class KxResultsPanel {
     version: number;
     table: ColumnarPanelResult;
     arrayDisplayFormat: ArrayDisplayFormat;
+    tableDecimalPlaces: number;
   } | undefined;
   private wholeResultColumnLengthScanId = 0;
   private activeSearchId = 0;
@@ -598,11 +606,13 @@ export class KxResultsPanel {
     }, undefined, this.disposables);
     this.panel.webview.onDidReceiveMessage(message => {
       void this.onMessage(message).catch(error => {
+        reportKxFailure('results', 'action', error, this.failureDetails('action'));
         const detail = toError(error).message;
         void Promise.resolve(vscode.window.showErrorMessage(`KX Results action failed: ${detail}`))
           .catch(notificationError => console.error(toError(notificationError).message));
       });
     }, undefined, this.disposables);
+    this.disposables.push(onFailureReportingChanged(state => this.post({ type: FAILURE_STATE_MESSAGE, ...state })));
   }
 
   private disposePanel(): void {
@@ -654,13 +664,26 @@ export class KxResultsPanel {
     KxResultsPanel.lastActivePanel = this;
   }
 
+  private failureDetails(phase: FailureOperation): Record<string, unknown> {
+    const result = this.result;
+    return { surface: 'results', phase, ready: !!result,
+      ...(!result ? {} : isTextPanelResult(result) ? { outputMode: 'qText' }
+        : { outputMode: 'grid', rowCount: result.table.rowCount, columnCount: result.table.columns.length }) };
+  }
+
   private async onMessage(message: any): Promise<void> {
     if (!message || typeof message.type !== 'string') {
       return;
     }
 
+    if (message.type === 'kxFailure') {
+      if (!this.disposed) forwardKxFailure(message, 'results-renderer');
+      return;
+    }
     if (message.type === 'ready') {
       this.ready = true;
+      const reporting = currentFailureReportingState();
+      if (reporting.enabled) this.post({ type: FAILURE_STATE_MESSAGE, ...reporting });
       if (this.result) {
         this.postResultMetadata();
       } else if (this.loading) {
@@ -750,6 +773,11 @@ export class KxResultsPanel {
 
     if (message.type === 'searchRows') {
       await this.searchRows(message);
+      return;
+    }
+
+    if (message.type === 'openResultSettings') {
+      await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:DanielAlonso.vscode-kdb vscode-kdb.results');
       return;
     }
 
@@ -1204,6 +1232,7 @@ export class KxResultsPanel {
         return;
       }
       const err = toError(error);
+      if (!(error instanceof ChartDataError)) reportKxFailure('results', 'chart', error, this.failureDetails('chart'));
       this.post({
         type: 'chartError',
         version: requestVersion,
@@ -1305,6 +1334,7 @@ export class KxResultsPanel {
       await vscode.workspace.fs.writeFile(uri, content);
     } catch (error) {
       const errorMessage = `Chart export failed: ${toError(error).message}`;
+      reportKxFailure('results', 'export', error, this.failureDetails('export'));
       await vscode.window.showErrorMessage(errorMessage);
       if (this.version === requestVersion && this.activeChartRequestId === requestId) {
         this.post({ type: 'chartExportError', version: requestVersion, requestId, message: errorMessage });
@@ -1377,7 +1407,8 @@ export class KxResultsPanel {
     if (cached &&
       cached.version === this.version &&
       cached.table === table &&
-      cached.arrayDisplayFormat === settings.arrayDisplayFormat) {
+      cached.arrayDisplayFormat === settings.arrayDisplayFormat &&
+      cached.tableDecimalPlaces === settings.tableDecimalPlaces) {
       return cached.lengths.slice();
     }
     return undefined;
@@ -1395,7 +1426,8 @@ export class KxResultsPanel {
     if (cached &&
       cached.version === this.version &&
       cached.table === table &&
-      cached.arrayDisplayFormat === settings.arrayDisplayFormat) {
+      cached.arrayDisplayFormat === settings.arrayDisplayFormat &&
+      cached.tableDecimalPlaces === settings.tableDecimalPlaces) {
       this.cancelWholeResultColumnLengthScan();
       return;
     }
@@ -1403,7 +1435,8 @@ export class KxResultsPanel {
     if (pending &&
       pending.version === this.version &&
       pending.table === table &&
-      pending.arrayDisplayFormat === settings.arrayDisplayFormat) {
+      pending.arrayDisplayFormat === settings.arrayDisplayFormat &&
+      pending.tableDecimalPlaces === settings.tableDecimalPlaces) {
       return;
     }
     const request = {
@@ -1411,11 +1444,12 @@ export class KxResultsPanel {
       version: this.version,
       table,
       arrayDisplayFormat: settings.arrayDisplayFormat,
+      tableDecimalPlaces: settings.tableDecimalPlaces,
     };
     this.wholeResultColumnLengthScan = request;
     void widestDisplayedColumnTextLengthsAsync(
       table,
-      { arrayDisplayFormat: request.arrayDisplayFormat },
+      { arrayDisplayFormat: request.arrayDisplayFormat, tableDecimalPlaces: request.tableDecimalPlaces },
       {
         continueScanning: () =>
           !this.disposed &&
@@ -1436,6 +1470,7 @@ export class KxResultsPanel {
         version: request.version,
         table: request.table,
         arrayDisplayFormat: request.arrayDisplayFormat,
+        tableDecimalPlaces: request.tableDecimalPlaces,
         lengths,
       };
       this.post({
@@ -1915,6 +1950,7 @@ export class KxResultsPanel {
       );
     } catch (error) {
       const detail = clipboardCopyErrorMessage(format, error);
+      if (!(error instanceof KxResultExportLimitError)) reportKxFailure('results', 'copy', error, this.failureDetails('copy'));
       if (!(error instanceof KxResultExportLimitError) || error.kind !== 'textBytes') {
         await vscode.window.showErrorMessage(detail);
         if (this.isCurrentVersion(requestVersion)) {
@@ -3136,7 +3172,9 @@ export class KxResultsPanel {
         </details>
         <details class="settings-section" open>
           <summary class="settings-heading"><span>Preferences</span></summary>
+          <button id="openResultSettings">Extension settings</button>
           <label class="checkbox"><input id="autoFit" type="checkbox" disabled>Auto-fit columns</label>
+          <button id="fitColumnsNow" type="button" disabled>Fit columns now</button>
           <label class="settings-row"><span>Auto-fit scope</span><select id="autoFitMode">
             <option value="wholeResult">Whole result</option>
             <option value="visibleRows">Visible rows</option>
@@ -3144,23 +3182,9 @@ export class KxResultsPanel {
           <label class="checkbox"><input id="settingsShowRowIndex" type="checkbox">Show row #</label>
           <label class="checkbox"><input id="settingsIncludeHeaders" type="checkbox">Include headers</label>
           <label class="checkbox"><input id="settingsIncludeRowIndex" type="checkbox">Include row #</label>
-          <label class="checkbox"><input id="settingsHideLargeResultWarnings" type="checkbox">Hide large-result warnings</label>
-          <label class="checkbox"><input id="settingsHideLargeSortWarnings" type="checkbox">Hide large-sort warnings</label>
-          <label class="settings-row"><span>Large-sort warning rows</span><input id="settingsLargeSortWarningRowThreshold" type="number" min="${MIN_LARGE_SORT_WARNING_ROW_THRESHOLD}" max="${MAX_LARGE_SORT_WARNING_ROW_THRESHOLD}" step="1" title="Warn only when the current result has more than this many rows"></label>
           <label class="checkbox"><input id="settingsShowColumnSummaryStatistics" type="checkbox">Show column summary statistics</label>
-          <label class="settings-row"><span>Copy/export confirm cells</span><input id="settingsCopyExportConfirmCellThreshold" type="number" min="1" step="1"></label>
-          <label class="settings-row"><span>Local server current.* cell limit</span><input id="settingsLocalDataServerFullExportCellLimit" type="number" min="1" step="1"></label>
+          <label class="settings-row"><span>Table decimals</span><input id="settingsTableDecimalPlaces" type="number" min="0" max="12" step="1" placeholder="Auto" title="Table decimals, 0–12; blank preserves original precision"></label>
           <label class="settings-row"><span>Chart decimals</span><input id="settingsChartDecimalPlaces" type="number" min="0" max="12" step="1" title="Decimal places for chart numeric labels, 0-12"></label>
-          <label class="settings-row"><span>Chart source rows</span><input id="settingsChartMaxSourceRows" type="number" min="1" step="1"></label>
-          <label class="settings-row"><span>Elapsed time</span><select id="settingsElapsedTimeDisplay">
-            <option value="auto">Auto</option>
-            <option value="milliseconds">Milliseconds</option>
-          </select></label>
-          <label class="settings-row"><span>Arrays</span><select id="settingsArrayDisplayFormat">
-            <option value="commaSpace">Comma + space</option>
-            <option value="space">Spaces</option>
-            <option value="raw">Raw brackets</option>
-          </select></label>
           <label class="checkbox" title="Result-webview qText only; source-editor highlighting is unchanged"><input id="settingsQTextSyntaxHighlighting" type="checkbox">Highlight qText output</label>
           <label class="checkbox" title="Display-only; unsupported, ambiguous, or malformed qText remains unchanged"><input id="settingsQTextDisplayFormatting" type="checkbox">Format supported qText output</label>
 
@@ -3269,6 +3293,45 @@ export class KxResultsPanel {
   <script nonce="${nonce}">
     (function () {
       const vscode = acquireVsCodeApi();
+      let kxReporting = { enabled: false, generation: 0 };
+      let reportedFailures;
+      function guardRendererCallback(callback) {
+        return function(...args) {
+          if (!kxReporting.enabled) return callback.apply(this, args);
+          try {
+            const result = callback.apply(this, args);
+            if (result && typeof result.then === 'function') {
+              return result.catch(error => { reportOwnedRendererFailure(error, 'action'); throw error; });
+            }
+            return result;
+          } catch (error) { reportOwnedRendererFailure(error, 'action'); throw error; }
+        };
+      }
+      function reportOwnedRendererFailure(error, operation) {
+        if (!kxReporting.enabled) return;
+        if (error && typeof error === 'object') {
+          if (reportedFailures?.has(error)) return;
+          reportedFailures?.add(error);
+        }
+        try {
+          const types = ['Error', 'TypeError', 'RangeError', 'SyntaxError', 'ReferenceError', 'URIError'];
+          const frames = [];
+          const lines = typeof error?.stack === 'string' ? error.stack.slice(0, 32768).split(String.fromCharCode(10)).slice(1, 100) : [];
+          for (const line of lines) {
+            const match = line.match(/:(\\d+):(\\d+)\\)?$/);
+            if (match && line.includes(window.location.href) && frames.length < 50) {
+              frames.push({ filename: 'results-webview.js', lineno: Number(match[1]), colno: Number(match[2]) });
+            }
+          }
+          vscode.postMessage({ type: 'kxFailure', generation: kxReporting.generation,
+            component: 'results-renderer', operation,
+            details: { surface: 'results', phase: operation, status: 'failed', transport: 'renderer',
+              rowCount: Number.isFinite(data.rowCount) ? Math.max(0, data.rowCount) : 0,
+              columnCount: data.columns.length, outputMode: data.mode === 'text' ? 'qText' : 'grid' },
+            failure: { exceptions: [{ type: types.includes(error?.name) ? error.name : 'Error',
+              value: 'Unstructured error message omitted', frames }] } });
+        } catch { /* Reporting never disrupts the webview. */ }
+      }
       const INDEX_WIDTH = 64;
       const OVERSCAN_ROWS = 8;
       const OVERSCAN_COLUMNS = 2;
@@ -3281,7 +3344,7 @@ export class KxResultsPanel {
         cellWidth: 160,
         columnWidths: {},
         autoFitColumns: true,
-        autoFitMode: 'wholeResult',
+        autoFitMode: 'visibleRows',
         rowHeight: 28,
         fontSize: 0,
         density: 'standard',
@@ -3295,6 +3358,8 @@ export class KxResultsPanel {
         copyExportConfirmCellThreshold: 1000000,
         localDataServerFullExportCellLimit: 1000000,
         elapsedTimeDisplay: 'auto',
+        tableDecimalPlaces: -1,
+        chartScientificNotationThreshold: 1000000,
         chartDecimalPlaces: 4,
         chartMaxSourceRows: ${CHART_MAX_SOURCE_ROWS},
         qTextSyntaxHighlighting: false,
@@ -3320,6 +3385,7 @@ export class KxResultsPanel {
       const includeRowIndex = document.getElementById('includeRowIndex');
       const includeHeaders = document.getElementById('includeHeaders');
       const autoFit = document.getElementById('autoFit');
+      const fitColumnsNowButton = document.getElementById('fitColumnsNow');
       const autoFitMode = document.getElementById('autoFitMode');
       const sortStatus = document.getElementById('sortStatus');
       const searchInput = document.getElementById('searchInput');
@@ -3332,16 +3398,9 @@ export class KxResultsPanel {
       const settingsShowRowIndex = document.getElementById('settingsShowRowIndex');
       const settingsIncludeHeaders = document.getElementById('settingsIncludeHeaders');
       const settingsIncludeRowIndex = document.getElementById('settingsIncludeRowIndex');
-      const settingsHideLargeResultWarnings = document.getElementById('settingsHideLargeResultWarnings');
-      const settingsHideLargeSortWarnings = document.getElementById('settingsHideLargeSortWarnings');
-      const settingsLargeSortWarningRowThreshold = document.getElementById('settingsLargeSortWarningRowThreshold');
       const settingsShowColumnSummaryStatistics = document.getElementById('settingsShowColumnSummaryStatistics');
-      const settingsCopyExportConfirmCellThreshold = document.getElementById('settingsCopyExportConfirmCellThreshold');
-      const settingsLocalDataServerFullExportCellLimit = document.getElementById('settingsLocalDataServerFullExportCellLimit');
+      const settingsTableDecimalPlaces = document.getElementById('settingsTableDecimalPlaces');
       const settingsChartDecimalPlaces = document.getElementById('settingsChartDecimalPlaces');
-      const settingsChartMaxSourceRows = document.getElementById('settingsChartMaxSourceRows');
-      const settingsElapsedTimeDisplay = document.getElementById('settingsElapsedTimeDisplay');
-      const settingsArrayDisplayFormat = document.getElementById('settingsArrayDisplayFormat');
       const settingsQTextSyntaxHighlighting = document.getElementById('settingsQTextSyntaxHighlighting');
       const settingsQTextDisplayFormatting = document.getElementById('settingsQTextDisplayFormatting');
 
@@ -3427,6 +3486,7 @@ export class KxResultsPanel {
       let columnWidthPositionSchema = [];
       let resizeState = null;
       let autoFitEnabled = true;
+      let columnSizingContext;
       let columnDragState = null;
       let headerPointerState = null;
       let focusedHeaderSourceOrdinal = -1;
@@ -3477,6 +3537,9 @@ export class KxResultsPanel {
       ${reduceChartZoomLifecycle.toString()}
       ${issueChartZoomLifecycleRequest.toString()}
       ${mergeChartPixelGaps.toString()}
+      ${chartSourceGapPixels.toString()}
+      ${scientificNotationThreshold.toString()}
+      ${formatNumericAxis.toString()}
       ${panChartViewport.toString()}
       ${panChartViewportByPixels.toString()}
       ${applyChartZoomLifecycleFailure.toString()}
@@ -3496,6 +3559,16 @@ export class KxResultsPanel {
       ${updateHeaderPointer.toString()}
       window.addEventListener('message', event => {
         const msg = event.data || {};
+        if (msg.type === 'kxFailureReporting') {
+          if (typeof msg.enabled === 'boolean' && Number.isSafeInteger(msg.generation)) {
+            if (kxReporting.enabled !== msg.enabled || kxReporting.generation !== msg.generation) {
+              reportedFailures = msg.enabled ? new WeakSet() : undefined;
+            }
+            kxReporting = { enabled: msg.enabled, generation: msg.generation };
+          }
+          return;
+        }
+        try {
         if (msg.type === 'loading') {
           setLoading(msg.state || {});
         } else if (msg.type === 'resultMeta') {
@@ -3513,7 +3586,8 @@ export class KxResultsPanel {
         } else if (msg.type === 'settings') {
           const arrayDisplayFormatChanged =
             normalizeArrayDisplayFormat(msg.settings?.arrayDisplayFormat) !==
-            settings.arrayDisplayFormat;
+            settings.arrayDisplayFormat ||
+            msg.settings?.tableDecimalPlaces !== settings.tableDecimalPlaces;
           if (arrayDisplayFormatChanged) {
             invalidateRenderedCellText();
           }
@@ -3579,27 +3653,30 @@ export class KxResultsPanel {
         } else if (msg.type === 'chartExportError' && isCurrentChartMessage(msg)) {
           chartStatus.textContent = String(msg.message || 'Chart export failed.');
         }
+        } catch (error) { reportOwnedRendererFailure(error, 'render'); throw error; }
       });
 
-      actionFormat.addEventListener('change', () => {
+      actionFormat.addEventListener('change', guardRendererCallback(() => {
         updateActionState();
         if (String(actionFormat.value || '') === 'xlsx') {
           status.textContent = 'XLSX is export-only';
         }
-      });
+      }));
       copyButton.addEventListener('click', copySelection);
       exportButton.addEventListener('click', exportSelection);
-      includeHeaders.addEventListener('change', () => updateSetting('includeHeaders', !!includeHeaders.checked));
-      includeRowIndex.addEventListener('change', () => updateSetting('includeRowIndex', !!includeRowIndex.checked));
-      autoFit.addEventListener('change', () => setAutoFitEnabled(!!autoFit.checked));
-      autoFitMode.addEventListener('change', () => {
+      includeHeaders.addEventListener('change', guardRendererCallback(() => updateSetting('includeHeaders', !!includeHeaders.checked)));
+      includeRowIndex.addEventListener('change', guardRendererCallback(() => updateSetting('includeRowIndex', !!includeRowIndex.checked)));
+      document.getElementById('openResultSettings').addEventListener('click', guardRendererCallback(() => vscode.postMessage({ type: 'openResultSettings' })));
+      autoFit.addEventListener('change', guardRendererCallback(() => setAutoFitEnabled(!!autoFit.checked)));
+      fitColumnsNowButton.addEventListener('click', fitColumnsNow);
+      autoFitMode.addEventListener('change', guardRendererCallback(() => {
         updateSetting(
           'autoFitMode',
           String(autoFitMode.value || '') === 'visibleRows' ? 'visibleRows' : 'wholeResult'
         );
-      });
+      }));
       searchInput.addEventListener('input', queueSearchRows);
-      searchInput.addEventListener('keydown', event => {
+      searchInput.addEventListener('keydown', guardRendererCallback(event => {
         if (event.key === 'Enter') {
           event.preventDefault();
           jumpSearch(event.shiftKey ? -1 : 1);
@@ -3607,70 +3684,58 @@ export class KxResultsPanel {
           searchInput.value = '';
           queueSearchRows();
         }
-      });
-      searchPrev.addEventListener('click', () => jumpSearch(-1));
-      searchNext.addEventListener('click', () => jumpSearch(1));
-      settingsShowRowIndex.addEventListener('change', () => updateSetting('showRowIndex', !!settingsShowRowIndex.checked));
-      settingsIncludeHeaders.addEventListener('change', () => updateSetting('includeHeaders', !!settingsIncludeHeaders.checked));
-      settingsIncludeRowIndex.addEventListener('change', () => updateSetting('includeRowIndex', !!settingsIncludeRowIndex.checked));
-      settingsHideLargeResultWarnings.addEventListener('change', () => updateSetting('hideLargeResultWarnings', !!settingsHideLargeResultWarnings.checked));
-      settingsHideLargeSortWarnings.addEventListener('change', () => updateSetting('hideLargeSortWarnings', !!settingsHideLargeSortWarnings.checked));
-      settingsLargeSortWarningRowThreshold.addEventListener('change', () => updateIntegerSetting(
-        'largeSortWarningRowThreshold',
-        settingsLargeSortWarningRowThreshold,
-        ${MIN_LARGE_SORT_WARNING_ROW_THRESHOLD},
-        ${MAX_LARGE_SORT_WARNING_ROW_THRESHOLD}
-      ));
-      settingsShowColumnSummaryStatistics.addEventListener('change', () => updateSetting('showColumnSummaryStatistics', !!settingsShowColumnSummaryStatistics.checked));
-      settingsCopyExportConfirmCellThreshold.addEventListener('change', () => updatePositiveIntegerSetting('copyExportConfirmCellThreshold', settingsCopyExportConfirmCellThreshold));
-      settingsLocalDataServerFullExportCellLimit.addEventListener('change', () => updatePositiveIntegerSetting('localDataServerFullExportCellLimit', settingsLocalDataServerFullExportCellLimit));
-      settingsChartDecimalPlaces.addEventListener('change', () => updateNumberSetting('chartDecimalPlaces', settingsChartDecimalPlaces, 0, 12));
-      settingsChartMaxSourceRows.addEventListener('change', () => updatePositiveIntegerSetting('chartMaxSourceRows', settingsChartMaxSourceRows));
-      expandSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(true));
-      collapseSettingsSections.addEventListener('click', () => setSettingsSectionsOpen(false));
-      settingsElapsedTimeDisplay.addEventListener('change', () => updateSetting('elapsedTimeDisplay', String(settingsElapsedTimeDisplay.value || 'auto')));
-      settingsArrayDisplayFormat.addEventListener('change', () => updateSetting('arrayDisplayFormat', normalizeArrayDisplayFormat(settingsArrayDisplayFormat.value)));
-      settingsQTextSyntaxHighlighting.addEventListener('change', () => updateSetting('qTextSyntaxHighlighting', !!settingsQTextSyntaxHighlighting.checked));
-      settingsQTextDisplayFormatting.addEventListener('change', () => updateSetting('qTextDisplayFormatting', !!settingsQTextDisplayFormatting.checked));
+      }));
+      searchPrev.addEventListener('click', guardRendererCallback(() => jumpSearch(-1)));
+      searchNext.addEventListener('click', guardRendererCallback(() => jumpSearch(1)));
+      settingsShowRowIndex.addEventListener('change', guardRendererCallback(() => updateSetting('showRowIndex', !!settingsShowRowIndex.checked)));
+      settingsIncludeHeaders.addEventListener('change', guardRendererCallback(() => updateSetting('includeHeaders', !!settingsIncludeHeaders.checked)));
+      settingsIncludeRowIndex.addEventListener('change', guardRendererCallback(() => updateSetting('includeRowIndex', !!settingsIncludeRowIndex.checked)));
+      settingsShowColumnSummaryStatistics.addEventListener('change', guardRendererCallback(() => updateSetting('showColumnSummaryStatistics', !!settingsShowColumnSummaryStatistics.checked)));
+      settingsTableDecimalPlaces.addEventListener('change', guardRendererCallback(() => updateSetting('tableDecimalPlaces', settingsTableDecimalPlaces.value === '' ? -1 : clampInteger(Number(settingsTableDecimalPlaces.value), 0, 12))));
+      settingsChartDecimalPlaces.addEventListener('change', guardRendererCallback(() => updateNumberSetting('chartDecimalPlaces', settingsChartDecimalPlaces, 0, 12)));
+      expandSettingsSections.addEventListener('click', guardRendererCallback(() => setSettingsSectionsOpen(true)));
+      collapseSettingsSections.addEventListener('click', guardRendererCallback(() => setSettingsSectionsOpen(false)));
+      settingsQTextSyntaxHighlighting.addEventListener('change', guardRendererCallback(() => updateSetting('qTextSyntaxHighlighting', !!settingsQTextSyntaxHighlighting.checked)));
+      settingsQTextDisplayFormatting.addEventListener('change', guardRendererCallback(() => updateSetting('qTextDisplayFormatting', !!settingsQTextDisplayFormatting.checked)));
 
-      settingsDictionaryDisplayStrategy.addEventListener('change', () => updateSetting('dictionaryDisplayStrategy', normalizeQResultDisplayStrategy(settingsDictionaryDisplayStrategy.value, 'grid')));
-      settingsListDisplayStrategy.addEventListener('change', () => updateSetting('listDisplayStrategy', normalizeQResultDisplayStrategy(settingsListDisplayStrategy.value, 'grid')));
+      settingsDictionaryDisplayStrategy.addEventListener('change', guardRendererCallback(() => updateSetting('dictionaryDisplayStrategy', normalizeQResultDisplayStrategy(settingsDictionaryDisplayStrategy.value, 'grid'))));
+      settingsListDisplayStrategy.addEventListener('change', guardRendererCallback(() => updateSetting('listDisplayStrategy', normalizeQResultDisplayStrategy(settingsListDisplayStrategy.value, 'grid'))));
 
-      settingsDensity.addEventListener('change', () => updateDensitySetting(String(settingsDensity.value || 'standard')));
-      settingsCellWidth.addEventListener('change', () => updateNumberSetting('cellWidth', settingsCellWidth, 80, 600));
-      settingsRowHeight.addEventListener('change', () => updateNumberSetting('rowHeight', settingsRowHeight, 20, 80));
-      settingsFontSize.addEventListener('change', () => updateNumberSetting('fontSize', settingsFontSize, 0, 32));
-      hideLargeOnce.addEventListener('click', event => {
+      settingsDensity.addEventListener('change', guardRendererCallback(() => updateDensitySetting(String(settingsDensity.value || 'standard'))));
+      settingsCellWidth.addEventListener('change', guardRendererCallback(() => updateNumberSetting('cellWidth', settingsCellWidth, 80, 600)));
+      settingsRowHeight.addEventListener('change', guardRendererCallback(() => updateNumberSetting('rowHeight', settingsRowHeight, 20, 80)));
+      settingsFontSize.addEventListener('change', guardRendererCallback(() => updateNumberSetting('fontSize', settingsFontSize, 0, 32)));
+      hideLargeOnce.addEventListener('click', guardRendererCallback(event => {
         event.preventDefault();
         data.guardrailMessage = '';
         vscode.postMessage({ type: 'hideLargeResultWarningOnce', version: data.version });
         updateLargeResultWarning();
-      });
-      hideLargeForever.addEventListener('click', event => {
+      }));
+      hideLargeForever.addEventListener('click', guardRendererCallback(event => {
         event.preventDefault();
         data.guardrailMessage = '';
         updateSetting('hideLargeResultWarnings', true);
         updateLargeResultWarning();
-      });
-      selectAllColumns.addEventListener('click', () => {
+      }));
+      selectAllColumns.addEventListener('click', guardRendererCallback(() => {
         status.textContent = 'All data columns visible';
         vscode.postMessage({ type: 'showAllColumns' });
-      });
-      deselectAllColumns.addEventListener('click', () => {
+      }));
+      deselectAllColumns.addEventListener('click', guardRendererCallback(() => {
         status.textContent = 'All data columns hidden';
         vscode.postMessage({ type: 'hideAllColumns' });
-      });
-      resetColumns.addEventListener('click', () => vscode.postMessage({ type: 'resetHiddenColumns' }));
+      }));
+      resetColumns.addEventListener('click', guardRendererCallback(() => vscode.postMessage({ type: 'resetHiddenColumns' })));
       resetColumnWidths.addEventListener('click', resetColumnWidthOverrides);
-      startLocalDataServer.addEventListener('click', () => vscode.postMessage({ type: 'startLocalDataServer' }));
-      stopLocalDataServer.addEventListener('click', () => vscode.postMessage({ type: 'stopLocalDataServer' }));
-      copyCurrentCsvUrl.addEventListener('click', () => vscode.postMessage({ type: 'copyLocalDataServerUrl', endpoint: 'current.csv' }));
-      copyMetadataUrl.addEventListener('click', () => vscode.postMessage({ type: 'copyLocalDataServerUrl', endpoint: 'metadata.json' }));
-      cancelQuery.addEventListener('click', () => {
+      startLocalDataServer.addEventListener('click', guardRendererCallback(() => vscode.postMessage({ type: 'startLocalDataServer' })));
+      stopLocalDataServer.addEventListener('click', guardRendererCallback(() => vscode.postMessage({ type: 'stopLocalDataServer' })));
+      copyCurrentCsvUrl.addEventListener('click', guardRendererCallback(() => vscode.postMessage({ type: 'copyLocalDataServerUrl', endpoint: 'current.csv' })));
+      copyMetadataUrl.addEventListener('click', guardRendererCallback(() => vscode.postMessage({ type: 'copyLocalDataServerUrl', endpoint: 'metadata.json' })));
+      cancelQuery.addEventListener('click', guardRendererCallback(() => {
         cancelQuery.disabled = true;
         status.textContent = 'Canceling query...';
         vscode.postMessage({ type: 'cancelRunningQuery', version: data.version });
-      });
+      }));
       openChart.addEventListener('click', openChartPanel);
       chartType.addEventListener('change', onChartTypeChanged);
       chartXColumn.addEventListener('change', onChartControlChanged);
@@ -3683,7 +3748,7 @@ export class KxResultsPanel {
       exportChart.addEventListener('click', exportChartPng);
       resetChartZoomButton.addEventListener('click', resetChartZoom);
       closeChart.addEventListener('click', closeChartPanel);
-      chartDragModeButton.addEventListener('click', () => {
+      chartDragModeButton.addEventListener('click', guardRendererCallback(() => {
         chartDragMode = chartDragMode === 'zoom' ? 'pan' : 'zoom';
         chartDragModeButton.textContent = chartDragMode === 'zoom' ? 'Pan mode' : 'Zoom mode';
         chartDragModeButton.title = chartDragMode === 'zoom'
@@ -3695,16 +3760,16 @@ export class KxResultsPanel {
             ? 'Chart plot. Drag to pan x. Switch to zoom mode to drag-zoom. Arrow keys pan. Home resets zoom.'
             : 'Chart plot. Drag to zoom x. Shift drag to pan x. Arrow keys pan. Home resets zoom.'
         );
-      });
-      chartNavigatorWindowElement.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'window'));
-      chartNavigatorStart.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'start'));
-      chartNavigatorEnd.addEventListener('pointerdown', event => startChartNavigatorPointer(event, 'end'));
+      }));
+      chartNavigatorWindowElement.addEventListener('pointerdown', guardRendererCallback(event => startChartNavigatorPointer(event, 'window')));
+      chartNavigatorStart.addEventListener('pointerdown', guardRendererCallback(event => startChartNavigatorPointer(event, 'start')));
+      chartNavigatorEnd.addEventListener('pointerdown', guardRendererCallback(event => startChartNavigatorPointer(event, 'end')));
       chartNavigator.addEventListener('pointerdown', startChartNavigatorTrackPointer);
-      chartNavigatorWindowElement.addEventListener('keydown', event => onChartNavigatorKeyDown(event, 'window'));
-      chartNavigatorStart.addEventListener('keydown', event => onChartNavigatorKeyDown(event, 'start'));
-      chartNavigatorEnd.addEventListener('keydown', event => onChartNavigatorKeyDown(event, 'end'));
+      chartNavigatorWindowElement.addEventListener('keydown', guardRendererCallback(event => onChartNavigatorKeyDown(event, 'window')));
+      chartNavigatorStart.addEventListener('keydown', guardRendererCallback(event => onChartNavigatorKeyDown(event, 'start')));
+      chartNavigatorEnd.addEventListener('keydown', guardRendererCallback(event => onChartNavigatorKeyDown(event, 'end')));
       chartCanvasWrap.addEventListener('mouseleave', hideChartTooltip);
-      chartCanvasWrap.addEventListener('keydown', event => {
+      chartCanvasWrap.addEventListener('keydown', guardRendererCallback(event => {
         if (event.key === 'Home') {
           resetChartZoom();
           event.preventDefault();
@@ -3712,20 +3777,23 @@ export class KxResultsPanel {
           panChartByFraction(event.key === 'ArrowLeft' ? -0.2 : 0.2, 'keyboard');
           event.preventDefault();
         }
-      });
+      }));
       chartCanvasWrap.addEventListener('mousedown', startChartPan, true);
-      chartCanvasWrap.addEventListener('dblclick', event => {
+      chartCanvasWrap.addEventListener('dblclick', guardRendererCallback(event => {
         if (chartCanResetZoom()) {
           event.preventDefault();
           resetChartZoom();
         }
-      });
+      }));
       chartSplitter.addEventListener('mousedown', startChartResize);
-      viewport.addEventListener('scroll', requestRender);
-      viewport.addEventListener('contextmenu', () => {
+      viewport.addEventListener('scroll', guardRendererCallback(() => {
+        updateAutoColumnWidthsFromSlice();
+        requestRender();
+      }));
+      viewport.addEventListener('contextmenu', guardRendererCallback(() => {
         vscode.postMessage({ type: 'tableContextMenu' });
-      });
-      document.addEventListener('click', event => {
+      }));
+      document.addEventListener('click', guardRendererCallback(event => {
         const target = event.target;
         if (settingsMenu.open && !settingsMenu.contains(target)) {
           settingsMenu.open = false;
@@ -3733,8 +3801,8 @@ export class KxResultsPanel {
         if (largeResultWarning.open && !largeResultWarning.contains(target)) {
           largeResultWarning.open = false;
         }
-      });
-      window.addEventListener('keydown', event => {
+      }));
+      window.addEventListener('keydown', guardRendererCallback(event => {
         if (event.key === 'Escape' && closeToolbarMenus(true)) {
           event.preventDefault();
           return;
@@ -3743,13 +3811,13 @@ export class KxResultsPanel {
           event.preventDefault();
           copySelection();
         }
-      });
-      document.addEventListener('focusin', event => {
+      }));
+      document.addEventListener('focusin', guardRendererCallback(event => {
         if (!header.contains(event.target)) {
           focusedHeaderSourceOrdinal = -1;
         }
-      });
-      window.addEventListener('mousemove', event => {
+      }));
+      window.addEventListener('mousemove', guardRendererCallback(event => {
         if (chartPanState) {
           updateChartPan(event);
           event.preventDefault();
@@ -3770,11 +3838,14 @@ export class KxResultsPanel {
         }
         resizeState.moved =
           resizeState.moved || event.clientX !== resizeState.startX;
+        if (resizeState.moved && autoFitEnabled) {
+          setAutoFitEnabled(false);
+        }
         const width = clampInteger(resizeState.startWidth + event.clientX - resizeState.startX, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
         setColumnWidthOverride(resizeState.column, width);
         event.preventDefault();
-      });
-      window.addEventListener('mouseup', event => {
+      }));
+      window.addEventListener('mouseup', guardRendererCallback(event => {
         if (chartPanState) {
           finishChartPan(event);
           return;
@@ -3811,20 +3882,20 @@ export class KxResultsPanel {
         clearColumnDragState();
         dragMode = '';
         requestRender();
-      });
-      window.addEventListener('resize', () => {
+      }));
+      window.addEventListener('resize', guardRendererCallback(() => {
         requestRender();
         if (!chartPanel.hidden) {
           setChartHeight(chartHeight);
         } else {
           drawChart();
         }
-      });
-      settingsMenu.addEventListener('toggle', () => {
+      }));
+      settingsMenu.addEventListener('toggle', guardRendererCallback(() => {
         if (settingsMenu.open) {
           // Chart is a direct button, not a dropdown.
         }
-      });
+      }));
       function closeToolbarMenus(restoreFocus) {
         let closed = false;
         let focusTarget = null;
@@ -4457,18 +4528,6 @@ export class KxResultsPanel {
           chartXColumn.value = preferredX.columnName;
         }
 
-        const noGroup = document.createElement('option');
-        noGroup.value = '';
-        noGroup.textContent = 'None';
-        chartGroupColumn.appendChild(noGroup);
-        chartOptions.groupColumns.forEach(option => {
-          const element = document.createElement('option');
-          element.value = option.columnName;
-          element.textContent = option.columnName;
-          chartGroupColumn.appendChild(element);
-        });
-        chartGroupColumn.disabled = chartOptions.groupColumns.length === 0;
-
         const defaultY = defaultChartYColumns();
         chartOptions.yColumns.forEach(option => {
           const label = document.createElement('label');
@@ -4570,10 +4629,10 @@ export class KxResultsPanel {
           });
         }
 
-        const groupByColumn = chartTypeSupportsGroup(type) ? String(value.groupByColumn || '') : '';
+        updateChartTypeControls();
+        const groupByColumn = String(value.groupByColumn || '');
         const hasGroup = groupByColumn && chartOptions.groupColumns.some(option => option.columnName === groupByColumn);
         chartGroupColumn.value = hasGroup ? groupByColumn : '';
-        updateChartTypeControls();
         chartControlsDirty = false;
         updateChartControls();
         return true;
@@ -4620,15 +4679,15 @@ export class KxResultsPanel {
         if (type === 'candlestick') {
           const validation = candlestickControlValidationMessage();
           if (validation) {
-            return validation + ' Group by is unavailable for candlesticks.';
+            return validation;
           }
-          return 'Candlestick uses distinct numeric Open, High, Low, Close columns; Group by is unavailable. ' +
+          return 'Candlestick uses distinct numeric Open, High, Low, Close columns. ' +
             (chartRendered ? 'Render to apply changed settings.' : 'Press Render to create chart.');
         }
         if (selectedChartYColumns().length === 0) {
           return 'Select one x column and at least one numeric y column.';
         }
-        const note = type === 'box' ? 'Box charts use numeric Y columns; Group by is unavailable. ' : '';
+        const note = type === 'box' ? 'Box charts use numeric Y columns. ' : '';
         return note + (chartRendered ? 'Chart settings changed — Render to update.' : 'Press Render to create chart.');
       }
 
@@ -4659,12 +4718,6 @@ export class KxResultsPanel {
       function updateChartTypeControls() {
         const type = selectedChartType();
         const candlestick = type === 'candlestick';
-        const supportsGroup = chartTypeSupportsGroup(type);
-        chartGroupField.hidden = !supportsGroup;
-        chartGroupColumn.disabled = !supportsGroup || chartOptions.groupColumns.length === 0;
-        if (!supportsGroup) {
-          chartGroupColumn.value = '';
-        }
         chartYColumns.hidden = candlestick;
         chartYColumns.querySelectorAll('input[type="checkbox"]').forEach(input => {
           input.disabled = candlestick;
@@ -4673,10 +4726,29 @@ export class KxResultsPanel {
         [chartOpenColumn, chartHighColumn, chartLowColumn, chartCloseColumn].forEach(select => {
           select.disabled = !candlestick || chartOptions.yColumns.length === 0;
         });
+        refreshChartGroupOptions();
       }
 
-      function chartTypeSupportsGroup(type) {
-        return type === 'line' || type === 'scatter' || type === 'step' || type === 'bar';
+      function refreshChartGroupOptions() {
+        const previous = String(chartGroupColumn.value || '');
+        const reserved = columnNameLookup(selectedChartType() === 'candlestick'
+          ? [String(chartXColumn.value || ''), ...Object.values(selectedCandlestickColumns())]
+          : [String(chartXColumn.value || ''), ...selectedChartYColumns()]);
+        const eligible = chartOptions.groupColumns.filter(option => !reserved[option.columnName]);
+        chartGroupColumn.textContent = '';
+        const noGroup = document.createElement('option');
+        noGroup.value = '';
+        noGroup.textContent = 'None';
+        chartGroupColumn.appendChild(noGroup);
+        eligible.forEach(option => {
+          const element = document.createElement('option');
+          element.value = option.columnName;
+          element.textContent = option.columnName;
+          chartGroupColumn.appendChild(element);
+        });
+        chartGroupColumn.value = eligible.some(option => option.columnName === previous) ? previous : '';
+        chartGroupColumn.disabled = eligible.length === 0;
+        chartGroupField.hidden = false;
       }
 
       function onChartTypeChanged() {
@@ -4685,6 +4757,7 @@ export class KxResultsPanel {
       }
 
       function onChartControlChanged() {
+        refreshChartGroupOptions();
         clearChartZoomBaseline();
         chartControlsDirty = true;
         hideChartTooltip();
@@ -4727,7 +4800,7 @@ export class KxResultsPanel {
       }
 
       function selectedChartGroupColumn() {
-        return chartTypeSupportsGroup(selectedChartType()) ? String(chartGroupColumn.value || '') : '';
+        return String(chartGroupColumn.value || '');
       }
 
       function selectedCandlestickColumns() {
@@ -4885,16 +4958,16 @@ export class KxResultsPanel {
         const grouped = chartData.groupByColumn ? ' grouped by ' + chartData.groupByColumn : '';
         const samplingLevel = chartSamplingLevelStatus(chartData);
         chartStatus.textContent = chartData.chartType === 'candlestick'
-          ? 'Showing ' + formatUiCount(chartData.candlesticks.length) +
+          ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
             ' candles from ' + formatUiCount(chartData.eligibleRowCount) +
-            ' eligible rows. ' + samplingLevel + ' Group by is unavailable.' + warnings
+            ' eligible rows' + grouped + '. ' + samplingLevel + warnings
           : chartData.chartType === 'box'
             ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
-              ' box groups from ' + formatUiCount(chartData.eligibleRowCount) +
-              ' eligible rows. ' + samplingLevel + ' Group by is unavailable.' + warnings
+              ' boxes from ' + formatUiCount(chartData.eligibleRowCount) +
+              ' eligible rows' + grouped + '. ' + samplingLevel + warnings
             : chartData.chartType === 'bar'
               ? 'Showing ' + formatUiCount(chartData.sampledPointCount) +
-                ' rendered bar groups from ' + formatUiCount(chartData.eligibleRowCount) +
+                ' rendered bars from ' + formatUiCount(chartData.eligibleRowCount) +
                 ' eligible rows' + grouped + '. ' + samplingLevel + warnings
               : 'Showing ' + formatUiCount(chartData.sampledPointCount) +
               ' rendered points from ' + formatUiCount(chartData.eligibleRowCount) +
@@ -4934,7 +5007,7 @@ export class KxResultsPanel {
           requestId: toNonNegativeInteger(value.requestId, 0),
           chartType: type,
           xColumn: String(value.xColumn || ''),
-          groupByColumn: chartTypeSupportsGroup(type) && value.groupByColumn ? String(value.groupByColumn) : '',
+          groupByColumn: value.groupByColumn ? String(value.groupByColumn) : '',
           xKind: value.xKind === 'temporal' ? 'temporal' : 'numeric',
           x,
           xText,
@@ -4958,6 +5031,8 @@ export class KxResultsPanel {
           boxSeries: Array.isArray(value.boxSeries) ? value.boxSeries.map(series => {
             return {
               columnName: String(series && series.columnName || ''),
+              sourceColumnName: String(series && series.sourceColumnName || ''),
+              groupValue: String(series && series.groupValue || ''),
               stats: Array.isArray(series && series.stats)
                 ? series.stats.map(normalizeBoxStats)
                 : []
@@ -4965,6 +5040,8 @@ export class KxResultsPanel {
           }).filter(series => series.columnName) : [],
           ohlcColumns: normalizeOhlcColumns(value.ohlcColumns),
           candlesticks,
+          candlestickSeries: normalizeCandlestickSeries(value.candlestickSeries),
+          retainedGroupCount: toNonNegativeInteger(value.retainedGroupCount, 0),
           invalidCandlestickCount,
           sourceRowCount: toNonNegativeInteger(value.sourceRowCount, 0),
           eligibleRowCount: toNonNegativeInteger(value.eligibleRowCount, 0),
@@ -5023,6 +5100,20 @@ export class KxResultsPanel {
           low,
           close
         };
+      }
+
+      function normalizeCandlestickSeries(value) {
+        if (!Array.isArray(value)) {
+          return [];
+        }
+        return value.map(series => {
+          return {
+            groupValue: String(series && series.groupValue || ''),
+            candlesticks: Array.isArray(series && series.candlesticks)
+              ? series.candlesticks.map(candle => candle === null ? null : normalizeCandlestick(candle))
+              : []
+          };
+        }).filter(series => series.groupValue && series.candlesticks.length > 0);
       }
 
       function normalizeBoxStats(value) {
@@ -5098,7 +5189,7 @@ export class KxResultsPanel {
         }
         if (!chartData || chartData.x.length === 0 ||
           (chartData.chartType === 'candlestick'
-            ? chartData.candlesticks.length === 0
+            ? chartCandlestickGroups().length === 0
             : chartData.series.length === 0)) {
           destroyChartPlot();
           clearChartRendered();
@@ -5163,10 +5254,8 @@ export class KxResultsPanel {
 
       function chartAlignedData() {
         if (chartData.chartType === 'candlestick') {
-          return [
-            chartData.candlesticks.map(candle => candle.x),
-            chartData.candlesticks.map(candle => candle.close)
-          ];
+          const groups = chartCandlestickGroups();
+          return [chartData.x.slice()].concat(groups.map(group => group.candlesticks.map(candle => candle ? candle.close : null)));
         }
         const aligned = [chartData.x.slice()];
         chartData.series.forEach(series => {
@@ -5198,8 +5287,11 @@ export class KxResultsPanel {
             if (previous >= indexStart) {
               window.uPlot.addGap(
                 gaps,
-                self.valToPos(chartData.x[previous], 'x', true),
-                self.valToPos(chartData.x[index], 'x', true)
+                ...chartSourceGapPixels(
+                  self.valToPos(chartData.x[previous], 'x', true),
+                  self.valToPos(chartData.x[index], 'x', true),
+                  self.series[_seriesIndex].width || 1.5, window.uPlot.pxRatio
+                )
               );
             }
           }
@@ -5218,19 +5310,22 @@ export class KxResultsPanel {
         }];
         if (type === 'candlestick') {
           const candleColors = chartCandlestickColors();
-          series.push({
-            label: 'OHLC',
-            show: chartSeriesVisible(chartHiddenSeriesKeys, chartRenderedSeriesKeys[0]),
-            stroke: candleColors.up,
-            width: 0,
-            spanGaps: false,
-            points: {
-              show: false,
-              width: 1,
-              stroke: candleColors.up,
-              fill: candleColors.hollow
-            },
-            value: (_self, _rawValue, _seriesIndex, valueIndex) => chartCandlestickValueLabel(valueIndex)
+          chartCandlestickGroups().forEach((group, index) => {
+            const color = group.groupValue ? colors[index % colors.length] : candleColors.up;
+            series.push({
+              label: group.groupValue || 'OHLC',
+              show: chartSeriesVisible(chartHiddenSeriesKeys, chartRenderedSeriesKeys[index]),
+              stroke: color,
+              width: 0,
+              spanGaps: false,
+              points: {
+                show: false,
+                width: 1,
+                stroke: color,
+                fill: candleColors.hollow
+              },
+              value: (_self, _rawValue, _seriesIndex, valueIndex) => chartCandlestickValueLabel(index, valueIndex)
+            });
           });
         } else {
           chartData.series.forEach((item, index) => {
@@ -5264,6 +5359,7 @@ export class KxResultsPanel {
         return {
           width: dimensions.width,
           height: dimensions.height,
+          padding: [16, self => chartXAxisEndPadding(self), 8, 8],
           ms: 1,
           series,
           scales: {
@@ -5281,6 +5377,7 @@ export class KxResultsPanel {
           axes: [
             {
               scale: 'x',
+              font: (settings.fontSize || 13) + 'px sans-serif',
               stroke: axisColor,
               grid: { stroke: gridColor, width: 1 },
               ticks: { stroke: gridColor, width: 1 },
@@ -5288,6 +5385,7 @@ export class KxResultsPanel {
             },
             {
               scale: 'y',
+              font: (settings.fontSize || 13) + 'px sans-serif',
               stroke: axisColor,
               grid: { stroke: gridColor, width: 1 },
               ticks: { stroke: gridColor, width: 1 },
@@ -5348,11 +5446,11 @@ export class KxResultsPanel {
         }
         if (value.chartType === 'candlestick') {
           const roles = value.ohlcColumns || {};
-          return ['candlestick\\u0000' +
+          return chartCandlestickGroups().map(group => 'candlestick\\u0000' +
             String(roles.open || '') + '\\u0000' +
             String(roles.high || '') + '\\u0000' +
             String(roles.low || '') + '\\u0000' +
-            String(roles.close || '')];
+            String(roles.close || '') + '\\u0000' + String(group.groupValue || ''));
         }
         return (Array.isArray(value.series) ? value.series : []).map(series => {
           return String(series.sourceColumnName || series.columnName || '') + '\\u0000' +
@@ -5399,7 +5497,7 @@ export class KxResultsPanel {
           label.dataset.kxSeriesIndex = String(seriesIndex);
           if (label.dataset.kxKeyboardToggle !== 'true') {
             label.dataset.kxKeyboardToggle = 'true';
-            label.addEventListener('keydown', event => {
+            label.addEventListener('keydown', guardRendererCallback(event => {
               if (!chartLegendToggleKey(event.key)) {
                 return;
               }
@@ -5409,7 +5507,7 @@ export class KxResultsPanel {
               if (Number.isSafeInteger(index) && index > 0 && index < self.series.length) {
                 self.setSeries(index, { show: self.series[index].show === false });
               }
-            });
+            }));
           }
         });
         syncChartLegendAccessibility(self);
@@ -5453,11 +5551,12 @@ export class KxResultsPanel {
         return Number.isFinite(rawValue) ? formatChartNumber(rawValue) : 'null';
       }
 
-      function chartCandlestickValueLabel(valueIndex) {
+      function chartCandlestickValueLabel(seriesIndex, valueIndex) {
         if (!chartData || valueIndex === null || valueIndex === undefined) {
           return '';
         }
-        const candle = chartData.candlesticks[valueIndex];
+        const group = chartCandlestickGroups()[seriesIndex];
+        const candle = group && group.candlesticks[valueIndex];
         return candle
           ? 'O ' + formatChartNumber(candle.open) +
             ' H ' + formatChartNumber(candle.high) +
@@ -5651,15 +5750,17 @@ export class KxResultsPanel {
       function chartCandlestickYRange(self) {
         let min = Infinity;
         let max = -Infinity;
-        if (self && self.series && self.series[1] && self.series[1].show === false) {
-          return null;
-        }
-        chartData.candlesticks.forEach((candle, index) => {
-          if (!chartXIsVisible(self, index)) {
+        chartCandlestickGroups().forEach((group, seriesIndex) => {
+          if (self && self.series && self.series[seriesIndex + 1] && self.series[seriesIndex + 1].show === false) {
             return;
           }
-          min = Math.min(min, candle.low);
-          max = Math.max(max, candle.high);
+          group.candlesticks.forEach((candle, index) => {
+            if (!candle || !chartXIsVisible(self, index)) {
+              return;
+            }
+            min = Math.min(min, candle.low);
+            max = Math.max(max, candle.high);
+          });
         });
         return min === Infinity ? null : { min, max };
       }
@@ -5687,44 +5788,71 @@ export class KxResultsPanel {
       }
 
       function drawChartCandlesticks(self) {
-        if (!chartData || chartData.chartType !== 'candlestick' || chartData.candlesticks.length === 0) {
+        if (!chartData || chartData.chartType !== 'candlestick') {
           return;
         }
-        const plotSeries = self.series[1];
-        if (plotSeries && plotSeries.show === false) {
+        const groups = chartCandlestickGroups();
+        if (groups.length === 0) {
           return;
         }
         const ctx = self.ctx;
         const pxRatio = chartPxRatio();
-        const colors = chartCandlestickColors();
+        const candleColors = chartCandlestickColors();
+        const categoryColors = chartColors();
         ctx.save();
         ctx.beginPath();
         ctx.rect(self.bbox.left, self.bbox.top, self.bbox.width, self.bbox.height);
         ctx.clip();
-        chartData.candlesticks.forEach((candle, index) => {
-          const center = self.valToPos(candle.x, 'x', true);
-          const localGap = chartLocalXGapPixels(self, index, 16 * pxRatio);
-          const bodyWidth = Math.max(1 * pxRatio, Math.min(18 * pxRatio, localGap * 0.68));
-          const highY = self.valToPos(candle.high, 'y', true);
-          const lowY = self.valToPos(candle.low, 'y', true);
-          const openY = self.valToPos(candle.open, 'y', true);
-          const closeY = self.valToPos(candle.close, 'y', true);
-          const rising = candle.close >= candle.open;
-          const color = rising ? colors.up : colors.down;
-          const bodyTop = Math.min(openY, closeY);
-          const bodyHeight = Math.max(1 * pxRatio, Math.abs(closeY - openY));
-          const bodyLeft = center - bodyWidth / 2;
-          ctx.strokeStyle = color;
-          ctx.lineWidth = Math.max(1, pxRatio);
-          ctx.beginPath();
-          ctx.moveTo(center, highY);
-          ctx.lineTo(center, lowY);
-          ctx.stroke();
-          ctx.fillStyle = rising ? colors.hollow : color;
-          ctx.fillRect(bodyLeft, bodyTop, bodyWidth, bodyHeight);
-          ctx.strokeRect(bodyLeft, bodyTop, bodyWidth, bodyHeight);
+        groups.forEach((group, seriesIndex) => {
+          const plotSeries = self.series[seriesIndex + 1];
+          if (plotSeries && plotSeries.show === false) {
+            return;
+          }
+          group.candlesticks.forEach((candle, index) => {
+            if (!candle) {
+              return;
+            }
+            const xCenter = self.valToPos(candle.x, 'x', true);
+            const localGap = chartLocalXGapPixels(self, index, 16 * pxRatio);
+            const clusterWidth = Math.max(1 * pxRatio, Math.min(22 * pxRatio, localGap * 0.78));
+            const slotWidth = clusterWidth / groups.length;
+            const bodyWidth = Math.max(1 * pxRatio, Math.min(18 * pxRatio, slotWidth * 0.72));
+            const center = xCenter - clusterWidth / 2 + slotWidth * seriesIndex + slotWidth / 2;
+            const highY = self.valToPos(candle.high, 'y', true);
+            const lowY = self.valToPos(candle.low, 'y', true);
+            const openY = self.valToPos(candle.open, 'y', true);
+            const closeY = self.valToPos(candle.close, 'y', true);
+            const rising = candle.close >= candle.open;
+            const color = group.groupValue
+              ? categoryColors[seriesIndex % categoryColors.length]
+              : (rising ? candleColors.up : candleColors.down);
+            const bodyTop = Math.min(openY, closeY);
+            const bodyHeight = Math.max(1 * pxRatio, Math.abs(closeY - openY));
+            const bodyLeft = center - bodyWidth / 2;
+            ctx.strokeStyle = color;
+            ctx.lineWidth = Math.max(1, pxRatio);
+            ctx.beginPath();
+            ctx.moveTo(center, highY);
+            ctx.lineTo(center, lowY);
+            ctx.stroke();
+            ctx.fillStyle = rising ? candleColors.hollow : color;
+            ctx.fillRect(bodyLeft, bodyTop, bodyWidth, bodyHeight);
+            ctx.strokeRect(bodyLeft, bodyTop, bodyWidth, bodyHeight);
+          });
         });
         ctx.restore();
+      }
+
+      function chartCandlestickGroups() {
+        if (!chartData || chartData.chartType !== 'candlestick') {
+          return [];
+        }
+        if (Array.isArray(chartData.candlestickSeries) && chartData.candlestickSeries.length > 0) {
+          return chartData.candlestickSeries;
+        }
+        return chartData.candlesticks.length > 0
+          ? [{ groupValue: '', candlesticks: chartData.candlesticks }]
+          : [];
       }
 
       function chartCandlestickColors() {
@@ -5864,14 +5992,20 @@ export class KxResultsPanel {
         }
         const lines = [chartData.xColumn + ': ' + chartXLabel(index)];
         if (chartData.chartType === 'candlestick') {
-          const plotSeries = self.series[1];
-          const candle = chartData.candlesticks[index];
-          if (!plotSeries || plotSeries.show !== false) {
+          chartCandlestickGroups().forEach((group, seriesIndex) => {
+            const plotSeries = self.series[seriesIndex + 1];
+            const candle = group.candlesticks[index];
+            if (!candle || (plotSeries && plotSeries.show === false)) {
+              return;
+            }
+            if (group.groupValue) {
+              lines.push(chartData.groupByColumn + ': ' + group.groupValue);
+            }
             lines.push(chartOhlcTooltipLabel('Open', chartData.ohlcColumns.open) + ': ' + formatChartNumber(candle.open));
             lines.push(chartOhlcTooltipLabel('High', chartData.ohlcColumns.high) + ': ' + formatChartNumber(candle.high));
             lines.push(chartOhlcTooltipLabel('Low', chartData.ohlcColumns.low) + ': ' + formatChartNumber(candle.low));
             lines.push(chartOhlcTooltipLabel('Close', chartData.ohlcColumns.close) + ': ' + formatChartNumber(candle.close));
-          }
+          });
         } else {
           chartData.series.forEach((series, seriesIndex) => {
             const plotSeries = self.series[seriesIndex + 1];
@@ -6145,6 +6279,20 @@ export class KxResultsPanel {
         chartNavigatorOverview.dataset.kxRangeKey = rangeKey;
         chartNavigatorOverview.textContent = '';
         const xValues = Array.isArray(overviewData.x) ? overviewData.x : [];
+        const candleGroups = overviewData.chartType === 'candlestick'
+          ? (Array.isArray(overviewData.candlestickSeries) && overviewData.candlestickSeries.length > 0
+            ? overviewData.candlestickSeries
+            : (Array.isArray(overviewData.candlesticks)
+              ? [{ candlesticks: overviewData.candlesticks }]
+              : []))
+          : [];
+        const candleOverview = candleGroups.reduce((best, group) => {
+          const candidate = Array.isArray(group && group.candlesticks)
+            ? group.candlesticks.map(candle => candle && candle.close)
+            : [];
+          const finite = candidate.filter(value => typeof value === 'number' && Number.isFinite(value)).length;
+          return finite > best.finite ? { values: candidate, finite } : best;
+        }, { values: [], finite: -1 });
         const overviewSeries = overviewData.chartType === 'candlestick'
           ? null
           : (Array.isArray(overviewData.series)
@@ -6165,9 +6313,7 @@ export class KxResultsPanel {
             }, null)
             : null);
         const values = overviewData.chartType === 'candlestick'
-          ? (Array.isArray(overviewData.candlesticks)
-            ? overviewData.candlesticks.map(candle => candle && candle.close)
-            : [])
+          ? candleOverview.values
           : (overviewSeries && Array.isArray(overviewSeries.values) ? overviewSeries.values : []);
         const gapBefore = overviewSeries && Array.isArray(overviewSeries.gapBefore)
           ? overviewSeries.gapBefore
@@ -6797,26 +6943,28 @@ export class KxResultsPanel {
       }
 
       function formatChartNumber(value) {
-        if (!Number.isFinite(value)) {
-          return '';
-        }
-        const normalized = Object.is(value, -0) ? 0 : value;
-        const places = clampInteger(settings.chartDecimalPlaces, 0, 12);
-        const abs = Math.abs(normalized);
-        if (abs !== 0 && (abs >= 1000000 || abs < 0.001)) {
-          return normalized.toExponential(places);
-        }
-        return normalized.toLocaleString(undefined, {
-          minimumFractionDigits: places,
-          maximumFractionDigits: places
-        });
+        return formatNumericAxis(value, settings.chartDecimalPlaces, settings.chartScientificNotationThreshold);
+      }
+
+      function chartXAxisEndPadding(plot) {
+        if (!chartData || chartData.xKind === 'temporal') { return 64; }
+        const scale = plot.scales.x;
+        plot.ctx.save();
+        plot.ctx.font = (settings.fontSize || 13) + 'px sans-serif';
+        const width = Math.max(...[scale.min, scale.max].map(value =>
+          plot.ctx.measureText(formatChartNumber(value)).width));
+        plot.ctx.restore();
+        return Math.max(16, Math.ceil(width / 2 + 12));
       }
 
       function chartYAxisSize(plot, values) {
-        const ratio = window.devicePixelRatio || 1;
+        plot.ctx.save();
+        plot.ctx.font = (settings.fontSize || 13) + 'px sans-serif';
+        const ratio = 1;
         const maxLabelWidth = (values || []).reduce((width, value) =>
           Math.max(width, plot.ctx.measureText(String(value || '')).width / ratio), 0);
-        return Math.max(48, Math.min(220, Math.ceil(maxLabelWidth + 18)));
+        plot.ctx.restore();
+        return Math.max(48, Math.ceil(maxLabelWidth + 24));
       }
 
       function formatChartTemporalValue(value) {
@@ -6846,6 +6994,7 @@ export class KxResultsPanel {
 
       function applySettings(value) {
         const previousChartDecimalPlaces = settings.chartDecimalPlaces;
+        const previousScientificThreshold = settings.chartScientificNotationThreshold;
         settings = normalizeSettings(value || {});
         columnWidthOverrides = positionalColumnWidthLookup(settings.columnWidths);
         autoFitEnabled = settings.autoFitColumns;
@@ -6860,7 +7009,8 @@ export class KxResultsPanel {
         if (!settings.showColumnSummaryStatistics) {
           clearColumnSummaries();
         }
-        if (settings.chartDecimalPlaces !== previousChartDecimalPlaces) {
+        if (settings.chartDecimalPlaces !== previousChartDecimalPlaces ||
+          settings.chartScientificNotationThreshold !== previousScientificThreshold) {
           refreshChartFormatting();
         }
         refreshAutoColumnWidths();
@@ -6886,7 +7036,7 @@ export class KxResultsPanel {
           autoFitColumns: typeof value.autoFitColumns === 'boolean'
             ? value.autoFitColumns
             : DEFAULT_SETTINGS.autoFitColumns,
-          autoFitMode: value.autoFitMode === 'visibleRows' ? 'visibleRows' : 'wholeResult',
+          autoFitMode: value.autoFitMode === 'wholeResult' ? 'wholeResult' : 'visibleRows',
           rowHeight: boundedSetting(value.rowHeight, DEFAULT_SETTINGS.rowHeight, 20, 80),
           fontSize: boundedSetting(value.fontSize, DEFAULT_SETTINGS.fontSize, 0, 32),
           density: normalizeDensity(value.density),
@@ -6907,6 +7057,8 @@ export class KxResultsPanel {
           copyExportConfirmCellThreshold: positiveIntegerSetting(value.copyExportConfirmCellThreshold, DEFAULT_SETTINGS.copyExportConfirmCellThreshold),
           localDataServerFullExportCellLimit: positiveIntegerSetting(value.localDataServerFullExportCellLimit, DEFAULT_SETTINGS.localDataServerFullExportCellLimit),
           elapsedTimeDisplay: normalizeElapsedTimeDisplay(value.elapsedTimeDisplay),
+          tableDecimalPlaces: boundedSetting(value.tableDecimalPlaces, -1, -1, 12),
+          chartScientificNotationThreshold: scientificNotationThreshold(value.chartScientificNotationThreshold),
           chartDecimalPlaces: boundedSetting(value.chartDecimalPlaces, DEFAULT_SETTINGS.chartDecimalPlaces, 0, 12),
           chartMaxSourceRows: positiveIntegerSetting(
             value.chartMaxSourceRows,
@@ -6935,16 +7087,9 @@ export class KxResultsPanel {
         settingsShowRowIndex.checked = settings.showRowIndex;
         settingsIncludeHeaders.checked = settings.includeHeaders;
         settingsIncludeRowIndex.checked = settings.includeRowIndex;
-        settingsHideLargeResultWarnings.checked = settings.hideLargeResultWarnings;
-        settingsHideLargeSortWarnings.checked = settings.hideLargeSortWarnings;
-        settingsLargeSortWarningRowThreshold.value = String(settings.largeSortWarningRowThreshold);
         settingsShowColumnSummaryStatistics.checked = settings.showColumnSummaryStatistics;
-        settingsCopyExportConfirmCellThreshold.value = String(settings.copyExportConfirmCellThreshold);
-        settingsLocalDataServerFullExportCellLimit.value = String(settings.localDataServerFullExportCellLimit);
+        settingsTableDecimalPlaces.value = settings.tableDecimalPlaces < 0 ? '' : String(settings.tableDecimalPlaces);
         settingsChartDecimalPlaces.value = String(settings.chartDecimalPlaces);
-        settingsChartMaxSourceRows.value = String(settings.chartMaxSourceRows);
-        settingsElapsedTimeDisplay.value = settings.elapsedTimeDisplay;
-        settingsArrayDisplayFormat.value = settings.arrayDisplayFormat;
         settingsQTextSyntaxHighlighting.checked = settings.qTextSyntaxHighlighting;
         settingsQTextDisplayFormatting.checked = settings.qTextDisplayFormatting;
 
@@ -6980,6 +7125,8 @@ export class KxResultsPanel {
           copyExportConfirmCellThreshold: settings.copyExportConfirmCellThreshold,
           localDataServerFullExportCellLimit: settings.localDataServerFullExportCellLimit,
           elapsedTimeDisplay: settings.elapsedTimeDisplay,
+          tableDecimalPlaces: settings.tableDecimalPlaces,
+          chartScientificNotationThreshold: settings.chartScientificNotationThreshold,
           chartDecimalPlaces: settings.chartDecimalPlaces,
           chartMaxSourceRows: settings.chartMaxSourceRows,
           qTextSyntaxHighlighting: settings.qTextSyntaxHighlighting,
@@ -6994,7 +7141,7 @@ export class KxResultsPanel {
         if (key === 'cellWidth' || key === 'density') {
           next.columnWidths = {};
         }
-        if (key === 'arrayDisplayFormat') {
+        if (key === 'arrayDisplayFormat' || key === 'tableDecimalPlaces') {
           invalidateRenderedCellText();
         }
         applySettings(next);
@@ -7121,14 +7268,14 @@ export class KxResultsPanel {
           const checkbox = document.createElement('input');
           checkbox.type = 'checkbox';
           checkbox.checked = !hidden.has(columnPosition);
-          checkbox.addEventListener('change', () => {
+          checkbox.addEventListener('change', guardRendererCallback(() => {
             vscode.postMessage({
               type: checkbox.checked ? 'showColumn' : 'hideColumn',
               version: data.version,
               columnName: column,
               columnPosition
             });
-          });
+          }));
           const text = document.createElement('span');
           text.textContent = column;
           text.title = column;
@@ -7145,6 +7292,7 @@ export class KxResultsPanel {
 
       function updateAutoFitControlState() {
         autoFit.disabled = data.columns.length === 0;
+        fitColumnsNowButton.disabled = data.columns.length === 0;
         autoFit.checked = settings.autoFitColumns;
         autoFitMode.disabled = !settings.autoFitColumns;
         autoFit.title = autoFit.disabled
@@ -7155,8 +7303,35 @@ export class KxResultsPanel {
       }
 
       function setAutoFitEnabled(enabled) {
+        if (enabled && !settings.autoFitColumns) {
+          clearCurrentColumnWidthOverrides();
+        }
         updateSetting('autoFitColumns', enabled);
         status.textContent = enabled ? 'Auto-fit enabled' : 'Auto-fit disabled';
+      }
+
+      function fitColumnsNow() {
+        clearCurrentColumnWidthOverrides();
+        updateSetting('autoFitColumns', true);
+        refreshAutoColumnWidths();
+        renderColumnSettings();
+        requestRender();
+        status.textContent = settings.autoFitMode === 'wholeResult'
+          ? 'Fitting columns to the whole result'
+          : 'Fitting columns to visible rows';
+      }
+
+      function clearCurrentColumnWidthOverrides() {
+        data.columns.forEach((_name, column) => {
+          const key = columnWidthKey(column);
+          const hadOverride = Number.isFinite(settings.columnWidths[key]) ||
+            Number.isFinite(columnWidthOverrides[key]);
+          delete settings.columnWidths[key];
+          delete columnWidthOverrides[key];
+          if (hadOverride) {
+            vscode.postMessage({ type: 'setResultColumnWidth', position: Number(key), width: 0 });
+          }
+        });
       }
 
       function updateAutoColumnWidthsFromSlice() {
@@ -7168,19 +7343,23 @@ export class KxResultsPanel {
           autoColumnWidths = next;
           return;
         }
+        const verticalState = scrollStateForViewport();
+        const firstVisibleRow = Math.floor(verticalState.rowOffset / layout.rowHeight);
+        const lastVisibleRow = Math.ceil((verticalState.rowOffset + viewport.clientHeight - layout.headerHeight) / layout.rowHeight);
         for (let column = slice.startColumn; column <= slice.endColumn; column++) {
           if (column < 0 || column >= data.columns.length) {
             continue;
           }
           const key = columnWidthKey(column);
-          if (Number.isFinite(columnWidthOverrides[key])) {
-            continue;
-          }
-          let desired = measuredColumnTextWidth(String(data.columns[column] || '').length);
+          let desired = measuredRenderedTextWidth(String(data.columns[column] || ''), true);
           for (let rowOffset = 0; rowOffset < slice.cells.length; rowOffset++) {
+            const rowIndex = slice.startRow + rowOffset;
+            if (rowIndex < firstVisibleRow || rowIndex >= lastVisibleRow) {
+              continue;
+            }
             const row = slice.cells[rowOffset] || [];
             const text = String(row[column - slice.startColumn] || '');
-            desired = Math.max(desired, measuredColumnTextWidth(text.length));
+            desired = Math.max(desired, measuredRenderedTextWidth(text, false));
           }
           next[key] = clampInteger(desired, MIN_COLUMN_WIDTH, AUTO_COLUMN_WIDTH_CAP);
         }
@@ -7198,9 +7377,7 @@ export class KxResultsPanel {
         }
         data.wholeResultColumnTextLengths.forEach((length, column) => {
           const key = columnWidthKey(column);
-          if (!Number.isFinite(columnWidthOverrides[key])) {
-            autoColumnWidths[key] = measuredColumnTextWidth(length);
-          }
+          autoColumnWidths[key] = measuredColumnTextWidth(length);
         });
       }
 
@@ -7218,13 +7395,32 @@ export class KxResultsPanel {
       }
 
       function measuredColumnTextWidth(textLength) {
-        const fontSize = settings.fontSize > 0 ? settings.fontSize : 13;
-        const charWidth = Math.max(7, fontSize * 0.58);
+        const style = getComputedStyle(document.body);
+        const fontSize = settings.fontSize > 0 ? settings.fontSize : parseFloat(style.fontSize) || 13;
+        const context = columnSizingContext || (columnSizingContext = document.createElement('canvas').getContext('2d'));
+        let charWidth = Math.max(7, fontSize * 0.58);
+        if (context) {
+          // Length hints cover offscreen rows. Use a conservative glyph width in
+          // the actual font, including bold headers, instead of assuming 13px.
+          context.font = 'bold ' + fontSize + 'px ' + (style.fontFamily || 'sans-serif');
+          charWidth = Math.max(charWidth, context.measureText('W').width);
+        }
         return clampInteger(
           Math.ceil(Math.max(0, Number(textLength) || 0) * charWidth + layout.cellPaddingX * 2 + 18),
           MIN_COLUMN_WIDTH,
           AUTO_COLUMN_WIDTH_CAP
         );
+      }
+
+      function measuredRenderedTextWidth(text, header) {
+        const style = getComputedStyle(document.body);
+        const fontSize = settings.fontSize > 0 ? settings.fontSize : parseFloat(style.fontSize) || 13;
+        const context = columnSizingContext || (columnSizingContext = document.createElement('canvas').getContext('2d'));
+        if (!context) {
+          return measuredColumnTextWidth(String(text).length);
+        }
+        context.font = (header ? 'bold ' : '') + fontSize + 'px ' + (style.fontFamily || 'sans-serif');
+        return clampInteger(Math.ceil(context.measureText(String(text)).width + layout.cellPaddingX * 2 + 18), MIN_COLUMN_WIDTH, AUTO_COLUMN_WIDTH_CAP);
       }
 
       function setColumnWidthOverride(column, width) {
@@ -7792,13 +7988,15 @@ export class KxResultsPanel {
 
       function columnWidth(column) {
         const key = columnWidthKey(column);
+        const autoWidth = autoColumnWidths[key];
+        if (autoFitEnabled) {
+          return Number.isFinite(autoWidth)
+            ? clampInteger(autoWidth, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH)
+            : clampInteger(settings.cellWidth, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+        }
         const override = columnWidthOverrides[key];
         if (Number.isFinite(override)) {
           return clampInteger(override, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
-        }
-        const autoWidth = autoColumnWidths[key];
-        if (autoFitEnabled && Number.isFinite(autoWidth)) {
-          return clampInteger(autoWidth, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
         }
         return clampInteger(settings.cellWidth, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
       }
@@ -8046,7 +8244,7 @@ export class KxResultsPanel {
           handle.title = 'Drag to resize column';
           handle.dataset.column = String(options.column);
           handle.addEventListener('mousedown', onColumnResizeMouseDown);
-          handle.addEventListener('click', event => event.stopPropagation());
+          handle.addEventListener('click', guardRendererCallback(event => event.stopPropagation()));
           handle.addEventListener('dblclick', onColumnResizeDoubleClick);
           cell.appendChild(handle);
         }
@@ -8795,6 +8993,8 @@ function panelSettings(): KxPanelSettings {
       DEFAULT_PANEL_SETTINGS.localDataServerFullExportCellLimit
     ),
     elapsedTimeDisplay: panelElapsedTimeDisplay(config.get<string>('elapsedTimeDisplay')),
+    tableDecimalPlaces: tableDecimalPlaces(config.get('viewer.tableDecimalPlaces')),
+    chartScientificNotationThreshold: scientificNotationThreshold(config.get('viewer.chartScientificNotationThreshold')),
     chartDecimalPlaces: chartDecimalPlacesSettingValue(config.get<number>('viewer.chartDecimalPlaces')),
     chartMaxSourceRows: chartMaxSourceRowsSettingValue(
       config.get<number>('viewer.chartMaxSourceRows')
@@ -8827,6 +9027,8 @@ export function sharedKxResultSettings(): SharedKxResultSettings {
     includeHeaders: settings.includeHeaders,
     includeRowIndex: settings.includeRowIndex,
     elapsedTimeDisplay: settings.elapsedTimeDisplay,
+    tableDecimalPlaces: settings.tableDecimalPlaces,
+    chartScientificNotationThreshold: settings.chartScientificNotationThreshold,
     chartDecimalPlaces: settings.chartDecimalPlaces,
     chartMaxSourceRows: settings.chartMaxSourceRows,
     copyExportConfirmCellThreshold: settings.copyExportConfirmCellThreshold,
@@ -8908,7 +9110,8 @@ function qTextRenderOptions(settings: KxPanelSettings): { syntaxHighlighting: bo
 }
 
 function panelCellTextOptions(): CellTextOptions {
-  return { arrayDisplayFormat: panelSettings().arrayDisplayFormat };
+  const settings = panelSettings();
+  return { arrayDisplayFormat: settings.arrayDisplayFormat, tableDecimalPlaces: settings.tableDecimalPlaces };
 }
 
 function chartMaxSourceRowsSetting(): number {
@@ -8960,6 +9163,8 @@ function panelSettingConfigKey(key: string, density: KxPanelDensity): string {
     key === 'autoFitMode' ||
     key === 'chartMaxSourceRows' ||
     key === 'chartDecimalPlaces' ||
+    key === 'tableDecimalPlaces' ||
+    key === 'chartScientificNotationThreshold' ||
     key === 'dictionaryDisplayStrategy' ||
     key === 'listDisplayStrategy'
   ) {
@@ -9019,6 +9224,8 @@ const RESULT_SETTING_UPDATE_ALLOWLIST: { [key: string]: PanelSettingUpdateValida
   copyExportConfirmCellThreshold: positiveIntegerSettingUpdate,
   localDataServerFullExportCellLimit: positiveIntegerSettingUpdate,
   elapsedTimeDisplay: elapsedTimeDisplaySettingUpdate,
+  tableDecimalPlaces: value => Number.isInteger(value) && value >= -1 && value <= 12 ? value : null,
+  chartScientificNotationThreshold: value => typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null,
   chartDecimalPlaces: value => numberSettingUpdate(value, CHART_DECIMAL_PLACES_MIN, CHART_DECIMAL_PLACES_MAX),
   chartMaxSourceRows: positiveIntegerSettingUpdate,
   arrayDisplayFormat: arrayDisplayFormatSettingUpdate,
@@ -9201,6 +9408,9 @@ function normalizeSavedChartSelection(value: any): SavedChartSelection | null {
       chartType,
       xColumn,
       yColumns: [],
+      groupByColumn: groupByColumn && groupByColumn !== xColumn && !roles.includes(groupByColumn)
+        ? groupByColumn
+        : undefined,
       openColumn,
       highColumn,
       lowColumn,
@@ -9214,7 +9424,9 @@ function normalizeSavedChartSelection(value: any): SavedChartSelection | null {
     chartType,
     xColumn,
     yColumns,
-    groupByColumn: chartType === 'box' ? undefined : (groupByColumn || undefined),
+    groupByColumn: groupByColumn && groupByColumn !== xColumn && !yColumns.includes(groupByColumn)
+      ? groupByColumn
+      : undefined,
   };
 }
 
@@ -9235,10 +9447,16 @@ function compatibleChartSelection(selection: SavedChartSelection, options: Retur
     if (roles.some(column => !yLookup[column]) || new Set(roles).size !== roles.length) {
       return null;
     }
+    const groupLookup = columnNameLookup(options.groupColumns.map(option => option.columnName));
+    const groupByColumn = selection.groupByColumn && groupLookup[selection.groupByColumn] &&
+      selection.groupByColumn !== xOption.columnName && !roles.includes(selection.groupByColumn)
+      ? selection.groupByColumn
+      : '';
     return {
       chartType,
       xColumn: xOption.columnName,
       yColumns: [],
+      groupByColumn: groupByColumn || undefined,
       openColumn: roles[0],
       highColumn: roles[1],
       lowColumn: roles[2],
@@ -9250,9 +9468,10 @@ function compatibleChartSelection(selection: SavedChartSelection, options: Retur
     return null;
   }
   const groupLookup = columnNameLookup(options.groupColumns.map(option => option.columnName));
-  const groupByColumn = chartType === 'box' ? '' : (selection.groupByColumn && groupLookup[selection.groupByColumn]
+  const groupByColumn = selection.groupByColumn && groupLookup[selection.groupByColumn] &&
+    selection.groupByColumn !== xOption.columnName && !yColumns.includes(selection.groupByColumn)
     ? selection.groupByColumn
-    : '');
+    : '';
   return {
     chartType,
     xColumn: xOption.columnName,

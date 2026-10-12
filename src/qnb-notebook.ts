@@ -1,13 +1,18 @@
 import * as vscode from 'vscode';
+import { reportKxFailure, reportKxBreadcrumb, newFailureOperationId } from './failure-record';
 
 import {
   QnbCellModel,
   QnbDocumentModel,
   QnbJson,
   QnbOutputModel,
+  QNB_MAX_JSON_DEPTH,
+  QnbCodecError,
   decodeQnb,
   encodeQnb,
 } from './qnb-codec';
+import { compactQnbJsonText, QnbJsonText, QnbJsonTextError } from './qnb-json-text';
+import { DiagnosticOutput } from './diagnostics';
 
 export const QNB_NOTEBOOK_TYPE = 'vscode-kdb-q-notebook';
 export const NEW_Q_NOTEBOOK_COMMAND = 'vscode-kdb.newQNotebook';
@@ -30,11 +35,11 @@ export class QnbNotebookSupport implements vscode.Disposable {
   private readonly disposables: vscode.Disposable[];
   private readonly preparedBlankDocuments = new WeakSet<vscode.NotebookDocument>();
 
-  public constructor() {
+  public constructor(output?: DiagnosticOutput) {
     this.disposables = [
       vscode.workspace.registerNotebookSerializer(
         QNB_NOTEBOOK_TYPE,
-        new QnbNotebookSerializer(),
+        new QnbNotebookSerializer(output),
         { transientOutputs: false }
       ),
       vscode.commands.registerCommand('vscode-kdb.newQNotebook', () => this.createNotebook()),
@@ -70,7 +75,8 @@ export class QnbNotebookSupport implements vscode.Disposable {
     edit.set(notebook.uri, [vscode.NotebookEdit.updateNotebookMetadata(metadata)]);
     try {
       if (await vscode.workspace.applyEdit(edit)) return;
-    } catch {
+    } catch (error) {
+      reportKxFailure('qnb', 'commit', error, { surface: 'qnb', phase: 'commit' });
       // The same actionable error is shown for a rejected or failed host edit.
     }
     void vscode.window.showErrorMessage(
@@ -80,15 +86,26 @@ export class QnbNotebookSupport implements vscode.Disposable {
 }
 
 export class QnbNotebookSerializer implements vscode.NotebookSerializer {
+  public constructor(private readonly output?: DiagnosticOutput) {}
   public async deserializeNotebook(
     content: Uint8Array,
     _token: vscode.CancellationToken,
   ): Promise<vscode.NotebookData> {
-    const decoded = decodeQnb(content);
+    const operationId = newFailureOperationId();
+    const started = Date.now();
+    const details = { operationId, surface: 'qnb', inputBytes: content.byteLength };
+    reportKxBreadcrumb('qnb', 'deserialize', { ...details, status: 'start' });
+    let decoded: ReturnType<typeof decodeQnb>;
+    try { decoded = decodeQnb(content); }
+    catch (error) {
+      if (!(error instanceof QnbCodecError)) reportKxFailure('qnb', 'deserialize', error, { ...details, durationMs: Date.now() - started });
+      throw error;
+    }
     const data = new vscode.NotebookData(decoded.cells.map(cellData));
     if (decoded.blankBootstrap) {
       data.metadata = { [QNB_BLANK_BOOTSTRAP_METADATA_KEY]: true };
     }
+    reportKxBreadcrumb('qnb', 'deserialize', { ...details, status: 'success', cellCount: data.cells.length, durationMs: Date.now() - started });
     return data;
   }
 
@@ -96,10 +113,32 @@ export class QnbNotebookSerializer implements vscode.NotebookSerializer {
     data: vscode.NotebookData,
     _token: vscode.CancellationToken,
   ): Promise<Uint8Array> {
-    const document: QnbDocumentModel = {
-      cells: data.cells.map((cell, index) => cellModel(cell, index)),
+    const operationId = newFailureOperationId();
+    const started = Date.now();
+    const inputBytes = data.cells.reduce((total, cell) => total + (cell.outputs ?? [])
+      .reduce((sum, output) => sum + output.items.reduce((n, item) => n + item.data.byteLength, 0), 0), 0);
+    const log = (status: string, bytes?: number): void => {
+      try {
+        this.output?.appendLine(JSON.stringify({ phase: 'notebook-save', status,
+          cells: data.cells.length, inputBytes, ...(bytes === undefined ? {} : { serializedBytes: bytes }),
+          durationMs: Date.now() - started }));
+      } catch { /* Diagnostics cannot interrupt a save. */ }
     };
-    return encodeQnb(document);
+    const details = { operationId, surface: 'qnb', inputBytes, cellCount: data.cells.length };
+    reportKxBreadcrumb('qnb', 'serialize', { ...details, status: 'start' });
+    log('start');
+    try {
+      const outputJsonText = new Map<QnbOutputModel, QnbJsonText>();
+      const document: QnbDocumentModel = {
+        cells: data.cells.map((cell, index) => cellModel(cell, index, outputJsonText)),
+      };
+      const bytes = encodeQnb(document, { outputValuesAreOwnedJson: true, outputJsonText });
+      log('serialized', bytes.byteLength);
+      reportKxBreadcrumb('qnb', 'serialize', { ...details, status: 'success', outputBytes: bytes.byteLength, durationMs: Date.now() - started });
+      return bytes;
+    } catch (error) { log('failed');
+      if (!(error instanceof QnbCodecError) && !(error instanceof QnbJsonTextError)) reportKxFailure('qnb', 'serialize', error, { ...details, durationMs: Date.now() - started });
+      throw error; }
   }
 }
 
@@ -149,7 +188,10 @@ function outputData(output: QnbOutputModel): vscode.NotebookCellOutput {
   );
 }
 
-function cellModel(cell: vscode.NotebookCellData, index: number): QnbCellModel {
+function cellModel(
+  cell: vscode.NotebookCellData, index: number,
+  outputJsonText: Map<QnbOutputModel, QnbJsonText>,
+): QnbCellModel {
   const kind = cell.kind === vscode.NotebookCellKind.Code ? 'code' : 'markdown';
   const sidecar = cellSidecar(cell.metadata?.[CELL_SIDECAR]);
   const metadata = withoutOwned(cell.metadata, CELL_SIDECAR);
@@ -170,7 +212,7 @@ function cellModel(cell: vscode.NotebookCellData, index: number): QnbCellModel {
       return output.items.flatMap((item, itemIndex) =>
         sidecar?.fallbackItemIndex === itemIndex
           ? []
-          : [outputModel(output, item, index, outputIndex, itemIndex)]);
+          : [outputModel(output, item, index, outputIndex, itemIndex, outputJsonText)]);
     }),
     unknown,
   };
@@ -182,15 +224,21 @@ function outputModel(
   cellIndex: number,
   outputIndex: number,
   itemIndex: number,
+  outputJsonText: Map<QnbOutputModel, QnbJsonText>,
 ): QnbOutputModel {
   const sidecar = itemIndex === 0 ? outputSidecar(output.metadata?.[OUTPUT_SIDECAR]) : undefined;
   const decoded = new TextDecoder('utf-8', { fatal: true }).decode(item.data);
   let value: QnbJson = decoded;
+  let raw: QnbJsonText | undefined;
   const expectsJson = sidecar?.valueKind === 'json' || jsonMime(item.mime);
   if (expectsJson) {
     try {
-      value = JSON.parse(decoded) as QnbJson;
-    } catch {
+      raw = compactQnbJsonText(decoded, QNB_MAX_JSON_DEPTH);
+      value = null;
+    } catch (error) {
+      if (error instanceof QnbJsonTextError && !error.syntax) {
+        throw new QnbCodecError(error.message);
+      }
       if (sidecar?.valueKind === 'json') {
         throw new Error(
           `q notebook cell ${cellIndex} output ${outputIndex}:${itemIndex} can no longer be preserved as JSON.`
@@ -201,7 +249,9 @@ function outputModel(
   const metadata = withoutOwned(output.metadata, OUTPUT_SIDECAR);
   const unknown: Record<string, QnbJson> = { ...sidecar?.unknown };
   if (Object.keys(metadata).length > 0) unknown.metadata = metadata;
-  return { mime: item.mime, value, unknown };
+  const model = { mime: item.mime, value, unknown };
+  if (raw) outputJsonText.set(model, raw);
+  return model;
 }
 
 function cellSidecar(value: unknown): CellSidecar | undefined {

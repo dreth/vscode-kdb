@@ -44,6 +44,7 @@ REQUIRED_MEMBERS = {
     PACKAGE_MANIFEST,
     "extension/language-configuration.json",
     "extension/THIRD_PARTY_NOTICES.md",
+    "extension/third-party/sentry-runtime-licenses.txt",
     "extension/readme.md",
     "extension/LICENSE.txt",
     "extension/changelog.md",
@@ -54,6 +55,7 @@ REQUIRED_MEMBERS = {
     "extension/language-server/APACHE-2.0.txt",
     "extension/language-server/PROVENANCE.md",
     "extension/out/extension.js",
+    "extension/out/failure-build.json",
     "extension/out/q-language-server.js",
     "extension/renderer/kx-notebook-renderer.js",
     "extension/syntaxes/q.tmLanguage.json",
@@ -77,6 +79,7 @@ ALLOWED_EXTENSION_ROOTS = {
     "syntaxes",
     "renderer",
     "language-server",
+    "third-party",
 }
 
 FORBIDDEN_COMPONENTS = {
@@ -372,6 +375,9 @@ def validate_vsix_path_policy(name: str) -> None:
     if root not in ALLOWED_EXTENSION_ROOTS:
         raise AuditError(f"VSIX: unexpected extension-root member: {name!r}")
 
+    if root == 'third-party' and name != 'extension/third-party/sentry-runtime-licenses.txt':
+        raise AuditError(f"VSIX: unexpected third-party notice artifact: {name!r}")
+
     folded_parts = [part.casefold() for part in parts]
     forbidden = sorted(set(folded_parts) & FORBIDDEN_COMPONENTS)
     if forbidden:
@@ -615,6 +621,7 @@ def validate_repository_manifest(package: dict[str, Any]) -> None:
 def validate_compiled_inventory(members: dict[str, bytes]) -> None:
     expected = {
         "extension/out/extension.js",
+        "extension/out/failure-build.json",
         "extension/out/q-language-server.js",
     }
     actual = {
@@ -628,6 +635,25 @@ def validate_compiled_inventory(members: dict[str, bytes]) -> None:
         raise AuditError(f"VSIX: compiled module(s) missing: {', '.join(missing)}")
     if stale:
         raise AuditError(f"VSIX: stale/unexpected compiled output: {', '.join(stale)}")
+
+    try:
+        metadata = json.loads(members['extension/out/failure-build.json'])
+        package = json.loads(members[PACKAGE_MANIFEST])
+    except (ValueError, KeyError) as error:
+        raise AuditError('VSIX: invalid failure build metadata') from error
+    if not isinstance(metadata, dict) or set(metadata) != {'schemaVersion', 'release', 'buildId', 'artifacts', 'libraries'}:
+        raise AuditError('VSIX: invalid failure build metadata schema')
+    artifacts = {name: hashlib.sha256(members['extension/' + name]).hexdigest() for name in
+                 ('out/extension.js', 'out/q-language-server.js', 'renderer/kx-notebook-renderer.js')}
+    identity = hashlib.sha256(json.dumps(artifacts, separators=(',', ':')).encode()).hexdigest()
+    if (metadata.get('schemaVersion') != 1 or metadata.get('release') != package.get('version') or
+            metadata.get('artifacts') != artifacts or metadata.get('buildId') != identity):
+        raise AuditError('VSIX: failure build identity does not match packaged artifacts/release')
+    libraries = metadata.get('libraries')
+    if (not isinstance(libraries, dict) or set(libraries) != set(package.get('dependencies', {})) or
+            any(not isinstance(version, str) or not re.fullmatch(r'[0-9][A-Za-z0-9.+_-]{0,59}', version)
+                for version in libraries.values())):
+        raise AuditError('VSIX: invalid resolved library versions in failure build metadata')
 
 
 def validate_runtime_indicators(members: dict[str, bytes]) -> None:

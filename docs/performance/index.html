@@ -646,6 +646,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#large-notebook-tables" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Large notebook tables
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -843,6 +854,17 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#large-notebook-tables" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Large notebook tables
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -865,7 +887,9 @@
 
 <h1 id="performance-large-results">Performance &amp; Large Results</h1>
 <p>The result viewer is designed to stay usable with large tables, but q IPC responses are not streamed through the complete pipeline.</p>
-<p>Direct notebook execution keeps the decoded live value in extension-host memory while its live record exists and automatically writes every exactly representable row using the typed portable v2 contract. The authoritative rich output therefore remains complete after reopening and can make the notebook large; it deliberately ignores helper-preview and static-fallback row/byte limits. A value outside the exact contract fails explicitly instead of being saved as a partial result labelled complete.</p>
+<p>Direct notebook execution automatically writes every exactly representable row using the typed portable v2/v3/v4 contracts. With a positive <code>maxOutputRows</code>, it also keeps the decoded value in extension-host memory while the live record exists. Set the row setting to <code>0</code> to avoid that duplicate session cache; the authoritative rich output remains complete after reopening and can still make the notebook large. It deliberately ignores helper-preview and static-fallback row/byte limits. A value outside the exact contract fails explicitly instead of being saved as a partial result labelled complete.</p>
+<p>The <code>.qnb</code> serializer has no fixed whole-file byte ceiling. It preserves valid complete output even when its JSON exceeds 16 MiB; available memory, time, and filesystem capacity still constrain very large saves and reopen operations. Direct IPC emits compact MIME JSON, and <code>.qnb</code> saves validate and compact JSON output without building another complete typed-cell object tree. Reopening avoids copying the freshly parsed output tree. The separate <code>.ipynb</code> serializer belongs to VS Code/Jupyter.</p>
+<p>Live notebook scrolling, output reconciliation, and result-menu checks reuse a validated ownership proof for identical output bytes. Each request still checks exact bytes and current metadata/session ownership. The bounded cache retains a byte snapshot rather than another parsed typed-cell tree, evicts older proofs, and clears on notebook close or output clearing. Its memory budget does not impose a notebook/result-size cap. This avoids repeatedly parsing a complete large result while autosave waits for the extension host.</p>
 <h2 id="memory-and-rendering-model">Memory and rendering model</h2>
 <p>The extension receives and decodes the complete q IPC response before the panel or notebook can show it. Table data is retained in columnar form in the extension host. The webview then requests only bounded row/column windows, so DOM and message traffic are virtualized.</p>
 <p>Virtual scrolling reduces browser work; it does not reduce the original q response, decode allocation, or extension-host storage. Limit at the q server when the full dataset is not required:</p>
@@ -905,7 +929,7 @@
 </tr>
 <tr>
 <td>Built-in chart</td>
-<td>Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views return all eligible observations at or below 7,000 and exactly 7,000 shared aligned samples above that count; semantic groups/candles may be fewer. Zoom stays local at 3,000 or more visible samples and refills below that threshold. Compatible pans use a cached X index, retain overlap, and decode only newly exposed/boundary Y slices.</td>
+<td>Rejects sources over 2,000,000 rows by default. Initial/full and ranged line/scatter/step views return all eligible observations at or below 7,000 and exactly 7,000 shared aligned samples above that count; semantic groups/candles may be fewer. Grouping is client-side, retains at most 12 categories and 36 generated series, and shares one bounded visual-item budget across categories. Zoom stays local at 3,000 or more visible samples and refills below that threshold. Compatible pans use a cached X index, retain overlap, and decode only newly exposed/boundary Y slices.</td>
 </tr>
 <tr>
 <td>Local server full export</td>
@@ -921,7 +945,7 @@
 </tr>
 <tr>
 <td>Notebook live registry</td>
-<td>Current extension-host session only; records are bound to notebook/cell URI, removed on rerun, cell removal, native output clearing, notebook close, or deactivation, capped at 512, and oldest-first evicted. Each result caches at most four full sort orders.</td>
+<td>Used only when <code>maxOutputRows</code> is positive. Records are bound to notebook/cell URI, removed on successful rerun, cell removal, native output clearing, notebook close, or deactivation, capped at 512, and oldest-first evicted. Each result caches at most four full sort orders. Zero mode creates no new record.</td>
 </tr>
 <tr>
 <td>Notebook live slice</td>
@@ -929,13 +953,13 @@
 </tr>
 <tr>
 <td>Notebook saved output</td>
-<td>Every successful first-party Direct IPC run automatically persists complete exact rich v2 output without the <code>maxOutputRows</code> or <code>maxOutputBytes</code> ceilings. Its saved grid and column controls page through bounded windows, bound visible cell/page text and search work, and display at most 1,048,576 full-qText characters with an explicit notice; Copy/Export with no selection still uses every retained visible column or the complete saved qText. The 1-10,000-row and 16,384-10,000,000-byte settings continue to bound tagged Python-helper previews and static fallback material where applicable. Historical preview payloads retain their declared 256-column, 32,768-character cell, and 1,048,576-character qText safety limits.</td>
+<td>Every successful first-party Direct IPC run automatically persists complete exact rich v2/v3/v4 output without the <code>maxOutputRows</code> or <code>maxOutputBytes</code> ceilings. Its saved grid and column controls page through bounded windows, bound visible cell/page text and search work, and display at most 1,048,576 full-qText characters with an explicit notice; Copy/Export with no selection still uses every retained visible column or the complete saved qText. The 0-10,000-row setting controls live-cache retention and supplies positive helper limits; zero uses a 20-row Tag/Prepare fallback. The 16,384-10,000,000-byte setting continues to bound tagged Python-helper previews and static fallback material. Historical preview payloads retain their declared 256-column, 32,768-character cell, and 1,048,576-character qText safety limits.</td>
 </tr>
 </tbody>
 </table>
 <p>Some cell and chart limits are configurable. Internal time, byte-size, group-count, and file-format limits remain protective boundaries. Raising a configurable limit can temporarily block the extension host.</p>
 <p>Large-sort approval is transient result state. Cancellation does not grant it, and re-execution, replacement, reopening, or a new output identity resets it. Column summaries use the already-decoded result without another q query, retain source-column ordinals, and send only compact payloads to the webview. In bounded mode, evaluated, valid, null, distinct, frequent-value, and numeric/temporal metrics describe only the deterministic sample; no count is extrapolated to unevaluated rows.</p>
-<p>Notebook row/byte options constrain tagged Python-helper previews and static fallback material where applicable, not q execution or authoritative first-party rich persistence. Apply a q-side limit when the full q value itself should not materialize or be stored. A historical or Python-helper preview has no recovery handle for omitted rows in the <code>.ipynb</code>; rerunning a historical first-party preview executes the current cell source and replaces it with new complete exact v2 output. Native output clearing removes the output and its live ownership so stale data cannot reappear. Cell removal, notebook close, deactivation, oldest-first eviction, or reopening likewise cannot recover rows absent from a saved preview.</p>
+<p>Notebook row/byte options do not limit q execution or authoritative first-party rich persistence. Zero rows disables the duplicate live cache; positive rows and the byte option supply tagged Python-helper/static limits, with a 20-row helper fallback in zero mode. Apply a q-side limit when the full q value itself should not materialize or be stored. A historical or Python-helper preview has no recovery handle for omitted rows in the <code>.ipynb</code>; rerunning a historical first-party preview executes the current cell source once and replaces it with new complete exact v2/v3/v4 output. Native output clearing removes the output and its live ownership so stale data cannot reappear. Cell removal, notebook close, deactivation, oldest-first eviction, or reopening likewise cannot recover rows absent from a saved preview.</p>
 <h2 id="timeout-and-queue-behavior">Timeout and queue behavior</h2>
 <p><code>vscode-kdb.connectionTimeoutMs</code> defaults to 30,000 milliseconds. It applies a complete budget to TCP connect and then a new complete budget to q IPC handshake. The independent <code>vscode-kdb.queryTimeoutMs</code> defaults to 3,600,000 milliseconds (60 minutes). Mixed q-cell execution and the optional pure-q controller both inherit the active profile's effective query timeout and add no separate 30-second query ceiling.</p>
 <p>The <strong>KX Connection</strong> form's <strong>Advanced direct q IPC</strong> section accepts optional per-profile <code>connectTimeoutMs</code> and <code>queryTimeoutMs</code> overrides. Blank inherits the corresponding global value, including for existing profiles whose query override is omitted. Every timeout is a whole number from <code>0</code> through <code>2147483647</code> milliseconds; use <code>0</code> only when an unbounded phase wait is intentional. Zero disables only the corresponding connect/handshake or query response deadline.</p>
@@ -943,6 +967,7 @@
 <p>A connection serializes its q query requests. Local panel or direct-notebook cancellation stops waiting for one result but does not undo work already sent to q or cancel other queued work. Pre-dispatch notebook cancellation sends nothing. Disconnecting closes the client and fails its outstanding queue.</p>
 <h2 id="diagnostics">Diagnostics</h2>
 <p>Open <strong>View &gt; Output</strong> and select <strong>KX</strong>. Lifecycle events are always available there for connection, handshake, query, cancellation, disconnect, and close transitions. They include the phase, effective timeout/disabled state for connect, handshake, and active queries, and direct <code>host:port</code> where useful.</p>
+<p><code>.qnb</code> saves also record <code>phase: "notebook-save"</code>, input/output byte counts, cell count, duration, and <code>start</code>, <code>serialized</code>, or <code>failed</code> status. These records contain no query text, results, file paths, or credentials. <code>serialized</code> means bytes were returned to VS Code; VS Code still owns the file write. If saving stalls after that event, collect the remote/Extension Host and window logs as well. A heap-exhaustion crash can appear in the save popup as <strong>Canceled</strong>; increasing the q query timeout does not fix that failure.</p>
 <p>For safe timing detail, explicitly enable:</p>
 <div class="highlight"><pre><span></span><code><span class="p">{</span>
 <span class="w">  </span><span class="nt">"vscode-kdb.performance.trace"</span><span class="p">:</span><span class="w"> </span><span class="kc">true</span>
@@ -953,6 +978,11 @@
 <p>Performance trace can add small measurement and output overhead. Disable it after troubleshooting.</p>
 <h2 id="external-analysis">External analysis</h2>
 <p>The optional <a href="../local-data-server/">Local Data Server</a> provides an explicit loopback workflow with bounded slices and tokenized endpoints. For data that should never be fully loaded into VS Code, query and aggregate it directly in q or use a separately managed client suited to that volume.</p>
+<h2 id="large-notebook-tables">Large notebook tables</h2>
+<p>Version 0.2.42 stores all supported native q tables/keyed tables with authoritative typed columns as full v4 packed columns, without a row/cell-count cutoff. Repeated constants and nested-vector headers are removed; exact numeric binary streams are losslessly compressed and embedded as base64 in ordinary notebook JSON. Decimal scaling is used only when reversible; exact IEEE bit corrections or binary storage preserve other floating values. Non-table/plain-row fallback v2 output and existing v1/v2/v3 readers remain supported. New v4 output requires 0.2.40 or later.</p>
+<p>The existing Dev Container notebook contained <strong>20,340,848 scalar values</strong>, including 2.4 million nested numeric vectors. Its <strong>278.8 MiB</strong> saved file became <strong>20.1 MiB</strong> (about 93% smaller), below a <strong>32.7 MiB</strong> gzip-JSON baseline. Every scalar and all q metadata were checked, and MIME bytes and durable identity survived save/reopen exactly. The actual file remained unchanged; the isolated test did not execute q. Converting the old saved representation took <strong>22.8 seconds</strong>; subsequent <code>.qnb</code> serialization took <strong>0.22 seconds</strong>. Reading, validating and comparing the original large file added diagnostic time. Standalone notebook factory mocks were used; these are not measurements of the installed Extension Host or Jupyter writer.</p>
+<p>The separate 600,000 × 14 producer fixture shrank from roughly <strong>160 MiB to 5.2 MiB</strong> and passed complete creation/save/reopen under a <strong>1 GiB JavaScript heap limit</strong>. Buffers outside that heap contribute to process memory. Compression ratio depends on values and nested shapes; no fixed file size or speed is promised. Existing saved files keep their format until a fresh execution.</p>
+<p>The row/byte settings do not cap first-party rich data. Zero rows avoids retaining a duplicate raw live value; q-side limits remain the way to reduce actual query/result size. Genuine runtime string/allocation exhaustion is reported explicitly without truncating the result.</p>
 
 
 

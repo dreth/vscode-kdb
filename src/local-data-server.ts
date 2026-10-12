@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { reportKxFailure, reportKxBreadcrumb, newFailureOperationId } from './failure-record';
 import * as http from 'http';
 import { AddressInfo } from 'net';
 import { URL } from 'url';
@@ -129,8 +130,13 @@ export class LocalDataServer {
   }
 
   private async startServer(): Promise<LocalDataServerInfo> {
+    const details = { operationId: newFailureOperationId(), surface: 'local-server', transport: 'loopback' };
+    reportKxBreadcrumb('local-server', 'start', { ...details, status: 'start' });
     const token = randomLocalDataServerToken();
-    const server = http.createServer((request, response) => this.handleRequest(request, response));
+    const server = http.createServer((request, response) => {
+      try { this.handleRequest(request, response); }
+      catch (error) { reportKxFailure('local-server', 'action', error, { surface: 'local-server', transport: 'loopback', ready: !!this.infoValue }); throw error; }
+    });
     this.server = server;
     try {
       const port = await listenOnNextFreePort(server, this.preferredPort);
@@ -140,9 +146,11 @@ export class LocalDataServer {
         token,
         baseUrl: `http://${LOCAL_DATA_SERVER_HOST}:${port}/${token}`,
       };
+      reportKxBreadcrumb('local-server', 'start', { ...details, status: 'success', ready: true });
       return { ...this.infoValue };
     } catch (error) {
       this.server = undefined;
+      reportKxFailure('local-server', 'start', error, { ...details, ready: false });
       this.infoValue = undefined;
       try {
         server.close();
@@ -167,7 +175,8 @@ export class LocalDataServer {
     if (!server) {
       return;
     }
-    await closeServer(server);
+    try { await closeServer(server); }
+    catch (error) { reportKxFailure('local-server', 'stop', error, { surface: 'local-server', transport: 'loopback' }); throw error; }
   }
 
   private handleRequest(request: http.IncomingMessage, response: http.ServerResponse): void {
@@ -192,6 +201,7 @@ export class LocalDataServer {
       this.writeEndpoint(response, parsed, snapshot);
     } catch (error) {
       const httpError = toHttpError(error);
+      if (httpError.status >= 500) reportKxFailure('local-server', 'export', error, { surface: 'local-server', transport: 'loopback', ready: true });
       writeJson(response, httpError.status, errorBody(httpError.code, httpError.message));
     }
   }

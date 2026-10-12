@@ -74,6 +74,7 @@ export interface CandlestickColumns {
 
 export interface CandlestickInputPoint {
   rowIndex?: number;
+  group?: string;
   x: number;
   xText: string;
   open: number | null;
@@ -109,7 +110,14 @@ export interface BoxChartStats {
 
 export interface BoxChartSeries {
   columnName: string;
+  sourceColumnName?: string;
+  groupValue?: string;
   stats: Array<BoxChartStats | null>;
+}
+
+export interface CandlestickSeries {
+  groupValue: string;
+  candlesticks: Array<CandlestickDataPoint | null>;
 }
 
 export interface LineChartData {
@@ -126,6 +134,8 @@ export interface LineChartData {
   boxSeries?: BoxChartSeries[];
   ohlcColumns?: CandlestickColumns;
   candlesticks?: CandlestickDataPoint[];
+  candlestickSeries?: CandlestickSeries[];
+  retainedGroupCount?: number;
   sourceRowCount: number;
   eligibleRowCount: number;
   sampledPointCount: number;
@@ -158,6 +168,8 @@ interface ChartPoint {
   group?: string;
   y: Array<number | null>;
   gapFlags?: boolean[];
+  /** Per-series source origin for aligned grouped occurrences. */
+  sourceRowIndexes?: Array<number | undefined>;
 }
 
 interface ChartXIndex {
@@ -212,6 +224,8 @@ interface PreparedCandlestickSource {
   xOption: ChartColumnOption;
   ohlcColumns: CandlestickColumns;
   ohlcColumnIndexes: [number, number, number, number];
+  groupColumnName?: string;
+  groupColumnIndex?: number;
   warnings: string[];
 }
 
@@ -228,6 +242,7 @@ interface CollectedChartPoints {
 interface CollectedCandlestickPoints {
   points: CandlestickInputPoint[];
   droppedX: number;
+  droppedGroup: number;
   rangeExcluded: number;
   sourceWasUnsorted: boolean;
 }
@@ -236,6 +251,7 @@ interface BoxChartBin {
   x: number;
   xText: string;
   stats: Array<BoxChartStats | null>;
+  points: ChartPoint[];
 }
 
 interface ChartXRange {
@@ -849,10 +865,25 @@ function mergeTemporalChartPieces(
       if (maxIndex >= 0) selected[maxIndex] = 1;
     }
     fillSelectedPointIndexes(selected, merged.length, CHART_ORDINARY_TARGET_POINTS);
+    const originalRecords = merged;
     const selectedRecords = merged.filter((_record, index) => selected[index]);
     merged = selectedRecords.length <= CHART_ORDINARY_TARGET_POINTS
       ? selectedRecords
       : evenlyThin(selectedRecords, CHART_ORDINARY_TARGET_POINTS);
+    // Carry breaks from removed samples without decoding the cached source again.
+    if (pieces.some(piece => piece.data.series.some(series => series.gapBefore?.some(Boolean)))) {
+      const retained = new Set(merged);
+      for (let seriesIndex = 0; seriesIndex < seriesCount; seriesIndex++) {
+        let gapPending = false;
+        for (const record of originalRecords) {
+          if (record.gapBefore[seriesIndex] || record.values[seriesIndex] === null) gapPending = true;
+          if (retained.has(record) && Number.isFinite(record.values[seriesIndex])) {
+            record.gapBefore[seriesIndex] ||= gapPending;
+            gapPending = false;
+          }
+        }
+      }
+    }
   }
   const first = pieces[0].data;
   const reusedPointCount = merged.filter(record => record.reused).length;
@@ -868,7 +899,8 @@ function mergeTemporalChartPieces(
       ...series,
       values: merged.map(record => record.values[seriesIndex]),
       ...(series.gapFlags ? { gapFlags: merged.map(record => record.gapFlags[seriesIndex]) } : {}),
-      ...(series.gapBefore ? { gapBefore: merged.map(record => record.gapBefore[seriesIndex]) } : {}),
+      ...(pieces.some(piece => piece.data.series[seriesIndex].gapBefore)
+        ? { gapBefore: merged.map(record => record.gapBefore[seriesIndex]) } : {}),
     })),
     eligibleRowCount,
     sampledPointCount: merged.length,
@@ -900,10 +932,10 @@ export function normalizeChartType(value: unknown): ChartType {
 export function chartTypeCapabilities(value: unknown): ChartTypeCapabilities {
   const chartType = normalizeChartType(value);
   if (chartType === 'candlestick') {
-    return { usesGenericY: false, supportsGroupBy: false, usesOhlc: true };
+    return { usesGenericY: false, supportsGroupBy: true, usesOhlc: true };
   }
   if (chartType === 'box') {
-    return { usesGenericY: true, supportsGroupBy: false, usesOhlc: false };
+    return { usesGenericY: true, supportsGroupBy: true, usesOhlc: false };
   }
   return { usesGenericY: true, supportsGroupBy: true, usesOhlc: false };
 }
@@ -953,11 +985,14 @@ function buildXyChartData(
   // Ordinary point charts use one fixed full/ranged density contract. Semantic
   // grouping still happens before sampling and can therefore yield fewer items.
   const targetPointCount = chartType === 'bar'
-    ? chartTargetPointCount(request.width, request.maxSampledPoints)
+    ? Math.min(CHART_ORDINARY_TARGET_POINTS, chartTargetPointCount(request.width, request.maxSampledPoints))
     : CHART_ORDINARY_TARGET_POINTS;
-  const preparedPoints = chartType === 'bar' || !!source.groupColumnName
+  const preparedPoints = chartType === 'bar'
     ? consolidateChartPointsByX(finiteGroupedPoints, grouped.series, chartType, warnings)
-    : finiteGroupedPoints;
+    : source.groupColumnName
+      ? alignGroupedChartPointsByXOccurrence(finiteGroupedPoints, grouped.series, chartType, warnings,
+          (chartType === 'line' || chartType === 'step') && mayHaveSourceGaps)
+      : finiteGroupedPoints;
   const temporalSampling = source.xOption.kind === 'temporal' && !source.groupColumnName &&
     chartType !== 'bar' && request.samplingStrategy !== undefined &&
     request.samplingStrategy !== 'point-count';
@@ -969,7 +1004,13 @@ function buildXyChartData(
       : temporalAutoInterval(preparedPoints, grouped.series.length)
     : undefined;
   const sampled = chartType === 'bar'
-    ? downsampleBarClusters(preparedPoints, targetPointCount, warnings)
+    ? downsampleBarClusters(
+      preparedPoints,
+      source.groupColumnName
+        ? Math.max(1, Math.floor(targetPointCount / Math.max(1, grouped.series.length)))
+        : targetPointCount,
+      warnings
+    )
     : temporalSampling
       ? downsampleTemporalMinMax(
         preparedPoints,
@@ -1006,6 +1047,12 @@ function buildXyChartData(
     }
     return result;
   });
+  const sampledPointCount = chartType === 'bar' && !!source.groupColumnName
+    ? series.reduce(
+      (count, value) => count + value.values.filter(item => Number.isFinite(item)).length,
+      0
+    )
+    : sampled.points.length;
 
   return {
     version: request.version,
@@ -1020,7 +1067,7 @@ function buildXyChartData(
     series,
     sourceRowCount: table.rowCount,
     eligibleRowCount,
-    sampledPointCount: sampled.points.length,
+    sampledPointCount,
     algorithm: sampled.algorithm,
     samplingStrategy: temporalSampling ? request.samplingStrategy : 'point-count',
     temporalBucketIntervalMs: temporalIntervalMs,
@@ -1031,9 +1078,6 @@ function buildXyChartData(
 }
 
 function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChartRequest): LineChartData {
-  if (String(request.groupByColumn || '').trim()) {
-    throw new ChartDataError('Group by is not supported for candlestick charts.');
-  }
   const source = prepareCandlestickSource(table, request);
   const xRange = normalizedChartXRange(request);
   const warnings = source.warnings.slice();
@@ -1044,6 +1088,9 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
   if (collected.rangeExcluded > 0) {
     warnings.push(`${collected.rangeExcluded} row${collected.rangeExcluded === 1 ? '' : 's'} outside the selected x range were skipped.`);
   }
+  if (source.groupColumnName && collected.droppedGroup > 0) {
+    warnings.push(`${collected.droppedGroup} row${collected.droppedGroup === 1 ? '' : 's'} dropped because ${source.groupColumnName} was empty or not scalar.`);
+  }
   if (collected.points.length === 0) {
     throw new ChartDataError(xRange ? 'No rows have a plottable candlestick x value in the selected x range.' : 'No rows have a plottable candlestick x value.');
   }
@@ -1051,6 +1098,17 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
   const sorted = collected.sourceWasUnsorted;
   if (sorted) {
     warnings.push('x values were sorted for this candlestick chart; table order was not changed.');
+  }
+  if (source.groupColumnName) {
+    return buildGroupedCandlestickChartData(
+      table,
+      request,
+      source,
+      collected,
+      warnings,
+      sorted,
+      !!xRange
+    );
   }
   const targetPointCount = candlestickTargetPointCount(
     request.width,
@@ -1090,10 +1148,99 @@ function buildCandlestickChartData(table: ColumnarPanelResult, request: LineChar
   };
 }
 
-function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest): LineChartData {
-  if (String(request.groupByColumn || '')) {
-    throw new ChartDataError('Group by is not supported for box charts.');
+function buildGroupedCandlestickChartData(
+  table: ColumnarPanelResult,
+  request: LineChartRequest,
+  source: PreparedCandlestickSource,
+  collected: CollectedCandlestickPoints,
+  warnings: string[],
+  sorted: boolean,
+  balanceBucketsByCount: boolean
+): LineChartData {
+  const groupColumnName = source.groupColumnName!;
+  const allGroups: string[] = [];
+  const seen = new Set<string>();
+  collected.points.slice().sort((left, right) => left.rowIndex! - right.rowIndex!).forEach(point => {
+    if (point.group && !seen.has(point.group)) {
+      seen.add(point.group);
+      allGroups.push(point.group);
+    }
+  });
+  if (allGroups.length === 0) {
+    throw new ChartDataError(`No grouped candlestick rows have a scalar value for ${groupColumnName}.`);
   }
+  const totalBudget = Math.max(1, Math.min(
+    CHART_ORDINARY_TARGET_POINTS,
+    candlestickTargetPointCount(request.width, request.maxSampledPoints)
+  ));
+  const retainedGroups = allGroups.slice(0, Math.min(CHART_MAX_GROUPS, totalBudget));
+  if (allGroups.length > retainedGroups.length) {
+    warnings.push(`Group by ${groupColumnName} has ${allGroups.length} categories with valid OHLC values; showing first ${retainedGroups.length}.`);
+  }
+  const baseBudget = Math.floor(totalBudget / retainedGroups.length);
+  let remainder = totalBudget % retainedGroups.length;
+  const aggregated = retainedGroups.map(group => {
+    const groupPoints = collected.points.filter(point => point.group === group);
+    const budget = Math.max(1, baseBudget + (remainder > 0 ? 1 : 0));
+    remainder = Math.max(0, remainder - 1);
+    const result = aggregateCandlestickPoints(groupPoints, budget, balanceBucketsByCount);
+    return { group, sourceCount: groupPoints.length, result };
+  });
+  const exactCount = aggregated.reduce((count, value) => count + value.result.exactPointCount, 0);
+  const returnedCount = aggregated.reduce((count, value) => count + value.result.candlesticks.length, 0);
+  if (exactCount < collected.points.length) {
+    warnings.push(`Grouped candlestick data aggregated ${collected.points.length} eligible rows into ${exactCount} category-specific x candles.`);
+  }
+  if (returnedCount < exactCount) {
+    warnings.push(`Grouped candlestick data downsampled ${exactCount} category-specific x candles into ${returnedCount} financial x buckets within one shared budget.`);
+  }
+
+  const xTextByValue = new Map<number, string>();
+  aggregated.forEach(value => value.result.candlesticks.forEach(candle => {
+    if (!xTextByValue.has(candle.x)) xTextByValue.set(candle.x, candle.xText);
+  }));
+  const x = [...xTextByValue.keys()].sort((left, right) => left - right);
+  const xText = x.map(value => xTextByValue.get(value) || String(value));
+  const candlestickSeries: CandlestickSeries[] = aggregated.map(value => {
+    const byX = new Map(value.result.candlesticks.map(candle => [candle.x, candle]));
+    return {
+      groupValue: value.group,
+      candlesticks: x.map(item => byX.get(item) || null),
+    };
+  });
+  const series: LineChartSeries[] = candlestickSeries.map(value => ({
+    columnName: `OHLC [${value.groupValue}]`,
+    sourceColumnName: source.ohlcColumns.close,
+    groupValue: value.groupValue,
+    values: value.candlesticks.map(candle => candle ? candle.close : null),
+  }));
+  return {
+    version: request.version,
+    requestId: request.requestId,
+    chartType: 'candlestick',
+    xColumn: request.xColumn,
+    groupByColumn: groupColumnName,
+    xKind: source.xOption.kind,
+    x,
+    xText,
+    xDomain: {
+      min: collected.points[0].x,
+      max: collected.points[collected.points.length - 1].x,
+    },
+    series,
+    ohlcColumns: source.ohlcColumns,
+    candlestickSeries,
+    retainedGroupCount: retainedGroups.length,
+    sourceRowCount: table.rowCount,
+    eligibleRowCount: collected.points.length,
+    sampledPointCount: returnedCount,
+    algorithm: `ohlc-grouped/${returnedCount}`,
+    sorted,
+    warnings,
+  };
+}
+
+function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest): LineChartData {
   const source = prepareChartSource(table, request);
   const xRange = normalizedChartXRange(request);
   const warnings = source.warnings.slice();
@@ -1101,11 +1248,17 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
     table,
     source.xOption,
     source.yColumnIndexes,
-    undefined,
+    source.groupColumnIndex,
     xRange,
     request.version
   );
-  appendCollectedWarnings(warnings, collected, source.xOption.kind, 'Null and non-finite y values are skipped for box statistics.');
+  appendCollectedWarnings(
+    warnings,
+    collected,
+    source.xOption.kind,
+    'Null and non-finite y values are skipped for box statistics.',
+    source.groupColumnName
+  );
 
   const points = collected.points;
   if (points.length === 0) {
@@ -1120,17 +1273,24 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
     warnings.push('x values were sorted for this chart; table order was not changed.');
   }
   const eligiblePoints = points.filter(chartPointHasFiniteY);
+  const grouped = source.groupColumnName
+    ? groupedChartPoints(eligiblePoints, source.yColumnNames, source.groupColumnName, warnings)
+    : ungroupedChartPoints(eligiblePoints, source.yColumnNames);
   const maxGroups = boxChartTargetGroupCount(
     eligiblePoints.length,
-    source.yColumnNames.length,
+    grouped.series.length,
     request.width,
     request.maxSampledPoints
   );
-  const bins = buildBoxChartBins(eligiblePoints, source.yColumnNames.length, maxGroups);
+  const bins = buildBoxChartBins(grouped.points, grouped.series.length, maxGroups);
   const xDomain = { min: points[0].x, max: points[points.length - 1].x };
-  const boxSeries = source.yColumnNames.map((columnName, seriesIndex) => {
+  const boxSeries = grouped.series.map((definition, seriesIndex) => {
     return {
-      columnName,
+      columnName: definition.columnName,
+      ...(definition.sourceColumnName && definition.sourceColumnName !== definition.columnName
+        ? { sourceColumnName: definition.sourceColumnName }
+        : {}),
+      ...(definition.groupValue ? { groupValue: definition.groupValue } : {}),
       stats: bins.map(bin => bin.stats[seriesIndex]),
     };
   });
@@ -1138,23 +1298,30 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
     throw new ChartDataError('No selected y column has finite numeric values for box statistics.');
   }
 
-  if (bins.length < distinctXCount(eligiblePoints)) {
+  if (bins.length < distinctXCount(grouped.points)) {
     warnings.push(`Box plot grouped ${eligiblePoints.length} eligible rows into ${bins.length} x buckets.`);
   }
+
+  const retainedGroups = [...new Set(grouped.series
+    .map(series => series.groupValue)
+    .filter((value): value is string => !!value))];
+  const visualItemCount = source.groupColumnName
+    ? boxSeries.reduce((count, series) => count + series.stats.filter(Boolean).length, 0)
+    : bins.length;
 
   return {
     version: request.version,
     requestId: request.requestId,
     chartType: 'box',
     xColumn: request.xColumn,
-    groupByColumn: undefined,
+    groupByColumn: source.groupColumnName,
     xKind: source.xOption.kind,
     x: bins.map(bin => bin.x),
     xText: bins.map(bin => bin.xText),
     xDomain,
-    series: source.yColumnNames.map((columnName, seriesIndex) => {
+    series: grouped.series.map((definition, seriesIndex) => {
       return {
-        columnName,
+        ...definition,
         values: bins.map(bin => {
           const stats = bin.stats[seriesIndex];
           return stats ? stats.median : null;
@@ -1162,10 +1329,11 @@ function buildBoxChartData(table: ColumnarPanelResult, request: LineChartRequest
       };
     }),
     boxSeries,
+    ...(retainedGroups.length > 0 ? { retainedGroupCount: retainedGroups.length } : {}),
     sourceRowCount: table.rowCount,
     eligibleRowCount: eligiblePoints.length,
-    sampledPointCount: bins.length,
-    algorithm: bins.length < distinctXCount(eligiblePoints) ? `box-bucket/${bins.length}` : `box-exact/${bins.length}`,
+    sampledPointCount: visualItemCount,
+    algorithm: bins.length < distinctXCount(grouped.points) ? `box-bucket/${bins.length}` : `box-exact/${bins.length}`,
     sorted,
     warnings,
   };
@@ -1213,7 +1381,10 @@ function prepareChartSource(table: ColumnarPanelResult, request: LineChartReques
   const groupOptionsByName = groupOptionLookup(options.groupColumns);
   const groupOption = groupByColumn ? groupOptionsByName[groupByColumn] : undefined;
   if (groupByColumn && !groupOption) {
-    throw new ChartDataError(`${groupByColumn} is not eligible as a categorical group-by column.`);
+    throw new ChartDataError(`${groupByColumn} is not eligible as a scalar group-by column.`);
+  }
+  if (groupByColumn && (groupByColumn === request.xColumn || yColumnNames.includes(groupByColumn))) {
+    throw new ChartDataError('Group by must use a column distinct from X and selected Y columns.');
   }
 
   return {
@@ -1282,6 +1453,18 @@ function prepareCandlestickSource(table: ColumnarPanelResult, request: LineChart
     warnings.push('Chart source exceeds the default row guard. Very large chartMaxSourceRows values can make rendering slow or temporarily block the extension host, especially with multiple y columns.');
   }
 
+  const groupByColumn = String(request.groupByColumn || '');
+  const groupOption = groupByColumn
+    ? groupOptionLookup(options.groupColumns)[groupByColumn]
+    : undefined;
+  if (groupByColumn && !groupOption) {
+    throw new ChartDataError(`${groupByColumn} is not eligible as a scalar group-by column.`);
+  }
+  if (groupByColumn && (groupByColumn === request.xColumn ||
+    selections.some(selection => selection.columnName === groupByColumn))) {
+    throw new ChartDataError('Group by must use a column distinct from X and OHLC columns.');
+  }
+
   return {
     xOption,
     ohlcColumns: {
@@ -1291,6 +1474,9 @@ function prepareCandlestickSource(table: ColumnarPanelResult, request: LineChart
       close: selections[3].columnName,
     },
     ohlcColumnIndexes: [indexes[0], indexes[1], indexes[2], indexes[3]],
+    ...(groupOption
+      ? { groupColumnName: groupOption.columnName, groupColumnIndex: groupOption.columnIndex }
+      : {}),
     warnings,
   };
 }
@@ -1302,6 +1488,7 @@ function collectCandlestickPoints(
   sourceVersion: number
 ): CollectedCandlestickPoints {
   const points: CandlestickInputPoint[] = [];
+  let droppedGroup = 0;
   const roles = [
     { label: 'Open', columnName: source.ohlcColumns.open, columnIndex: source.ohlcColumnIndexes[0] },
     { label: 'High', columnName: source.ohlcColumns.high, columnIndex: source.ohlcColumnIndexes[1] },
@@ -1312,6 +1499,14 @@ function collectCandlestickPoints(
   const append = (rowIndex: number, x: NormalizedValue): void => {
     if (xRange && (x.value < xRange.min || x.value > xRange.max)) {
       return;
+    }
+    let group: string | undefined;
+    if (source.groupColumnIndex !== undefined) {
+      group = normalizeCategoricalValue(table.cellValue(rowIndex, source.groupColumnIndex)) || undefined;
+      if (!group) {
+        droppedGroup += 1;
+        return;
+      }
     }
     const values: number[] = [];
     roles.forEach(role => {
@@ -1326,9 +1521,11 @@ function collectCandlestickPoints(
       values.push(value);
     });
 
-    validateCandlestickEnvelope(values[0], values[1], values[2], values[3], `row ${rowIndex + 1} (x ${x.text})`);
+    const groupContext = group ? `, group ${group}` : '';
+    validateCandlestickEnvelope(values[0], values[1], values[2], values[3], `row ${rowIndex + 1} (x ${x.text}${groupContext})`);
     points.push({
       rowIndex,
+      ...(group ? { group } : {}),
       x: x.value,
       xText: x.text,
       open: values[0],
@@ -1363,6 +1560,7 @@ function collectCandlestickPoints(
   return {
     points,
     droppedX: xIndex.droppedX,
+    droppedGroup,
     rangeExcluded: bounds.rangeExcluded,
     sourceWasUnsorted: xIndex.sourceWasUnsorted,
   };
@@ -1648,6 +1846,88 @@ function consolidateChartPointsByX(
   return clusters;
 }
 
+/**
+ * Align ordinary grouped series without discarding repeated observations.
+ * Every (x, group) cluster keeps its stable source-order occurrences. Groups
+ * with fewer occurrences receive structural nulls so every series remains
+ * aligned to the same repeated-X slots.
+ */
+function alignGroupedChartPointsByXOccurrence(
+  points: ChartPoint[],
+  series: ChartSeriesDefinition[],
+  chartType: ChartType,
+  warnings: string[],
+  preserveSourceGaps: boolean
+): ChartPoint[] {
+  const aligned: ChartPoint[] = [];
+  let repeatedGroupObservationCount = 0;
+  let start = 0;
+  while (start < points.length) {
+    let end = start + 1;
+    while (end < points.length && points[end].x === points[start].x) {
+      end += 1;
+    }
+    const clusterPoints = points.slice(start, end);
+    const byGroup: { [group: string]: ChartPoint[] } = Object.create(null);
+    const groups: string[] = [];
+    clusterPoints.forEach(point => {
+      const group = point.group || '';
+      if (!byGroup[group]) {
+        byGroup[group] = [];
+        groups.push(group);
+      }
+      byGroup[group].push(point);
+    });
+    const occurrenceCount = groups.reduce(
+      (maximum, group) => Math.max(maximum, byGroup[group].length),
+      0
+    );
+    groups.forEach(group => {
+      repeatedGroupObservationCount += Math.max(0, byGroup[group].length - 1);
+    });
+    for (let occurrence = 0; occurrence < occurrenceCount; occurrence += 1) {
+      const occurrencePoints = groups
+        .map(group => byGroup[group][occurrence])
+        .filter((point): point is ChartPoint => !!point);
+      const values = series.map(() => null as number | null);
+      const gapFlags = series.map(() => false);
+      const sourceRowIndexes = preserveSourceGaps
+        ? series.map(() => undefined as number | undefined) : undefined;
+      occurrencePoints.forEach(point => {
+        series.forEach((_definition, seriesIndex) => {
+          const value = point.y[seriesIndex];
+          if (Number.isFinite(value)) {
+            values[seriesIndex] = value;
+            if (sourceRowIndexes) sourceRowIndexes[seriesIndex] = point.rowIndex;
+            gapFlags[seriesIndex] = false;
+          } else if (point.gapFlags?.[seriesIndex] === true) {
+            gapFlags[seriesIndex] = true;
+          }
+        });
+      });
+      aligned.push({
+        ...clusterPoints[0],
+        rowIndex: Math.min(...occurrencePoints.map(point => point.rowIndex)),
+        y: values,
+        gapFlags,
+        ...(sourceRowIndexes ? { sourceRowIndexes } : {}),
+      });
+    }
+    start = end;
+  }
+
+  if (repeatedGroupObservationCount > 0) {
+    warnings.push(
+      `${chartTypeLabel(chartType)} chart preserved ${repeatedGroupObservationCount} repeated grouped observation${repeatedGroupObservationCount === 1 ? '' : 's'} in stable source-occurrence slots.`
+    );
+  } else if (aligned.length < points.length) {
+    warnings.push(
+      `${chartTypeLabel(chartType)} chart aligned ${points.length} grouped rows into ${aligned.length} distinct x positions.`
+    );
+  }
+  return aligned;
+}
+
 function downsampleBarClusters(
   points: ChartPoint[],
   maxPoints: number,
@@ -1670,7 +1950,7 @@ function retainedChartGroups(points: ChartPoint[], groupColumnName: string, warn
   const groups: string[] = [];
   const seen: { [group: string]: boolean } = Object.create(null);
   const hasFiniteY: { [group: string]: boolean } = Object.create(null);
-  points.forEach(point => {
+  points.slice().sort((left, right) => left.rowIndex - right.rowIndex).forEach(point => {
     const group = point.group || '';
     if (group && !seen[group]) {
       seen[group] = true;
@@ -1711,7 +1991,7 @@ export function candlestickTargetPointCount(
 ): number {
   const pixelWidth = Math.max(1, Math.floor(Number(width) || 0));
   const maxPoints = positiveInteger(maxSampledPoints, CHART_MAX_SAMPLED_POINTS);
-  return Math.min(maxPoints, pixelWidth * CHART_CANDLES_PER_PIXEL);
+  return Math.min(CHART_ORDINARY_TARGET_POINTS, maxPoints, pixelWidth * CHART_CANDLES_PER_PIXEL);
 }
 
 export function boxChartTargetGroupCount(
@@ -1919,7 +2199,7 @@ export function inferColumn(
     return {
       numeric: declaredKind === 'numeric',
       temporal: declaredKind === 'temporal',
-      categorical: false,
+      categorical: true,
       sampled: sampledScalarCount(table, columnIndex, sampleSize),
       missing: 0,
       invalid: 0,
@@ -1929,7 +2209,7 @@ export function inferColumn(
     return {
       numeric: false,
       temporal: false,
-      categorical: declaredCategoricalQType(qType),
+      categorical: declaredScalarGroupQType(qType),
       sampled: sampledScalarCount(table, columnIndex, sampleSize),
       missing: 0,
       invalid: 0,
@@ -1972,7 +2252,7 @@ export function inferColumn(
   return {
     numeric: sampled > 0 && numeric === sampled,
     temporal: sampled > 0 && temporal === sampled,
-    categorical: sampled > 0 && categorical === sampled,
+    categorical: sampled > 0 && numeric + temporal + categorical === sampled && invalid === 0,
     sampled,
     missing,
     invalid,
@@ -1999,10 +2279,8 @@ function sampledScalarCount(
   return sampled;
 }
 
-function declaredCategoricalQType(qType: unknown): boolean {
-  const normalized = String(qType || '').trim().toLocaleLowerCase();
-  return normalized === 'symbol' || normalized === 'char' ||
-    normalized === 'string' || normalized === 'boolean' || normalized === 'bool';
+function declaredScalarGroupQType(qType: unknown): boolean {
+  return isKnownQType(qType);
 }
 
 function buildBoxChartBins(points: ChartPoint[], seriesCount: number, maxGroups: number): BoxChartBin[] {
@@ -2024,6 +2302,7 @@ function buildBoxChartBins(points: ChartPoint[], seriesCount: number, maxGroups:
         x: points[start].x,
         xText: points[start].xText,
         stats: boxStatsForPoints(group, seriesCount),
+        points: group,
       });
       start = end;
     }
@@ -2053,6 +2332,7 @@ function buildBoxChartBins(points: ChartPoint[], seriesCount: number, maxGroups:
       x: (first.x + last.x) / 2,
       xText: first.x === last.x ? first.xText : `${first.xText}..${last.xText}`,
       stats: boxStatsForPoints(group, seriesCount),
+      points: group,
     });
   }
   return bins;
@@ -2133,13 +2413,24 @@ function uniqueStrings(values: string[]): string[] {
   return result;
 }
 
+/** Shared scalar coordinates for interactive charts and static saved fallbacks. */
+export function chartScalarNumber(value: unknown, kind: ChartColumnKind = 'numeric'): number | undefined {
+  return normalizeXValue(value, kind)?.value;
+}
+
 function normalizeXValue(value: unknown, kind: ChartColumnKind): NormalizedValue | null {
   return kind === 'temporal' ? normalizeTemporalValue(value) : normalizeNumericValueWithText(value);
 }
 
 function normalizeNumericValue(value: unknown): number | null {
-  const normalized = normalizeNumericValueWithText(value);
-  return normalized ? normalized.value : null;
+  value = semanticQValue(value);
+  if (typeof value === 'number') return Number.isFinite(value) ? value : null;
+  if (typeof value === 'bigint') {
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  }
+  // Y values need no per-observation formatted X label.
+  return typeof value === 'string' ? normalizeNumericValueWithText(value)?.value ?? null : null;
 }
 
 function normalizeNumericValueWithText(value: unknown): NormalizedValue | null {
@@ -2494,28 +2785,26 @@ function sourceGapBeforeSampledPoints(
   }
 
   let sourceIndex = 0;
-  let previousFiniteX: number | undefined;
+  let previousFinite: { x: number; row: number } | undefined;
+  const before = (point: ChartPoint, endpoint: { x: number; row: number }): boolean =>
+    point.x < endpoint.x || (point.x === endpoint.x && point.rowIndex < endpoint.row);
   for (let sampledIndex = 0; sampledIndex < sampledPoints.length; sampledIndex++) {
     const sampled = sampledPoints[sampledIndex];
-    if (!Number.isFinite(sampled.y[seriesIndex])) {
-      continue;
-    }
-    if (previousFiniteX !== undefined) {
-      while (sourceIndex < sourcePoints.length && sourcePoints[sourceIndex].x <= previousFiniteX) {
-        sourceIndex += 1;
-      }
-      for (; sourceIndex < sourcePoints.length && sourcePoints[sourceIndex].x < sampled.x; sourceIndex++) {
+    if (!Number.isFinite(sampled.y[seriesIndex])) continue;
+    const current = { x: sampled.x, row: sampled.sourceRowIndexes?.[seriesIndex] ?? sampled.rowIndex };
+    if (previousFinite) {
+      while (sourceIndex < sourcePoints.length &&
+        (before(sourcePoints[sourceIndex], previousFinite) ||
+          (sourcePoints[sourceIndex].x === previousFinite.x &&
+            sourcePoints[sourceIndex].rowIndex === previousFinite.row))) sourceIndex++;
+      for (; sourceIndex < sourcePoints.length && before(sourcePoints[sourceIndex], current); sourceIndex++) {
         const point = sourcePoints[sourceIndex];
         const realGap = Array.isArray(point.gapFlags)
-          ? point.gapFlags[seriesIndex] === true
-          : point.y[seriesIndex] === null;
-        if (realGap) {
-          result[sampledIndex] = true;
-          break;
-        }
+          ? point.gapFlags[seriesIndex] === true : point.y[seriesIndex] === null;
+        if (realGap) { result[sampledIndex] = true; break; }
       }
     }
-    previousFiniteX = sampled.x;
+    previousFinite = current;
   }
   return result;
 }

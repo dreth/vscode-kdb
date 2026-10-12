@@ -444,6 +444,31 @@ function attributedKeyedTableIdentityValue() {
   );
 }
 
+function multiAttributedTableValue() {
+  return table(['sym', 'price', 'size'], [
+    symbolVector(['EURAUD', 'EURGBP', 'GBPAUD'], 1),
+    intVector([101, 102, 103]),
+    intVector([1, 2, 3], 2),
+  ]);
+}
+
+function multiAttributedKeyedTableValue() {
+  return dictionary(
+    table(['sym'], [symbolVector(['EURAUD', 'EURGBP', 'GBPAUD'], 1)]),
+    table(['size', 'price'], [
+      intVector([1, 2, 3], 2),
+      intVector([101, 102, 103]),
+    ])
+  );
+}
+
+function emptyAttributedKeyedTableValue() {
+  return dictionary(
+    table(['sym'], [symbolVector([], 1)]),
+    table(['size'], [intVector([], 2)])
+  );
+}
+
 function emptyKeyedTableIdentityValue() {
   return dictionary(
     table(['key'], [symbolVector([])]),
@@ -455,6 +480,7 @@ module.exports = {
   Q_TYPE,
   attributedKeyedTableIdentityValue,
   attributedPersistenceTable,
+  emptyAttributedKeyedTableValue,
   bigEndianLongFixtures,
   dictionaryIdentityValue,
   emptyAttributedPersistenceTable,
@@ -462,6 +488,8 @@ module.exports = {
   emptyKeyedTableIdentityValue,
   exactRenderingFixtures,
   keyedTableIdentityValue,
+  multiAttributedKeyedTableValue,
+  multiAttributedTableValue,
   multiKeyedTableIdentityValue,
   ordinaryKeyNamedTableValue,
   realisticPersistenceTable,

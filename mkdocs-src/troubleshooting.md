@@ -8,9 +8,9 @@ If **KX** is not yet in the Output picker, activate the extension by opening the
 
 ## q completion, diagnostics, or formatting is missing
 
-Version 0.2.29 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
+Version 0.2.40 requires VS Code 1.101 or newer. Check `vscode-kdb.languageServer.enabled`, open **Output > KX**, and run **Developer: Reload Window** after upgrading from an older extension. TextMate syntax colors should remain even when server startup fails; server-backed completion, diagnostics, and formatting will not.
 
-If definitions and reads of the same ordinary q data name still use different colors, verify that the installed KX extension is version 0.2.29 and reload the window. The extension now emits the same complete `variable` selector for those occurrences, but `editor.semanticTokenColorCustomizations` or a theme may intentionally style genuinely different roles such as functions, parameters, and qSQL columns differently.
+If definitions and reads of the same ordinary q data name still use different colors, verify that the installed KX extension is version 0.2.40 and reload the window. The extension now emits the same complete `variable` selector for those occurrences, but `editor.semanticTokenColorCustomizations` or a theme may intentionally style genuinely different roles such as functions, parameters, and qSQL columns differently.
 
 Disable another q extension while diagnosing because overlapping completion, formatting, semantic-token, grammar, and `*.qnb` providers can conflict. To use this extension as the formatter, set `"[q]": { "editor.defaultFormatter": "DanielAlonso.vscode-kdb" }`.
 
@@ -20,7 +20,9 @@ For a file above `vscode-kdb.languageServer.maxFileSizeBytes`, the server delibe
 
 Disable any other extension that also claims `*.qnb`, reload VS Code, then use **Reopen Editor With… > q Notebook** if necessary. This extension expects a top-level JSON cell array. Malformed, oversized, or unsupported shapes fail visibly and are never replaced with an empty notebook.
 
-A plain zero-byte, BOM-only, or whitespace-only `.qnb` is the one exception: it opens with one empty q cell and is marked unsaved, but its bytes are not changed until Save. If this does not happen after installing 0.2.29, open Extensions in the same VS Code window, check the **Local - Installed** or remote **Installed** section that owns that window's Extension Host, and verify the KX details page reports version 0.2.29. From a command line attached to that same host/profile, `code --list-extensions --show-versions` should include `DanielAlonso.vscode-kdb@0.2.29`. Reload the window after replacing an older local or remote installation.
+If a large result stops scrolling when autosave starts, verify version 0.2.40 in the extension installation that owns the current window (including the Dev Container). Earlier releases could repeatedly parse complete MIME output for every live scroll request and exhaust the remote Extension Host; the save then reports **Canceled**. Version 0.2.40 caches validation of identical bytes while keeping current ownership checks. Save completion still depends on host load and storage; `serialized` in **Output > KX** precedes the actual file write.
+
+A plain zero-byte, BOM-only, or whitespace-only `.qnb` is the one exception: it opens with one empty q cell and is marked unsaved, but its bytes are not changed until Save. If this does not happen after installing 0.2.40, open Extensions in the same VS Code window, check the **Local - Installed** or remote **Installed** section that owns that window's Extension Host, and verify the KX details page reports version 0.2.40. From a command line attached to that same host/profile, `code --list-extensions --show-versions` should include `DanielAlonso.vscode-kdb@0.2.40`. Reload the window after replacing an older local or remote installation.
 
 Distinct `.q` and `.qnb` artwork is available only as VS Code's contributed language-icon fallback. The selected file-icon theme has precedence and may show its own icon or suppress the fallback; this extension does not install or override a complete file-icon theme.
 
@@ -219,25 +221,25 @@ Choose one route per cell. For extension-managed Direct IPC, keep the durable ce
 
 ## Notebook KX output is invalid or shows the static fallback
 
-The renderer accepts `application/vnd.kx.result+json` versions 1 and 2 within strict, backward-compatible schemas. Rerun with the current KX for VS Code or released `kx-notebook==0.1.0` (`import kx_notebook`). Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and historical/Python-helper preview payloads outside their declared safety limits are rejected rather than partially trusted. Automatically persisted first-party v2 output may exceed helper-preview limits, but must contain every declared row/column and every cell must validate exactly.
+The renderer accepts `application/vnd.kx.result+json` versions 1, 2, 3, and 4 within strict, backward-compatible schemas. Rerun with the current KX for VS Code or released `kx-notebook==0.1.0` (`import kx_notebook`). Unknown fields, invalid typed cells, inconsistent row/truncation counts, unsafe chart references, malformed JSON, and historical/Python-helper preview payloads outside their declared safety limits are rejected rather than partially trusted. Automatically persisted first-party v2/v3/v4 output may exceed helper-preview limits, but must contain every declared row/column and every cell must validate exactly.
 
 Direct IPC output from the mixed runner or optional controller includes `text/plain`, not `text/html`. The Python helper includes escaped `text/html` and `text/plain` fallbacks for viewers without the KX renderer. Static fallbacks do not preserve interactive notebook behavior.
 
 ## Direct IPC reports an exact-encoding error
 
-The portable v2 contract stores supported table rows and typed q cells exactly. Keyed tables are supported through validated structural key-column source ordinals, which also restore their visual cue after reopen. It deliberately rejects metadata that this contract cannot reconstruct: currently a vector attribute attached to a whole table column, or top-level dictionary container identity. The error identifies the q type and a bounded value description. Return a supported row/cell shape from q; KX does not flatten, stringify, or silently save a bounded preview and call it complete.
+The portable v2 contract stores supported table rows and typed q cells exactly. Keyed tables are supported through validated structural key-column source ordinals, which also restore their visual cue after reopen. It deliberately rejects metadata that this contract cannot reconstruct: currently top-level dictionary container identity. Supported column-vector attributes persist exactly in v2/v3/v4. The error identifies the q type and a bounded value description. Return a supported row/cell shape from q; KX does not flatten, stringify, or silently save a bounded preview and call it complete.
 
 ## Historical or Python-helper notebook preview is truncated
 
-`vscode-kdb.notebook.maxOutputRows` defaults to `20` and accepts `1` through `10000`; `vscode-kdb.notebook.maxOutputBytes` defaults to `1000000` and accepts `16384` through `10000000`. The tag command writes those values into the Python-helper cell marker, whose bounded output keeps schema, total count, saved rows, and explicit truncation reasons. Preview transport additionally caps schema at 256 columns and cell text at 32,768 characters. Existing v1/v2 previews saved by older KX versions remain valid and are clearly identified as historical saved previews.
+`vscode-kdb.notebook.maxOutputRows` defaults to `20` and accepts `0` through `10000`; `vscode-kdb.notebook.maxOutputBytes` defaults to `1000000` and accepts `16384` through `10000000`. First-party Direct IPC rich v2/v3/v4 output remains complete at every row setting. Set rows to `0` to avoid retaining a duplicate decoded result in the session live cache; Tag/Prepare then writes a bounded `20`-row Python-helper fallback. Positive row settings retain the live cache and are written into the helper marker. The helper's bounded output keeps schema, total count, saved rows, and explicit truncation reasons. Preview transport additionally caps schema at 256 columns and cell text at 32,768 characters. Existing v1/v2 previews saved by older KX versions remain valid and are clearly identified as historical saved previews.
 
-These settings do not change the q expression or add a server-side limit. They bound tagged Python-helper previews and static fallback material where applicable; they do not truncate authoritative rich output from a new first-party Direct IPC run. `maxOutputBytes` may bound `text/plain` or another static fallback, but the exact rich v2 payload remains complete or fails explicitly. Apply a q-side limit or aggregation when the full value should not materialize or be stored. A preview's omitted rows have no recovery handle in the notebook.
+These settings do not change the q expression or add a server-side limit. They bound tagged Python-helper previews and static fallback material where applicable; they do not truncate authoritative rich output from a new first-party Direct IPC run. `maxOutputBytes` may bound `text/plain` or another static fallback, but the exact rich v2/v3/v4 payload remains complete or fails explicitly. Apply a q-side limit or aggregation when the full value should not materialize or be stored. A preview's omitted rows have no recovery handle in the notebook.
 
 ## Open in KX Results has only a historical saved preview
 
-For a newly run direct q cell, **Open in KX Results** can use the full decoded value while its bound live record exists and can use the complete exact v2 payload after that live record is gone. Older v1/v2 preview bytes remain previews even when every declared preview row is present. **Rerun cell** executes the current cell source again through q, makes a new IPC call, and replaces the historical output with a new complete result; it never executes source copied from the preview.
+For a newly run direct q cell, **Open in KX Results** can use the full decoded value while its bound live record exists and can use the complete exact v2/v3/v4 payload after that live record is gone. Older v1/v2 preview bytes remain previews even when every declared preview row is present. **Rerun cell** executes the current cell source again through q, makes a new IPC call, and replaces the historical output with a new complete result; it never executes source copied from the preview.
 
-**KX: Open Saved Notebook Result in Results Panel** transfers only the validated rows stored in the cell: bounded rows from a historical/Python-helper preview or every row of current first-party complete v2 output. The opaque ID is not an IPC handle, and rows omitted from a preview cannot be recovered from a reopened notebook. Rerun/replacement removes the previous live owner; native **Clear Cell Output** and **Clear All Outputs** remove output ownership too, so a cleared result cannot resurrect stale live data.
+**KX: Open Saved Notebook Result in Results Panel** transfers only the validated rows stored in the cell: bounded rows from a historical/Python-helper preview or every row of current first-party complete v2/v3/v4 output. The opaque ID is not an IPC handle, and rows omitted from a preview cannot be recovered from a reopened notebook. Rerun/replacement removes the previous live owner; native **Clear Cell Output** and **Clear All Outputs** remove output ownership too, so a cleared result cannot resurrect stale live data.
 
 ## Notebook chart changes did not persist
 
@@ -252,11 +254,11 @@ Check the selected notebook controller.
 
 Choose the intended route explicitly. KX never intercepts Python-controller Run; the q-cell action is a separate visible gesture.
 
-## Query History is missing or incomplete
+## Query History is disabled or incomplete
 
-`vscode-kdb.features.queryHistory` defaults to `false`. Enable it for the current window/workspace to show the view. Only editor line, selection, and script executions actually issued while the feature is enabled are recorded; rejected pre-issue runs and result payloads are not.
+The Query History view remains visible, and `vscode-kdb.features.queryHistory` defaults to `true`. Set it to `false` to opt out; its disabled status deliberately does not read or display retained entries. Editor line/selection/script and first-party Direct IPC `.qnb` or mixed-Jupyter q-cell commands actually issued while enabled are recorded; rejected pre-issue runs, metadata/preview work, renderer actions, Python-owned `%%q`, zero-mode notebook MIME, and all other result payloads are not.
 
-Disabling the feature stops future writes and hides history commands, but does not silently erase sensitive retained text. Re-enable it and run **KX: Clear Query History** to confirm deletion. Storage is local workspace extension `Memento`, not Settings or Settings Sync. Lowering `vscode-kdb.queryHistory.maxEntries` prunes oldest entries beyond the new limit.
+Disabling capture stops future writes and disables history actions, but does not silently erase sensitive retained text. Re-enable it and run **KX: Clear Query History** to confirm deletion. Storage is local workspace extension `Memento`, not Settings or Settings Sync. Lowering `vscode-kdb.queryHistory.maxEntries` prunes oldest entries beyond the new limit.
 
 Rerun deliberately targets the current active connection through the normal configured-namespace pipeline. If its stable connection ID differs from the recorded entry, confirm the mismatch prompt or cancel. A renamed/removed recorded profile is labelled safely and never exposes a password.
 
@@ -273,3 +275,71 @@ Use `VSCODE_KDB_Q_BIN=/absolute/path/to/q` to select a non-default executable. T
 ## Generated docs drift
 
 Edit files under `mkdocs-src/`, then run the exact gate in `mkdocs-src/README.md`. Generated `docs/` is committed. The workflow verifies that generated output is current, uploads it as a GitHub Pages artifact, and deploys that artifact through the repository's `github-pages` environment on non-pull-request runs.
+
+## Large table could not serialize the complete result
+
+Older versions expanded every q table cell into repeated typed JSON wrappers. At 600,000 × 14 cells this can exceed Node’s single-string limit. Install version 0.2.42 or later in the environment running KX (for a Dev Container, install there and reload). Native tables with typed columns now use complete v4 packed columns at every size. Existing v1/v2/v3 files remain readable; v4 rich output needs reader 0.2.40 or later. Genuine memory/string exhaustion can still fail with an explicit resource error; `maxOutputRows = 0` avoids the duplicate raw live cache.
+
+### Large notebook output is still large after upgrading
+
+Version 0.2.42 removes the former one-million-cell cutoff: all supported native q tables with typed columns use lossless packed v4 output. A 60k × 14 result previously used verbose v2 typed cells while a 600k result used packed v4, which could make the smaller result larger. This was a storage-format difference, not persisted cache accumulation. Existing saved v2/v3 results remain in their original format until rerun. Check the extension version in the window's owning Dev Container/remote installation, reload, then rerun the intended cell to produce packed output. Nested vector cells can contain many more scalar values than rows × columns suggests. No fixed whole-file size cap is imposed, and values are not rounded or truncated to meet a target size.
+
+## Configure GlitchTip or Sentry
+
+Create or select a Node.js/JavaScript project in your existing GlitchTip/Sentry instance and copy its **project DSN**, including any reverse-proxy prefix. Configure the actual DSN in the User or Remote User setting for the KX extension host:
+
+```json
+{
+  "vscode-kdb.diagnostics.sentryDsn": "https://PUBLIC_KEY@glitchtip.example.test/PROJECT_ID",
+  "vscode-kdb.diagnostics.reportServerUrl": ""
+}
+```
+
+The placeholder above must be replaced by the DSN issued by your project. KX uses an isolated Sentry SDK client for sanitized exception envelopes. Global process/console/network instrumentation, sessions, performance tracing, replay, profiling and usage/log telemetry stay disabled. KX reports handled failures from its own operations; it does not collect VS Code application errors or unrelated extension failures. Available KX generated artifact locations and line/column coordinates are tagged with the extension release. Server-side q source tracebacks, Python/Jupyter kernel traces and fatal extension-host crashes are outside this collector's coverage.
+
+Network requests originate from the host running KX, which may be a remote SSH, Dev Container, WSL or Codespaces environment. That host must reach your server over normal verified HTTP(S). The GlitchTip web UI URL is not a project DSN. Do not embed administrative/API tokens in the extension configuration. Clear the DSN to stop delivery and collection for that destination. A failed delivery drops pending events and pauses that destination for one hour. Only a new eligible failure after the cooldown triggers another attempt; there are no timed retries or connectivity probes. Reporting connection failures are never reported as incidents. `vscode-kdb.diagnostics.failSilently` defaults to `true`; set it to `false` temporarily to inspect bounded reporting notices in Output > KX. Neither mode adds reporting popups. No destinations are shipped in the extension and environment variables such as `SENTRY_DSN` do not enable it.
+
+Maintainers can run `npm run test:failure-reporting` for deterministic privacy/transport/SDK isolation fixtures and `npm run test:failure-reporting-host` for actual extension ingestion into loopback receivers in an isolated temporary VS Code profile. The host runner needs a compatible VS Code executable (`VSCODE_KDB_E2E_CODE`), a display (`VSCODE_KDB_E2E_DISPLAY`) or Xvfb, and any required runtime libraries (`VSCODE_KDB_E2E_LIBS`). It does not require a q server. The synthetic exception API exists only in ExtensionMode.Test with the explicit fixture flag; no production bug-report command is added.
+
+For a separately authorized live project smoke, set `VSCODE_KDB_GLITCHTIP_SMOKE_DSN` to that project's HTTPS DSN and run `VSCODE_KDB_E2E_TESTS_PATH="$PWD/test/extension-host/failure-reporting-live.js" node scripts/run-extension-host-test.js --reporting-only` after compilation. This test alone reads that variable, configures the temporary profile, emits one handled KX exception, prints its event ID and restores the setting. Confirm that ID in the intended GlitchTip project before claiming live ingestion; capture/queue completion alone does not prove server receipt. Normal extension activation never reads the smoke variable.
+
+The synthetic smoke now emits connect/start, handshake/success and query/start/failure breadcrumbs with one ephemeral operation ID and a sanitized nested network cause. Inspect the retained event's `kx.operation`, `kx.failureDetails`, `kx.resourceUsage`, `kx.heapStatistics`, `kx.versions`, `kx.libraries`, settings and breadcrumbs, plus standard runtime/OS contexts and build/surface/category tags. Query/source fixture strings must be absent. Missing facts are marked; q/Python versions are not probed. Clearing the temporary DSN is asserted before the isolated profile is removed.
+
+### Matching a packaged build
+
+`out/failure-build.json` is generated after compilation. It records SHA-256 hashes of the three exact first-party bundles, their combined reproducible `buildId`, release and resolved dependency versions. Compare the event's build tag with the metadata inside the tested VSIX before interpreting line/column coordinates. Recompiling modified code at the same release produces a different build ID. No repository/workspace content is attached to events.
+
+The distributed build currently has no source maps. Do not manufacture maps or upload unrelated artifacts. If matching first-party maps are produced later, verify their exact bundle hashes/build ID, inspect the installed GlitchTip version's supported release-artifact workflow and use separately authorized project-scoped access. Maps are supplementary, never automatically uploaded by the extension; administrative credentials and user source must stay outside it.
+
+## Diagnostic JSON receiver
+
+`vscode-kdb.diagnostics.reportServerUrl` accepts a complete HTTP(S) URL without embedded userinfo. KX automatically posts `Content-Type: application/json`; any 2xx response counts as success. Redirects and non-2xx responses are dropped without retry. Provision the receiver separately; GlitchTip's envelope endpoint is not this JSON API. This first receiver contract has no bearer-auth setting; use appropriately controlled ingress.
+
+A v1 request has this shape (values below are synthetic):
+
+```json
+{
+  "schemaVersion": 1,
+  "eventId": "0123456789abcdef0123456789abcdef",
+  "sessionId": "fedcba9876543210fedcba9876543210",
+  "timestamp": "2026-10-07T00:00:00.000Z",
+  "component": "notebook",
+  "operationName": "encode",
+  "failure": {
+    "exceptions": [{
+      "type": "RangeError",
+      "value": "Unstructured error message omitted",
+      "frames": [{ "filename": "out/extension.js", "lineno": 10, "colno": 20 }]
+    }]
+  },
+  "environment": { "kxVersion": "0.2.43", "vscodeVersion": "1.101.0" },
+  "operation": { "operationId": "kx-12-1", "surface": "live-notebook",
+    "phase": "encode", "status": "failed", "issued": true, "canceled": false },
+  "breadcrumbs": [{ "component": "notebook", "operation": "query",
+    "timestamp": "2026-10-07T00:00:00.000Z",
+    "details": { "operationId": "kx-12-1", "status": "success", "durationMs": 12 } }],
+  "omissions": ["electronVersion-unavailable"]
+}
+```
+
+Environment fields, allowlisted numeric/boolean/enum settings and safe operation counts vary with availability. Extension inventory omission counts and missing-field markers make bounds explicit. Event IDs correlate with Sentry events when both sinks are configured; session IDs are ephemeral and do not survive extension activation. Reporter-status messages in **Output > KX** contain bounded status categories rather than destination credentials or server response bodies.

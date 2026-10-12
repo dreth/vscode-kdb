@@ -22,6 +22,8 @@ export interface SharedKxResultSettings {
   includeRowIndex: boolean;
   copyExportConfirmCellThreshold: number;
   elapsedTimeDisplay: KxResultElapsedTimeDisplay;
+  tableDecimalPlaces: number;
+  chartScientificNotationThreshold: number;
   chartDecimalPlaces: number;
   chartMaxSourceRows: number;
   qTextSyntaxHighlighting: boolean;
@@ -102,6 +104,7 @@ export interface KxResultSettingDefinition {
   control: 'checkbox' | 'number' | 'select';
   minimum?: number;
   maximum?: number;
+  quick?: boolean;
   autoValue?: number;
   autoLabel?: string;
   values?: readonly KxResultOptionDefinition[];
@@ -144,12 +147,14 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
   { key: 'includeRowIndex', label: 'Include row #', control: 'checkbox' },
   {
     key: 'copyExportConfirmCellThreshold',
+    quick: false,
     label: 'Copy/export confirm cells',
     control: 'number',
     minimum: 1,
   },
   {
     key: 'elapsedTimeDisplay',
+    quick: false,
     label: 'Elapsed time',
     control: 'select',
     values: [
@@ -159,6 +164,7 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
   },
   {
     key: 'arrayDisplayFormat',
+    quick: false,
     label: 'Arrays',
     control: 'select',
     values: [
@@ -190,6 +196,15 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
   },
 
   {
+    key: 'tableDecimalPlaces',
+    label: 'Table decimals',
+    control: 'number',
+    minimum: -1,
+    maximum: 12,
+    autoValue: -1,
+    autoLabel: 'Auto (original precision)',
+  },
+  {
     key: 'chartDecimalPlaces',
     label: 'Chart decimal places',
     control: 'number',
@@ -198,6 +213,7 @@ export const KX_RESULT_SETTING_DEFINITIONS: readonly KxResultSettingDefinition[]
   },
   {
     key: 'chartMaxSourceRows',
+    quick: false,
     label: 'Chart source rows',
     control: 'number',
     minimum: 1,

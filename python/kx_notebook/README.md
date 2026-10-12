@@ -55,13 +55,14 @@ display_result(
 )
 ```
 
-`Chart.type` accepts `line`, `scatter`, `step`, `bar`, `box`, or `candlestick`. Line/scatter/step/bar may set `group_by_column`; box does not. Candlestick uses an empty `y_columns=()` plus four distinct fields: `open_column`, `high_column`, `low_column`, and `close_column`:
+`Chart.type` accepts `line`, `scatter`, `step`, `bar`, `box`, or `candlestick`. Every type may set a `group_by_column` that is distinct from X, selected Y, and OHLC role columns. Candlestick uses an empty `y_columns=()` plus four distinct fields: `open_column`, `high_column`, `low_column`, and `close_column`:
 
 ```python
 Chart(
     type="candlestick",
     x_column="time",
     y_columns=(),
+    group_by_column="sym",
     open_column="open",
     high_column="high",
     low_column="low",

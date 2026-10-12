@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "First-party q language tooling, direct q IPC, qnb and mixed Jupyter notebooks, and high-performance KX results for VS Code.",
-  "version": "0.2.29",
+  "version": "0.2.44",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -46,6 +46,7 @@
     "onNotebook:vscode-kdb-q-notebook",
     "onRenderer:vscode-kdb.kx-notebook-renderer",
     "onView:vscode-kdb.connections",
+    "onView:vscode-kdb.variables",
     "onView:vscode-kdb.serverExplorer",
     "onView:vscode-kdb.queryHistory",
     "onCommand:vscode-kdb.addConnection",
@@ -58,6 +59,8 @@
     "onCommand:vscode-kdb.testConnection",
     "onCommand:vscode-kdb.importSqlToolsConnections",
     "onCommand:vscode-kdb.refreshConnections",
+    "onCommand:vscode-kdb.refreshVariables",
+    "onCommand:vscode-kdb.openVariableInResults",
     "onCommand:vscode-kdb.refreshServerExplorer",
     "onCommand:vscode-kdb.previewServerObject",
     "onCommand:vscode-kdb.rerunQueryHistoryEntry",
@@ -91,14 +94,15 @@
     "compile:extension": "tsc -p ./ && esbuild src/extension.ts --bundle --format=cjs --platform=node --target=node22 --external:vscode --outfile=out/extension.js --minify-syntax --minify-whitespace --legal-comments=inline",
     "compile:language": "tsc -p language-server/tsconfig.json --noEmit && esbuild language-server/src/server.ts language-server/src/testing.ts --bundle --format=cjs --platform=node --target=node22 --outdir=out --entry-names=q-language-[name] --minify --legal-comments=inline",
     "compile:renderer": "tsc -p renderer/tsconfig.json --noEmit && esbuild renderer/index.ts --bundle --format=esm --platform=browser --target=es2022 --loader:.css=text --outfile=renderer/kx-notebook-renderer.js --minify --legal-comments=none",
-    "compile:assets": "node scripts/copy-webview-assets.js",
+    "compile:assets": "node scripts/copy-webview-assets.js && node scripts/generate-failure-build.js",
     "watch": "tsc -watch -p ./",
-    "test": "npm run test:repository-confidentiality && npm run compile && node test/run.js && node test/language/run.js",
+    "test": "npm run test:repository-confidentiality && npm run compile && node test/results-display.js && node test/notebook-packed-column.js && node test/run.js && node test/failure-reporting.js && node test/failure-reporting-silent.js && node test/failure-reporting-rich.js && node test/failure-reporting-sentry.js && node test/failure-reporting-language.js && node test/failure-reporting-producers.js && npm run test:notebook-save-memory && node test/language/run.js",
+    "test:notebook-save-memory": "node --max-old-space-size=384 --expose-gc test/qnb-save-memory.js && node --max-old-space-size=1024 --expose-gc test/notebook-columnar-memory.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:language": "npm run compile:language && node test/language/run.js",
     "audit:repository-confidentiality": "node scripts/audit-repository-confidentiality.js",
     "audit:compiled-confidentiality": "node scripts/audit-vsix-confidentiality.js --compiled out/extension.js out/q-language-server.js renderer/kx-notebook-renderer.js",
-    "audit:vsix-confidentiality": "node scripts/audit-vsix-confidentiality.js vscode-kdb-0.2.29.vsix",
+    "audit:vsix-confidentiality": "node scripts/audit-vsix-confidentiality.js vscode-kdb-0.2.44.vsix",
     "test:repository-confidentiality": "node test/repository-hygiene/run.js",
     "test:repository-hygiene": "npm run test:repository-confidentiality",
     "benchmark:q-language": "npm run compile:language && node scripts/benchmark-q-language.js",
@@ -113,12 +117,18 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix && npm run audit:vsix-confidentiality",
-    "package:vsix": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.29.vsix && npm run audit:vsix-confidentiality"
+    "package": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.44.vsix && npm run audit:vsix-confidentiality",
+    "package:vsix": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.44.vsix && npm run audit:vsix-confidentiality",
+    "test:results-display-browser": "npm run compile && node test/results-display-browser.js",
+    "test:failure-reporting": "npm run compile && node test/failure-reporting.js && node test/failure-reporting-silent.js && node test/failure-reporting-rich.js && node test/failure-reporting-sentry.js && node test/failure-reporting-language.js && node test/failure-reporting-producers.js",
+    "test:failure-reporting-host": "npm run compile && node scripts/run-extension-host-test.js --reporting-only"
   },
   "dependencies": {
+    "@sentry/core": "10.76.1",
+    "@sentry/node": "10.76.1",
     "chevrotain": "13.2.0",
     "jszip": "^3.10.1",
+    "pako": "2.1.0",
     "uplot": "^1.6.32",
     "vscode-languageclient": "9.0.1",
     "vscode-languageserver": "9.0.1",
@@ -276,6 +286,16 @@
         "command": "vscode-kdb.refreshConnections",
         "title": "KX: Refresh Connections",
         "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-kdb.refreshVariables",
+        "title": "KX: Refresh Variables",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "vscode-kdb.openVariableInResults",
+        "title": "KX: Open Binding in Results",
+        "icon": "$(open-preview)"
       },
       {
         "command": "vscode-kdb.refreshServerExplorer",
@@ -483,7 +503,14 @@
         {
           "id": "vscode-kdb.connections",
           "name": "KX Connections",
-          "contextualTitle": "KX Connections"
+          "contextualTitle": "KX Connections",
+          "visibility": "visible"
+        },
+        {
+          "id": "vscode-kdb.variables",
+          "name": "KX Variables",
+          "contextualTitle": "KX Variables",
+          "visibility": "visible"
         },
         {
           "id": "vscode-kdb.serverExplorer",
@@ -495,7 +522,7 @@
           "id": "vscode-kdb.queryHistory",
           "name": "KX Query History",
           "contextualTitle": "KX Query History",
-          "when": "config.vscode-kdb.features.queryHistory"
+          "visibility": "visible"
         }
       ]
     },
@@ -510,6 +537,11 @@
           "command": "vscode-kdb.refreshConnections",
           "when": "view == vscode-kdb.connections",
           "group": "navigation@2"
+        },
+        {
+          "command": "vscode-kdb.refreshVariables",
+          "when": "view == vscode-kdb.variables",
+          "group": "navigation@1"
         },
         {
           "command": "vscode-kdb.refreshServerExplorer",
@@ -559,6 +591,11 @@
           "group": "inline@1"
         },
         {
+          "command": "vscode-kdb.openVariableInResults",
+          "when": "view == vscode-kdb.variables && viewItem =~ /^vscode-kdb\\.variables\\.(variable|table)$/",
+          "group": "inline@1"
+        },
+        {
           "command": "vscode-kdb.rerunQueryHistoryEntry",
           "when": "view == vscode-kdb.queryHistory && viewItem =~ /^vscode-kdb\\.queryHistory\\.entry\\./ && config.vscode-kdb.features.queryHistory",
           "group": "inline@1"
@@ -602,6 +639,10 @@
         },
         {
           "command": "vscode-kdb.previewServerObject",
+          "when": "false"
+        },
+        {
+          "command": "vscode-kdb.openVariableInResults",
           "when": "false"
         },
         {
@@ -861,9 +902,9 @@
           "type": "integer",
           "scope": "window",
           "default": 20,
-          "minimum": 1,
+          "minimum": 0,
           "maximum": 10000,
-          "description": "Maximum preview rows written by the optional Tag command for the separate Python %%q helper (20 by default). It never limits first-party Direct IPC rich output, which automatically persists every exactly representable row."
+          "description": "Maximum preview rows written by the optional Tag command for the separate Python %%q helper (20 by default). Set to 0 to keep complete first-party Direct IPC notebook output without retaining a duplicate session-bound live-result cache; Python helper tagging still uses a bounded 20-row preview. Positive values retain the live-result cache. First-party Direct IPC rich output always persists every exactly representable row."
         },
         "vscode-kdb.notebook.maxOutputBytes": {
           "type": "integer",
@@ -882,8 +923,8 @@
         "vscode-kdb.features.queryHistory": {
           "type": "boolean",
           "scope": "window",
-          "default": false,
-          "description": "Enable privacy-aware Query History. Disabled by default; issued editor query text is stored only in local VS Code workspace extension storage and is not sent as telemetry or placed in Settings Sync."
+          "default": true,
+          "description": "Enable privacy-aware Query History recording. Enabled by default and explicitly disableable while the view remains visible; issued editor and first-party Direct IPC notebook command text is stored only in local VS Code workspace extension storage and is not sent as telemetry or placed in Settings Sync."
         },
         "vscode-kdb.serverExplorer.previewCellLimit": {
           "type": "integer",
@@ -1050,18 +1091,18 @@
         "vscode-kdb.results.viewer.autoFitColumns": {
           "type": "boolean",
           "default": true,
-          "description": "Automatically size result columns. Disable this to use only the active density preset and positional manual widths."
+          "description": "Automatically size result columns. Turning on the quick-panel checkbox clears manual widths for the current columns and fits them again. Disable this to use only the active density preset and positional manual widths."
         },
         "vscode-kdb.results.viewer.autoFitMode": {
           "type": "string",
-          "default": "wholeResult",
+          "default": "visibleRows",
           "enum": [
             "wholeResult",
             "visibleRows"
           ],
           "enumDescriptions": [
             "Measure the complete displayed result once so widths remain stable while scrolling.",
-            "Adapt widths to the currently rendered rows."
+            "Fit the headers and cells currently shown on screen."
           ],
           "description": "Rows used when automatically sizing KX result columns."
         },
@@ -1232,6 +1273,37 @@
           "default": 1000000,
           "minimum": 1,
           "description": "Visible-cell limit for full exports from the loopback local data server."
+        },
+        "vscode-kdb.results.viewer.tableDecimalPlaces": {
+          "type": "integer",
+          "default": -1,
+          "minimum": -1,
+          "maximum": 12,
+          "description": "Table display decimal places for floating-point values. -1 (Auto) preserves original precision; 0–12 rounds display only. Copy/export and saved values remain exact."
+        },
+        "vscode-kdb.results.viewer.chartScientificNotationThreshold": {
+          "type": "number",
+          "default": 1000000,
+          "exclusiveMinimum": 0,
+          "description": "Absolute numeric X/Y axis magnitude at which scientific notation starts. Time axes keep time formatting."
+        },
+        "vscode-kdb.diagnostics.failSilently": {
+          "type": "boolean",
+          "default": true,
+          "scope": "machine",
+          "markdownDescription": "Suppress local reporting-status notices. Delivery failures are dropped and pause that destination for one hour; only a new KX failure after the cooldown triggers another attempt, without background probes or retries. Disabling this setting permits bounded notices in Output > KX; no reporting popup is shown."
+        },
+        "vscode-kdb.diagnostics.reportServerUrl": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "Full HTTP(S) URL for automatic sanitized KX failure reports. Empty disables collection and delivery to this destination. User/remote User setting only; workspace values cannot enable reporting."
+        },
+        "vscode-kdb.diagnostics.sentryDsn": {
+          "type": "string",
+          "default": "",
+          "scope": "machine",
+          "markdownDescription": "GlitchTip or Sentry project DSN for automatic KX exception reports. Empty disables this destination. Captures KX functionality only; excludes VS Code/other extensions, credentials, query source and result data. User/remote User setting only."
         }
       }
     }

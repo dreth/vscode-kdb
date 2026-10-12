@@ -295,15 +295,34 @@ class ContractTests(unittest.TestCase):
                 "close": 2,
             }
         ]
-        with self.assertRaisesRegex(KxNotebookError, "unavailable for box"):
-            build_mime_bundle(
-                rows,
-                chart=Chart("box", "x", ("y",), group_by_column="group"),
-            )
+        grouped_box = build_mime_bundle(
+            rows,
+            chart=Chart("box", "x", ("y",), group_by_column="group"),
+        ).bundle[MIME_TYPE]["chart"]
+        self.assertEqual(grouped_box["groupByColumn"], "group")
+        grouped_candle = build_mime_bundle(
+            rows,
+            chart=Chart(
+                "candlestick",
+                "x",
+                (),
+                group_by_column="group",
+                open_column="open",
+                high_column="high",
+                low_column="low",
+                close_column="close",
+            ),
+        ).bundle[MIME_TYPE]["chart"]
+        self.assertEqual(grouped_candle["groupByColumn"], "group")
         with self.assertRaisesRegex(KxNotebookError, "group-by column"):
             build_mime_bundle(
                 rows,
                 chart=Chart("line", "x", ("y",), group_by_column="missing"),
+            )
+        with self.assertRaisesRegex(KxNotebookError, "must be distinct"):
+            build_mime_bundle(
+                rows,
+                chart=Chart("box", "x", ("y",), group_by_column="y"),
             )
         with self.assertRaisesRegex(KxNotebookError, "y columns must be empty"):
             build_mime_bundle(
@@ -320,6 +339,20 @@ class ContractTests(unittest.TestCase):
             )
         with self.assertRaisesRegex(KxNotebookError, "requires open, high, low"):
             build_mime_bundle(rows, chart=Chart("candlestick", "x", ()))
+        with self.assertRaisesRegex(KxNotebookError, "must be distinct"):
+            build_mime_bundle(
+                rows,
+                chart=Chart(
+                    "candlestick",
+                    "x",
+                    (),
+                    group_by_column="close",
+                    open_column="open",
+                    high_column="high",
+                    low_column="low",
+                    close_column="close",
+                ),
+            )
         with self.assertRaisesRegex(KxNotebookError, "must be distinct"):
             build_mime_bundle(
                 rows,

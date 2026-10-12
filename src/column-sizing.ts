@@ -60,7 +60,7 @@ export class PositionalColumnWidthPersistenceQueue {
 }
 
 export function normalizeColumnAutoFitMode(value: unknown): KxColumnAutoFitMode {
-  return value === 'visibleRows' ? 'visibleRows' : 'wholeResult';
+  return value === 'wholeResult' ? 'wholeResult' : 'visibleRows';
 }
 
 /**
@@ -204,9 +204,23 @@ export function resolvedColumnWidth(
       ? clampColumnWidth(Number(width))
       : undefined;
   };
-  return widthAt(positionalWidths) ??
-    (autoFitEnabled ? widthAt(automaticWidths) : undefined) ??
-    fallback;
+  return autoFitEnabled
+    ? widthAt(automaticWidths) ?? fallback
+    : widthAt(positionalWidths) ?? fallback;
+}
+
+export function measuredColumnRenderedTextWidth(
+  text: string,
+  measure: (text: string) => number,
+  horizontalPadding: number,
+  extra = 18
+): number {
+  const measured = measure(text);
+  const desired = Math.ceil(
+    (Number.isFinite(measured) ? Math.max(0, measured) : 0) +
+    Math.max(0, horizontalPadding) * 2 + extra
+  );
+  return Math.min(KX_COLUMN_AUTO_WIDTH_CAP, clampColumnWidth(desired));
 }
 
 export function clampColumnWidth(width: number): number {
@@ -218,11 +232,13 @@ export function measuredColumnTextWidth(
   textLength: number,
   fontSize: number,
   horizontalPadding: number,
-  maximum = KX_COLUMN_AUTO_WIDTH_CAP
+  maximum = KX_COLUMN_AUTO_WIDTH_CAP,
+  measuredCharacterWidth?: number
 ): number {
   const length = Math.max(0, safeInteger(textLength, 0));
   const safeFontSize = Number.isFinite(fontSize) && fontSize > 0 ? fontSize : 13;
-  const characterWidth = Math.max(7, safeFontSize * 0.58);
+  const characterWidth = measuredCharacterWidth !== undefined && Number.isFinite(measuredCharacterWidth) && measuredCharacterWidth > 0
+    ? measuredCharacterWidth : Math.max(7, safeFontSize * 0.58);
   const desired = Math.ceil(
     length * characterWidth +
     Math.max(0, Number(horizontalPadding) || 0) * 2 +
@@ -350,10 +366,11 @@ export async function widestDisplayedColumnTextLengthsAsync(
 export function automaticColumnWidthsForLengths(
   textLengths: readonly number[],
   fontSize: number,
-  horizontalPadding: number
+  horizontalPadding: number,
+  measuredCharacterWidth?: number
 ): number[] {
   return textLengths.map(length =>
-    measuredColumnTextWidth(length, fontSize, horizontalPadding));
+    measuredColumnTextWidth(length, fontSize, horizontalPadding, KX_COLUMN_AUTO_WIDTH_CAP, measuredCharacterWidth));
 }
 
 export interface VariableColumnMetrics {

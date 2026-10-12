@@ -6,7 +6,7 @@ See the [user guide](mkdocs-src/index.md) for detailed setup and the [troublesho
 
 ## Quick start
 
-KX for VS Code 0.2.29 requires VS Code 1.101 or newer and a reachable q process for execution. Offline authoring does not require q. VS Code 1.96–1.100 users can remain on extension 0.2.23. For local development, bind q to loopback:
+KX for VS Code 0.2.44 requires VS Code 1.101 or newer and a reachable q process for execution. Offline authoring does not require q. VS Code 1.96–1.100 users can remain on extension 0.2.23. For local development, bind q to loopback:
 
 ```sh
 q -p 127.0.0.1:5000
@@ -101,9 +101,9 @@ Run **KX: New q Notebook** or open an existing `*.qnb` file. The dedicated `q No
 
 A `.qnb` created as a plain empty file—for example with `touch analysis.qnb` or VS Code Explorer—opens with one empty q code cell and an unsaved marker. Opening does not write to the file; the first ordinary Save writes the compatible JSON cell array. BOM-only and whitespace-only files follow the same bootstrap path, while any nonblank malformed content remains an error and is never replaced.
 
-The serializer reads and writes the established top-level qnb cell-array shape. Cell order, source text and final newlines, Markdown, ordered MIME outputs, attachments, execution summaries, and JSON-compatible unknown fields are preserved within documented bounds. Current KX MIME v2 results use the same exact-value renderer, grids, charts, resampling, copy/export, rerun, cancellation, and stale-result protection as direct q cells in `.ipynb`. Session-only live IDs and credentials are not saved. Recognized legacy `x-application/q-notebook` lists receive a visible text fallback without converting or replacing the original value; unsupported shapes remain losslessly preserved and are shown as preserved JSON rather than guessed into an incorrect q type.
+The serializer reads and writes the established top-level qnb cell-array shape. Cell order, source text and final newlines, Markdown, ordered MIME outputs, attachments, execution summaries, and JSON-compatible unknown fields are preserved within documented structural bounds, without a fixed whole-file byte limit. Current KX MIME v2/v3/v4 results use the same exact-value renderer, grids, charts, resampling, copy/export, rerun, cancellation, and stale-result protection as direct q cells in `.ipynb`. Session-only live IDs and credentials are not saved. Recognized legacy `x-application/q-notebook` lists receive a visible text fallback without converting or replacing the original value; unsupported shapes remain losslessly preserved and are shown as preserved JSON rather than guessed into an incorrect q type.
 
-The extension contributes distinct `.q` and `.qnb` language artwork for Explorer and editor-label fallback. A selected file-icon theme can replace or suppress contributed language icons. After installing an update, verify that the KX extension shown under the current window's **Local** or remote **Installed** section is version 0.2.29, then run **Developer: Reload Window**.
+The extension contributes distinct `.q` and `.qnb` language artwork for Explorer and editor-label fallback. A selected file-icon theme can replace or suppress contributed language icons. After installing an update, verify that the KX extension shown under the current window's **Local** or remote **Installed** section is version 0.2.44, then run **Developer: Reload Window**.
 
 ## Jupyter notebooks
 
@@ -116,9 +116,11 @@ The default notebook workflow keeps the Python Jupyter kernel selected:
 
 Direct q cells use only the globally active KX profile and reuse its q session. Legacy notebook-level target ID/name metadata is ignored safely and does not override the star; KX does not implicitly edit notebooks merely to remove it. The KX action writes completed output as an undoable notebook edit, so the notebook becomes dirty until saved. It will not overwrite a cell that changed while q was running.
 
-Every successful first-party Direct IPC notebook execution automatically stores its complete result in a strict portable v2 rich payload, alongside a transient live result. `vscode-kdb.notebook.maxOutputRows` never limits that rich output, and `maxOutputBytes` limits only static fallbacks such as `text/plain`. Versioned exact q cells retain atom/vector identity, vector attributes, symbols versus character vectors, longs, temporals, nulls/infinities, and nested typed vectors through JSON save/reopen. Keyed-table key source ordinals are stored as optional validated schema metadata, so first-party saved/reopened output retains the same key-column styling; older payloads without that field remain unhighlighted. Default grid cells use the same selective concise display as the panel, qText remains conservative q syntax, and table copy/export uses the shared analyst conversion without rewriting the saved cells. Unsupported exact persistence—including a whole-table-column attribute or top-level dictionary identity—reports a technical failure with q type and bounded value detail instead of flattening, stringifying, truncating, or relabelling a preview as complete. Extension-managed connection credentials, session objects, and IPC handles are never written into notebook output.
+Every successful first-party Direct IPC notebook execution automatically stores its complete result in a strict portable v2/v3/v4 rich payload. Positive `vscode-kdb.notebook.maxOutputRows` values also retain a transient live result; set it to `0` to skip that duplicate session cache while keeping the complete notebook output. Tag/Prepare uses a bounded 20-row Python-helper fallback in zero mode. `maxOutputBytes` limits only static fallbacks such as `text/plain`. Versioned exact q cells retain atom/vector identity, vector attributes, symbols versus character vectors, longs, temporals, nulls/infinities, and nested typed vectors through JSON save/reopen. Keyed-table key source ordinals and original table column-vector attributes are stored as optional validated schema metadata, so first-party saved/reopened output retains those identities; older payloads without that metadata remain readable. Default grid cells use the same selective concise display as the panel, qText remains conservative q syntax, and table copy/export uses the shared analyst conversion without rewriting the saved cells. Unsupported exact persistence, such as a top-level dictionary identity, reports a technical failure with q type and bounded value detail instead of flattening, stringifying, truncating, or relabelling a preview as complete. Extension-managed connection credentials, session objects, and IPC handles are never written into notebook output.
 
-Rerun always executes the current cell source again through a new bridge/IPC call, assigns fresh output and live identities, and replaces the cell with the complete new result. Bounded first-party v1/v2 Direct IPC previews already saved in notebooks remain readable and are labelled **Historical saved preview**; their Rerun action performs a new execution and upgrades the output rather than recovering omitted rows. Use VS Code/Jupyter's native **Clear Cell Output** and **Clear All Outputs** actions to remove output. KX adds no custom clear control, and clearing or removing an output also invalidates its transient live record so stale data cannot reappear. The separate Python `%%q` helper keeps its bounded v1 output contract.
+Version 0.2.42 writes all supported native q tables/keyed tables with authoritative typed columns as complete v4 packed columns, including small and empty tables. Constant columns, numeric values and homogeneous nested vectors are stored compactly with lossless compression; every value, type, vector attribute, key and output identity is preserved. Non-table output and row-table fallbacks without native typed columns remain v2 and existing v1/v2/v3 files remain readable. Newly written v4 output requires 0.2.40 or later for rich rendering; v3 needs 0.2.39 or later. A verified 600,000 × 14 notebook with 20.3 million scalar values shrank from 279 MiB to 20.1 MiB. Existing saved outputs retain their format until rerun; opening or saving does not migrate them.
+
+Rerun always executes the current cell source exactly once through a new bridge/IPC call, assigns a fresh output identity and a live identity only in positive mode, and replaces the cell with the complete new result. Passive render, save/reopen, and **Open in KX Results** use complete saved MIME without requerying q. Bounded first-party v1/v2 Direct IPC previews already saved in notebooks remain readable and are labelled **Historical saved preview**; their Rerun action performs a new execution and upgrades the output rather than recovering omitted rows. Use VS Code/Jupyter's native **Clear Cell Output** and **Clear All Outputs** actions to remove output. KX adds no custom clear control, and clearing or removing an output also invalidates its transient live record so stale data cannot reappear. The separate Python `%%q` helper keeps its bounded v1 output contract.
 
 Set `vscode-kdb.notebook.enableDirectController` to `true` to enable the optional pure-q `KX q (Direct IPC)` controller. This first-class Direct IPC controller then appears in the kernel picker and uses the active KX profile for normal q-cell Run commands. It remains opt-in so mixed Python/q stays the default, supports q code cells only, and rejects a leading `%%q`.
 
@@ -141,9 +143,9 @@ configure_evaluator(lambda source: my_existing_q_session(source))
 
 This route requires Python 3.9 or newer, IPython, and an evaluator supplied by the user. Optional PyKX support requires a separate PyKX installation, configuration, and license. See the [notebook guide](mkdocs-src/notebooks.md) for cell-language handling, the `%%q` route, saved-output limits, and chart persistence.
 
-## Optional sidebar features
+## Runtime sidebar views
 
-Server Explorer and Query History are disabled by default:
+**KX Variables** and **KX Query History** are always visible beside **KX Connections**. Variables refresh is explicit and metadata-only. Query capture is enabled by default with an explicit opt-out; **KX Server Explorer** is the optional view:
 
 ```json
 {
@@ -154,7 +156,11 @@ Server Explorer and Query History are disabled by default:
 
 Server Explorer loads tables and safe variable/function metadata only on refresh or table expansion. Preview requires confirmation and limits table cells or outer list/dictionary items. Scalars and nested values can still be large. Functions and projections are metadata-only.
 
-Query History stores issued editor query text, connection identity, status, timestamp, execution kind, and duration in local VS Code workspace extension storage. It does not store results or passwords and is not registered for Settings Sync or telemetry. Disabling it stops new entries but does not delete retained data; re-enable it and run `KX: Clear Query History` to erase the entries.
+KX Variables lists safe data-variable metadata for the active connected profile and configured namespace after **Refresh Variables**. Hover or focus a row to open its bounded value in KX Results after confirmation. It is distinct from Server Explorer: it never lists tables or functions and never fetches values merely to populate the tree.
+
+Query History stores issued editor and first-party Direct IPC notebook q text, connection identity, status, timestamp, execution kind, and duration in local VS Code workspace extension storage. It does not store results or passwords and is not registered for Settings Sync or telemetry. While disabled, the view shows an opt-in status without reading or displaying retained entries. Disabling it stops new entries but does not delete retained data; re-enable it and run `KX: Clear Query History` to erase the entries.
+
+Connections, Variables, and Query History are native collapsible sections in the same KX sidebar. Drag their headers to reorder them; use the sidebar's **… > Views** menu or header context menu to show or hide sections. VS Code persists that layout for the user.
 
 All supported settings and ranges are listed in the [settings reference](mkdocs-src/settings.md).
 
@@ -173,6 +179,8 @@ Open `View > Output` and select `KX` for connection, handshake, query, cancellat
   "vscode-kdb.performance.trace": true
 }
 ```
+
+Automatic remote failure reporting is opt-in through `vscode-kdb.diagnostics.sentryDsn` (GlitchTip/Sentry) and `vscode-kdb.diagnostics.reportServerUrl` (a separate JSON receiver). Both default to empty and accept User/Remote User configuration only. `vscode-kdb.diagnostics.failSilently` defaults to `true`. Failed deliveries clear pending events and pause that destination for one hour; only a new error after that hour triggers another attempt, with no background probes or timed retries. Reporting connection failures never become reported incidents. Until a valid destination is configured, there is no reporting SDK initialization, remote context collection/buffering, or delivery. Reports carry structured operation history, host/runtime/resource summaries, audited settings, bounded cause details and packaged build identity. They cover KX-owned failures only and exclude VS Code/other-extension errors, credentials, query source and result data. See the [settings documentation](mkdocs-src/settings.md#automatic-failure-reporting) for collected fields and bounds, and [setup instructions](mkdocs-src/troubleshooting.md#configure-glitchtip-or-sentry).
 
 ## Documentation and support
 
@@ -229,3 +237,7 @@ The live test is optional unless `VSCODE_KDB_LIVE_REQUIRED=1` is set.
 KX for VS Code is released under the [MIT License](LICENSE). Bundled third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 KX and the KX logo are trademarks of KX and are used only to identify KX/kdb+ integration. This independent project is not affiliated with or endorsed by KX. kdb+ and q are products of KX.
+
+Results quick settings include autofit and independent **Table decimals** / **Chart decimals**. Turning autofit on fits the current columns again after manual resizing. Row/cell limits, elapsed-time format, and array separators live in extension settings. Numeric chart axes use a configurable scientific-notation threshold, defaulting to one million (`vscode-kdb.results.viewer.chartScientificNotationThreshold`).
+
+Standalone q symbol atoms such as `` `hola `` default to qText in Results and new live/saved notebook output. Symbol vectors such as `` `hola`ciao `` continue to follow the list display setting; table and dictionary symbol cells retain their structured display. New standalone-symbol notebook metadata needs 0.2.41+; existing saved outputs keep their previous presentation until rerun.

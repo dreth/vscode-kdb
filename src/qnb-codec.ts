@@ -1,4 +1,5 @@
-export const QNB_MAX_BYTES = 16 * 1024 * 1024;
+import { QnbJsonText, isValidatedQnbJsonText } from './qnb-json-text';
+
 export const QNB_MAX_CELLS = 10_000;
 export const QNB_MAX_OUTPUTS_PER_CELL = 2_000;
 export const QNB_MAX_JSON_DEPTH = 64;
@@ -32,9 +33,6 @@ export class QnbCodecError extends Error {
 }
 
 export function decodeQnb(bytes: Uint8Array): QnbDocumentModel {
-  if (bytes.byteLength > QNB_MAX_BYTES) {
-    throw new QnbCodecError(`q notebook exceeds the ${QNB_MAX_BYTES}-byte safety limit.`);
-  }
   let text: string;
   try {
     text = new TextDecoder('utf-8', { fatal: true }).decode(bytes).replace(/^\uFEFF/, '');
@@ -69,17 +67,46 @@ export function decodeQnb(bytes: Uint8Array): QnbDocumentModel {
   return Object.freeze({ cells: Object.freeze(value.map((cell, index) => decodeCell(cell, index))) });
 }
 
-export function encodeQnb(document: QnbDocumentModel): Uint8Array {
+export function encodeQnb(
+  document: QnbDocumentModel,
+  options: {
+    readonly outputValuesAreOwnedJson?: true;
+    /** Validated JSON text owned by the notebook serializer; model values are null placeholders. */
+    readonly outputJsonText?: ReadonlyMap<QnbOutputModel, QnbJsonText>;
+  } = {},
+): Uint8Array {
   if (!Array.isArray(document.cells) || document.cells.length > QNB_MAX_CELLS) {
     throw new QnbCodecError(`q notebook cannot contain more than ${QNB_MAX_CELLS} cells.`);
   }
-  const cells = document.cells.map((cell, index) => encodeCell(cell, index));
-  const text = `${JSON.stringify(cells, null, 2)}\n`;
-  const bytes = new TextEncoder().encode(text);
-  if (bytes.byteLength > QNB_MAX_BYTES) {
-    throw new QnbCodecError(`Saving would exceed the ${QNB_MAX_BYTES}-byte q notebook safety limit.`);
-  }
-  return bytes;
+  const cells = document.cells.map((cell, index) =>
+    encodeCell(cell, index, options.outputValuesAreOwnedJson === true));
+  const text = options.outputJsonText?.size
+    ? encodeWithOutputJsonText(cells, document, options.outputJsonText)
+    : `${JSON.stringify(cells)}\n`;
+  return new TextEncoder().encode(text);
+}
+
+function encodeWithOutputJsonText(
+  cells: Record<string, QnbJson>[], document: QnbDocumentModel,
+  outputJsonText: ReadonlyMap<QnbOutputModel, QnbJsonText>,
+): string {
+  const parts = ['['];
+  cells.forEach((cell, cellIndex) => {
+    if (cellIndex) parts.push(',');
+    const { outputs, ...header } = cell;
+    parts.push(JSON.stringify(header).slice(0, -1), ',"outputs":[');
+    (outputs as Record<string, QnbJson>[]).forEach((output, outputIndex) => {
+      if (outputIndex) parts.push(',');
+      const raw = outputJsonText.get(document.cells[cellIndex].outputs[outputIndex]);
+      if (!raw) { parts.push(JSON.stringify(output)); return; }
+      if (!isValidatedQnbJsonText(raw)) throw new QnbCodecError('Unvalidated q notebook output JSON.');
+      const { value: _value, ...outputHeader } = output;
+      parts.push(JSON.stringify(outputHeader).slice(0, -1), ',"value":', raw.text, '}');
+    });
+    parts.push(']}');
+  });
+  parts.push(']\n');
+  return parts.join('');
 }
 
 function decodeCell(value: QnbJson, index: number): QnbCellModel {
@@ -119,12 +146,15 @@ function decodeOutput(value: QnbJson, cellIndex: number, outputIndex: number): Q
   }
   return Object.freeze({
     mime: output.mime,
-    value: cloneJson(output.value as QnbJson),
+    // JSON.parse allocated this tree solely for this decode; it has no external owner.
+    value: output.value as QnbJson,
     unknown: Object.freeze(without(output, ['mime', 'value'])),
   });
 }
 
-function encodeCell(cell: QnbCellModel, index: number): Record<string, QnbJson> {
+function encodeCell(
+  cell: QnbCellModel, index: number, outputValuesAreOwnedJson: boolean,
+): Record<string, QnbJson> {
   if (cell.kind !== 'code' && cell.kind !== 'markdown') {
     throw new QnbCodecError(`q notebook cell ${index} has an unsupported in-memory kind.`);
   }
@@ -140,11 +170,15 @@ function encodeCell(cell: QnbCellModel, index: number): Record<string, QnbJson> 
     kind: cell.kind === 'code' ? 2 : 1,
     language: cell.kind === 'code' ? 'q' : 'markdown',
     value: cell.value,
-    outputs: cell.outputs.map((output, outputIndex) => encodeOutput(output, index, outputIndex)),
+    outputs: cell.outputs.map((output, outputIndex) =>
+      encodeOutput(output, index, outputIndex, outputValuesAreOwnedJson)),
   };
 }
 
-function encodeOutput(output: QnbOutputModel, cellIndex: number, outputIndex: number): Record<string, QnbJson> {
+function encodeOutput(
+  output: QnbOutputModel, cellIndex: number, outputIndex: number,
+  outputValuesAreOwnedJson: boolean,
+): Record<string, QnbJson> {
   if (typeof output.mime !== 'string' || !validMime(output.mime)) {
     throw new QnbCodecError(`q notebook cell ${cellIndex} output ${outputIndex} has an invalid MIME type.`);
   }
@@ -152,7 +186,7 @@ function encodeOutput(output: QnbOutputModel, cellIndex: number, outputIndex: nu
   return {
     ...sanitizeUnknown(output.unknown, 0),
     mime: output.mime,
-    value: cloneJson(output.value),
+    value: outputValuesAreOwnedJson ? output.value : cloneJson(output.value),
   };
 }
 

@@ -4,6 +4,8 @@ CNAME
 index.html
 .github/**
 .agents/**
+.codex*/**
+**/.codex*/**
 docs/**
 mkdocs-src/**
 mkdocs.yml
@@ -15,6 +17,7 @@ language-server/src/**
 language-server/tsconfig.json
 out/**
 !out/extension.js
+!out/failure-build.json
 !out/q-language-server.js
 test/**
 scripts/**

@@ -639,7 +639,20 @@ export function notebookChartControlModel(
 ): NotebookChartControlModel {
   const capabilities = chartTypeCapabilities(configuration.chartType);
   const yColumns = numericColumns.filter(name => name !== configuration.xColumn);
-  const eligibleGroupColumns = capabilities.supportsGroupBy ? [...groupColumns] : [];
+  const reservedGroupColumns = new Set([
+    configuration.xColumn,
+    ...(capabilities.usesOhlc
+      ? [
+        configuration.openColumn || '',
+        configuration.highColumn || '',
+        configuration.lowColumn || '',
+        configuration.closeColumn || '',
+      ]
+      : configuration.yColumns),
+  ].filter(Boolean));
+  const eligibleGroupColumns = capabilities.supportsGroupBy
+    ? groupColumns.filter(name => !reservedGroupColumns.has(name))
+    : [];
   let validationMessage = '';
   if (!configuration.xColumn || !xColumns.includes(configuration.xColumn)) {
     validationMessage = 'Select one numeric or temporal X column.';
@@ -663,7 +676,8 @@ export function notebookChartControlModel(
   } else if (configuration.yColumns.length === 0 ||
     configuration.yColumns.some(value => !yColumns.includes(value))) {
     validationMessage = 'Select at least one numeric Y column distinct from X.';
-  } else if (capabilities.supportsGroupBy && configuration.groupByColumn &&
+  }
+  if (!validationMessage && capabilities.supportsGroupBy && configuration.groupByColumn &&
     !eligibleGroupColumns.includes(configuration.groupByColumn)) {
     validationMessage = 'Selected Group by column is unavailable.';
   }
@@ -689,13 +703,6 @@ export function reconcileNotebookChartConfiguration(
     xColumn,
     previous.yColumns
   );
-  const supportsGroup = previous.chartType === 'line' ||
-    previous.chartType === 'scatter' ||
-    previous.chartType === 'step' ||
-    previous.chartType === 'bar';
-  const groupByColumn = supportsGroup && groupColumns.includes(previous.groupByColumn)
-    ? previous.groupByColumn
-    : '';
   const roleColumn = (current: string, role: string): string => {
     if (yColumns.includes(current)) {
       return current;
@@ -704,16 +711,32 @@ export function reconcileNotebookChartConfiguration(
     const matches = yColumns.filter(name => name.trim().toLocaleLowerCase() === normalized);
     return matches.length === 1 ? matches[0] : '';
   };
+  const capabilities = chartTypeCapabilities(previous.chartType);
+  const resolvedOhlc = [
+    roleColumn(previous.openColumn, 'open'),
+    roleColumn(previous.highColumn, 'high'),
+    roleColumn(previous.lowColumn, 'low'),
+    roleColumn(previous.closeColumn, 'close'),
+  ];
+  const reservedGroupColumns = new Set([
+    xColumn,
+    ...(capabilities.usesOhlc ? resolvedOhlc : selectedY),
+  ].filter(Boolean));
+  const groupByColumn = capabilities.supportsGroupBy &&
+    groupColumns.includes(previous.groupByColumn) &&
+    !reservedGroupColumns.has(previous.groupByColumn)
+    ? previous.groupByColumn
+    : '';
   const configuration: NotebookRendererChartConfiguration = {
     visible: previous.visible,
     chartType: previous.chartType,
     xColumn,
     yColumns: selectedY,
     groupByColumn,
-    openColumn: roleColumn(previous.openColumn, 'open'),
-    highColumn: roleColumn(previous.highColumn, 'high'),
-    lowColumn: roleColumn(previous.lowColumn, 'low'),
-    closeColumn: roleColumn(previous.closeColumn, 'close'),
+    openColumn: resolvedOhlc[0],
+    highColumn: resolvedOhlc[1],
+    lowColumn: resolvedOhlc[2],
+    closeColumn: resolvedOhlc[3],
   };
   const sameY = previous.yColumns.length === selectedY.length &&
     previous.yColumns.every((value, index) => value === selectedY[index]);
@@ -723,8 +746,8 @@ export function reconcileNotebookChartConfiguration(
         previous.highColumn === configuration.highColumn &&
         previous.lowColumn === configuration.lowColumn &&
         previous.closeColumn === configuration.closeColumn
-      : sameY && (!supportsGroup || previous.groupByColumn === groupByColumn)
-  );
+      : sameY
+  ) && previous.groupByColumn === groupByColumn;
   return { configuration, compatible };
 }
 

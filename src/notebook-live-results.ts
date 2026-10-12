@@ -1,4 +1,5 @@
 import * as crypto from 'crypto';
+import { notebookOutputOwnershipCache } from './notebook-output-ownership';
 import {
   CHART_MAX_SOURCE_ROWS,
   ChartType,
@@ -28,7 +29,6 @@ import {
 import {
   MAX_NOTEBOOK_LIVE_COPY_CELLS,
   MAX_NOTEBOOK_LIVE_COLUMNS,
-  inspectNotebookKxOutputIdentity,
 } from './notebook-message';
 import { widestDisplayedColumnTextLengthsAsync } from './column-sizing';
 import {
@@ -69,6 +69,7 @@ export interface NotebookOutputSnapshot {
 
 export interface LiveNotebookDisplayOptions extends QResultDisplayOptions {
   arrayDisplayFormat?: ArrayDisplayFormat;
+  tableDecimalPlaces?: number;
 }
 
 export interface LiveNotebookResultView {
@@ -412,7 +413,7 @@ export class LiveNotebookResultStore {
       Math.max(0, Math.floor(Number(maximumColumns) || 0))
     );
     const key =
-      `${record.viewKey || ''}\0${options.arrayDisplayFormat || ''}\0${columnLimit}`;
+      `${record.viewKey || ''}\0${options.arrayDisplayFormat || ''}\0${options.tableDecimalPlaces ?? -1}\0${columnLimit}`;
     if (record.columnTextLengthCache?.key === key) {
       return record.columnTextLengthCache.lengths.slice();
     }
@@ -434,7 +435,7 @@ export class LiveNotebookResultStore {
       );
     scan.promise = widestDisplayedColumnTextLengthsAsync(
       scanTable,
-      { arrayDisplayFormat: options.arrayDisplayFormat },
+      { arrayDisplayFormat: options.arrayDisplayFormat, tableDecimalPlaces: options.tableDecimalPlaces },
       {
         continueScanning: () =>
           this.records.get(id) === record &&
@@ -894,7 +895,7 @@ export function reconcileLiveNotebookCellOutputs(
   outputs: readonly NotebookOutputSnapshot[]
 ): boolean {
   const retainsOwner = outputs.some(output => {
-    const inspected = inspectNotebookKxOutputIdentity(output.metadata, output.items);
+    const inspected = notebookOutputOwnershipCache.inspect(output.metadata, output.items);
     return inspected.status === 'valid' && !!inspected.identity.live && liveResults.hasForOutput(
       inspected.identity.live.id,
       notebookUri,
@@ -1000,6 +1001,7 @@ function inlineChartSource(table: ColumnarPanelResult): ColumnarPanelResult {
 
 function cellTextOptions(options: LiveNotebookDisplayOptions): CellTextOptions {
   return {
+    tableDecimalPlaces: options.tableDecimalPlaces,
     arrayDisplayFormat: options.arrayDisplayFormat === 'space' || options.arrayDisplayFormat === 'raw'
       ? options.arrayDisplayFormat
       : 'commaSpace',

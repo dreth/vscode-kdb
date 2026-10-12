@@ -4,10 +4,11 @@ import {
   MAX_NOTEBOOK_BYTE_LIMIT,
   MAX_NOTEBOOK_ROW_LIMIT,
   MIN_NOTEBOOK_BYTE_LIMIT,
-  MIN_NOTEBOOK_ROW_LIMIT,
 } from './notebook-contract';
 
 export type NotebookPresentation = 'inline' | 'panel' | 'both';
+
+export const UNLIMITED_NOTEBOOK_ROW_LIMIT = 0;
 
 export interface NotebookSettings {
   presentation: NotebookPresentation;
@@ -23,9 +24,23 @@ export function safeNotebookRowLimit(value: unknown): number {
   return safeInteger(
     value,
     DEFAULT_NOTEBOOK_ROW_LIMIT,
-    MIN_NOTEBOOK_ROW_LIMIT,
+    UNLIMITED_NOTEBOOK_ROW_LIMIT,
     MAX_NOTEBOOK_ROW_LIMIT
   );
+}
+
+export function notebookHelperRowLimit(
+  settings: Pick<NotebookSettings, 'rowLimit'>
+): number {
+  return settings.rowLimit === UNLIMITED_NOTEBOOK_ROW_LIMIT
+    ? DEFAULT_NOTEBOOK_ROW_LIMIT
+    : settings.rowLimit;
+}
+
+export function shouldRetainLiveNotebookResult(
+  settings: Pick<NotebookSettings, 'rowLimit'>
+): boolean {
+  return settings.rowLimit !== UNLIMITED_NOTEBOOK_ROW_LIMIT;
 }
 
 export function safeNotebookByteLimit(value: unknown): number {
@@ -50,7 +65,7 @@ export function notebookQSourceFromMagic(source: string): string | undefined {
 }
 
 export function notebookQMagicLine(settings: Pick<NotebookSettings, 'rowLimit' | 'byteLimit'>): string {
-  return `%%q --max-rows ${settings.rowLimit} --max-bytes ${settings.byteLimit}`;
+  return `%%q --max-rows ${notebookHelperRowLimit(settings)} --max-bytes ${settings.byteLimit}`;
 }
 
 function safeInteger(value: unknown, fallback: number, minimum: number, maximum: number): number {
