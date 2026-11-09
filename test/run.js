@@ -483,6 +483,7 @@ const tests = [
   ['connection form payload and password semantics', testConnectionFormModel],
   ['connection webview lifecycle', testConnectionFormPanelLifecycle],
   ['connection form host testing', testConnectionFormHostTesting],
+  ['single-folder connection save ownership', testSingleFolderConnectionScopes],
   ['connection multi-scope precedence and ownership', testConnectionScopes],
   ['connection SecretStorage transactions', testConnectionStoreTransactions],
   ['post-persist active connection lifecycle', testConnectionUpdateLifecycle],
@@ -9687,6 +9688,115 @@ async function testConnectionFormHostTesting() {
   assert.strictEqual(failedSaveSuccesses, 0, 'failed profile persistence must never report success');
   assert.match(failedSaveHarness.errors.at(-1), /Add KX connection failed/);
   assert.match(failedSaveHarness.errors.at(-1), /injected profile persistence failure/);
+}
+
+async function testSingleFolderConnectionScopes() {
+  const folderUri = 'file:///workspace/research';
+  const connection = validateConnection({
+    id: 'kx-single-folder-7000', name: 'Research 7000',
+    host: 'q.example.test', port: 7000, database: '.', username: '',
+  });
+  const other = { ...connection, id: 'kx-other-profile', name: 'Other worker', port: 7001 };
+  const userDefault = { ...connection, host: 'user-default.example.test' };
+  const harness = createScopedConnectionStoreHarness({
+    singleFolder: true,
+    global: [userDefault], workspace: [connection, other],
+    folders: [{ uri: folderUri, connections: [connection, other] }],
+    activeId: connection.id,
+  });
+  const tree = createVscodeTreeHarness();
+  const panel = createVscodePanelHarness();
+  const vscode = {
+    ...tree.vscode, ...harness.vscode, ...panel.vscode,
+    window: { ...tree.vscode.window, ...panel.vscode.window },
+  };
+  const { ConnectionStore } = requireOutWithVscode('connection-store', vscode);
+  const { ConnectionCommands } = requireOutWithVscode('connection-commands', vscode);
+  const store = new ConnectionStore(harness.context);
+  assert.strictEqual(store.connections().filter(item => item.id === connection.id).length, 1);
+  assert.deepStrictEqual(store.connectionScope(connection.id), { kind: 'workspace' },
+    'one folder settings file must have one writable project owner, not an unavailable folder owner');
+  assert.deepStrictEqual(store.availableConnectionScopes(), [{ kind: 'global' }, { kind: 'workspace' }]);
+  const disconnects = [];
+  const commands = new ConnectionCommands(store, {
+    globalTimeouts: () => ({ connectTimeoutMs: 30000, queryTimeoutMs: 3600000 }),
+    isConnected: () => false,
+    disconnect: async id => { disconnects.push(id); },
+    connect: async () => assert.fail('saving a disconnected profile must not open a transport'),
+  }, { refresh() {} });
+  const formRun = commands.createConnectionForm(store.connection(connection.id));
+  await new Promise(resolve => setImmediate(resolve));
+  const form = commands.activeForm;
+  assert(form);
+  await form.onMessage({ type: 'ready', session: form.session });
+  const initial = panel.posted.find(message => message.type === 'initialize').values;
+  assert.strictEqual(initial.scopeKey, 'workspace');
+  assert(initial.scopes.some(scope => scope.key === initial.scopeKey),
+    'the current profile owner must have a visible selected dropdown option');
+  const enteredSecret = ['single', 'folder', 'entered', 'secret'].join('-');
+  const payload = {
+    name: connection.name, host: connection.host, port: '7000', database: '.', username: 'research-user',
+    password: enteredSecret, clearPassword: false, connectTimeoutMs: '', queryTimeoutMs: '',
+    scope: initial.scopeKey,
+  };
+  await form.onMessage({ type: 'save', session: form.session, payload });
+  await formRun;
+  assert.strictEqual(panel.panel.disposed, true);
+  assert.strictEqual(tree.errors.length, 0);
+  assert.strictEqual(store.connection(connection.id).username, 'research-user');
+  assert.strictEqual(await store.password(connection.id), enteredSecret);
+  assert.deepStrictEqual(harness.globalConnections, [userDefault], 'shadowed User settings must stay untouched');
+  assert.deepStrictEqual(harness.workspaceConnections.find(item => item.id === other.id), other);
+  assert.strictEqual(harness.activeId, connection.id);
+  assert(!JSON.stringify(harness.workspaceConnections).includes(enteredSecret),
+    'the entered password must only be stored in SecretStorage');
+
+  const saved = store.connection(connection.id);
+  await assert.rejects(() => commands.saveConnectionForm({ ...payload, scope: '', password: '' }, saved.id, saved),
+    /select.*settings scope/i, 'an empty dropdown must not silently move an existing profile');
+  // Legacy callers without a scope retain the existing owner rather than the new-profile default.
+  const { scope: _scope, ...withoutScope } = { ...payload, password: '', name: 'Research renamed' };
+  await commands.saveConnectionForm(withoutScope, saved.id, saved);
+  assert.deepStrictEqual(store.connectionScope(saved.id), { kind: 'workspace' });
+  assert.strictEqual(await store.password(saved.id), enteredSecret);
+
+  const renamed = store.connection(saved.id);
+  const beforeCollision = JSON.stringify([harness.globalConnections, harness.workspaceConnections]);
+  await assert.rejects(() => store.update(renamed, 'unused-replacement', renamed, { kind: 'global' }),
+    /already defines stable ID/, 'a real User/project collision must still fail before changing credentials');
+  assert.strictEqual(JSON.stringify([harness.globalConnections, harness.workspaceConnections]), beforeCollision);
+  assert.strictEqual(await store.password(saved.id), enteredSecret);
+
+  const movable = { ...connection, id: 'kx-movable', name: 'Movable' };
+  await store.add(movable, 'movable-secret', { kind: 'global' });
+  await store.update(movable, undefined, movable, { kind: 'workspace' });
+  assert.deepStrictEqual(store.connectionScope(movable.id), { kind: 'workspace' });
+  assert.strictEqual(await store.password(movable.id), 'movable-secret');
+  assert(!harness.globalConnections.some(item => item.id === movable.id));
+  assert(harness.workspaceConnections.some(item => item.id === movable.id));
+  await store.update(movable, undefined, movable, { kind: 'global' });
+  assert.deepStrictEqual(store.connectionScope(movable.id), { kind: 'global' });
+  assert.strictEqual(await store.password(movable.id), 'movable-secret');
+  assert(!harness.workspaceConnections.some(item => item.id === movable.id));
+
+  // A saved .code-workspace retains a separate folder file even with one folder.
+  const savedWorkspace = createScopedConnectionStoreHarness({
+    workspace: [userDefault], folders: [{ uri: folderUri, connections: [connection, other] }],
+    secrets: { [`vscode-kdb.connectionPassword.${connection.id}`]: enteredSecret },
+  });
+  const { ConnectionStore: SavedWorkspaceStore } = requireOutWithVscode('connection-store', savedWorkspace.vscode);
+  const savedStore = new SavedWorkspaceStore(savedWorkspace.context);
+  const folderScope = { kind: 'workspaceFolder', folderUri };
+  assert.deepStrictEqual(savedStore.connectionScope(connection.id), folderScope);
+  assert(savedStore.availableConnectionScopes().some(scope => scope.kind === 'workspaceFolder'),
+    'a saved one-folder workspace must offer its distinct folder scope');
+  await savedStore.update({ ...connection, username: 'saved-user' }, undefined, connection, folderScope);
+  assert.strictEqual(savedWorkspace.folderConnections(folderUri)[0].username, 'saved-user');
+  assert.deepStrictEqual(savedWorkspace.workspaceConnections, [userDefault]);
+  const edited = savedStore.connection(connection.id);
+  await assert.rejects(() => savedStore.update(edited, 'do-not-save', edited, { kind: 'workspace' }),
+    /already defines stable ID/);
+  assert.strictEqual(await savedStore.password(connection.id), enteredSecret);
 }
 
 async function testConnectionScopes() {
@@ -27581,11 +27691,11 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.44');
+  assert.strictEqual(manifest.version, '0.2.46');
   assert.strictEqual(
     manifest.scripts.package,
     'npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies ' +
-      '--out vscode-kdb-0.2.44.vsix && npm run audit:vsix-confidentiality'
+      '--out vscode-kdb-0.2.46.vsix && npm run audit:vsix-confidentiality'
   );
   assert.strictEqual(manifest.scripts['package:vsix'], manifest.scripts.package);
   assert.strictEqual(
@@ -27610,8 +27720,8 @@ function testManifestAndSources() {
     'node scripts/copy-webview-assets.js && node scripts/generate-failure-build.js'
   );
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.44');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.44');
+  assert.strictEqual(packageLock.version, '0.2.46');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.46');
   const compiledExtensionBundle = fs.readFileSync(
     path.join(ROOT, 'out', 'extension.js'),
     'utf8'
@@ -30933,7 +31043,9 @@ function createScopedConnectionStoreHarness(options) {
         globalValue: cloneJson(state.global),
         workspaceValue: cloneJson(state.workspace),
         ...(resource
-          ? { workspaceFolderValue: cloneJson(state.folders.get(resource.toString()) || []) }
+          ? { workspaceFolderValue: cloneJson(options.singleFolder
+                ? state.workspace
+                : state.folders.get(resource.toString()) || []) }
           : {}),
       };
     },
@@ -31011,7 +31123,7 @@ function createScopedConnectionStoreHarness(options) {
       },
       workspace: {
         workspaceFolders: folders,
-        workspaceFile: testUri('file:///workspace/project.code-workspace'),
+        workspaceFile: options.singleFolder ? undefined : testUri('file:///workspace/project.code-workspace'),
         getConfiguration(_section, resource) {
           return configuration(resource);
         },

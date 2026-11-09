@@ -128,7 +128,7 @@ export function parseConnectionFormPayload(
       payload.clearPassword,
       options.hasStoredPassword
     ),
-    ...(scopeKey ? { scopeKey } : {}),
+    ...(scopeKey !== undefined ? { scopeKey } : {}),
   };
 }
 

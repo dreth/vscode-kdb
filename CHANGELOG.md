@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.2.46 - 2026-11-09
+
+- Fixed saving existing KX profiles in single-folder windows: project settings no longer appear as a second hidden folder owner, the scope selection stays populated, and entered passwords save to SecretStorage. Saved workspaces with one folder retain distinct scopes; genuine stable-ID move conflicts still leave settings and secrets unchanged.
+
 ## 0.2.44 - 2026-10-08
 
 - Added automatic opt-in KX-owned failure diagnostics with structured operation history, safe host/runtime/resource/settings summaries, sanitized causes and reproducible packaged-build identity. Reporting destinations remain empty by default; VS Code 1.101 remains the minimum.

@@ -189,7 +189,7 @@ export class ConnectionStore {
     if (folders.length > 0 || vscode.workspace.workspaceFile) {
       scopes.push({ kind: 'workspace' });
     }
-    if (folders.length > 1) {
+    if (folders.length > 1 || vscode.workspace.workspaceFile) {
       folders.forEach(folder => scopes.push({
         kind: 'workspaceFolder',
         folderUri: folder.uri.toString(),
@@ -838,12 +838,17 @@ export class ConnectionStore {
     const inspected = base.inspect<unknown>(CONNECTIONS_SETTING);
     const folders = [...(vscode.workspace.workspaceFolders || [])]
       .sort((left, right) => left.uri.toString().localeCompare(right.uri.toString()));
+    // In an Open Folder window VS Code exposes the same .vscode/settings.json
+    // as both workspaceValue and workspaceFolderValue. Read it once, with the
+    // project owner used by the form and writes. A .code-workspace keeps its
+    // separate folder settings even when it currently contains only one folder.
+    const scopedFolders = folders.length > 1 || vscode.workspace.workspaceFile ? folders : [];
     return {
       global: inspected
         ? inspected.globalValue
         : base.get<unknown>(CONNECTIONS_SETTING),
       workspace: inspected?.workspaceValue,
-      workspaceFolders: folders.map(folder => ({
+      workspaceFolders: scopedFolders.map(folder => ({
         folderUri: folder.uri.toString(),
         value: vscode.workspace
           .getConfiguration(CONFIGURATION_SECTION, folder.uri)

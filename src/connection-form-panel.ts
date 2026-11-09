@@ -529,7 +529,7 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
           </div>
           <div class="field full">
             <label for="scope">Save profile in</label>
-            <select id="scope" name="scope" aria-describedby="scopeHelp"></select>
+            <select id="scope" name="scope" required aria-describedby="scopeHelp"></select>
             <p id="scopeHelp" class="help">Workspace profiles live in project settings and survive container recreation. User profiles are shared across projects in this VS Code environment and are Settings Sync eligible where VS Code allows.</p>
           </div>
           <div class="field">

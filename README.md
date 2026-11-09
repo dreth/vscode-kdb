@@ -6,7 +6,7 @@ See the [user guide](mkdocs-src/index.md) for detailed setup and the [troublesho
 
 ## Quick start
 
-KX for VS Code 0.2.44 requires VS Code 1.101 or newer and a reachable q process for execution. Offline authoring does not require q. VS Code 1.96–1.100 users can remain on extension 0.2.23. For local development, bind q to loopback:
+KX for VS Code 0.2.46 requires VS Code 1.101 or newer and a reachable q process for execution. Offline authoring does not require q. VS Code 1.96–1.100 users can remain on extension 0.2.23. For local development, bind q to loopback:
 
 ```sh
 q -p 127.0.0.1:5000
@@ -103,7 +103,7 @@ A `.qnb` created as a plain empty file—for example with `touch analysis.qnb` o
 
 The serializer reads and writes the established top-level qnb cell-array shape. Cell order, source text and final newlines, Markdown, ordered MIME outputs, attachments, execution summaries, and JSON-compatible unknown fields are preserved within documented structural bounds, without a fixed whole-file byte limit. Current KX MIME v2/v3/v4 results use the same exact-value renderer, grids, charts, resampling, copy/export, rerun, cancellation, and stale-result protection as direct q cells in `.ipynb`. Session-only live IDs and credentials are not saved. Recognized legacy `x-application/q-notebook` lists receive a visible text fallback without converting or replacing the original value; unsupported shapes remain losslessly preserved and are shown as preserved JSON rather than guessed into an incorrect q type.
 
-The extension contributes distinct `.q` and `.qnb` language artwork for Explorer and editor-label fallback. A selected file-icon theme can replace or suppress contributed language icons. After installing an update, verify that the KX extension shown under the current window's **Local** or remote **Installed** section is version 0.2.44, then run **Developer: Reload Window**.
+The extension contributes distinct `.q` and `.qnb` language artwork for Explorer and editor-label fallback. A selected file-icon theme can replace or suppress contributed language icons. After installing an update, verify that the KX extension shown under the current window's **Local** or remote **Installed** section is version 0.2.46, then run **Developer: Reload Window**.
 
 ## Jupyter notebooks
 

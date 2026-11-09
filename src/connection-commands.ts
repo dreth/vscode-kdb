@@ -372,7 +372,7 @@ export class ConnectionCommands {
       editing: current,
       hasStoredPassword,
     });
-    const scope = this.scopeForFormKey(parsed.scopeKey);
+    const scope = this.scopeForFormKey(parsed.scopeKey, current && this.store.connectionScope?.(current.id));
 
     if (!current) {
       await this.store.add(
@@ -417,7 +417,15 @@ export class ConnectionCommands {
     );
   }
 
-  private scopeForFormKey(key: string | undefined): ConnectionConfigurationScope {
+  private scopeForFormKey(
+    key: string | undefined,
+    owner?: ConnectionConfigurationScope
+  ): ConnectionConfigurationScope {
+    // An unmatched HTML select has an empty value. Do not interpret that as
+    // permission to move an existing profile to the new-profile default scope.
+    if (key === '') {
+      throw new Error('Select a connection settings scope before saving.');
+    }
     const available = typeof this.store.availableConnectionScopes === 'function'
       ? this.store.availableConnectionScopes()
       : [{ kind: 'global' as const }];
@@ -425,7 +433,7 @@ export class ConnectionCommands {
     if (key && !selected) {
       throw new Error('The selected connection settings scope is no longer available.');
     }
-    return selected ||
+    return selected || owner ||
       (typeof this.store.defaultNewConnectionScope === 'function'
         ? this.store.defaultNewConnectionScope()
         : available[0]);
