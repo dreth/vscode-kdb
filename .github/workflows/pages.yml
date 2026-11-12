@@ -61,6 +61,8 @@ jobs:
 
       - name: Verify generated docs are committed
         run: |
+          # The sitemap carries the build date; only a content change should fail here.
+          python .github/scripts/keep-committed-sitemap.py docs
           git diff --exit-code -- docs
           if [ -n "$(git status --porcelain -- docs)" ]; then
             git status --short -- docs
