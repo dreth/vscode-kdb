@@ -2,7 +2,7 @@
 
 KX for VS Code runs q from `.q` files and Jupyter notebooks against saved kdb+/q endpoints over direct q IPC. It adds q syntax highlighting and displays decoded results in a VS Code panel or notebook output. It does not bundle q, translate SQL, or require SQLTools.
 
-See the [user guide](mkdocs-src/index.md) for detailed setup and the [troubleshooting guide](mkdocs-src/troubleshooting.md) for connection, execution, and result problems.
+See the [user guide](https://vscode-kdb.dac.sg/) for detailed setup and the [troubleshooting guide](https://vscode-kdb.dac.sg/troubleshooting/) for connection, execution, and result problems.
 
 ## Quick start
 
@@ -73,7 +73,7 @@ Each value is in milliseconds. A per-profile value overrides its global default;
 
 `KX: Import SQLTools KDB Connections` reviews eligible legacy KDB profiles already present in `sqltools.connections`. Import is one-time: it does not require SQLTools, change the source setting, overwrite an existing KX profile, or create ongoing synchronization. SSH-enabled profiles are not imported because this extension cannot reproduce the tunnel. Password transfer requires explicit confirmation and writes the copied value to SecretStorage.
 
-See [Connections and SecretStorage](mkdocs-src/connections.md) for field validation, namespace behavior, timeouts, and import rules.
+See [Connections and SecretStorage](https://vscode-kdb.dac.sg/connections/) for field validation, namespace behavior, timeouts, and import rules.
 
 ## Results
 
@@ -87,13 +87,13 @@ Grid cells use concise familiar text for ordinary booleans, numerics, temporals,
 
 Charts support line, scatter, step, bar, box, and candlestick views over eligible columns. A compact overview navigator below the main plot shows the full X domain and a selected window: drag the window to pan, drag either edge to resize, or use the focusable window/handles with bounded arrow-key movement. Plain main-plot drag zoom remains available, and `Home` or **Reset zoom** restores the full domain. Settled live ranges refine automatically through the same absolute-range/stale-response lifecycle; saved or otherwise bounded charts navigate locally. There are no dedicated Pan or Refine buttons. Ordinary line, scatter, and step charts plot exactly 7,000 deterministic points when at least 7,000 eligible finite source points exist, or all eligible points below that threshold. Semantic grouping/aggregation can honestly yield fewer bars, box groups, or candles, and status distinguishes eligible rows from rendered visual items. Large copy, export, sort, render, and chart operations are bounded or require confirmation. The complete q IPC response is decoded before display; virtualization reduces DOM work but does not stream the response.
 
-Table file export is hard-bounded before whole-result allocation: text formats allow at most 5,000,000 output cells, 100,000 output columns, 128 MiB realized UTF-8, and 8,388,608 analyst-text characters per cell/header/key; XLSX allows at most 1,000,000 output cells and 64 MiB uncompressed worksheet XML in addition to Excel's sheet/cell limits. Panel clipboard copy has a separate 15 MiB realized UTF-8 cap. Limit failures never truncate or write a partial file; see [copy and export](mkdocs-src/copy-export.md#guardrails).
+Table file export is hard-bounded before whole-result allocation: text formats allow at most 5,000,000 output cells, 100,000 output columns, 128 MiB realized UTF-8, and 8,388,608 analyst-text characters per cell/header/key; XLSX allows at most 1,000,000 output cells and 64 MiB uncompressed worksheet XML in addition to Excel's sheet/cell limits. Panel clipboard copy has a separate 15 MiB realized UTF-8 cap. Limit failures never truncate or write a partial file; see [copy and export](https://vscode-kdb.dac.sg/copy-export/#guardrails).
 
 The panel Settings menu can enable default-off column summary statistics. They are computed in the extension host from the current decoded result without rerunning q, and only compact summaries cross into the webview. Results at or below both 50,000 rows and 100,000 cells are exact; larger results use a clearly labelled deterministic evenly spaced sample of at most 10,000 rows, with sampled counts reported as observed rather than extrapolated.
 
 The optional local data server exposes the current visible grid as tokenized CSV, JSON, or NDJSON endpoints on `127.0.0.1`. It never starts automatically. The URL is a temporary bearer secret: another local process that obtains it can read the exposed result, and `metadata.json` includes result metadata such as the connection name and query text. Stop the server when finished.
 
-See [Results viewer](mkdocs-src/results-viewer.md), [copy and export](mkdocs-src/copy-export.md), [charting](mkdocs-src/charting.md), and [local data server](mkdocs-src/local-data-server.md).
+See [Results viewer](https://vscode-kdb.dac.sg/results-viewer/), [copy and export](https://vscode-kdb.dac.sg/copy-export/), [charting](https://vscode-kdb.dac.sg/charting/), and [local data server](https://vscode-kdb.dac.sg/local-data-server/).
 
 ## q-only `.qnb` notebooks
 
@@ -141,7 +141,7 @@ configure_evaluator(lambda source: my_existing_q_session(source))
 %load_ext kx_notebook
 ```
 
-This route requires Python 3.9 or newer, IPython, and an evaluator supplied by the user. Optional PyKX support requires a separate PyKX installation, configuration, and license. See the [notebook guide](mkdocs-src/notebooks.md) for cell-language handling, the `%%q` route, saved-output limits, and chart persistence.
+This route requires Python 3.9 or newer, IPython, and an evaluator supplied by the user. Optional PyKX support requires a separate PyKX installation, configuration, and license. See the [notebook guide](https://vscode-kdb.dac.sg/notebooks/) for cell-language handling, the `%%q` route, saved-output limits, and chart persistence.
 
 ## Runtime sidebar views
 
@@ -162,7 +162,7 @@ Query History stores issued editor and first-party Direct IPC notebook q text, c
 
 Connections, Variables, and Query History are native collapsible sections in the same KX sidebar. Drag their headers to reorder them; use the sidebar's **… > Views** menu or header context menu to show or hide sections. VS Code persists that layout for the user.
 
-All supported settings and ranges are listed in the [settings reference](mkdocs-src/settings.md).
+All supported settings and ranges are listed in the [settings reference](https://vscode-kdb.dac.sg/settings/).
 
 ## Security and compatibility
 
@@ -180,11 +180,11 @@ Open `View > Output` and select `KX` for connection, handshake, query, cancellat
 }
 ```
 
-Automatic remote failure reporting is opt-in through `vscode-kdb.diagnostics.sentryDsn` (GlitchTip/Sentry) and `vscode-kdb.diagnostics.reportServerUrl` (a separate JSON receiver). Both default to empty and accept User/Remote User configuration only. `vscode-kdb.diagnostics.failSilently` defaults to `true`. Failed deliveries clear pending events and pause that destination for one hour; only a new error after that hour triggers another attempt, with no background probes or timed retries. Reporting connection failures never become reported incidents. Until a valid destination is configured, there is no reporting SDK initialization, remote context collection/buffering, or delivery. Reports carry structured operation history, host/runtime/resource summaries, audited settings, bounded cause details and packaged build identity. They cover KX-owned failures only and exclude VS Code/other-extension errors, credentials, query source and result data. See the [settings documentation](mkdocs-src/settings.md#automatic-failure-reporting) for collected fields and bounds, and [setup instructions](mkdocs-src/troubleshooting.md#configure-glitchtip-or-sentry).
+Automatic remote failure reporting is opt-in through `vscode-kdb.diagnostics.sentryDsn` (GlitchTip/Sentry) and `vscode-kdb.diagnostics.reportServerUrl` (a separate JSON receiver). Both default to empty and accept User/Remote User configuration only. `vscode-kdb.diagnostics.failSilently` defaults to `true`. Failed deliveries clear pending events and pause that destination for one hour; only a new error after that hour triggers another attempt, with no background probes or timed retries. Reporting connection failures never become reported incidents. Until a valid destination is configured, there is no reporting SDK initialization, remote context collection/buffering, or delivery. Reports carry structured operation history, host/runtime/resource summaries, audited settings, bounded cause details and packaged build identity. They cover KX-owned failures only and exclude VS Code/other-extension errors, credentials, query source and result data. See the [settings documentation](https://vscode-kdb.dac.sg/settings/#automatic-failure-reporting) for collected fields and bounds, and [setup instructions](https://vscode-kdb.dac.sg/troubleshooting/#configure-glitchtip-or-sentry).
 
 ## Documentation and support
 
-Start with the [user guide](mkdocs-src/index.md), [settings reference](mkdocs-src/settings.md), or [troubleshooting guide](mkdocs-src/troubleshooting.md).
+Start with the [user guide](https://vscode-kdb.dac.sg/), [settings reference](https://vscode-kdb.dac.sg/settings/), or [troubleshooting guide](https://vscode-kdb.dac.sg/troubleshooting/).
 
 Report bugs and documentation problems in the [GitHub issue tracker](https://github.com/dreth/vscode-kdb/issues).
 
