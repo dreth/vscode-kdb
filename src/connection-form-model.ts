@@ -13,6 +13,11 @@ export type ConnectionFormField =
   | 'database'
   | 'username'
   | 'password'
+  | 'credentialTransport'
+  | 'executionHandler'
+  | 'envFile'
+  | 'usernameEnv'
+  | 'passwordEnv'
   | 'connectTimeoutMs'
   | 'queryTimeoutMs';
 
@@ -49,6 +54,11 @@ const FORM_FIELDS = new Set([
   'username',
   'password',
   'clearPassword',
+  'credentialTransport',
+  'executionHandler',
+  'envFile',
+  'usernameEnv',
+  'passwordEnv',
   'connectTimeoutMs',
   'queryTimeoutMs',
   'scope',
@@ -106,6 +116,12 @@ export function parseConnectionFormPayload(
     port: Number(normalizedPort),
     database,
     username,
+    credentialTransport: payload.credentialTransport,
+    ...Object.fromEntries(['envFile', 'usernameEnv', 'passwordEnv', 'executionHandler'].map(key => {
+      const value = payload[key];
+      if (value !== undefined && typeof value !== 'string') throw new ConnectionFormValidationError(`${key} must be a string.`);
+      return [key, value];
+    })),
     connectTimeoutMs,
     queryTimeoutMs,
   };
@@ -182,6 +198,9 @@ function validationField(error: unknown): ConnectionFormField | undefined {
   }
   if (/namespace/i.test(message)) {
     return 'database';
+  }
+  for (const field of ['envFile', 'usernameEnv', 'passwordEnv'] as const) {
+    if (message.includes(field)) return field;
   }
   if (/username/i.test(message)) {
     return 'username';

@@ -16,6 +16,11 @@ export interface KxConnection {
   database: string;
   username: string;
   password?: string;
+  credentialTransport?: "connection" | "request";
+  executionHandler?: string;
+  envFile?: string;
+  usernameEnv?: string;
+  passwordEnv?: string;
   connectTimeoutMs?: number;
   queryTimeoutMs?: number;
 }
@@ -28,6 +33,11 @@ export interface ConnectionCandidate {
   database?: unknown;
   username?: unknown;
   password?: unknown;
+  credentialTransport?: unknown;
+  executionHandler?: unknown;
+  envFile?: unknown;
+  usernameEnv?: unknown;
+  passwordEnv?: unknown;
   connectTimeoutMs?: unknown;
   queryTimeoutMs?: unknown;
 }
@@ -70,6 +80,23 @@ export function normalizeConnection(candidate: ConnectionCandidate): KxConnectio
     database: normalizeNamespace(candidate.database),
     username: String(candidate.username === undefined || candidate.username === null ? '' : candidate.username).trim(),
   };
+  for (const key of ['envFile', 'usernameEnv', 'passwordEnv', 'executionHandler'] as const) {
+    const value = candidate[key];
+    if (value !== undefined && typeof value !== 'string') {
+      throw new ConnectionValidationError(`${key} must be a string.`);
+    }
+    if (typeof value === 'string' && value.trim()) connection[key] = value.trim();
+  }
+  if (candidate.credentialTransport !== undefined) {
+    if (!['connection', 'request'].includes(String(candidate.credentialTransport))) {
+      throw new ConnectionValidationError('credentialTransport must be connection or request.');
+    }
+    connection.credentialTransport = candidate.credentialTransport as 'connection' | 'request';
+  }
+  if (connection.credentialTransport === 'request' &&
+      !/^\.[A-Za-z_][A-Za-z0-9_.]*$/.test(connection.executionHandler || '')) {
+    throw new ConnectionValidationError('Request mode requires a qualified q executionHandler.');
+  }
   const password = normalizeOptionalPassword(candidate.password);
   const connectTimeoutMs = normalizeOptionalTimeout(candidate.connectTimeoutMs);
   const queryTimeoutMs = normalizeOptionalTimeout(candidate.queryTimeoutMs);
@@ -112,6 +139,14 @@ export function validateConnection(
   }
   if (existing.some(item => item.id !== editingId && item.name.toLocaleLowerCase() === connection.name.toLocaleLowerCase())) {
     throw new ConnectionValidationError(`A connection named "${connection.name}" already exists.`);
+  }
+  for (const key of ['usernameEnv', 'passwordEnv'] as const) {
+    if (connection[key] && !/^[A-Za-z_][A-Za-z0-9_]*$/.test(connection[key]!)) {
+      throw new ConnectionValidationError(`${key} must be an environment variable name.`);
+    }
+  }
+  if (connection.envFile && /[\0\r\n]/.test(connection.envFile)) {
+    throw new ConnectionValidationError('envFile cannot contain line breaks or null characters.');
   }
   validateHost(connection.host);
   validatePort(connection.port);
@@ -193,7 +228,9 @@ export function connectionSessionChanged(
   next: KxConnection,
   passwordChanged = false
 ): boolean {
-  return passwordChanged || previous.host !== next.host || previous.port !== next.port ||
+  return passwordChanged || previous.credentialTransport !== next.credentialTransport ||
+    previous.executionHandler !== next.executionHandler || previous.envFile !== next.envFile ||
+    previous.usernameEnv !== next.usernameEnv || previous.passwordEnv !== next.passwordEnv || previous.host !== next.host || previous.port !== next.port ||
     previous.username !== next.username || previous.connectTimeoutMs !== next.connectTimeoutMs ||
     previous.queryTimeoutMs !== next.queryTimeoutMs;
 }

@@ -1,0 +1,28 @@
+const assert = require('assert/strict');
+const { validateConnection } = require('../out/connection');
+const { resolveEnvironmentCredentials } = require('../out/connection-env');
+const { serializeRequestQuery, deserializeQMessage } = require('../out/q-ipc');
+const profile={id:'request-q',name:'Request Q',host:'localhost',port:5000,database:'.',username:'',credentialTransport:'request',executionHandler:'.kx.request',envFile:'.env',usernameEnv:'KX_VSCODE_USERNAME',passwordEnv:'KX_VSCODE_PASSWORD'};
+(async()=>{
+  validateConnection(profile);
+  assert.throws(()=>validateConnection({...profile,executionHandler:'bad[]'}),/qualified/);
+  assert.throws(()=>validateConnection({...profile,credentialTransport:'unknown'}),/connection or request/);
+  let saved='KX_VSCODE_USERNAME=reader\nKX_VSCODE_PASSWORD="colon: café"\n';
+  const context={trusted:true,folder:'/workspace',environment:{},readFile:async()=>saved};
+  let pair=await resolveEnvironmentCredentials(profile,'legacy',context);
+  assert.equal(pair.password,'colon: café');
+  const query='1+1';
+  const frame=serializeRequestQuery(query,{handler:'.kx.request',...pair});
+  const decoded=deserializeQMessage(frame);
+  assert.ok(frame.includes(Buffer.from('colon: café')));
+  assert.equal(query,'1+1');
+  assert.ok(Array.isArray(decoded));
+  saved='KX_VSCODE_USERNAME=partial\n';
+  assert.deepEqual(await resolveEnvironmentCredentials(profile,'legacy',context),{username:'',password:undefined});
+  assert.deepEqual(await resolveEnvironmentCredentials(profile,'legacy',{...context,readFile:async()=>{throw Object.assign(new Error('missing'),{code:'ENOENT'});}}),{username:'',password:undefined});
+  await assert.rejects(resolveEnvironmentCredentials(profile,undefined,{...context,trusted:false}),/Trust/);
+  await assert.rejects(resolveEnvironmentCredentials(profile,undefined,{...context,readFile:async()=>{throw Object.assign(new Error('private details'),{code:'EACCES'});}}),/Cannot read/);
+  saved='KX_VSCODE_USERNAME=rotated\nKX_VSCODE_PASSWORD=new-secret\n';
+  assert.equal((await resolveEnvironmentCredentials(profile,undefined,context)).username,'rotated');
+  console.log('request credential validation, typed framing, rotation and optional local execution: passed');
+})().catch(e=>{console.error(e);process.exitCode=1;});

@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import * as vscode from 'vscode';
+import { credentialFile, resolveEnvironmentCredentials } from './connection-env';
 import {
   KxConnection,
   safeStoredConnections,
@@ -355,6 +356,10 @@ export class ConnectionStore {
         validatePassword(password);
       }
       const moving = !sameConnectionScope(owner, targetScope);
+      if (moving && validated.envFile) {
+        // Preserve the old file identity when a relative connection changes scope.
+        validated.envFile = credentialFile(validated.envFile, this.credentialFolder(owner));
+      }
       const targetConnections = moving
         ? this.scopeConnections(targetScope)
         : ownerConnections;
@@ -528,6 +533,23 @@ export class ConnectionStore {
     });
   }
 
+  private credentialFolder(scope?: ConnectionConfigurationScope): string | undefined {
+    const folders = vscode.workspace.workspaceFolders || [];
+    if (scope?.kind === 'workspaceFolder') {
+      return folders.find(folder => folder.uri.toString() === scope.folderUri)?.uri.fsPath;
+    }
+    return folders.length === 1 ? folders[0].uri.fsPath : undefined;
+  }
+
+  public async credentials(connection: KxConnection, password?: string, scope?: ConnectionConfigurationScope): Promise<{ username: string; password: string | undefined }> {
+    // An explicit password reference never consults SecretStorage, including on failure.
+    const legacy = connection.credentialTransport === 'request' ? connection.password : connection.passwordEnv ? undefined : password ?? await this.password(connection.id);
+    return resolveEnvironmentCredentials(connection, legacy, {
+      trusted: vscode.workspace.isTrusted !== false,
+      folder: this.credentialFolder(scope || this.connectionScope(connection.id)),
+    });
+  }
+
   public async password(id: string): Promise<string | undefined> {
     return (await this.resolvePassword(id)).password;
   }
@@ -641,6 +663,11 @@ export class ConnectionStore {
       port: connection.port,
       database: connection.database,
       username: connection.username,
+      ...(connection.credentialTransport ? { credentialTransport: connection.credentialTransport } : {}),
+      ...(connection.executionHandler ? { executionHandler: connection.executionHandler } : {}),
+      ...(connection.envFile ? { envFile: connection.envFile } : {}),
+      ...(connection.usernameEnv ? { usernameEnv: connection.usernameEnv } : {}),
+      ...(connection.passwordEnv ? { passwordEnv: connection.passwordEnv } : {}),
       ...(connection.password === undefined
         ? {}
         : { password: connection.password }),
@@ -1243,7 +1270,9 @@ function connectionListFingerprint(connections: readonly KxConnection[]): string
 function sameConnection(left: KxConnection, right: KxConnection): boolean {
   return left.id === right.id && left.name === right.name && left.host === right.host &&
     left.port === right.port && left.database === right.database && left.username === right.username &&
-    left.password === right.password &&
+    left.credentialTransport === right.credentialTransport && left.executionHandler === right.executionHandler &&
+    left.password === right.password && left.envFile === right.envFile &&
+    left.usernameEnv === right.usernameEnv && left.passwordEnv === right.passwordEnv &&
     left.connectTimeoutMs === right.connectTimeoutMs && left.queryTimeoutMs === right.queryTimeoutMs;
 }
 

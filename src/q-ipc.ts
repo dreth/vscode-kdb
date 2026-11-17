@@ -168,7 +168,14 @@ export interface KdbConnectionOptions {
   diagnostics?: KxDiagnostics;
 }
 
+export interface RequestCredentials {
+  handler: string;
+  username: string;
+  password?: string;
+}
+
 interface PendingQuery {
+  requestCredentials?: RequestCredentials;
   reportingOperationId?: string;
   queryId: number;
   query: string;
@@ -560,7 +567,8 @@ export class KdbIpcClient {
     query: string,
     onIssued?: () => void,
     signal?: AbortSignal,
-    shouldIssue?: () => boolean
+    shouldIssue?: () => boolean,
+    requestCredentials?: RequestCredentials
   ): Promise<QValue> {
     const queryId = nextQueryId++;
     if (signal?.aborted) {
@@ -588,6 +596,7 @@ export class KdbIpcClient {
       const pending: PendingQuery = {
         queryId,
         query,
+        requestCredentials,
         onIssued,
         shouldIssue,
         queuedAtMs: Date.now(),
@@ -741,7 +750,10 @@ export class KdbIpcClient {
       }, timeoutMs);
     }
 
-    const message = serializeTextQuery(pending.query);
+    const message = pending.requestCredentials
+      ? serializeRequestQuery(pending.query, pending.requestCredentials)
+      : serializeTextQuery(pending.query);
+    pending.requestCredentials = undefined;
     if (pending.perf) {
       const details = { ...queryPerfDetails(pending.perf), bytes: message.length };
       perfMark('q-ipc.send.start', details);
@@ -1100,22 +1112,45 @@ function redactIpcErrorMessage(message: string, secrets: readonly string[]): str
     .reduce((safe, secret) => safe.split(secret).join('[redacted]'), message);
 }
 
-export function serializeTextQuery(query: string): Buffer {
-  const text = Buffer.from(query, 'utf8');
-  const payload = Buffer.alloc(1 + 1 + 4 + text.length);
-  payload.writeInt8(TYPE_CHAR_VECTOR, 0);
-  payload.writeUInt8(0, 1);
-  payload.writeInt32LE(text.length, 2);
-  text.copy(payload, 6);
+function ipcList(items: Buffer[]): Buffer {
+  const header = Buffer.alloc(6);
+  header.writeInt32LE(items.length, 2);
+  return Buffer.concat([header, ...items]);
+}
 
-  const message = Buffer.alloc(HEADER_LENGTH + payload.length);
-  message.writeUInt8(LITTLE_ENDIAN, 0);
-  message.writeUInt8(MESSAGE_SYNC, 1);
-  message.writeUInt8(0, 2);
-  message.writeUInt8(0, 3);
-  message.writeInt32LE(message.length, 4);
-  payload.copy(message, HEADER_LENGTH);
-  return message;
+function ipcText(text: string): Buffer {
+  const bytes = Buffer.from(text, 'utf8');
+  const header = Buffer.alloc(6);
+  header[0] = TYPE_CHAR_VECTOR;
+  header.writeInt32LE(bytes.length, 2);
+  return Buffer.concat([header, bytes]);
+}
+
+function ipcSymbol(text: string): Buffer {
+  return Buffer.concat([Buffer.from([245]), Buffer.from(text, 'utf8'), Buffer.from([0])]);
+}
+
+function syncFrame(payload: Buffer): Buffer {
+  const header = Buffer.alloc(HEADER_LENGTH);
+  header[0] = LITTLE_ENDIAN;
+  header[1] = MESSAGE_SYNC;
+  header.writeInt32LE(HEADER_LENGTH + payload.length, 4);
+  return Buffer.concat([header, payload]);
+}
+
+export function serializeTextQuery(query: string): Buffer {
+  return syncFrame(ipcText(query));
+}
+
+/** Typed protocol v1: (handler;1i;`execute;optional pair;original payload). */
+export function serializeRequestQuery(query: string, credentials: RequestCredentials): Buffer {
+  const version = Buffer.from([250, 1, 0, 0, 0]);
+  const pair = credentials.username && credentials.password
+    ? ipcList([ipcText(credentials.username), ipcText(credentials.password)])
+    : ipcList([]);
+  return syncFrame(ipcList([
+    ipcSymbol(credentials.handler), version, ipcSymbol('execute'), pair, ipcText(query),
+  ]));
 }
 
 export function deserializeQMessage(message: Buffer, perfDetails?: PerfDetails): QValue {

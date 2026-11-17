@@ -513,6 +513,28 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#credentials-from-a-local-env-file" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Credentials from a local env file
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#per-request-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Per-request credentials
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -1009,6 +1031,28 @@
 
 </li>
 
+        <li class="md-nav__item">
+  <a href="#credentials-from-a-local-env-file" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Credentials from a local env file
+
+    </span>
+  </a>
+
+</li>
+
+        <li class="md-nav__item">
+  <a href="#per-request-credentials" class="md-nav__link">
+    <span class="md-ellipsis">
+
+        Per-request credentials
+
+    </span>
+  </a>
+
+</li>
+
     </ul>
 
 </nav>
@@ -1230,6 +1274,62 @@
 <p>Root namespace <code>.</code> sends a single-line/current-line query as written. A non-root namespace wraps the query so q temporarily switches namespace, evaluates the text, restores the previous namespace, and rethrows genuine q errors.</p>
 <p>Whole-document, multiline-selection, and complete direct-cell runs group q source lines on the client and evaluate the groups through ordinary q <code>value</code>. Their wrapper saves the process's current namespace, enters the configured namespace, evaluates the source groups in the existing session, restores the saved namespace after success or q error, and rethrows genuine q errors. Assignments and definitions remain in the namespace where q evaluated them.</p>
 <p>A q system command in the user's source retains normal q semantics and can change the namespace seen by later groups within that same run. The outer wrapper still restores the pre-run namespace when the run finishes. See <a href="../running-q/">Running q</a> for indentation, comments, trailing script comments, and execution details.</p>
+<h2 id="credentials-from-a-local-env-file">Credentials from a local env file</h2>
+<p>Store a personal credential pair in an ignored <code>.env</code> file once:</p>
+<div class="highlight"><pre><span></span><code>KX_VSCODE_USERNAME="&lt;your-username&gt;"
+KX_VSCODE_PASSWORD="&lt;your-password&gt;"
+</code></pre></div>
+<p>Reference the keys explicitly in a saved connection; the port remains ordinary connection metadata:</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"local-q"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"My Q"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"host"</span><span class="p">:</span><span class="w"> </span><span class="s2">"localhost"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"port"</span><span class="p">:</span><span class="w"> </span><span class="mi">5000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"database"</span><span class="p">:</span><span class="w"> </span><span class="s2">"."</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"username"</span><span class="p">:</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"envFile"</span><span class="p">:</span><span class="w"> </span><span class="s2">"${workspaceFolder}/.env"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"usernameEnv"</span><span class="p">:</span><span class="w"> </span><span class="s2">"KX_VSCODE_USERNAME"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"passwordEnv"</span><span class="p">:</span><span class="w"> </span><span class="s2">"KX_VSCODE_PASSWORD"</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The connection editor exposes the same three optional fields.
+For independent accounts, choose explicit keys such as <code>KX_VSCODE_SECOND_USERNAME</code> and <code>KX_VSCODE_SECOND_PASSWORD</code>; renaming a display label does not change the binding.
+File values take precedence over the extension-host environment, including an explicitly blank value, which blocks connection.
+A key absent from a valid file can use the matching extension-host variable; a missing/unreadable/malformed configured file is an error.
+Omit <code>envFile</code> to use extension-host variables alone.
+References override only their corresponding literal/SecretStorage field and missing references never revive a saved fallback.
+Without references, existing literal username and SecretStorage-before-settings-password behavior is unchanged.</p>
+<p>Env files are parsed as single-line assignments with optional <code>export</code>, blank lines and comments.
+Use single or double quotes for punctuation and surrounding spaces; double-quoted escapes follow Python dotenv (<code>\\</code>, <code>\"</code>, <code>\n</code>, <code>\r</code>, <code>\t</code>), without variable or shell expansion.
+Duplicate assignments, unterminated quotes and unexpected text after a quoted value are rejected without printing values.
+The extension reads only in a trusted workspace; relative paths require one unambiguous owning folder, while absolute paths can bind multi-root connections explicitly.
+Moving a relative connection between settings scopes preserves its file binding.</p>
+<p>Changing the file affects the next new connection or test; explicitly disconnect/reconnect to rotate an established session.
+Reading the file, editing settings and opening saved notebook output do not connect or replay queries.
+Passwords never enter saved settings, diagnostics, query history or notebook output.
+Your local env file persists across container rebuilds when it remains in the mounted workspace; back it up privately before deleting a checkout.</p>
+<h2 id="per-request-credentials">Per-request credentials</h2>
+<p>For a compatible trusted q executor, set <code>credentialTransport</code> to <code>request</code> and <code>executionHandler</code> to its qualified handler, for example <code>.kx.request</code>.
+The default <code>connection</code> mode is unchanged.
+Request mode opens IPC anonymously, verifies protocol v1 without credentials, then resolves the configured env references for each execution.
+Missing or incomplete values permit local calculations and produce a fixed diagnostic; authenticated downstream operations require a complete pair.
+An absent env file is allowed in this mode; unreadable, malformed or untrusted configuration still fails.
+Explicit references never fall back to saved legacy credentials.
+Connection tests check executor/protocol reachability, not downstream account validity.</p>
+<div class="highlight"><pre><span></span><code><span class="p">{</span>
+<span class="w">  </span><span class="nt">"id"</span><span class="p">:</span><span class="w"> </span><span class="s2">"request-q"</span><span class="p">,</span><span class="w"> </span><span class="nt">"name"</span><span class="p">:</span><span class="w"> </span><span class="s2">"Request Q"</span><span class="p">,</span><span class="w"> </span><span class="nt">"host"</span><span class="p">:</span><span class="w"> </span><span class="s2">"localhost"</span><span class="p">,</span><span class="w"> </span><span class="nt">"port"</span><span class="p">:</span><span class="w"> </span><span class="mi">5000</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"database"</span><span class="p">:</span><span class="w"> </span><span class="s2">"."</span><span class="p">,</span><span class="w"> </span><span class="nt">"username"</span><span class="p">:</span><span class="w"> </span><span class="s2">""</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"credentialTransport"</span><span class="p">:</span><span class="w"> </span><span class="s2">"request"</span><span class="p">,</span><span class="w"> </span><span class="nt">"executionHandler"</span><span class="p">:</span><span class="w"> </span><span class="s2">".kx.request"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"envFile"</span><span class="p">:</span><span class="w"> </span><span class="s2">".env"</span><span class="p">,</span><span class="w"> </span><span class="nt">"usernameEnv"</span><span class="p">:</span><span class="w"> </span><span class="s2">"KX_VSCODE_USERNAME"</span><span class="p">,</span><span class="w"> </span><span class="nt">"passwordEnv"</span><span class="p">:</span><span class="w"> </span><span class="s2">"KX_VSCODE_PASSWORD"</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Protocol v1 probes <code>handler[1i;`probe;();()]</code>, expecting boolean true.
+Execution is the typed general list <code>(handlerSymbol;1i;`execute;pair;originalPayload)</code>.
+<code>pair</code> is an empty general list or two UTF-8 char vectors; no credentials are inserted into q source.
+The executor must intercept this list before observers, delegate only the original payload, bound credentials to that execution and clear them on every exit.
+The same transport serves editor results and notebook execution; history and saved outputs retain the original source.
+A matching executor is required; unsupported peers fail before a credential frame is sent.
+This protocol trusts the executor with transient plaintext credentials and does not change TCP/TLS transport security.</p>
 
 
 

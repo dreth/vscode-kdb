@@ -241,3 +241,47 @@ KX and the KX logo are trademarks of KX and are used only to identify KX/kdb+ in
 Results quick settings include autofit and independent **Table decimals** / **Chart decimals**. Turning autofit on fits the current columns again after manual resizing. Row/cell limits, elapsed-time format, and array separators live in extension settings. Numeric chart axes use a configurable scientific-notation threshold, defaulting to one million (`vscode-kdb.results.viewer.chartScientificNotationThreshold`).
 
 Standalone q symbol atoms such as `` `hola `` default to qText in Results and new live/saved notebook output. Symbol vectors such as `` `hola`ciao `` continue to follow the list display setting; table and dictionary symbol cells retain their structured display. New standalone-symbol notebook metadata needs 0.2.41+; existing saved outputs keep their previous presentation until rerun.
+
+## Credentials from a local env file
+
+Store a personal credential pair in an ignored `.env` file once:
+
+```dotenv
+KX_VSCODE_USERNAME="<your-username>"
+KX_VSCODE_PASSWORD="<your-password>"
+```
+
+Reference the keys explicitly in a saved connection; the port remains ordinary connection metadata:
+
+```json
+{
+  "id": "local-q",
+  "name": "My Q",
+  "host": "localhost",
+  "port": 5000,
+  "database": ".",
+  "username": "",
+  "envFile": "${workspaceFolder}/.env",
+  "usernameEnv": "KX_VSCODE_USERNAME",
+  "passwordEnv": "KX_VSCODE_PASSWORD"
+}
+```
+
+The connection editor exposes the same three optional fields.
+For independent accounts, choose explicit keys such as `KX_VSCODE_SECOND_USERNAME` and `KX_VSCODE_SECOND_PASSWORD`; renaming a display label does not change the binding.
+File values take precedence over the extension-host environment, including an explicitly blank value, which blocks connection.
+A key absent from a valid file can use the matching extension-host variable; a missing/unreadable/malformed configured file is an error.
+Omit `envFile` to use extension-host variables alone.
+References override only their corresponding literal/SecretStorage field and missing references never revive a saved fallback.
+Without references, existing literal username and SecretStorage-before-settings-password behavior is unchanged.
+
+Env files are parsed as single-line assignments with optional `export`, blank lines and comments.
+Use single or double quotes for punctuation and surrounding spaces; double-quoted escapes follow Python dotenv (`\\`, `\"`, `\n`, `\r`, `\t`), without variable or shell expansion.
+Duplicate assignments, unterminated quotes and unexpected text after a quoted value are rejected without printing values.
+The extension reads only in a trusted workspace; relative paths require one unambiguous owning folder, while absolute paths can bind multi-root connections explicitly.
+Moving a relative connection between settings scopes preserves its file binding.
+
+Changing the file affects the next new connection or test; explicitly disconnect/reconnect to rotate an established session.
+Reading the file, editing settings and opening saved notebook output do not connect or replay queries.
+Passwords never enter saved settings, diagnostics, query history or notebook output.
+Your local env file persists across container rebuilds when it remains in the mounted workspace; back it up privately before deleting a checkout.

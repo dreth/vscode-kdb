@@ -18,6 +18,11 @@ export interface ConnectionFormInitialValues {
   port: number;
   database: string;
   username: string;
+  credentialTransport?: string;
+  executionHandler?: string;
+  envFile?: string;
+  usernameEnv?: string;
+  passwordEnv?: string;
   connectTimeoutMs?: number;
   queryTimeoutMs?: number;
   globalConnectTimeoutMs: number;
@@ -33,6 +38,7 @@ export type ConnectionFormPasswordSource =
   | 'secretStorage'
   | 'configuration'
   | 'entered'
+  | 'environment'
   | 'none';
 
 export interface ConnectionFormCallbacks {
@@ -553,6 +559,19 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
             <p id="usernameHelp" class="help">Optional q IPC handshake username.</p>
           </div>
           <div class="field full">
+            <label for="credentialTransport">Credential transport</label>
+            <select id="credentialTransport"><option value="connection">Connection login</option><option value="request">Per execution request</option></select>
+            <label for="executionHandler">Request execution handler</label>
+            <input id="executionHandler" type="text" placeholder=".kx.request">
+            <p class="help">Request mode requires a compatible executor and sends credentials with each execution. Worker login is anonymous.</p>
+            <label for="envFile">Credential env file</label>
+            <input id="envFile" type="text" autocomplete="off" placeholder=".env">
+            <p class="help">Optional path relative to the owning workspace folder. Read on connection login or each execution in request mode; values stay out of settings.</p>
+            <label for="usernameEnv">Username variable</label>
+            <input id="usernameEnv" type="text" autocomplete="off" placeholder="KX_VSCODE_USERNAME">
+            <label for="passwordEnv">Password variable</label>
+            <input id="passwordEnv" type="text" autocomplete="off" placeholder="KX_VSCODE_PASSWORD">
+            <p class="help">Explicit variables override the corresponding literal or saved credential. Connection mode requires referenced values; request mode permits local execution without a complete pair.</p>
             <label for="password">Password</label>
             <input id="password" name="password" type="password" maxlength="65535" autocomplete="new-password" aria-describedby="passwordHelp">
             <p id="passwordHelp" class="help">Optional. Stored only in VS Code SecretStorage and never in settings, source control, or Settings Sync. Secrets may need to be entered again in each local or remote environment.</p>
@@ -619,6 +638,11 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         port: document.getElementById('port'),
         database: document.getElementById('database'),
         username: document.getElementById('username'),
+        credentialTransport: document.getElementById('credentialTransport'),
+        executionHandler: document.getElementById('executionHandler'),
+        envFile: document.getElementById('envFile'),
+        usernameEnv: document.getElementById('usernameEnv'),
+        passwordEnv: document.getElementById('passwordEnv'),
         password: document.getElementById('password'),
         connectTimeoutMs: document.getElementById('connectTimeoutMs'),
         queryTimeoutMs: document.getElementById('queryTimeoutMs')
@@ -643,6 +667,11 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
           port: controls.port.value,
           database: controls.database.value,
           username: controls.username.value,
+          credentialTransport: controls.credentialTransport.value,
+          executionHandler: controls.executionHandler.value,
+          ...(controls.envFile.value ? { envFile: controls.envFile.value } : {}),
+          ...(controls.usernameEnv.value ? { usernameEnv: controls.usernameEnv.value } : {}),
+          ...(controls.passwordEnv.value ? { passwordEnv: controls.passwordEnv.value } : {}),
           password: controls.password.value,
           clearPassword: clearPassword.checked,
           connectTimeoutMs: controls.connectTimeoutMs.value,
@@ -798,6 +827,11 @@ export function connectionFormHtml(cspSource: string, nonce: string, session: st
         controls.port.value = String(values.port || '');
         controls.database.value = values.database || '${DEFAULT_NAMESPACE}';
         controls.username.value = values.username || '';
+        controls.credentialTransport.value = values.credentialTransport || 'connection';
+        controls.executionHandler.value = values.executionHandler || '';
+        controls.envFile.value = values.envFile || '';
+        controls.usernameEnv.value = values.usernameEnv || '';
+        controls.passwordEnv.value = values.passwordEnv || '';
         controls.password.value = '';
         controls.connectTimeoutMs.value = values.connectTimeoutMs === undefined ? '' : String(values.connectTimeoutMs);
         controls.queryTimeoutMs.value = values.queryTimeoutMs === undefined ? '' : String(values.queryTimeoutMs);
@@ -923,6 +957,11 @@ export function initialConnectionFormValues(
     port: connection.port,
     database: connection.database,
     username: connection.username,
+    ...(connection.credentialTransport ? { credentialTransport: connection.credentialTransport } : {}),
+    ...(connection.executionHandler ? { executionHandler: connection.executionHandler } : {}),
+    ...(connection.envFile ? { envFile: connection.envFile } : {}),
+    ...(connection.usernameEnv ? { usernameEnv: connection.usernameEnv } : {}),
+    ...(connection.passwordEnv ? { passwordEnv: connection.passwordEnv } : {}),
     connectTimeoutMs: connection.connectTimeoutMs,
     queryTimeoutMs: connection.queryTimeoutMs,
     globalConnectTimeoutMs,
@@ -940,6 +979,7 @@ function passwordUseMessage(
   tense: 'is being used' | 'was used',
   includeNone: boolean
 ): string {
+  if (source === 'environment') return ` An environment-referenced password ${tense}.`;
   if (source === 'secretStorage') {
     return ` A saved password from VS Code SecretStorage ${tense}.`;
   }

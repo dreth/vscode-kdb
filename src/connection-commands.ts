@@ -212,7 +212,7 @@ export class ConnectionCommands {
       username: '',
     };
     let hasStoredPassword = false;
-    if (editing) {
+    if (editing && !editing.passwordEnv) {
       try {
         hasStoredPassword = await this.store.hasStoredPassword(editing.id);
       } catch (error) {
@@ -297,7 +297,7 @@ export class ConnectionCommands {
     if (typeof parsed.passwordUpdate === 'string') {
       password = parsed.passwordUpdate;
       passwordSource = 'entered';
-    } else if (editing) {
+    } else if (editing && !parsed.connection.passwordEnv) {
       let savedPassword: Awaited<ReturnType<ConnectionStore['resolvePassword']>>;
       try {
         savedPassword = await this.store.resolvePassword(editing.id);
@@ -324,7 +324,11 @@ export class ConnectionCommands {
       throw new ConnectionTestError('cancel', endpoint);
     }
 
+    if (parsed.connection.passwordEnv) passwordSource = 'environment';
     const timeouts = await this.manager.testTemporary(parsed.connection, {
+      ...(parsed.connection.envFile || parsed.connection.usernameEnv || parsed.connection.passwordEnv
+        ? { credentialScope: this.scopeForFormKey(parsed.scopeKey, editing && this.store.connectionScope(editing.id)) }
+        : {}),
       password,
       signal,
       onPhase: phase => onProgress({ phase, endpoint, passwordSource }),
@@ -363,7 +367,7 @@ export class ConnectionCommands {
     if (editing && !current) {
       throw new Error(`KX connection "${editing.name}" no longer exists.`);
     }
-    const hasStoredPassword = current
+    const hasStoredPassword = current && !current.passwordEnv
       ? await this.store.hasStoredPassword(current.id)
       : false;
     const parsed = parseConnectionFormPayload(payload, {

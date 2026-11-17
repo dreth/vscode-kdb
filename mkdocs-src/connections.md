@@ -204,3 +204,74 @@ Root namespace `.` sends a single-line/current-line query as written. A non-root
 Whole-document, multiline-selection, and complete direct-cell runs group q source lines on the client and evaluate the groups through ordinary q `value`. Their wrapper saves the process's current namespace, enters the configured namespace, evaluates the source groups in the existing session, restores the saved namespace after success or q error, and rethrows genuine q errors. Assignments and definitions remain in the namespace where q evaluated them.
 
 A q system command in the user's source retains normal q semantics and can change the namespace seen by later groups within that same run. The outer wrapper still restores the pre-run namespace when the run finishes. See [Running q](running-q.md) for indentation, comments, trailing script comments, and execution details.
+
+## Credentials from a local env file
+
+Store a personal credential pair in an ignored `.env` file once:
+
+```dotenv
+KX_VSCODE_USERNAME="<your-username>"
+KX_VSCODE_PASSWORD="<your-password>"
+```
+
+Reference the keys explicitly in a saved connection; the port remains ordinary connection metadata:
+
+```json
+{
+  "id": "local-q",
+  "name": "My Q",
+  "host": "localhost",
+  "port": 5000,
+  "database": ".",
+  "username": "",
+  "envFile": "${workspaceFolder}/.env",
+  "usernameEnv": "KX_VSCODE_USERNAME",
+  "passwordEnv": "KX_VSCODE_PASSWORD"
+}
+```
+
+The connection editor exposes the same three optional fields.
+For independent accounts, choose explicit keys such as `KX_VSCODE_SECOND_USERNAME` and `KX_VSCODE_SECOND_PASSWORD`; renaming a display label does not change the binding.
+File values take precedence over the extension-host environment, including an explicitly blank value, which blocks connection.
+A key absent from a valid file can use the matching extension-host variable; a missing/unreadable/malformed configured file is an error.
+Omit `envFile` to use extension-host variables alone.
+References override only their corresponding literal/SecretStorage field and missing references never revive a saved fallback.
+Without references, existing literal username and SecretStorage-before-settings-password behavior is unchanged.
+
+Env files are parsed as single-line assignments with optional `export`, blank lines and comments.
+Use single or double quotes for punctuation and surrounding spaces; double-quoted escapes follow Python dotenv (`\\`, `\"`, `\n`, `\r`, `\t`), without variable or shell expansion.
+Duplicate assignments, unterminated quotes and unexpected text after a quoted value are rejected without printing values.
+The extension reads only in a trusted workspace; relative paths require one unambiguous owning folder, while absolute paths can bind multi-root connections explicitly.
+Moving a relative connection between settings scopes preserves its file binding.
+
+Changing the file affects the next new connection or test; explicitly disconnect/reconnect to rotate an established session.
+Reading the file, editing settings and opening saved notebook output do not connect or replay queries.
+Passwords never enter saved settings, diagnostics, query history or notebook output.
+Your local env file persists across container rebuilds when it remains in the mounted workspace; back it up privately before deleting a checkout.
+
+## Per-request credentials
+
+For a compatible trusted q executor, set `credentialTransport` to `request` and `executionHandler` to its qualified handler, for example `.kx.request`.
+The default `connection` mode is unchanged.
+Request mode opens IPC anonymously, verifies protocol v1 without credentials, then resolves the configured env references for each execution.
+Missing or incomplete values permit local calculations and produce a fixed diagnostic; authenticated downstream operations require a complete pair.
+An absent env file is allowed in this mode; unreadable, malformed or untrusted configuration still fails.
+Explicit references never fall back to saved legacy credentials.
+Connection tests check executor/protocol reachability, not downstream account validity.
+
+```json
+{
+  "id": "request-q", "name": "Request Q", "host": "localhost", "port": 5000,
+  "database": ".", "username": "",
+  "credentialTransport": "request", "executionHandler": ".kx.request",
+  "envFile": ".env", "usernameEnv": "KX_VSCODE_USERNAME", "passwordEnv": "KX_VSCODE_PASSWORD"
+}
+```
+
+Protocol v1 probes ``handler[1i;`probe;();()]``, expecting boolean true.
+Execution is the typed general list ``(handlerSymbol;1i;`execute;pair;originalPayload)``.
+`pair` is an empty general list or two UTF-8 char vectors; no credentials are inserted into q source.
+The executor must intercept this list before observers, delegate only the original payload, bound credentials to that execution and clear them on every exit.
+The same transport serves editor results and notebook execution; history and saved outputs retain the original source.
+A matching executor is required; unsupported peers fail before a credential frame is sent.
+This protocol trusts the executor with transient plaintext credentials and does not change TCP/TLS transport security.

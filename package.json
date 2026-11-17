@@ -2,7 +2,7 @@
   "name": "vscode-kdb",
   "displayName": "KX for VS Code",
   "description": "First-party q language tooling, direct q IPC, qnb and mixed Jupyter notebooks, and high-performance KX results for VS Code.",
-  "version": "0.2.46",
+  "version": "0.2.48",
   "publisher": "DanielAlonso",
   "license": "MIT",
   "icon": "icons/kx-marketplace.png",
@@ -96,13 +96,13 @@
     "compile:renderer": "tsc -p renderer/tsconfig.json --noEmit && esbuild renderer/index.ts --bundle --format=esm --platform=browser --target=es2022 --loader:.css=text --outfile=renderer/kx-notebook-renderer.js --minify --legal-comments=none",
     "compile:assets": "node scripts/copy-webview-assets.js && node scripts/generate-failure-build.js",
     "watch": "tsc -watch -p ./",
-    "test": "npm run test:repository-confidentiality && npm run compile && node test/results-display.js && node test/notebook-packed-column.js && node test/run.js && node test/failure-reporting.js && node test/failure-reporting-silent.js && node test/failure-reporting-rich.js && node test/failure-reporting-sentry.js && node test/failure-reporting-language.js && node test/failure-reporting-producers.js && npm run test:notebook-save-memory && node test/language/run.js",
+    "test": "npm run test:repository-confidentiality && npm run compile && node test/results-display.js && node test/notebook-packed-column.js && node test/connection-env.js && node test/run.js && node test/failure-reporting.js && node test/failure-reporting-silent.js && node test/failure-reporting-rich.js && node test/failure-reporting-sentry.js && node test/failure-reporting-language.js && node test/failure-reporting-producers.js && npm run test:notebook-save-memory && node test/language/run.js && npm run test:request-credentials",
     "test:notebook-save-memory": "node --max-old-space-size=384 --expose-gc test/qnb-save-memory.js && node --max-old-space-size=1024 --expose-gc test/notebook-columnar-memory.js",
     "test:unit": "npm run compile && node test/run.js",
     "test:language": "npm run compile:language && node test/language/run.js",
     "audit:repository-confidentiality": "node scripts/audit-repository-confidentiality.js",
     "audit:compiled-confidentiality": "node scripts/audit-vsix-confidentiality.js --compiled out/extension.js out/q-language-server.js renderer/kx-notebook-renderer.js",
-    "audit:vsix-confidentiality": "node scripts/audit-vsix-confidentiality.js vscode-kdb-0.2.46.vsix",
+    "audit:vsix-confidentiality": "node scripts/audit-vsix-confidentiality.js vscode-kdb-0.2.48.vsix",
     "test:repository-confidentiality": "node test/repository-hygiene/run.js",
     "test:repository-hygiene": "npm run test:repository-confidentiality",
     "benchmark:q-language": "npm run compile:language && node scripts/benchmark-q-language.js",
@@ -117,11 +117,12 @@
     "test:parity:worktree": "node scripts/run-cross-parity.js --worktree",
     "test:parity:self": "node test/parity/self-test.js",
     "test:parity:strict": "node scripts/run-cross-parity.js --fail-on-known-gap",
-    "package": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.46.vsix && npm run audit:vsix-confidentiality",
-    "package:vsix": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.46.vsix && npm run audit:vsix-confidentiality",
+    "package": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.48.vsix && npm run audit:vsix-confidentiality",
+    "package:vsix": "npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies --out vscode-kdb-0.2.48.vsix && npm run audit:vsix-confidentiality",
     "test:results-display-browser": "npm run compile && node test/results-display-browser.js",
     "test:failure-reporting": "npm run compile && node test/failure-reporting.js && node test/failure-reporting-silent.js && node test/failure-reporting-rich.js && node test/failure-reporting-sentry.js && node test/failure-reporting-language.js && node test/failure-reporting-producers.js",
-    "test:failure-reporting-host": "npm run compile && node scripts/run-extension-host-test.js --reporting-only"
+    "test:failure-reporting-host": "npm run compile && node scripts/run-extension-host-test.js --reporting-only",
+    "test:request-credentials": "node test/request-credentials.js"
   },
   "dependencies": {
     "@sentry/core": "10.76.1",
@@ -947,8 +948,8 @@
           "scope": "resource",
           "ignoreSync": false,
           "default": [],
-          "description": "Direct q IPC profiles from User, Workspace, and Workspace Folder settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project. An optional password is plaintext in settings; VS Code SecretStorage is safer and takes precedence when it has a value.",
-          "markdownDescription": "Direct q IPC profiles from **User**, **Workspace**, and **Workspace Folder** settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project and survive container recreation. An optional `password` is plaintext in settings; VS Code SecretStorage is safer and takes precedence when it has a value.",
+          "description": "Direct q IPC profiles from User, Workspace, and Workspace Folder settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project. An optional password is plaintext in settings; VS Code SecretStorage is safer and takes precedence when it has a value. Explicit usernameEnv/passwordEnv references override the corresponding saved value; In connection mode envFile is read on connection and missing variables block IPC; request mode resolves optional credentials for each execution.",
+          "markdownDescription": "Direct q IPC profiles from **User**, **Workspace**, and **Workspace Folder** settings. More-specific settings override the same stable ID. User values are Settings Sync eligible where VS Code allows; workspace values live with the project and survive container recreation. An optional `password` is plaintext in settings; VS Code SecretStorage is safer and takes precedence when it has a value. Explicit usernameEnv/passwordEnv references override the corresponding saved value; In connection mode envFile is read on connection and missing variables block IPC; request mode resolves optional credentials for each execution.",
           "items": {
             "type": "object",
             "additionalProperties": false,
@@ -1013,6 +1014,31 @@
                 "minimum": 0,
                 "maximum": 2147483647,
                 "description": "Optional per-connection query response timeout override in milliseconds. Omit to inherit the global default, vscode-kdb.queryTimeoutMs; 0 disables only the query response deadline."
+              },
+              "envFile": {
+                "type": "string",
+                "description": "Optional credential dotenv file; relative paths use the owning workspace folder."
+              },
+              "usernameEnv": {
+                "type": "string",
+                "description": "Explicit username variable, for example KX_VSCODE_USERNAME."
+              },
+              "passwordEnv": {
+                "type": "string",
+                "description": "Explicit password variable, for example KX_VSCODE_PASSWORD; missing values never fall back to saved passwords."
+              },
+              "credentialTransport": {
+                "type": "string",
+                "enum": [
+                  "connection",
+                  "request"
+                ],
+                "default": "connection",
+                "description": "Send credentials at connection login (default), or per execution to a compatible request executor."
+              },
+              "executionHandler": {
+                "type": "string",
+                "description": "Qualified q handler for typed request protocol v1, required in request mode."
               }
             }
           }
@@ -1279,7 +1305,7 @@
           "default": -1,
           "minimum": -1,
           "maximum": 12,
-          "description": "Table display decimal places for floating-point values. -1 (Auto) preserves original precision; 0–12 rounds display only. Copy/export and saved values remain exact."
+          "description": "Table display decimal places for floating-point values. -1 (Auto) preserves original precision; 0\u201312 rounds display only. Copy/export and saved values remain exact."
         },
         "vscode-kdb.results.viewer.chartScientificNotationThreshold": {
           "type": "number",

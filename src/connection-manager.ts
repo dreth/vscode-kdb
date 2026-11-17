@@ -21,7 +21,7 @@ import {
   connectionTestNamespaceResultIsSafe,
   connectionTestQueryResultIsSafe,
 } from './connection-test';
-import { ConnectionStore } from './connection-store';
+import { ConnectionStore, ConnectionConfigurationScope } from './connection-store';
 import type { KxDiagnostics } from './diagnostics';
 import {
   KdbIpcClient,
@@ -33,6 +33,7 @@ import {
 
 export interface TemporaryConnectionTestOptions {
   password?: string;
+  credentialScope?: ConnectionConfigurationScope;
   signal?: AbortSignal;
   onPhase?: (phase: Exclude<ConnectionTestPhase, 'validation' | 'cancel'>) => void;
 }
@@ -159,7 +160,7 @@ export class ConnectionManager implements vscode.Disposable {
       }
       let password: string | undefined;
       try {
-        password = await waitForQueryCancellation(this.store.password(connection.id), signal);
+        password = (await waitForQueryCancellation(this.credentials(connection), signal)).password;
       } catch (error) {
         if (!(error instanceof KdbQueryCanceledError)) {
           this.writeConnectFailure(connection, error, false);
@@ -213,6 +214,12 @@ export class ConnectionManager implements vscode.Disposable {
     );
   }
 
+  private async credentials(connection: KxConnection, password?: string): Promise<{ username: string; password: string | undefined }> {
+    if (connection.credentialTransport === 'request') return { username: '', password: undefined };
+    if (connection.usernameEnv || connection.passwordEnv) return this.store.credentials(connection, password);
+    return { username: connection.username, password: password ?? await this.store.password(connection.id) };
+  }
+
   private openConnection(
     connection: KxConnection,
     timeouts: ConnectionTimeouts,
@@ -224,7 +231,8 @@ export class ConnectionManager implements vscode.Disposable {
     opening = Promise.resolve().then(async () => {
       let client: KdbIpcClient | undefined;
       try {
-        const password = await this.store.password(connection.id);
+        const credentials = await this.credentials(connection);
+        const password = credentials.password;
         if (this.opening.get(connection.id) !== opening ||
             !this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
           throw new Error('KX connection canceled.');
@@ -239,7 +247,7 @@ export class ConnectionManager implements vscode.Disposable {
         client = new KdbIpcClient({
           host: connection.host,
           port: connection.port,
-          username: connection.username,
+          username: credentials.username,
           password,
           connectTimeoutMs: timeouts.connectTimeoutMs,
           queryTimeoutMs: timeouts.queryTimeoutMs,
@@ -248,6 +256,7 @@ export class ConnectionManager implements vscode.Disposable {
         });
         this.clients.set(connection.id, client);
         await client.connect();
+        if (connection.credentialTransport === 'request') await this.probeRequestExecutor(client, connection, signal);
         if (this.opening.get(connection.id) !== opening ||
             this.clients.get(connection.id) !== client ||
             !this.requestIsCurrent(connection.id, requestSignature, requestGeneration)) {
@@ -361,7 +370,16 @@ export class ConnectionManager implements vscode.Disposable {
   ): Promise<QValue> {
     const client = await this.connect(connection, signal);
     try {
-      return await client.query(query, onIssued, signal, shouldIssue);
+      const credentials = connection.credentialTransport === 'request'
+        ? await this.store.credentials(connection)
+        : undefined;
+      throwIfQueryCanceled(signal);
+      if (credentials && (!credentials.username || !credentials.password)) {
+        console.warn('KX: no complete request credential pair; authenticated downstream work requires credentials.');
+      }
+      return await client.query(query, onIssued, signal, shouldIssue, credentials && {
+        handler: connection.executionHandler!, ...credentials,
+      });
     } catch (error) {
       if (!(error instanceof KdbQError) && !(error instanceof KdbQueryCanceledError)) {
         const shouldCancel = this.clients.get(connection.id) === client;
@@ -374,10 +392,21 @@ export class ConnectionManager implements vscode.Disposable {
     }
   }
 
+  private async probeRequestExecutor(client: KdbIpcClient, connection: KxConnection, signal?: AbortSignal): Promise<void> {
+    try {
+      const supported = await client.query(`${connection.executionHandler}[1i;\`probe;();()]`, undefined, signal);
+      if (!(typeof supported === 'object' && supported !== null && !Array.isArray(supported) &&
+            'qtype' in supported && supported.qtype === 'atom' && supported.type === 'boolean' && supported.value === true)) throw new Error('unsupported');
+    } catch {
+      if (signal?.aborted) throw new KdbQueryCanceledError();
+      throw new Error('Request credential protocol v1 is unavailable on this executor.');
+    }
+  }
+
   public async test(connection: KxConnection): Promise<void> {
     let password: string | undefined;
     try {
-      password = await this.store.password(connection.id);
+      password = connection.credentialTransport === 'request' || connection.passwordEnv ? undefined : await this.store.password(connection.id);
     } catch (error) {
       this.writeConnectFailure(connection, error, false);
       throw error;
@@ -401,11 +430,14 @@ export class ConnectionManager implements vscode.Disposable {
         // UI progress observers must never disrupt a temporary IPC test.
       }
     };
+    const credentials = connection.credentialTransport === 'request' ? { username: '', password: undefined } : connection.usernameEnv || connection.passwordEnv
+      ? await this.store.credentials(connection, options.password, options.credentialScope)
+      : { username: connection.username, password: options.password };
     const client = new KdbIpcClient({
       host: connection.host,
       port: connection.port,
-      username: connection.username,
-      password: options.password,
+      username: credentials.username,
+      password: credentials.password,
       connectTimeoutMs: timeouts.connectTimeoutMs,
       queryTimeoutMs: timeouts.queryTimeoutMs,
       diagnostics: this.diagnostics,
@@ -424,6 +456,7 @@ export class ConnectionManager implements vscode.Disposable {
         throw new ConnectionTestError('cancel', endpoint);
       }
       await client.connect();
+      if (connection.credentialTransport === 'request') await this.probeRequestExecutor(client, connection, options.signal);
       if (connection.database !== '.') {
         reportPhase('namespace');
         const namespaceResult = await client.query(connectionTestNamespaceQuery(connection.database));
@@ -551,6 +584,11 @@ function connectionRuntimeSignature(
     host: connection.host,
     port: connection.port,
     username: connection.username,
+    credentialTransport: connection.credentialTransport,
+    executionHandler: connection.executionHandler,
+    envFile: connection.envFile,
+    usernameEnv: connection.usernameEnv,
+    passwordEnv: connection.passwordEnv,
     connectTimeoutMs: timeouts.connectTimeoutMs,
     queryTimeoutMs: timeouts.queryTimeoutMs,
     credential: password === undefined

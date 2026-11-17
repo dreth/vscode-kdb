@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.48
+
+- Add opt-in typed per-request credentials for compatible q executors, shared by editor and notebook execution.
+- Resolve request-mode env values per execution without requiring worker-login credentials.
+
+
+## 0.2.47 - 2026-11-11
+
+- Added explicit `envFile`, `usernameEnv` and `passwordEnv` connection references. Local dotenv credentials survive setup and container rebuilds, are read for new connections/tests, and never replace existing sessions automatically. Missing referenced values block IPC instead of using an older saved password.
+
 ## 0.2.46 - 2026-11-09
 
 - Fixed saving existing KX profiles in single-folder windows: project settings no longer appear as a second hidden folder owner, the scope selection stays populated, and entered passwords save to SecretStorage. Saved workspaces with one folder retain distinct scopes; genuine stable-ID move conflicts still leave settings and secrets unchanged.

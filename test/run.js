@@ -27691,11 +27691,11 @@ function testManifestAndSources() {
   assert.strictEqual(manifest.name, 'vscode-kdb');
   assert.strictEqual(manifest.displayName, 'KX for VS Code');
   assert.strictEqual(manifest.publisher, 'DanielAlonso');
-  assert.strictEqual(manifest.version, '0.2.46');
+  assert.strictEqual(manifest.version, '0.2.48');
   assert.strictEqual(
     manifest.scripts.package,
     'npm run audit:repository-confidentiality && npm run compile && vsce package --no-dependencies ' +
-      '--out vscode-kdb-0.2.46.vsix && npm run audit:vsix-confidentiality'
+      '--out vscode-kdb-0.2.48.vsix && npm run audit:vsix-confidentiality'
   );
   assert.strictEqual(manifest.scripts['package:vsix'], manifest.scripts.package);
   assert.strictEqual(
@@ -27720,8 +27720,8 @@ function testManifestAndSources() {
     'node scripts/copy-webview-assets.js && node scripts/generate-failure-build.js'
   );
   const packageLock = JSON.parse(fs.readFileSync(path.join(ROOT, 'package-lock.json'), 'utf8'));
-  assert.strictEqual(packageLock.version, '0.2.46');
-  assert.strictEqual(packageLock.packages[''].version, '0.2.46');
+  assert.strictEqual(packageLock.version, '0.2.48');
+  assert.strictEqual(packageLock.packages[''].version, '0.2.48');
   const compiledExtensionBundle = fs.readFileSync(
     path.join(ROOT, 'out', 'extension.js'),
     'utf8'
@@ -28526,7 +28526,7 @@ function testManifestAndSources() {
   const storedFields = Object.keys(((connectionsSetting.items || {}).properties) || {}).sort();
   assert.deepStrictEqual(
     storedFields,
-    ['connectTimeoutMs', 'database', 'host', 'id', 'name', 'password', 'port', 'queryTimeoutMs', 'username']
+    ['connectTimeoutMs', 'credentialTransport', 'database', 'envFile', 'executionHandler', 'host', 'id', 'name', 'password', 'passwordEnv', 'port', 'queryTimeoutMs', 'username', 'usernameEnv']
   );
   assert.strictEqual(connectionsSetting.items.additionalProperties, false);
   assert.deepStrictEqual(
